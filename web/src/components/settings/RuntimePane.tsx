@@ -38,18 +38,18 @@ export function RuntimePane({ status, back }: { status: HarnessStatus | null; ba
         <dl className="divide-y divide-border">
           {rows.map((row) => (
             <div key={row.label} className="flex flex-wrap items-baseline gap-x-4 gap-y-1 py-2.5">
-              <dt className="flex w-32 shrink-0 items-center gap-1.5 text-[13px] text-muted">
+              <dt className="flex w-32 shrink-0 items-center gap-1.5 text-body-sm text-muted">
                 {row.bad && <span aria-hidden="true" className="size-2 rounded-full bg-err" />}
                 {row.label}
               </dt>
-              <dd className={cx("min-w-0 flex-1 text-[13px] [overflow-wrap:anywhere]", row.mono && "font-mono text-[12.5px]", row.bad && "text-err")}>
+              <dd className={cx("min-w-0 flex-1 text-body-sm [overflow-wrap:anywhere]", row.mono && "font-mono text-small-lg", row.bad && "text-err")}>
                 {row.value}
               </dd>
             </div>
           ))}
         </dl>
       ) : (
-        <p className="text-[13px] text-muted">Mothership status unavailable.</p>
+        <p className="text-body-sm text-muted">Mothership status unavailable.</p>
       )}
     </Pane>
   );

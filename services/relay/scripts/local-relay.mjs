@@ -19,7 +19,10 @@
 //     code/reason, ping/pong — so a close the DO sends (4000 'replaced') reaches the client as a
 //     real close frame.
 //   - A request whose Host is `<install_id>.<RELAY_DOMAIN>` keeps that host, so the real owner sign-in
-//     (/_auth, /_auth/callback) runs. GitHub is stubbed: the callback's `code` names the account,
+//     (/_auth, /_auth/callback) runs, and with the session cookie it mints, the real worker proxies
+//     the request to the install's DO exactly as deployed. A WebSocket upgrade on that host is the
+//     browser's passthrough: the DO's browser end is bridged onto the raw socket with the same codec
+//     as the tunnel dial, so a browser socket rides the real worker, DO and tunnel end to end. GitHub is stubbed: the callback's `code` names the account,
 //     `<github_id>:<login>`, and the token exchange and /user read answer exactly that. The session
 //     secret and OAuth app are fixed test values. With this, the pairing flow runs end to end: sign in,
 //     read the code off the pairing page, confirm it with the mothership's signed call.
@@ -56,7 +59,7 @@ const env = {
     idFromName: (name) => name,
     get(id) {
       if (!dos.has(id)) {
-        dos.set(id, makeDo({ helloTimeoutMs: 10000, responseTimeoutMs: 60000, idleTimeoutMs: 120000, pingMs: 5000 }));
+        dos.set(id, makeDo({ env, helloTimeoutMs: 10000, responseTimeoutMs: 60000, idleTimeoutMs: 120000, pingMs: 5000 }));
       }
       const made = dos.get(id);
       return { fetch: (request) => made.relay.fetch(request) };
@@ -82,13 +85,14 @@ globalThis.fetch = async (input, init = {}) => {
   return realFetch(input, init);
 };
 
-// The mothership dial currently in flight: the raw socket, and once the DO has made its socket pair,
-// the bridge end its side speaks through. Requests are served one at a time, so one global is safe.
+// The upgrade currently in flight (a mothership dial or a browser websocket): the raw socket, and once
+// the DO has made its socket pair, the bridge end its side speaks through. Requests are served one at a
+// time, so one global is safe.
 let dial = null;
 
 runtime.pair = () => {
   const current = dial;
-  if (!current) return fakePair(); // a browser-side passthrough would go nowhere: plain HTTP only
+  if (!current) return fakePair(); // no upgrade in flight to bridge onto
   const [bridge, server] = fakePair();
   bridge.accept();
   // Out: whatever the DO writes on its end leaves as a text frame. In: frames read off the socket
@@ -221,14 +225,15 @@ const server = createServer((req, res) => {
   enqueue(() => serve(req, res));
 });
 
-// An Upgrade request is always meant as the mothership's tunnel dial (a browser passthrough needs no
-// websocket here), so it never reaches the request handler above.
+// An Upgrade request is the mothership's tunnel dial on the apex, or a signed-in browser's websocket
+// on an install host; the worker tells them apart, and either way the DO's end is bridged onto the
+// socket. The sign-in bypass header serves plain HTTP only.
 server.on('upgrade', (req, socket, head) => {
   socket.on('error', () => {});
   if (req.headers['x-local-relay-install'] !== undefined) {
-    return plain(socket, 501, 'the harness bridges only the mothership tunnel dial');
+    return plain(socket, 501, 'the sign-in bypass header serves plain HTTP only; sign in for a websocket');
   }
-  enqueue(() => dialTunnel(req, socket, head));
+  enqueue(() => bridgeUpgrade(req, socket, head));
 });
 
 server.on('error', (e) => {
@@ -301,9 +306,10 @@ async function writeResponse(res, response) {
   res.end(() => res.socket?.end());
 }
 
-// The mothership's dial through the real worker: the fake D1 holds the registered key, so the worker
-// tags the dial with it and the DO challenges over the bridged socket.
-async function dialTunnel(req, socket, head) {
+// An upgrade through the real worker. On the apex it is the mothership's dial: the fake D1 holds the
+// registered key, so the worker tags the dial with it and the DO challenges over the bridged socket. On
+// an install host it is a browser's websocket, which the worker forwards only with the owner's session.
+async function bridgeUpgrade(req, socket, head) {
   let bridge = null;
   try {
     dial = { socket, bridge: null };
@@ -337,7 +343,7 @@ async function dialTunnel(req, socket, head) {
     socket.on('close', () => bridge.close(1006, 'socket gone')); // no close frame came: abnormal
   } catch (e) {
     dial = null;
-    process.stderr.write(`local-relay: dial ${req.url}: ${e?.stack ?? e}\n`);
+    process.stderr.write(`local-relay: upgrade ${req.url}: ${e?.stack ?? e}\n`);
     socket.destroy();
   }
 }

@@ -4,6 +4,7 @@ import type { UpdateStatus } from "../../types";
 import { Badge, Button, Spinner, Switch } from "../ui";
 import { IconExternal } from "../icons";
 import { Code, Pane, Row } from "./ui";
+import { pendingNotices, restartOnNewVersion } from "../../cockpit/UpdateBanner";
 
 // ---------------------------------------------------------------------------
 // Updates: which Colonizer this is, and whether a newer release is out (#45)
@@ -40,6 +41,26 @@ export function UpdatesPane({
   const toast = useToast();
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [restartBusy, setRestartBusy] = useState(false);
+
+  const restart = async (which: { ids: string[] } | { all: true }) => {
+    setRestartBusy(true);
+    await restartOnNewVersion(api, which, (message, tone) => toast(message, tone ?? "info"), onChanged);
+    setRestartBusy(false);
+  };
+
+  // While restarts onto the new version run, follow them until they are done (issue #1097).
+  const restartsRunning = (update?.restarts?.restarting.length ?? 0) > 0;
+  useEffect(() => {
+    if (!restartsRunning) return;
+    const timer = setInterval(() => {
+      api
+        .update()
+        .then(onChanged)
+        .catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [api, onChanged, restartsRunning]);
 
   // While an update is being applied the process is about to be replaced, so the
   // pane follows it until the answer stops coming.
@@ -89,14 +110,14 @@ export function UpdatesPane({
   return (
     <Pane title="Updates" subtitle="Which Colonizer this is, and whether a newer one is out" info={info} back={back}>
       {!update ? (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       ) : (
         <div className="space-y-4">
-          <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px]">
+          <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className="font-semibold text-[13px]">{update.installed.version}</span>
+              <span className="font-semibold text-body-sm">{update.installed.version}</span>
               {update.installed.dirty && <Badge tone="warn">built from a modified tree</Badge>}
             </div>
             <p className="mt-1 text-muted">
@@ -113,13 +134,28 @@ export function UpdatesPane({
           </div>
 
           {update.available && update.latest && (
-            <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-[12.5px]">
-              <p className="font-semibold text-[13px]">Colonizer {update.latest.version} is available</p>
+            <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-small-lg">
+              <p className="font-semibold text-body-sm">Colonizer {update.latest.version} is available</p>
               {behindLabel(update.installed.built_at, update.latest.published_at) && (
                 <p className="text-muted">{behindLabel(update.installed.built_at, update.latest.published_at)}</p>
               )}
+              {pendingNotices(update).length > 0 && (
+                <ul className="mt-1.5 space-y-1">
+                  {pendingNotices(update).map((n) => (
+                    <li key={`${n.version}-${n.line}`} className={n.severity === "critical" ? "text-err" : "text-warn"}>
+                      <span className="font-semibold">{n.severity === "critical" ? "Critical" : "Fixes running colonies"}:</span> {n.line}
+                      {n.version !== update.latest?.version ? ` (${n.version})` : ""}
+                      {n.affected
+                        ? n.affected.count > 0
+                          ? ` — ${n.affected.count} of your colonies ${n.affected.count === 1 ? "is" : "are"} affected.`
+                          : " — none of your colonies is affected right now."
+                        : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {update.latest.notes && (
-                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-[12.5px] text-muted">
+                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-small-lg text-muted">
                   {update.latest.notes}
                 </pre>
               )}
@@ -175,6 +211,57 @@ export function UpdatesPane({
             </div>
           )}
 
+          {update.switch_to_releases && (
+            <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg">
+              <p className="font-semibold text-body-sm">Update is not available from here</p>
+              <p className="mt-1 text-muted">{update.switch_to_releases.reason}.</p>
+              <p className="mt-1.5">
+                To switch to releases, run <Code>{update.switch_to_releases.command}</Code>
+              </p>
+              <p className="mt-1 text-muted">{update.switch_to_releases.then}</p>
+            </div>
+          )}
+
+          {(update.behind?.length ?? 0) > 0 && (
+            <div className="rounded-xl border border-warn/50 bg-warn-soft px-3.5 py-2.5 text-small-lg">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-semibold text-body-sm">
+                  {update.behind!.length === 1 ? "1 colony is" : `${update.behind!.length} colonies are`} still on the previous version
+                </p>
+                <Button
+                  size="sm"
+                  disabled={restartBusy || update.behind!.every((c) => update.restarts?.restarting.includes(c.id))}
+                  onClick={() => void restart({ all: true })}
+                >
+                  Restart all on the new version
+                </Button>
+              </div>
+              <p className="mt-1 text-muted">
+                Their microVMs keep the components (msb, plugins, agent modules) of the version they booted on until they are
+                stopped and resumed. A restart keeps the worktree and the conversation.
+              </p>
+              <ul className="mt-1.5 space-y-1">
+                {update.behind!.map((c) => {
+                  const busy = update.restarts?.restarting.includes(c.id) ?? false;
+                  const failed = update.restarts?.failed[c.id];
+                  return (
+                    <li key={c.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span>
+                        {c.repo} <Code>{c.id}</Code> — {c.status}
+                      </span>
+                      {c.affected_by.length > 0 && <Badge tone="warn">affected: {c.affected_by.join("; ")}</Badge>}
+                      <Button size="sm" disabled={restartBusy || busy} onClick={() => void restart({ ids: [c.id] })}>
+                        {busy ? <Spinner /> : null}
+                        {busy ? "Restarting…" : "Restart on the new version"}
+                      </Button>
+                      {failed && <span className="text-err">Restart failed: {failed}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
           <Row id="update-check-switch" label="Check for new releases" inline>
             <Switch
               id="update-check-switch"
@@ -187,16 +274,16 @@ export function UpdatesPane({
           </Row>
 
           {update.blocked_by && (
-            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
               Kept off by <Code>{update.blocked_by}</Code> in the Mothership’s environment.
             </p>
           )}
           {!update.enabled && !update.blocked_by && (
-            <p className="text-[12.5px] text-muted">Off: the Mothership makes no request to GitHub about releases.</p>
+            <p className="text-small-lg text-muted">Off: the Mothership makes no request to GitHub about releases.</p>
           )}
-          {update.error && <p className="text-[12.5px] text-err">Last check failed: {update.error}</p>}
+          {update.error && <p className="text-small-lg text-err">Last check failed: {update.error}</p>}
           {update.enabled && update.last_checked && !update.error && (
-            <p className="text-[12.5px] text-faint">Last checked {new Date(update.last_checked).toLocaleString()}.</p>
+            <p className="text-small-lg text-faint">Last checked {new Date(update.last_checked).toLocaleString()}.</p>
           )}
         </div>
       )}

@@ -108,11 +108,26 @@ for the run's artifacts — at most three levels deep, never following symlinks.
   refuse to start a hunter whose probe is not ready, and a `needs_docker` hunter (Strix) still
   needs a Docker daemon inside the colony microVM (see above).
 
-## Planned, not implemented (#216 closed with these left; see #933)
+## Planned, not implemented (tracked in [#933](https://github.com/Colonizer-dev/harness/issues/933))
 
-- A red-team run driving Strix: it needs a Docker daemon inside the colony microVM, which colonies
-  do not have yet, so no run starts one (Shannon already runs this way; see
-  [red-team.md](red-team.md#operating-it)).
+[#216](https://github.com/Colonizer-dev/harness/issues/216) closed with these left, and so did its
+breakdown [#336](https://github.com/Colonizer-dev/harness/issues/336) and its follow-ups
+[#442](https://github.com/Colonizer-dev/harness/issues/442); none of them built the work, so it is
+still open under #933.
+
+- A red-team run driving Strix. `check_hunter` (`crates/colonizer/src/redteam.rs:1637`) answers any
+  hunter other than the swarm or Shannon with a 400 — "cannot run as a red-team hunter in this build
+  yet" — and the wizard's Strix card is disabled and reads "Coming soon"
+  (`web/src/cockpit/RedTeamWizard.tsx:239`).
+- The Docker daemon that Strix needs. Its scan is arbitrary proof-of-concept code that wants a
+  daemon inside the colony microVM, which colonies do not have, so no run starts one. The host's
+  daemon is never shared; see "Docker stays out of reach" above.
+- A run stage that drives the host-side `hunters::scan` (`crates/colonizer/src/hunters.rs:941`). The
+  runner is built and tested but nothing calls it outside the tests, so a host-side hunter's
+  findings never reach `events::file_finding` — orchestrator validation, the
+  `findings::MAX_PER_COLONY` cap (`crates/colonizer/src/findings.rs:27`) and issue filing. Shannon is
+  not this gap: its in-colony SARIF is read back and filed through that path
+  (see [red-team.md](red-team.md#operating-it)).
 
 ## How to add a hunter
 

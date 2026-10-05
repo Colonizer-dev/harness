@@ -119,6 +119,55 @@ describe("Inspector", () => {
     expect(connecting).toContain("loading the question…");
   });
 
+  // Issue #1093: World360-Lab#37's card said "the watchdog flagged this colony · this colony has no
+  // pending question · open the colony and answer" over a colony held on a gateway error.
+  it("a colony held on gateway errors is carded by its cause, with Retry and no question", () => {
+    const markup = renderInspector({
+      session: session({
+        status: "idle",
+        autopilot: true,
+        attention: {
+          reason: "autopilot_held",
+          since: ASKED_AT,
+          nudges: 0,
+          cause: "gateway_error",
+          detail: "Stopped on repeated gateway errors (502, connection to Anthropic); 3 automatic retries did not get through",
+        },
+      }),
+    });
+    expect(markup).toContain("Stopped on repeated gateway errors (502, connection to Anthropic)");
+    expect(markup).toContain(">Retry<");
+    expect(markup).toContain("Open colony");
+    expect(markup).not.toContain("the watchdog flagged this colony");
+    expect(markup).not.toContain("no pending question");
+    expect(markup).not.toContain("answer");
+  });
+
+  it("a colony backing off an automatic retry is not waiting on you", () => {
+    const markup = renderInspector({
+      session: session({
+        status: "parked",
+        autopilot: true,
+        attention: {
+          reason: "provider_retry",
+          since: ASKED_AT,
+          nudges: 0,
+          cause: "gateway_error",
+          summary: "Stopped on a model gateway error (502, connection to Anthropic)",
+          retry_at: new Date(Date.now() + 4 * 60_000 - 1_000).toISOString(),
+          attempt: 1,
+          max_attempts: 3,
+        },
+      }),
+    });
+    expect(markup).not.toContain("Waiting on you");
+    expect(markup).toContain("Retrying automatically");
+    expect(markup).toContain("Stopped on a model gateway error (502, connection to Anthropic): retrying in 4 min");
+    expect(markup).toContain("Retry now");
+    expect(markup).toContain("attempt 1 of 3");
+    expect(markup).not.toContain("watchdog");
+  });
+
   it("nothing selected is its own labelled state", () => {
     const markup = renderToStaticMarkup(
       <ApiContext.Provider value={api}>

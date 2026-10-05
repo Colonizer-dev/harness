@@ -47,11 +47,11 @@ function Meter({ label, used, total, detail }: { label: string; used: number | n
   const color = ratio == null ? "var(--panel-3)" : ratio >= 0.9 ? "var(--err)" : ratio >= 0.75 ? "var(--warn)" : "var(--chart-1)";
   return (
     <div className="grid grid-cols-[120px_minmax(0,1fr)_auto] items-center gap-4 border-t border-border py-3.5 first:border-t-0 max-sm:grid-cols-[minmax(0,1fr)_auto]">
-      <span className="text-[13.5px] text-text">{label}</span>
+      <span className="text-body text-text">{label}</span>
       <span className="h-1.5 overflow-hidden rounded-full bg-panel-3 max-sm:col-span-2 max-sm:row-start-2">
         <span className="block h-full rounded-full transition-[width] duration-700 ease-out" style={{ width: `${(ratio ?? 0) * 100}%`, background: color }} />
       </span>
-      <span className="whitespace-nowrap text-right text-[13px] tabular-nums text-muted">{detail}</span>
+      <span className="whitespace-nowrap text-right text-body-sm tabular-nums text-muted">{detail}</span>
     </div>
   );
 }
@@ -59,8 +59,8 @@ function Meter({ label, used, total, detail }: { label: string; used: number | n
 function Fact({ label, children }: { label: string; children: ReactNode }): ReactElement {
   return (
     <div className="flex min-w-0 flex-col gap-1 border-t border-border py-3 [&:nth-child(-n+2)]:border-t-0 sm:[&:nth-child(-n+3)]:border-t-0">
-      <span className="text-[12.5px] text-faint">{label}</span>
-      <span className="min-w-0 truncate text-[13.5px] text-text">{children}</span>
+      <span className="text-small-lg text-faint">{label}</span>
+      <span className="min-w-0 truncate text-body text-text">{children}</span>
     </div>
   );
 }
@@ -116,8 +116,8 @@ export function HostView({
   if (!host) {
     return (
       <Page>
-        <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Host</h1>
-        <p className="mt-2 text-[14px] text-muted">{status ? "This mothership does not report its host yet (it needs a build from issue #205 on)." : "Waiting for the mothership…"}</p>
+        <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">Host</h1>
+        <p className="mt-2 text-body-lg text-muted">{status ? "This mothership does not report its host yet (it needs a build from issue #205 on)." : "Waiting for the mothership…"}</p>
       </Page>
     );
   }
@@ -180,8 +180,8 @@ export function HostView({
   return (
     <Page frameClassName="flex flex-col gap-10">
       <div>
-        <h1 className="m-0 truncate text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">{host.hostname ?? "Host"}</h1>
-        <div className="mt-2 text-[14px] text-muted">
+        <h1 className="m-0 truncate text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">{host.hostname ?? "Host"}</h1>
+        <div className="mt-2 text-body-lg text-muted">
           {[os, runtime?.platform, host.uptime_secs != null ? `up ${formatUptime(host.uptime_secs)}` : null, `checked ${timeAgo(host.checked_at)}`].filter(Boolean).join(" · ")}
         </div>
       </div>
@@ -228,7 +228,7 @@ export function HostView({
         </Rules>
         {liveHere.length > 0 && (
           <div className="mt-4 border-y border-border">
-            <div className="grid grid-cols-[minmax(0,1fr)_130px_56px_64px_72px] gap-4 border-b border-border py-2.5 text-[12.5px] text-muted">
+            <div className="grid grid-cols-[minmax(0,1fr)_130px_56px_64px_72px] gap-4 border-b border-border py-2.5 text-small-lg text-muted">
               <span>Colony</span>
               <span>Status</span>
               <span className="text-right">vCPU</span>
@@ -242,12 +242,12 @@ export function HostView({
                   key={s.id}
                   type="button"
                   onClick={() => onOpenColony(s.id)}
-                  className="-mt-px grid w-full cursor-pointer grid-cols-[minmax(0,1fr)_130px_56px_64px_72px] items-center gap-4 border-0 border-t border-solid border-border bg-transparent py-3 text-left text-[13.5px] tabular-nums transition-colors hover:bg-panel-2"
+                  className="-mt-px grid w-full cursor-pointer grid-cols-[minmax(0,1fr)_130px_56px_64px_72px] items-center gap-4 border-0 border-t border-solid border-border bg-transparent py-3 text-left text-body tabular-nums transition-colors hover:bg-panel-2"
                 >
                   <span className="min-w-0 truncate">
-                    {s.issue_title || s.repo} <span className="font-mono text-[12px] text-faint">{s.repo.split("/").pop()}#{s.issue ?? ""}</span>
+                    {s.issue_title || s.repo} <span className="font-mono text-small text-faint">{s.repo.split("/").pop()}#{s.issue ?? ""}</span>
                   </span>
-                  <span className="text-[13px]" style={{ color: TONE_VAR[st.tone] }}>
+                  <span className="text-body-sm" style={{ color: TONE_VAR[st.tone] }}>
                     {st.label}
                   </span>
                   <span className="text-right text-muted">{s.boot_cpus ?? "—"}</span>
@@ -265,7 +265,7 @@ export function HostView({
         meta={storage ? (storage.admission_paused ? <span className="text-err">below the free-space floor — new colonies are held</span> : storage.free_bytes != null ? `${formatBytes(storage.free_bytes)} free` : undefined) : "no reading yet"}
         right={
           onOpenSettings && (
-            <button type="button" onClick={() => onOpenSettings("module:sandbox")} className="cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
+            <button type="button" onClick={() => onOpenSettings("module:sandbox")} className="cursor-pointer border-0 bg-transparent p-0 text-body-sm text-muted hover:text-text">
               Storage settings
             </button>
           )
@@ -278,14 +278,14 @@ export function HostView({
             </div>
             <div className="grid grid-cols-2 gap-x-6 pb-3 sm:grid-cols-4">
               {storageRows.map((r) => (
-                <div key={r.label} className="flex items-center gap-2 py-2 text-[13px]">
+                <div key={r.label} className="flex items-center gap-2 py-2 text-body-sm">
                   <span aria-hidden="true" className="h-2 w-2 rounded-sm" style={{ background: r.color }} />
                   <span className="text-muted">{r.label}</span>
                   <span className="ml-auto tabular-nums text-text">{formatBytes(r.bytes)}</span>
                 </div>
               ))}
             </div>
-            <div className="border-t border-border py-3 text-[13px] text-muted">
+            <div className="border-t border-border py-3 text-body-sm text-muted">
               {storage.reclaimable.length} finished {storage.reclaimable.length === 1 ? "colony" : "colonies"} reclaimable ({formatBytes(reclaimBytes)}) · {storage.unpushed.length} unpushed kept for you · {storage.orphans.length} orphaned worktrees
               {storage.enabled ? ` · auto-reclaim after ${Math.round(storage.retention_secs / 3600)}h` : " · auto-reclaim off"}
             </div>
@@ -303,9 +303,9 @@ export function HostView({
             <Fact label="git">{runtime ? ok(runtime.git.ok, runtime.git.version ?? "ok", runtime.git.error ?? "missing") : "—"}</Fact>
             <Fact label="GitHub CLI">{runtime ? ok(runtime.gh.ok, runtime.gh.version ?? "ok", runtime.gh.error ?? "missing") : "—"}</Fact>
             <Fact label="Mesh">{mesh ? (mesh.enabled ? [mesh.provider, mesh.state, mesh.nodes != null ? `${mesh.nodes} ${mesh.nodes === 1 ? "node" : "nodes"}` : null].filter(Boolean).join(" · ") : "off") : "—"}</Fact>
-            <Fact label="Claude Code (host)">{runtime ? (runtime.host_claude_bin ? <span className="font-mono text-[12.5px]">{runtime.host_claude_bin}</span> : <span className="text-faint">{runtime.host_claude_bin_error ?? "not found"}</span>) : "—"}</Fact>
+            <Fact label="Claude Code (host)">{runtime ? (runtime.host_claude_bin ? <span className="font-mono text-small-lg">{runtime.host_claude_bin}</span> : <span className="text-faint">{runtime.host_claude_bin_error ?? "not found"}</span>) : "—"}</Fact>
             <Fact label="Host id">
-              <span className="font-mono text-[12.5px] text-muted">{host.id}</span>
+              <span className="font-mono text-small-lg text-muted">{host.id}</span>
             </Fact>
           </div>
         </Rules>
@@ -314,7 +314,7 @@ export function HostView({
       {fleet.length > 1 && (
         <Section title="Fleet" meta={`${fleet.filter((h) => h.health === "online").length} of ${fleet.length} online`}>
           <div className="border-y border-border">
-            <div className="grid grid-cols-[minmax(0,1fr)_120px_72px_64px_84px_96px] gap-4 border-b border-border py-2.5 text-[12.5px] text-muted">
+            <div className="grid grid-cols-[minmax(0,1fr)_120px_72px_64px_84px_96px] gap-4 border-b border-border py-2.5 text-small-lg text-muted">
               <span>Host</span>
               <span>Platform</span>
               <span className="text-right">Slots</span>
@@ -323,19 +323,19 @@ export function HostView({
               <span className="text-right">Heartbeat</span>
             </div>
             {fleet.map((h) => (
-              <div key={h.id} className="-mt-px grid grid-cols-[minmax(0,1fr)_120px_72px_64px_84px_96px] items-center gap-4 border-t border-border py-3 text-[13.5px] tabular-nums">
+              <div key={h.id} className="-mt-px grid grid-cols-[minmax(0,1fr)_120px_72px_64px_84px_96px] items-center gap-4 border-t border-border py-3 text-body tabular-nums">
                 <span className="flex min-w-0 items-center gap-2">
                   <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${h.health === "online" ? "bg-ok" : "bg-err"}`} />
                   <span className="truncate">{h.name}</span>
-                  {h.version && <span className="font-mono text-[11.5px] text-faint">{h.version}</span>}
+                  {h.version && <span className="font-mono text-meta-lg text-faint">{h.version}</span>}
                 </span>
-                <span className="truncate text-[13px] text-muted">{h.platform}</span>
+                <span className="truncate text-body-sm text-muted">{h.platform}</span>
                 <span className="text-right">
                   {h.slots_in_use}/{h.slots_ceiling}
                 </span>
                 <span className="text-right text-muted">{h.queue_depth}</span>
                 <span className="text-right text-muted">{h.disk_free_bytes != null ? formatBytes(h.disk_free_bytes) : "—"}</span>
-                <span className="text-right text-[13px] text-faint">{h.last_heartbeat ? timeAgo(h.last_heartbeat) : "never"}</span>
+                <span className="text-right text-body-sm text-faint">{h.last_heartbeat ? timeAgo(h.last_heartbeat) : "never"}</span>
               </div>
             ))}
           </div>

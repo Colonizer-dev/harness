@@ -1,0 +1,226 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "821c290b4505c9e89ceef129f6d94b07"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "routing"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "decision"
+                  }
+                },
+                {
+                  "key": "decision.point",
+                  "value": {
+                    "stringValue": "routing.tier"
+                  }
+                },
+                {
+                  "key": "decision.jev_mode",
+                  "value": {
+                    "stringValue": "shadow"
+                  }
+                },
+                {
+                  "key": "decision.jev_agrees",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "decision.floor",
+                  "value": {
+                    "stringValue": "low"
+                  }
+                },
+                {
+                  "key": "decision.tier",
+                  "value": {
+                    "stringValue": "high"
+                  }
+                },
+                {
+                  "key": "decision.rule",
+                  "value": {
+                    "stringValue": "high"
+                  }
+                },
+                {
+                  "key": "decision.source",
+                  "value": {
+                    "stringValue": "rule"
+                  }
+                },
+                {
+                  "key": "decision.score",
+                  "value": {
+                    "intValue": "7"
+                  }
+                },
+                {
+                  "key": "decision.model",
+                  "value": {
+                    "stringValue": "claude-opus-4-5"
+                  }
+                },
+                {
+                  "key": "decision.agent",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "decision.misroute",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "decision.sensitivity",
+                  "value": {
+                    "stringValue": "standard"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "decision"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.routing",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108000000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108000000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "c982bf0dbeab031bd441d5c6dda9a149"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "routing"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "actual"
+                  }
+                },
+                {
+                  "key": "actual_cost_usd",
+                  "value": {
+                    "doubleValue": 0.97
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "actual"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.routing",
+              "flags": 0,
+              "observedTimeUnixNano": "1791115200000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791115200000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

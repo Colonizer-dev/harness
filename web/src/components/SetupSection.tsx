@@ -76,7 +76,7 @@ export function SetupSection({
   if (!status || !setup) {
     return (
       <PaneShell setup={null} back={back} onDismiss={onDismiss}>
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       </PaneShell>
@@ -138,12 +138,12 @@ export function SetupSection({
     if (!row.error) return null;
     const { head, rest } = errorDetail(row.error, source);
     return (
-      <p className="text-[12.5px] text-err [overflow-wrap:anywhere]">
+      <p className="text-small-lg text-err [overflow-wrap:anywhere]">
         {head}
         {rest && (
           <details className="mt-1">
             <summary className="cursor-pointer text-muted hover:text-text">More</summary>
-            <pre className="scroll-thin mt-1 overflow-x-auto font-mono text-[11.5px] whitespace-pre-wrap text-muted">{rest}</pre>
+            <pre className="scroll-thin mt-1 overflow-x-auto font-mono text-meta-lg whitespace-pre-wrap text-muted">{rest}</pre>
           </details>
         )}
       </p>
@@ -152,7 +152,7 @@ export function SetupSection({
 
   const notes = (row: SetupRow) =>
     row.notes.map((note, i) => (
-      <p key={i} className="text-[12.5px] text-muted">
+      <p key={i} className="text-small-lg text-muted">
         {note}
       </p>
     ));
@@ -169,7 +169,7 @@ export function SetupSection({
           aria-pressed={(currentPreset ?? "auto") === id}
           onClick={() => void pickStack(id)}
           className={cx(
-            "cursor-pointer rounded-full border px-2.5 py-1 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            "cursor-pointer rounded-full border px-2.5 py-1 text-small-lg font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
             (currentPreset ?? "auto") === id
               ? "border-accent bg-accent-soft text-accent"
               : "border-border bg-panel text-muted hover:bg-panel-2 hover:text-text",
@@ -186,16 +186,16 @@ export function SetupSection({
     if (row.state === "working" && pullStatus?.state === "pulling") {
       return (
         <div className="space-y-1">
-          <p className="flex flex-wrap items-center gap-2 text-[13px] text-muted">
+          <p className="flex flex-wrap items-center gap-2 text-body-sm text-muted">
             <Spinner />
             <span>
-              Downloading <code className="rounded bg-panel-3 px-1 font-mono text-[12px] text-text">{pullStatus.image}</code> ·{" "}
+              Downloading <code className="rounded bg-panel-3 px-1 font-mono text-small text-text">{pullStatus.image}</code> ·{" "}
               {seconds(pullStatus.started_at)}s
             </span>
           </p>
           {/* Deliberately no percentage: msb reports no progress when it is not on a terminal.
               The number below is a measurement, not a promise. */}
-          <p className="text-[12.5px] text-muted">A cold pull measured about 108 s on one connection. This happens once per image.</p>
+          <p className="text-small-lg text-muted">A cold pull measured about 108 s on one connection. This happens once per image.</p>
         </div>
       );
     }
@@ -223,8 +223,8 @@ export function SetupSection({
       <div className="space-y-2">
         {errorBlock(row, status.github.error)}
         {row.fix && (
-          <p className="text-[13px]">
-            Run <code className="rounded bg-panel-3 px-1.5 py-0.5 font-mono text-[12px]">{row.command}</code> on this machine, or paste a
+          <p className="text-body-sm">
+            Run <code className="rounded bg-panel-3 px-1.5 py-0.5 font-mono text-small">{row.command}</code> on this machine, or paste a
             token here.
           </p>
         )}
@@ -239,7 +239,7 @@ export function SetupSection({
       return notes(row).length > 0 ? <div className="space-y-1">{notes(row)}</div> : null;
     return (
       <div className="space-y-2">
-        {row.fix && row.state !== "done" && <p className="text-[13px]">{row.fix}</p>}
+        {row.fix && row.state !== "done" && <p className="text-body-sm">{row.fix}</p>}
         {retry(row)}
         <ClaudeLoginSection claude={status.claude} onStatusChanged={onStatusChanged} />
         {notes(row)}
@@ -253,8 +253,8 @@ export function SetupSection({
       : (
           <div className="space-y-2">
             {errorBlock(row)}
-            {row.fix && <p className="text-[13px]">{row.fix}</p>}
-            {row.command && <code className="rounded bg-panel-3 px-1.5 py-0.5 font-mono text-[12px]">{row.command}</code>}
+            {row.fix && <p className="text-body-sm">{row.fix}</p>}
+            {row.command && <code className="rounded bg-panel-3 px-1.5 py-0.5 font-mono text-small">{row.command}</code>}
             {retry(row)}
             {notes(row)}
           </div>
@@ -281,7 +281,7 @@ export function SetupSection({
           What is sent
         </Button>
       </div>
-      {row.fix && row.state === "todo" && <p className="text-[12.5px] text-muted">{row.fix}</p>}
+      {row.fix && row.state === "todo" && <p className="text-small-lg text-muted">{row.fix}</p>}
       {notes(row)}
     </div>
   );
@@ -328,8 +328,8 @@ export function SetupSection({
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     {row.os != null && <OsLogo os={row.os} size={14} />}
-                    <span className="text-[14px] font-semibold">{row.title}</span>
-                    {row.state === "done" && <span className="min-w-0 text-[12.5px] text-muted [overflow-wrap:anywhere]">{row.detail}</span>}
+                    <span className="text-body-lg font-semibold">{row.title}</span>
+                    {row.state === "done" && <span className="min-w-0 text-small-lg text-muted [overflow-wrap:anywhere]">{row.detail}</span>}
                     {row.state === "working" && <Badge tone="info">Downloading</Badge>}
                     {row.state === "blocked" && <Badge tone="err">Blocked</Badge>}
                     {(row.id === "stack" || row.id === "github" || row.id === "claude") && row.state === "done" && (
@@ -338,7 +338,7 @@ export function SetupSection({
                       </Button>
                     )}
                   </div>
-                  {row.state !== "done" && <p className="text-[12.5px] text-muted [overflow-wrap:anywhere]">{row.detail}</p>}
+                  {row.state !== "done" && <p className="text-small-lg text-muted [overflow-wrap:anywhere]">{row.detail}</p>}
                   {open && body(row)}
                 </div>
               </div>
@@ -348,7 +348,7 @@ export function SetupSection({
       </ol>
       {setup.progress.done === setup.progress.total && (
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-panel-2 px-4 py-3">
-          <p className="min-w-0 flex-1 text-[12.5px] text-muted">All set. Bookmark this cockpit so you can come back to it from any device.</p>
+          <p className="min-w-0 flex-1 text-small-lg text-muted">All set. Bookmark this cockpit so you can come back to it from any device.</p>
           <Button size="sm" onClick={onOpenCockpit}>
             Your cockpit address
           </Button>
@@ -389,10 +389,10 @@ function PaneShell({
           </button>
         )}
         <div className="min-w-0 flex-1">
-          <h3 id={titleId} className="text-[15px] font-semibold leading-8">
+          <h3 id={titleId} className="text-lead font-semibold leading-8">
             Setup
           </h3>
-          {subtitle && <p className="-mt-1 text-[12.5px] text-muted">{subtitle}</p>}
+          {subtitle && <p className="-mt-1 text-small-lg text-muted">{subtitle}</p>}
         </div>
         <div className="flex shrink-0 items-center leading-8">
           {setup && <Badge tone={setupTone(setup)}>{setup.progress.label}</Badge>}
@@ -400,7 +400,7 @@ function PaneShell({
       </div>
       <div className="page-pad scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
       <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
-        <span className="mr-auto text-[12.5px] text-muted">Model providers, plugins and skills are in Settings.</span>
+        <span className="mr-auto text-small-lg text-muted">Model providers, plugins and skills are in Settings.</span>
         <Button size="sm" onClick={onDismiss}>
           Not now
         </Button>

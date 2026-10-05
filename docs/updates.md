@@ -170,6 +170,39 @@ not recognise. Delete the recorded file to stop re-signing; an identity in the
 environment still signs. See [The system
 keychain](configuration.md#the-system-keychain).
 
+## Notices and affected colonies
+
+Most releases are routine, and the cockpit says so quietly: a dot in the rail and the release in
+**Settings → Updates**. A release that fixes something an operator may be hitting right now says so
+in its notes. A changelog fragment can carry a `critical` or `fixes-running` line written for the
+operator ([changelog.d/README.md](../changelog.d/README.md#a-fix-the-operator-should-hear-about-before-updating)),
+and the release body carries those lines in a block `GET /api/update` reads, together with the
+ones from the nine releases before it, so a mothership a few releases behind still hears about the
+fixes in between. The ones newer than the running build come back as `notices`, and the cockpit
+shows them as a banner above every view: *Update to v0.2.7: Fixes colonies failing with
+UND_ERR_SOCKET (sandbox credential scanner). 4 of your colonies are affected.*
+
+**Affected here.** A notice can name a probe: a read-only check, compiled into the harness, that
+the mothership runs on its own disk to count the colonies the fix is for. A release cannot send code
+to run, only the id of a probe the running build already has; a notice naming one this build does
+not know is shown without a count (`affected: null`). Nothing a probe reads leaves the machine. Each
+answer is reused for 30 seconds.
+
+| Probe | What it reads | Matches |
+| :--- | :--- | :--- |
+| `msb-body-secret-violation` | The last MiB of each running colony's `$MSB_HOME/sandboxes/<sandbox>/logs/runtime.log` (`~/.microsandbox` by default) | A `secret violation` line with `location=body`: msb 0.7.3's credential scanner blocking the colony's own request ([#1096](https://github.com/Colonizer-dev/harness/issues/1096)) |
+
+**After the update.** A colony's microVM keeps the vendored components it booted with (msb, the
+plugins, the agent modules), from the app slot it started from, until it is stopped and resumed. An
+update reconnects running colonies rather than restarting them, so a colony stuck on a bug the
+update fixed stays stuck. `GET /api/update` lists the colonies still running on a previous slot as
+`behind`, each with the notice lines whose probe matched it (`affected_by`). **Settings → Updates**
+offers **Restart on the new version** for each of them and for all of them. The cockpit banners the
+affected ones, with the same button. A restart is the stop and resume the colony's own buttons do:
+the microVM is taken down and booted again from the current slot, and the worktree and the
+conversation are kept. Restarts run one at a time in the background; `restarts` on `GET /api/update`
+follows them, and names any that failed.
+
 ## The previous version is kept for a while
 
 An update applied in place, from Settings or with `colonizer update`, passes
@@ -209,7 +242,11 @@ the same reason:
 | Provenance could not be checked because `gh` is not logged in (a note, or an update failure under `COLONIZER_REQUIRE_ATTESTATION=1`) | Run `gh auth login`, or set `GH_TOKEN`; the mothership passes the GitHub token saved in settings to the installer when the environment carries none |
 
 A source checkout is meant to be updated with git. Saying so is better than
-half-applying something.
+half-applying something. **Settings → Updates** also says how to switch such a
+build to releases (`switch_to_releases` on `GET /api/update`): the one-line
+installer for a build with no installed app, or `colonizer update --force` for a
+development build that sits in one. Updating a development install from `main`
+in place is not built.
 
 ## By hand
 
@@ -260,9 +297,10 @@ owner token (the sign-in link's).
 | Route | What it answers |
 | :--- | :--- |
 | `GET /api/version` | The build: version, commit, dirty, built at, the release it descends from, whether it is a development build |
-| `GET /api/update` | `installed` (the above), plus `enabled` and `blocked_by` (the check's switch and the variable holding it off), `latest`, `available`, `last_checked`, `error`, `can_apply` (`{ok, reason}`), and `apply`, how an update in flight is getting on (`phase`, `version`, `started_at`, `error`, `log`, `colonies`, `backup`) |
+| `GET /api/update` | `installed` (the above), plus `enabled` and `blocked_by` (the check's switch and the variable holding it off), `latest`, `available`, `last_checked`, `error`, `can_apply` (`{ok, reason}`), `apply`, how an update in flight is getting on (`phase`, `version`, `started_at`, `error`, `log`, `colonies`, `backup`), `notices` (the [notices](#notices-and-affected-colonies) newer than this build: `version`, `severity`, `line`, `probe`, `issue`, `affected` — `{count, colonies}` or `null`), `behind` (colonies still on a previous app slot: `id`, `repo`, `status`, `slot`, `affected_by`), `restarts` (`{restarting, failed}`) and `switch_to_releases` (`{reason, command, then}`, or `null` for a release install) |
 | `PUT /api/update` | `{"enabled": true\|false}` — the check. Answers the same body as `GET`, or `409` while the environment keeps the check off |
 | `POST /api/update/apply` | Install the newer release and restart into it; an optional `{"force": true}` body installs the latest release over a development build or a newer release instead (no body means no force, anything else that is not JSON is a 400) |
+| `POST /api/update/restart` | `{"ids": [...]}` or `{"all": true}`: stop and resume the colonies in `behind` so they boot on this version. Answers `{restarting, skipped}` at once (an id that is not behind, or already restarting, is skipped with the reason); `400` with neither, `409` while an update is being applied |
 | `GET /api/admin/drain` · `POST /api/admin/drain` | The drain, for a script that updates or restarts on its own. `POST` (no body, or `{"draining": false}` to cancel) starts or cancels it and both answer `{draining, since, in_flight, ready}`: `ready` is what a script polls for before installing or killing the process, and `in_flight` counts the colonies still booting or publishing |
 
 Designed in [#45](https://github.com/Colonizer-dev/harness/issues/45); the

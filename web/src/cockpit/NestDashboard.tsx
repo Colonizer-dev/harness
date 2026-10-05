@@ -75,8 +75,8 @@ export function nestDashboard(sessions: Session[]): NestDashboardSummary {
 function Fact({ label, value }: { label: string; value: string }): ReactElement {
   return (
     <div className="bg-bg px-3 py-2.5">
-      <div className="text-[12px] text-muted lowercase first-letter:uppercase">{label}</div>
-      <div className="mt-0.5 truncate text-[15px] font-semibold tracking-[-0.01em] text-text tabular-nums">{value}</div>
+      <div className="text-small text-muted lowercase first-letter:uppercase">{label}</div>
+      <div className="mt-0.5 truncate text-lead font-semibold tracking-[-0.01em] text-text tabular-nums">{value}</div>
     </div>
   );
 }
@@ -84,7 +84,7 @@ function Fact({ label, value }: { label: string; value: string }): ReactElement 
 function Section({ title, children }: { title: string; children: ReactElement | ReactElement[] }): ReactElement {
   return (
     <div>
-      <div className="mb-2 text-[13px] font-medium text-text lowercase first-letter:uppercase">{title}</div>
+      <div className="mb-2 text-body-sm font-medium text-text lowercase first-letter:uppercase">{title}</div>
       {children}
     </div>
   );
@@ -132,8 +132,8 @@ export function NestDashboard({
           </span>
         )}
         <div className="min-w-0 flex-1">
-          <div className="truncate font-mono text-[11.5px] text-muted">nest dashboard</div>
-          <div className="mt-0.5 truncate text-[15px] font-semibold leading-tight tracking-[-0.01em]">{org ?? "All workspaces"}</div>
+          <div className="truncate font-mono text-meta-lg text-muted">nest dashboard</div>
+          <div className="mt-0.5 truncate text-lead font-semibold leading-tight tracking-[-0.01em]">{org ?? "All workspaces"}</div>
         </div>
         <button
           type="button"
@@ -149,7 +149,7 @@ export function NestDashboard({
 
       <div className="scroll-thin flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4 pt-3.5">
         {sessions.length === 0 ? (
-          <div className="rounded-md bg-panel-2 px-3 py-2 text-[12.5px] leading-snug text-muted">
+          <div className="rounded-md bg-panel-2 px-3 py-2 text-small-lg leading-snug text-muted">
             no colonies here yet — launch one and its state, cost and activity land here.
           </div>
         ) : (
@@ -164,7 +164,7 @@ export function NestDashboard({
             <Section title="NEEDS YOU">
               <div className="flex flex-col gap-0.5">
                 {summary.attention.length === 0 ? (
-                  <div className="rounded-md bg-panel-2 px-3 py-2 text-[12px] text-faint">nothing needs you here right now</div>
+                  <div className="rounded-md bg-panel-2 px-3 py-2 text-small text-faint">nothing needs you here right now</div>
                 ) : (
                   summary.attention.map((s) => (
                     <button
@@ -173,8 +173,8 @@ export function NestDashboard({
                       onClick={() => onSelect(s.id)}
                       className="cursor-pointer rounded-md bg-panel-2 px-2.5 py-2 text-left transition-colors hover:bg-panel-2/70"
                     >
-                      <span className="block truncate text-[12.5px] font-medium">{colonyLabel(s.repo, s.issue)}</span>
-                      <span className="block truncate text-[11.5px] text-warn">
+                      <span className="block truncate text-small-lg font-medium">{colonyLabel(s.repo, s.issue)}</span>
+                      <span className="block truncate text-meta-lg text-warn">
                         {s.attention ? attentionText(s.attention) : "waiting for your answer"}
                       </span>
                     </button>
@@ -186,10 +186,10 @@ export function NestDashboard({
             <Section title="BY STATE">
               <div className="flex flex-col gap-1">
                 {states.map((state) => (
-                  <div key={state.label} className="flex items-center gap-2.5 text-[12px]">
+                  <div key={state.label} className="flex items-center gap-2.5 text-small">
                     <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: TONE_VAR[state.tone] }} />
                     <span className="min-w-0 flex-1 truncate text-muted">{state.label}</span>
-                    <span className="shrink-0 font-mono text-[11px] tabular-nums">{state.n}</span>
+                    <span className="shrink-0 font-mono text-meta tabular-nums">{state.n}</span>
                   </div>
                 ))}
               </div>
@@ -205,12 +205,12 @@ export function NestDashboard({
                     title={s.issue_title}
                     className="-mx-1 flex cursor-pointer items-baseline gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-panel-2"
                   >
-                    <span className="min-w-0 flex-1 truncate text-[12.5px]">{colonyLabel(s.repo, s.issue)}</span>
-                    <span className="shrink-0 text-[11px]" style={{ color: TONE_VAR[SESSION_STATUS[s.status]?.tone ?? "neutral"] }}>
+                    <span className="min-w-0 flex-1 truncate text-small-lg">{colonyLabel(s.repo, s.issue)}</span>
+                    <span className="shrink-0 text-meta" style={{ color: TONE_VAR[SESSION_STATUS[s.status]?.tone ?? "neutral"] }}>
                       {statusLabel(s)}
                     </span>
-                    <span className="shrink-0 font-mono text-[10.5px] text-faint tabular-nums">{timeAgo(s.last_activity_at ?? s.updated_at)}</span>
-                    <span className="w-11 shrink-0 text-right font-mono text-[11px] text-muted tabular-nums">{formatCost(sessionCost(s))}</span>
+                    <span className="shrink-0 font-mono text-meta-sm text-faint tabular-nums">{timeAgo(s.last_activity_at ?? s.updated_at)}</span>
+                    <span className="w-11 shrink-0 text-right font-mono text-meta text-muted tabular-nums">{formatCost(sessionCost(s))}</span>
                   </button>
                 ))}
               </div>

@@ -593,6 +593,8 @@ pub fn quota_active(reset_unix: Option<i64>, since: DateTime<Utc>, now: DateTime
 /// One provider's quota state for the queue's admission decision.
 pub struct ProviderQuota {
     pub id: String,
+    /// The name the operator gave the provider (`BytePlus`): the reason's words, never "Claude".
+    pub name: String,
     pub exhausted: bool,
     pub reset_at: Option<String>,
     pub reset_unix: Option<i64>,
@@ -647,12 +649,23 @@ pub fn quota_pause(states: &[ProviderQuota], waiting: usize) -> Option<QuotaPaus
             .and_then(|s| s.reset_at.clone())
     });
     let providers: Vec<String> = exhausted.iter().map(|s| s.id.clone()).collect();
+    let names: Vec<&str> = exhausted
+        .iter()
+        .map(|s| {
+            if s.name.trim().is_empty() {
+                s.id.as_str()
+            } else {
+                s.name.trim()
+            }
+        })
+        .collect();
+    let plans = if names.len() == 1 { "plan" } else { "plans" };
     let reason = match &reset_at {
         Some(reset) => format!(
-            "queue paused — {} quota exhausted, resets {reset} ({waiting} waiting)",
-            providers.join(", ")
+            "queue paused — {} {plans} exhausted, resets {reset} ({waiting} waiting)",
+            names.join(", ")
         ),
-        None => format!("queue paused — {} quota exhausted ({waiting} waiting)", providers.join(", ")),
+        None => format!("queue paused — {} {plans} exhausted ({waiting} waiting)", names.join(", ")),
     };
     Some(QuotaPause {
         reason,
@@ -676,6 +689,7 @@ mod tests {
     fn state(id: &str, exhausted: bool, reset_unix: Option<i64>, routable: bool) -> ProviderQuota {
         ProviderQuota {
             id: id.into(),
+            name: String::new(),
             exhausted,
             reset_at: reset_unix.map(|_| "reset".into()),
             reset_unix,
@@ -870,6 +884,16 @@ mod tests {
             hit.reset_unix,
             Some(Utc.with_ymd_and_hms(2026, 9, 23, 7, 54, 0).unwrap().timestamp())
         );
+    }
+
+    #[test]
+    fn the_pause_reason_names_providers_by_display_name() {
+        let mut byteplus = state("byteplus", true, Some(1_789_000_000), true);
+        byteplus.name = "BytePlus".into();
+        let pause = quota_pause(&[byteplus], 0).expect("the only routable provider is out");
+        assert!(pause.reason.contains("BytePlus plan exhausted"), "{}", pause.reason);
+        assert!(!pause.reason.contains("Claude"), "{}", pause.reason);
+        assert_eq!(pause.providers, vec!["byteplus".to_string()], "the ids stay ids");
     }
 
     #[test]

@@ -128,6 +128,23 @@ pub fn log_event(level: &str, message: impl Into<String>) -> Event {
     object(json!({"type": "log", "level": level, "message": message.into()}))
 }
 
+/// A `boundary` event (issue #609): agentd's report that a control could not be applied — a
+/// path-policy bind it could not lay on a path that appeared mid-session. The mothership's watchdog
+/// reads it for its control-defeat signature (docs/agent-events.schema.json `boundary`).
+pub fn boundary_event(kind: &str, control: &str, detail: impl Into<String>, target: Option<String>) -> Event {
+    let mut event = object(json!({
+        "type": "boundary",
+        "kind": kind,
+        "control": control,
+        "detail": detail.into(),
+        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    if let Some(target) = target {
+        event.insert("target".into(), Value::String(target));
+    }
+    event
+}
+
 pub fn status_event(state: &str, detail: Option<String>) -> Event {
     let mut event = object(json!({"type": "status", "state": state}));
     if let Some(detail) = detail {

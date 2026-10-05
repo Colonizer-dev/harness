@@ -642,7 +642,13 @@ pub struct AppError(pub(crate) StatusCode, pub(crate) anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": format!("{:#}", self.1)}))).into_response()
+        let mut body = json!({"error": format!("{:#}", self.1)});
+        // A launch refused as a duplicate names its holder, so the cockpit can link to it and offer
+        // Allow duplicate (issue #832).
+        if let Some(refusal) = self.1.downcast_ref::<crate::duplicates::Refusal>() {
+            body["duplicate"] = json!(refusal.holder);
+        }
+        (self.0, Json(body)).into_response()
     }
 }
 

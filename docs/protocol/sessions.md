@@ -51,6 +51,53 @@ next page starts right after it and `next_cursor` is the page's last index while
 **400**. The route takes the same visibility guard as the diff and files routes, so a scoped token
 outside its org/repo limits reads an unknown colony (**404**).
 
+## `POST /api/handoff`
+
+Continue a local agent session in a colony (issue #738). The body carries where to run it and the
+txcript **Simple** document `txcript export <session-id>` writes:
+
+```jsonc
+{
+  "repo": "owner/repo",          // required
+  "branch": "feature/parser",    // optional base; the transcript's recorded branch when absent
+  "title": "…",                  // optional; the transcript's recorded title, else a default
+  "instructions": "…",           // optional free text, carried beside the transcript
+  "transcript": { /* Simple JSON */ }
+}
+```
+
+The document is untrusted input the agent will read, treated exactly like an issue's text: the
+transcript byte-caps at 2 MiB and the whole body at 4 MiB, each answering **413**; a document that
+is not Simple, or one with no messages, is a **400**. It is rendered **text only** — tool calls,
+their results, thinking and images are dropped, so no tool state is replayed — with a note saying
+how many were omitted and only the most recent 60,000 characters kept, then redacted
+([secrets.md](secrets.md)). The rendered conversation is written host-side at
+`<session dir>/handoff.md`, beside rather than inside the colony-writable `transcripts/` mount, and
+fenced into the colony's first prompt as `<handoff-transcript>…</handoff-transcript>` with a
+disclaimer; a closing tag in the text is neutralised so the fence cannot be escaped. A resumed
+colony is not re-fed the transcript.
+
+The base is the request's `branch`, else the branch the transcript recorded, else the repository
+default; a branch that is not a safe git ref name is a **400**. The worktree is cut from git at
+boot, never from anything in the file, and a base that is not on origin fails the boot with a
+message saying to push it first. The colony's own branch stays `colonizer/session-…`, cut from that
+base. The launch goes through the ordinary create path, so admission, holds and queueing all apply;
+a scoped token needs `launch`, like `POST /api/sessions`, and the answer is the same `Session` JSON
+that route returns, with `origin` set to `handoff`.
+
+## `GET /api/sessions/{id}/handoff`
+
+Export a colony's conversation as the same txcript **Simple** document, so
+`txcript continue ./colony.json --with claude_code` picks it up on a laptop. The transcript is read
+the way the transcript route reads it — same agent, same mount caps, **422** for an agent with no
+reader — and a colony with nothing recorded is a **404**. The answer is `application/json` with
+`Content-Disposition: attachment; filename="colony.json"`.
+
+The document's `git_branch` is the colony's own branch (`colonizer/session-…`), its `title` is the
+colony's task, and `cwd` is scrubbed to the guest's `/workspace`, so no host path leaks. The text
+passes through the same secret redaction as every other exported text, so a token the agent pasted
+comes back `[REDACTED:…]`. A scoped token needs `read` on the colony, like its transcript.
+
 ## `GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>` (WebSocket)
 
 A scoped token needs `read` on the colony to watch; its commands need `operate` or `launch`, and

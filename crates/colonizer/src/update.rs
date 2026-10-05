@@ -89,6 +89,8 @@ pub struct ColonyNote {
 #[derive(Default)]
 pub struct Updater {
     progress: Mutex<Progress>,
+    /// The probe cache and the restarts onto the new version (issue #1097, update_notices.rs).
+    pub(crate) notices: crate::update_notices::NoticeState,
 }
 
 impl Updater {
@@ -99,6 +101,14 @@ impl Updater {
     pub async fn progress(&self) -> Progress {
         self.progress.lock().await.clone()
     }
+}
+
+/// Whether an update is draining, installing or restarting right now.
+pub async fn applying(app: &Shared) -> bool {
+    matches!(
+        app.updater.progress.lock().await.phase,
+        Phase::Draining | Phase::Installing | Phase::Restarting
+    )
 }
 
 /* ------------------------------------------------------------------ the app */
@@ -883,7 +893,9 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
 /// behind the activity log's route layer and `host_guard`.
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
     use axum::routing;
-    axum::Router::new().route("/api/update/apply", routing::post(apply))
+    axum::Router::new()
+        .route("/api/update/apply", routing::post(apply))
+        .route("/api/update/restart", routing::post(crate::update_notices::restart))
 }
 
 #[cfg(test)]

@@ -2,9 +2,9 @@
 # name       version   platform      kind    sha256                                                            url
 headscale    0.29.3    linux-x86_64  binary  8dc183758024ed7095cf610fedea0790233613c71353bc8be2715d82ba29b92c  https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_linux_amd64
 tailscale    1.102.4   linux-x86_64  tgz     50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9  https://pkgs.tailscale.com/stable/tailscale_1.102.4_amd64.tgz
-microsandbox 0.7.3     linux-x86_64  msb     2d5da7de187246c804dce2a1a23f06626b6f7cb892d9a0c7c5c620784ba412ea  https://github.com/superradcompany/microsandbox/releases/download/v0.7.3/microsandbox-linux-x86_64.tar.gz
-microsandbox 0.7.3     linux-aarch64 msb     6c1bfde0a86919bdb04fa33bbe10e76b27d65f6afb25d17e6c5ffc9c53060c47  https://github.com/superradcompany/microsandbox/releases/download/v0.7.3/microsandbox-linux-aarch64.tar.gz
-microsandbox 0.7.3     darwin-arm64  msb     4c1c4ec07bedb9eddbbdbfe93fe45d57c5fddc1ddcee87d00c17dace185a45c1  https://github.com/superradcompany/microsandbox/releases/download/v0.7.3/microsandbox-darwin-aarch64.tar.gz
+microsandbox 0.7.6     linux-x86_64  msb     daa69c6a644289bbb7ef889bd862ffba7acddf934d45e724fa160edcd9a540e0  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-linux-x86_64.tar.gz
+microsandbox 0.7.6     linux-aarch64 msb     47e4787423b12f56f24119f657c54974b1869c0853b3d7a0873157668d29aa03  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-linux-aarch64.tar.gz
+microsandbox 0.7.6     darwin-arm64  msb     a4f1722fee6460d4e2813e62b60dae4c092021d8120b7aaa9c2f4b5679d97d89  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-darwin-aarch64.tar.gz
 
 # The mesh on a Mac. headscale ships a darwin-arm64 binary just as it does for Linux. Tailscale
 # publishes no macOS tailscaled anywhere, so the darwin row pins the same v1.102.4 tag as the Linux

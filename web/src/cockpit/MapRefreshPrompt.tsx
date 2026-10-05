@@ -52,7 +52,7 @@ export function mapRefreshPrompt(loops: readonly Loop[], repo: string, remembere
 export function MapRefreshCovered({ covered, onEdit }: { covered: Loop; onEdit: () => void }): ReactElement {
   const words = covered.cadence.every === "every_days" ? `Refreshed every ${covered.cadence.days} days` : `Refreshed ${describeLoopCadence(covered.cadence)}`;
   return (
-    <span className="text-[12.5px] text-faint">
+    <span className="text-small-lg text-faint">
       {words} ·{" "}
       <button type="button" onClick={onEdit} className="cursor-pointer border-0 bg-transparent p-0 text-muted underline decoration-dotted underline-offset-2 hover:text-text">
         edit
@@ -74,9 +74,9 @@ export function MapRefreshPrompt({
   const [days, setDays] = useState(14);
   const [all, setAll] = useState(false);
   const preset = DAY_PRESETS.includes(days);
-  const field = "rounded-lg border border-border bg-transparent px-2 py-1 text-[12.5px] text-text outline-none focus:border-border-strong";
+  const field = "rounded-lg border border-border bg-transparent px-2 py-1 text-small-lg text-text outline-none focus:border-border-strong";
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border bg-panel px-4 py-2.5 text-[13px]">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border bg-panel px-4 py-2.5 text-body-sm">
       <span className="font-semibold text-text">Keep this map up to date?</span>
       <span className="text-muted">Re-map every</span>
       <select

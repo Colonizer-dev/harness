@@ -8,7 +8,6 @@ use crate::{
     gateway_audit::{GatewayAudit, GatewayFailure},
     openai, orgs, provider_quota,
     providers::{Provider, ProviderQuirks, Usage, Wire, apply_connection_policy, strip_oauth_betas, valid_model},
-    util::read_trimmed,
 };
 use axum::{
     Json, Router,
@@ -716,9 +715,14 @@ impl Gateway {
     }
 }
 
+/// The per-colony gateway token's file in the session store, written owner-only.
+pub(crate) const GATEWAY_TOKEN_FILE: &str = "gateway-token";
+
 impl App {
+    /// Where the local store keeps a colony's gateway token: for tests that plant one by hand.
+    #[cfg(test)]
     pub fn gateway_token_file(&self, session: &str) -> std::path::PathBuf {
-        self.session_dir(session).join("gateway-token")
+        self.session_dir(session).join(GATEWAY_TOKEN_FILE)
     }
 
     /// The live colony a gateway token belongs to, record and all: `proxy` needs the session itself,
@@ -728,14 +732,26 @@ impl App {
         if token.len() < 32 {
             return None;
         }
-        let sessions = self.sessions.read().await;
-        sessions
+        let live: Vec<crate::sessions::Session> = self
+            .sessions
+            .read()
+            .await
             .iter()
             .filter(|s| s.status.is_live())
-            .find(|s| {
-                read_trimmed(&self.gateway_token_file(&s.id)).is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes()))
-            })
             .cloned()
+            .collect();
+        // Read through the session store, one live colony at a time, outside the sessions lock.
+        for s in live {
+            let Ok(Some(bytes)) = self.store().read_file(&s.id, GATEWAY_TOKEN_FILE).await else {
+                continue;
+            };
+            let held = String::from_utf8_lossy(&bytes);
+            let held = held.trim();
+            if !held.is_empty() && constant_time_eq(held.as_bytes(), token.as_bytes()) {
+                return Some(s);
+            }
+        }
+        None
     }
 }
 

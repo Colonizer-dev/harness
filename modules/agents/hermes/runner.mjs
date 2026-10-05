@@ -5,15 +5,18 @@
 // One `hermes chat -q <text> --format stream-json` process per turn, later turns --resume the
 // session id the first one reported. Questions go through the colonizer MCP server's ask_user tool
 // (mcp.mjs, registered under `mcp_servers.colonizer` in the written config.yaml) and a loopback
-// bridge below, the same wire the codex and grok-build modules speak.
+// bridge below, the same wire the codex and grok-build modules speak. A loop colony also gets
+// loop_stop, and loop_next when it is self-paced (issue #643): the same server and bridge.
 
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+
+import { stageHermes } from './stage.mjs';
 
 export const DEFAULT_TURN_TIMEOUT_SECS = 3600;
 export const DEFAULT_HERMES_HOME = '/tmp/colonizer-hermes';
@@ -141,8 +144,18 @@ export function hermesConfig(routes, resolved = null, mcpServers = null, env = {
 /** Loopback HTTP bridge to mcp.mjs: an ask waits for the matching `answer` command, the same wire
  * the codex and grok-build modules speak (the vendored mcp.mjs copies are byte-identical on
  * purpose). Interrupt, turn end and shutdown cancel the parked calls; `answer` on an unknown id is
- * a warn. Only `/ask` is served: the runner passes no findings/memory/loop switches into the
- * server's env block, so mcp.mjs's own gating never offers those tools here. */
+ * a warn. `/loop_next` and `/loop_stop` leave the colony as protocol events, validated as the
+ * codex bridge validates them (mcp.mjs already clamped the delay). The runner passes no
+ * findings/memory switches into the server's env block, so mcp.mjs never offers those tools here;
+ * the loop switches ride through (`loopEnv`). */
+/** COLONIZER_LOOP* gate mcp.mjs's loop tools, so they flow into the server's env block — but only
+ * when the mothership set them, for a loop colony (docs/loops.md). */
+export function loopEnv(env = process.env) {
+  const out = {};
+  for (const key of ['COLONIZER_LOOP', 'COLONIZER_LOOP_SELF_PACED']) if (env[key] !== undefined) out[key] = env[key];
+  return out;
+}
+
 export async function createBridge({ emit, setStatus = () => {}, isWorking = () => false, token = randomBytes(16).toString('hex') }) {
   let count = 0;
   const pending = new Map();
@@ -167,6 +180,24 @@ export async function createBridge({ emit, setStatus = () => {}, isWorking = () 
         msg = JSON.parse(body || '{}');
       } catch {
         reply(400, {});
+        return;
+      }
+      if (req.url === '/loop_next') {
+        const minutes = Number(msg.delay_minutes);
+        if (!Number.isFinite(minutes) || minutes < 1) reply(200, { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+        else if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_next needs a reason: what the next run should find or do' });
+        else {
+          emit({ type: 'loop_next', delay_minutes: Math.round(minutes), reason: msg.reason });
+          reply(200, { ok: true });
+        }
+        return;
+      }
+      if (req.url === '/loop_stop') {
+        if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_stop needs a reason: why the loop should stop' });
+        else {
+          emit({ type: 'loop_stop', reason: msg.reason });
+          reply(200, { ok: true });
+        }
         return;
       }
       if (req.url !== '/ask') {
@@ -266,6 +297,21 @@ export function probeHermes({ bin = ['hermes'], execFileImpl = execFile, timeout
   });
 }
 
+/** The install command for a custom image, named when staging fails or an explicit binary is missing. */
+export const CUSTOM_IMAGE_INSTALL =
+  'git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11–3.13 venv, then pip install -e ".[mcp]" (without the mcp extra Hermes silently loads no MCP servers)';
+
+/** The hermes command: COLONIZER_HERMES_BIN (split on spaces), then `hermes` on the PATH, then the
+ * pinned build stage.mjs makes in the cache on first boot (reused on later boots). `venvBin` is the
+ * staged venv's bin dir, for the caller to put on the PATH; a staging failure throws. */
+export async function resolveHermes({ env = process.env, stage = stageHermes, log = () => {} } = {}) {
+  const explicit = String(env.COLONIZER_HERMES_BIN ?? '').trim();
+  if (explicit) return { bin: explicit.split(' ').filter(Boolean), source: 'env' };
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'hermes'))) return { bin: [join(dir, 'hermes')], source: 'path' };
+  const staged = await stage({ env, log });
+  return { bin: [staged.bin], source: staged.cached ? 'cache' : 'staged', venvBin: dirname(staged.bin) };
+}
+
 const truncate = (text) => {
   if (text.length <= MAX_TOOL_OUTPUT) return text;
   const suffix = `\n… [truncated ${text.length - MAX_TOOL_OUTPUT} characters]`;
@@ -300,15 +346,16 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
   let markKilled = () => {};
   // The model asks the user through the colonizer MCP server (mcp.mjs, registered in config.yaml
   // below); its asks park on this runner's loopback bridge until the matching `answer` command.
-  // The server env carries only the bridge coordinates — mcp.mjs's own gating then hides the
-  // findings, memory and loop tools, leaving ask_user (and its self-contained `wait`).
+  // The server env carries the bridge coordinates and, for a loop colony, the loop switches —
+  // mcp.mjs's own gating then hides the findings and memory tools, leaving ask_user, its
+  // self-contained `wait` and, in a loop, loop_stop (plus loop_next when self-paced).
   const bridge = await createBridge({ emit, setStatus, isWorking: () => Boolean(child) });
   onReady?.(bridge);
   const mcpServers = {
     colonizer: {
       command: process.execPath,
       args: [join(dirname(fileURLToPath(import.meta.url)), 'mcp.mjs')],
-      env: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token },
+      env: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token, ...loopEnv(env) },
       timeout: MCP_TIMEOUT_SECS,
     },
   };
@@ -575,11 +622,21 @@ async function main() {
   };
   const refuse = backendRefusal(process.env);
   if (refuse) fail(refuse);
-  const bin = (process.env.COLONIZER_HERMES_BIN || 'hermes').split(' ').filter(Boolean);
+  let resolved;
+  try {
+    resolved = await resolveHermes({ env: process.env, log: (m) => emit({ type: 'log', level: m.level, message: m.message }) });
+  } catch (error) {
+    fail(`hermes could not be staged on first boot: ${error?.message ?? error}. Nothing unverified was run. Retry the colony, or boot an image with hermes on PATH: ${CUSTOM_IMAGE_INSTALL}.`);
+  }
+  // The staged venv's own bin dir first, so anything Hermes spawns by name finds the same Python.
+  if (resolved.venvBin) process.env.PATH = `${resolved.venvBin}:${process.env.PATH ?? ''}`;
+  const bin = resolved.bin;
   const probe = await probeHermes({ bin });
   if (!probe.ok) {
     fail(
-      `${probe.error}. This module needs hermes-agent v2026.9.24 in the colony image: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv, then pip install -e ".[mcp]" (without the mcp extra Hermes silently loads no MCP servers). Nothing stages that binary into the VM yet.`,
+      resolved.source === 'env'
+        ? `${probe.error}. COLONIZER_HERMES_BIN names a hermes that does not run; unset it to use the pinned build the runner stages, or install hermes-agent v2026.9.24: ${CUSTOM_IMAGE_INSTALL}.`
+        : `${probe.error}. Install hermes-agent v2026.9.24: ${CUSTOM_IMAGE_INSTALL}.`,
     );
   }
   emit({ type: 'log', level: 'info', message: `hermes probe: ${probe.version}; terminal backend local; disabled toolsets: ${disabledToolsets(process.env).join(', ')}` });

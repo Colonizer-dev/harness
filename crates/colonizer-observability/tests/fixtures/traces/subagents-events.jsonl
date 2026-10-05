@@ -1,0 +1,20 @@
+{"type":"user_message","id":"initial","text":"Split the store","origin":"user","seq":1,"ts":"2026-09-24T10:00:00.000Z"}
+{"type":"model_changed","model":"claude-opus-5","previous":null,"origin":"agent","seq":2,"ts":"2026-09-24T10:00:01.000Z"}
+{"type":"assistant_text","message_id":"m1","block_index":0,"text":"Exploring first.","origin":"agent","seq":3,"ts":"2026-09-24T10:00:02.000Z"}
+{"type":"tool_call","message_id":"m1","tool_call_id":"toolu_task1","name":"Task","input":{"description":"Survey the storage layer","prompt":"Find every write"},"origin":"agent","seq":4,"ts":"2026-09-24T10:00:03.000Z"}
+{"type":"assistant_text","message_id":"s1","block_index":0,"text":"Looking.","agent":{"id":"toolu_task1","name":"Explore","description":"Survey the storage layer"},"origin":"subagent","seq":5,"ts":"2026-09-24T10:00:04.000Z"}
+{"type":"tool_call","message_id":"s1","tool_call_id":"toolu_r1","name":"Read","input":{"file_path":"src/store.rs"},"agent":{"id":"toolu_task1","name":"Explore","description":"Survey the storage layer"},"origin":"subagent","seq":6,"ts":"2026-09-24T10:00:05.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_r1","output":"fn write() {}","is_error":false,"agent":{"id":"toolu_task1","name":"Explore","description":"Survey the storage layer"},"origin":"subagent","seq":7,"ts":"2026-09-24T10:00:06.000Z"}
+{"type":"tool_call","message_id":"s1","tool_call_id":"toolu_r2","name":"Grep","input":{"pattern":"fs::write"},"agent":{"id":"toolu_task1","name":"Explore","description":"Survey the storage layer"},"origin":"subagent","seq":8,"ts":"2026-09-24T10:00:07.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_r2","output":"grep: bad regex","is_error":true,"agent":{"id":"toolu_task1","name":"Explore","description":"Survey the storage layer"},"origin":"subagent","seq":9,"ts":"2026-09-24T10:00:08.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_task1","output":"Three writers.","is_error":false,"origin":"agent","seq":10,"ts":"2026-09-24T10:00:09.000Z"}
+{"type":"tool_call","message_id":"m2","tool_call_id":"toolu_task2","name":"Task","input":{"description":"Write tests","run_in_background":true},"origin":"agent","seq":11,"ts":"2026-09-24T10:00:10.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_task2","output":"Started in the background.","is_error":false,"background":true,"origin":"agent","seq":12,"ts":"2026-09-24T10:00:11.000Z"}
+{"type":"tool_call","message_id":"m2","tool_call_id":"toolu_b1","name":"Bash","input":{"command":"cargo build"},"origin":"agent","seq":13,"ts":"2026-09-24T10:00:12.000Z"}
+{"type":"turn_end","is_error":false,"result":"Started","cost_usd":0.5,"duration_ms":13000,"model_usage":{"claude-opus-5":{"input_tokens":1000,"output_tokens":200,"cache_read_tokens":5000,"cache_write_tokens":700}},"origin":"agent","seq":14,"ts":"2026-09-24T10:00:13.000Z"}
+{"type":"user_message","id":"watchdog-1","text":"Still there?","origin":"watchdog","seq":15,"ts":"2026-09-24T10:00:14.000Z"}
+{"type":"assistant_text","message_id":"s2","block_index":0,"text":"Writing tests.","agent":{"id":"toolu_task2","name":"general-purpose","description":null},"origin":"subagent","seq":16,"ts":"2026-09-24T10:00:15.000Z"}
+{"type":"tool_call","message_id":"s2","tool_call_id":"toolu_b2","name":"Bash","input":{"command":"cargo test"},"agent":{"id":"toolu_task2","name":"general-purpose","description":null},"origin":"subagent","seq":17,"ts":"2026-09-24T10:00:16.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_b2","output":"ok","is_error":false,"agent":{"id":"toolu_task2","name":"general-purpose","description":null},"origin":"subagent","seq":18,"ts":"2026-09-24T10:00:17.000Z"}
+{"type":"subagent_end","tool_call_id":"toolu_task2","status":"completed","origin":"agent","seq":19,"ts":"2026-09-24T10:00:18.000Z"}
+{"type":"turn_end","is_error":false,"result":"Done","cost_usd":0.8,"duration_ms":6000,"model_usage":{"claude-opus-5":{"input_tokens":1500,"output_tokens":350,"cache_read_tokens":9000,"cache_write_tokens":900},"openrouter/qwen3-coder":{"input_tokens":40,"output_tokens":10,"cache_read_tokens":0,"cache_write_tokens":0}},"origin":"agent","seq":20,"ts":"2026-09-24T10:00:19.000Z"}

@@ -66,6 +66,75 @@ describe("demo build", () => {
     expect(touched).toEqual([]);
   });
 
+  it("serves the header's model switcher and a switch without the network (issue #1051)", async () => {
+    const api = await demoLoadApi();
+    const assignments = await api.modelAssignments();
+    expect(assignments.install.roles.length).toBeGreaterThan(0);
+    expect(assignments.orgs.length).toBeGreaterThan(0);
+    const plan = await api.switchModels({ scope: "install", roles: { model: "sonnet" }, apply: "running", dry_run: true });
+    expect(plan.dry_run).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
+  it("shows the \"Added to …\" notification from the mock orgs and answers it without the network", async () => {
+    const api = await demoLoadApi();
+    const { pendingOrgPrompts } = await import("./orgs");
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { ApiContext } = await import("./context");
+    const { OrgNotices } = await import("./components/OrgNotice");
+    const render = (orgs: Parameters<typeof OrgNotices>[0]["orgs"]) =>
+      renderToStaticMarkup(createElement(ApiContext.Provider, { value: api }, createElement(OrgNotices, { orgs, onAnswered: () => {} })));
+
+    const pending = pendingOrgPrompts(await api.orgs(), new Set());
+    expect(pending.map((o) => o.org)).toEqual(["hooli", "initech"]);
+    expect(render(pending)).toContain("Added to 2 organisations");
+
+    // Not now on hooli, as its button does: the mock remembers it and the row is gone.
+    const { answerNewOrg } = await import("./components/OrgNotice");
+    await answerNewOrg(api, "hooli", false);
+    const left = pendingOrgPrompts(await api.orgs(), new Set());
+    expect(left.map((o) => o.org)).toEqual(["initech"]);
+    expect(render(left)).toContain(">initech</span>");
+    expect(render(left)).toContain(">Add workspace</button>");
+
+    await answerNewOrg(api, "initech", true);
+    const orgs = await api.orgs();
+    expect(pendingOrgPrompts(orgs, new Set())).toEqual([]);
+    expect(orgs.find((o) => o.org === "initech")?.settings.enabled).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
+  it("renders the decisions inbox's demo cards with the real components and answers one without the network", async () => {
+    vi.useFakeTimers();
+    const api = await demoLoadApi();
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { InboxView } = await import("./cockpit/InboxView");
+    const read = async () => {
+      const pending = api.decisions();
+      await vi.advanceTimersByTimeAsync(500);
+      return pending;
+    };
+    const decisions = await read();
+    expect(decisions.decisions.length).toBeGreaterThan(0);
+    expect(new Set(decisions.prs.map((p) => p.reason))).toEqual(new Set(["policy_hold", "conflicted", "red_ci", "review_requested"]));
+    const html = renderToStaticMarkup(
+      createElement(InboxView, { sessions: [], onOpenColony: () => {}, onOpenNotificationSettings: () => {}, decisions }),
+    );
+    expect(html).toContain(">Decisions<");
+    expect(html).toContain(decisions.decisions[0].question);
+    expect(html).toContain("Re-run failed jobs");
+    expect(html).toContain("Dispatch redo colony");
+    expect(html).toContain(`${decisions.count} need you`);
+
+    const answered = api.answerDecision({ id: decisions.decisions[0].id, choice: decisions.decisions[0].options[0] });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await answered).comment.startsWith("Decision (maintainer): ")).toBe(true);
+    expect((await read()).decisions.map((d) => d.id)).not.toContain(decisions.decisions[0].id);
+    expect(touched).toEqual([]);
+  });
+
   it("answers the demo colony's question once its intro gets to it", async () => {
     vi.useFakeTimers();
     const api = await demoLoadApi();

@@ -10,6 +10,8 @@ import { FilterSelect, Pagination, SearchBox, optionsBy } from "./ListControls";
 import { matchesQuery, usePagedFilter } from "./paging";
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, timeAgo } from "../components/ui";
+import { describeHolder } from "../components/DuplicateNotice";
+import { duplicateHolder } from "../api";
 import type {
   CacheInfo,
   Dependency,
@@ -129,13 +131,13 @@ export function PackagesView({ org, onOpenColony }: { org: string; onOpenColony?
             aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
             className={cx(
-              "-mb-px inline-flex cursor-pointer items-center gap-1.5 border-0 border-b-2 bg-transparent px-3 py-2 text-[13px]",
+              "-mb-px inline-flex cursor-pointer items-center gap-1.5 border-0 border-b-2 bg-transparent px-3 py-2 text-body-sm",
               tab === t.id ? "border-accent text-text" : "border-transparent text-muted hover:text-text",
             )}
           >
             {t.label}
             {counts[t.id] != null && (
-              <span className={cx("rounded-full px-1.5 text-[11px] tabular-nums", t.id === "supply" && (supply.data?.counts.critical || supply.data?.counts.high) ? "bg-err/15 text-err" : "bg-panel-3 text-muted")}>
+              <span className={cx("rounded-full px-1.5 text-meta tabular-nums", t.id === "supply" && (supply.data?.counts.critical || supply.data?.counts.high) ? "bg-err/15 text-err" : "bg-panel-3 text-muted")}>
                 {counts[t.id]}
               </span>
             )}
@@ -150,7 +152,7 @@ export function PackagesView({ org, onOpenColony }: { org: string; onOpenColony?
 }
 
 function Loaded<T extends CacheInfo>({ state, children }: { state: ScanState<T>; children: (d: T) => ReactNode }): ReactElement {
-  if (state.error) return <p className="py-3 text-[13px] text-err">{state.error}</p>;
+  if (state.error) return <p className="py-3 text-body-sm text-err">{state.error}</p>;
   if (state.data)
     return (
       <>
@@ -159,7 +161,7 @@ function Loaded<T extends CacheInfo>({ state, children }: { state: ScanState<T>;
       </>
     );
   return (
-    <p className="flex items-center gap-2 py-3 text-[13px] text-muted">
+    <p className="flex items-center gap-2 py-3 text-body-sm text-muted">
       <span aria-hidden="true" className="size-2 animate-pulse rounded-full bg-accent" />
       {state.pending ?? "Loading…"}
     </p>
@@ -170,7 +172,7 @@ function Loaded<T extends CacheInfo>({ state, children }: { state: ScanState<T>;
 export function Freshness({ data, onRefresh }: { data: CacheInfo & { scanned_at?: string }; onRefresh: () => void }): ReactElement {
   const at = data.cached_at ?? data.scanned_at;
   return (
-    <div className="mb-2 flex items-center gap-2 text-[12px] text-faint">
+    <div className="mb-2 flex items-center gap-2 text-small text-faint">
       {at && <span>updated {timeAgo(at)}</span>}
       {data.refreshing && (
         <span className="flex items-center gap-1.5 text-muted">
@@ -183,7 +185,7 @@ export function Freshness({ data, onRefresh }: { data: CacheInfo & { scanned_at?
         type="button"
         onClick={onRefresh}
         disabled={data.refreshing}
-        className="ml-auto cursor-pointer rounded-md border border-border bg-transparent px-2 py-0.5 text-[12px] text-muted hover:text-text disabled:cursor-default disabled:opacity-50"
+        className="ml-auto cursor-pointer rounded-md border border-border bg-transparent px-2 py-0.5 text-small text-muted hover:text-text disabled:cursor-default disabled:opacity-50"
       >
         Refresh
       </button>
@@ -195,7 +197,7 @@ function RepoNotes({ repos }: { repos: { repo: string; error?: string; skipped?:
   const bad = repos.filter((r) => r.error || (r.skipped && r.skipped.length > 0));
   if (bad.length === 0) return null;
   return (
-    <details className="mt-3 text-[12px] text-faint">
+    <details className="mt-3 text-small text-faint">
       <summary className="cursor-pointer">{bad.length} {bad.length === 1 ? "repository" : "repositories"} not fully read</summary>
       <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
         {bad.map((r) => (
@@ -237,10 +239,10 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
   return (
     <div>
       {data.packages.length === 0 ? (
-        <p className="py-3 text-[13px] text-faint">No package manifests found in this workspace's repositories.</p>
+        <p className="py-3 text-body-sm text-faint">No package manifests found in this workspace's repositories.</p>
       ) : (
         <>
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-small-lg text-muted">
           <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search packages or paths…" label="search published packages" />
           <FilterSelect label="status" allLabel="Any status" value={f.status} onChange={(v) => list.setFilters({ status: v as PublishedFilters["status"] })} options={optionsBy(data.packages, (p) => p.status)} />
           <FilterSelect label="ecosystem" allLabel="All ecosystems" value={f.eco} onChange={(v) => list.setFilters({ eco: v as PublishedFilters["eco"] })} options={optionsBy(data.packages, (p) => p.ecosystem, (e) => ECO[e as Ecosystem]?.label ?? e)} />
@@ -248,12 +250,12 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
           <Check label="Unreleased changes" checked={f.unreleased} onChange={(v) => list.setFilters({ unreleased: v })} />
         </div>
         {list.total === 0 ? (
-          <p className="border-y border-border py-3 text-[13px] text-faint">Nothing matches this search and these filters.</p>
+          <p className="border-y border-border py-3 text-body-sm text-faint">Nothing matches this search and these filters.</p>
         ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] border-collapse text-[13px]">
+          <table className="w-full min-w-[720px] border-collapse text-body-sm">
             <thead>
-              <tr className="border-b border-border text-left text-[12px] text-muted">
+              <tr className="border-b border-border text-left text-small text-muted">
                 <th className="py-2 pr-3 font-normal">Package</th>
                 <th className="py-2 pr-3 font-normal">Where</th>
                 <th className="py-2 pr-3 font-normal">In repo</th>
@@ -278,7 +280,7 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
                       <StatusBadge status={p.status} />
                     </span>
                   </td>
-                  <td className="py-2 pr-3 font-mono text-[12px] text-muted">
+                  <td className="py-2 pr-3 font-mono text-small text-muted">
                     {p.repo.split("/")[1]}
                     {p.path ? `/${p.path}` : ""}
                   </td>
@@ -286,7 +288,7 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
                   <td className="py-2 pr-3 tabular-nums">
                     {p.published?.latest ?? "—"}
                     {p.unreleased_changes && (
-                      <span className="ml-1.5 rounded bg-warn/15 px-1 text-[11px] text-warn" title="the repository's version is ahead of the registry's latest">
+                      <span className="ml-1.5 rounded bg-warn/15 px-1 text-meta text-warn" title="the repository's version is ahead of the registry's latest">
                         unreleased
                       </span>
                     )}
@@ -304,16 +306,16 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
         <Pagination view={list} onPage={list.setPage} noun="packages" />
         </>
       )}
-      <h3 className="mb-1.5 mt-5 flex items-center gap-2 text-[13px] font-medium text-text">
+      <h3 className="mb-1.5 mt-5 flex items-center gap-2 text-body-sm font-medium text-text">
         <EcoIcon eco="github" size={16} /> GitHub Packages
       </h3>
       {gh.length === 0 ? (
-        <p className="text-[12.5px] text-faint">{data.github_packages.note ?? "None published under this organization."}</p>
+        <p className="text-small-lg text-faint">{data.github_packages.note ?? "None published under this organization."}</p>
       ) : (
         <ul className="m-0 grid list-none gap-1.5 p-0 sm:grid-cols-2">
           {gh.map((p) => (
-            <li key={`${p.type}:${p.name}`} className="flex items-center gap-2 rounded-lg border border-border px-2.5 py-1.5 text-[12.5px]">
-              <span className="rounded bg-panel-3 px-1 font-mono text-[10.5px] text-muted">{p.type}</span>
+            <li key={`${p.type}:${p.name}`} className="flex items-center gap-2 rounded-lg border border-border px-2.5 py-1.5 text-small-lg">
+              <span className="rounded bg-panel-3 px-1 font-mono text-meta-sm text-muted">{p.type}</span>
               {p.url ? (
                 <a href={p.url} target="_blank" rel="noreferrer" className="min-w-0 truncate font-mono text-text hover:underline">
                   {p.name}
@@ -337,7 +339,7 @@ function PublishedList({ data }: { data: PackagesPublished }): ReactElement {
 
 function StatusBadge({ status }: { status: "published" | "unpublished" | "private" }): ReactElement {
   const tone = status === "published" ? "bg-ok/15 text-ok" : status === "private" ? "bg-panel-3 text-muted" : "bg-panel-3 text-faint";
-  return <span className={cx("rounded-full px-1.5 py-px text-[10.5px]", tone)}>{status}</span>;
+  return <span className={cx("rounded-full px-1.5 py-px text-meta-sm", tone)}>{status}</span>;
 }
 
 // --- Dependencies -------------------------------------------------------------------------------
@@ -395,7 +397,7 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
             onClick={() => setEco(eco === e.ecosystem ? "all" : e.ecosystem)}
             aria-pressed={eco === e.ecosystem}
             className={cx(
-              "inline-flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[12.5px]",
+              "inline-flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-small-lg",
               eco === e.ecosystem ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text",
             )}
           >
@@ -405,18 +407,18 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
             </span>
           </button>
         ))}
-        <span className="ml-auto self-center text-[12.5px] text-muted">
+        <span className="ml-auto self-center text-small-lg text-muted">
           <span className="text-warn">{data.totals.outdated} outdated</span> · <span className="text-err">{data.totals.vulnerable} with advisories</span>
         </span>
       </div>
-      <div className="mb-2 flex flex-wrap items-center gap-3 text-[12.5px] text-muted">
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-small-lg text-muted">
         <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search packages or paths…" label="search dependencies" />
         <FilterSelect label="repository" allLabel="All repositories" value={list.filters.repo ?? "all"} onChange={(v) => list.setFilters({ repo: v })} options={optionsBy(data.packages, depRepos, repoName)} />
         <Check label="Direct only" checked={directOnly} onChange={(v) => list.setFilters({ directOnly: v })} />
         <Check label="Outdated" checked={outdated} onChange={(v) => list.setFilters({ outdated: v })} />
         <Check label="Vulnerable" checked={vulnerable} onChange={(v) => list.setFilters({ vulnerable: v })} />
       </div>
-      {list.total === 0 && <p className="border-y border-border py-3 text-[13px] text-faint">Nothing matches this search and these filters.</p>}
+      {list.total === 0 && <p className="border-y border-border py-3 text-body-sm text-faint">Nothing matches this search and these filters.</p>}
       <ul className="m-0 list-none divide-y divide-border/60 border-y border-border p-0 empty:hidden">
         {list.rows.map((d) => {
           const key = `${d.ecosystem}:${d.name}`;
@@ -427,17 +429,17 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
                 type="button"
                 aria-expanded={isOpen}
                 onClick={() => setOpen(isOpen ? null : key)}
-                className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent p-0 text-left text-[13px]"
+                className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent p-0 text-left text-body-sm"
               >
                 <EcoIcon eco={d.ecosystem} size={16} />
                 <span className="font-mono text-text">{d.name}</span>
-                <span className="rounded-full bg-panel-3 px-1.5 text-[10.5px] text-muted">{d.direct === true ? (d.dev ? "dev" : "direct") : d.direct === false ? "transitive" : "unknown"}</span>
+                <span className="rounded-full bg-panel-3 px-1.5 text-meta-sm text-muted">{d.direct === true ? (d.dev ? "dev" : "direct") : d.direct === false ? "transitive" : "unknown"}</span>
                 <span className="flex flex-wrap gap-1">
                   {d.versions.map((v) => (
                     <span
                       key={v.version}
                       className={cx(
-                        "rounded px-1 font-mono text-[11px] tabular-nums",
+                        "rounded px-1 font-mono text-meta tabular-nums",
                         v.vulns.length > 0 ? "bg-err/15 text-err" : d.drift ? "bg-warn/15 text-warn" : "bg-panel-2 text-muted",
                       )}
                       title={v.vulns.length > 0 ? v.vulns.map((x) => x.id).join(", ") : d.drift ? "more than one version in use" : undefined}
@@ -446,11 +448,11 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
                     </span>
                   ))}
                 </span>
-                {d.outdated && d.latest && <span className="text-[11.5px] text-warn">→ {d.latest}</span>}
-                <span className="ml-auto text-[11.5px] text-faint">{d.versions.reduce((n, v) => n + v.users.length, 0)} uses</span>
+                {d.outdated && d.latest && <span className="text-meta-lg text-warn">→ {d.latest}</span>}
+                <span className="ml-auto text-meta-lg text-faint">{d.versions.reduce((n, v) => n + v.users.length, 0)} uses</span>
               </button>
               {isOpen && (
-                <div className="mt-1.5 space-y-1 pl-6 text-[12px] text-muted">
+                <div className="mt-1.5 space-y-1 pl-6 text-small text-muted">
                   {d.versions.map((v) => (
                     <div key={v.version}>
                       <span className="font-mono text-text">{v.version}</span>
@@ -554,14 +556,21 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
   const list = usePagedFilter(data.risks, { filters: RISKS_ALL, match: riskMatches });
   const { severity, fixable, kind } = list.filters;
 
-  const handOff = async (r: SupplyRisk, key: string) => {
+  const handOff = async (r: SupplyRisk, key: string, allowDuplicate = false) => {
     const repo = r.users[0]?.repo;
     if (!repo) return;
     setSending(key);
     try {
       // The target rides on the launch (issue #673): a second live colony for it is refused, and a
       // same-repository merge over this one marks it superseded.
-      const s = await api.createSession({ repo, title: `Supply chain: ${r.name}`, instructions: fixInstructions(r), autopilot: true, supply_chain: { package: r.name, advisory: advisoryId(r) } });
+      const s = await api.createSession({
+        repo,
+        title: `Supply chain: ${r.name}`,
+        instructions: fixInstructions(r),
+        autopilot: true,
+        supply_chain: { package: r.name, advisory: advisoryId(r) },
+        allow_duplicate: allowDuplicate || undefined,
+      });
       toast({
         title: `A colony is fixing ${r.name}`,
         body: `${repo} · ${KIND_LABEL[r.kind] ?? r.kind}`,
@@ -569,7 +578,19 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
         action: onOpenColony ? { label: "Watch it work", onClick: () => onOpenColony(s.id) } : undefined,
       });
     } catch (e) {
-      toast(errorMessage(e), "error");
+      // Refused as a duplicate (issue #832): say who holds the fix — the loop's colony, or an
+      // earlier hand-off — and offer to start another anyway.
+      const holder = duplicateHolder(e);
+      if (holder) {
+        toast({
+          title: `${r.name} is already being fixed`,
+          body: describeHolder(holder),
+          kind: "warn",
+          action: { label: "Allow duplicate", onClick: () => void handOff(r, key, true) },
+        });
+      } else {
+        toast(errorMessage(e), "error");
+      }
     } finally {
       setSending(null);
     }
@@ -585,12 +606,12 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
             aria-pressed={severity === s}
             onClick={() => list.setFilters({ severity: severity === s ? "all" : s })}
             className={cx(
-              "inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12.5px]",
+              "inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-small-lg",
               severity === s ? "border-accent" : "border-border",
               "bg-transparent",
             )}
           >
-            <span className={cx("rounded-full px-1.5 text-[11px] tabular-nums", SEVERITY[s].tone)}>{data.counts[s] ?? 0}</span>
+            <span className={cx("rounded-full px-1.5 text-meta tabular-nums", SEVERITY[s].tone)}>{data.counts[s] ?? 0}</span>
             {SEVERITY[s].label}
           </button>
         ))}
@@ -599,7 +620,7 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
           value={kind}
           onChange={(e) => list.setFilters({ kind: e.target.value })}
           aria-label="risk kind"
-          className="rounded-md border border-border bg-panel px-2 py-1 text-[12.5px] text-text"
+          className="rounded-md border border-border bg-panel px-2 py-1 text-small-lg text-text"
         >
           <option value="all">All kinds</option>
           {kinds.map((k) => (
@@ -610,21 +631,21 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
         </select>
       </div>
       {data.risks.length > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-small-lg text-muted">
           <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search packages, reasons or paths…" label="search supply-chain risks" />
           <FilterSelect label="ecosystem" allLabel="All ecosystems" value={list.filters.eco ?? "all"} onChange={(v) => list.setFilters({ eco: v as Ecosystem | "all" })} options={optionsBy(data.risks, (r) => r.ecosystem, (e) => ECO[e as Ecosystem]?.label ?? e)} />
           <FilterSelect label="repository" allLabel="All repositories" value={list.filters.repo ?? "all"} onChange={(v) => list.setFilters({ repo: v })} options={optionsBy(data.risks, (r) => r.users.map((u) => u.repo), repoName)} />
         </div>
       )}
       {list.total === 0 ? (
-        <p className="py-3 text-[13px] text-faint">{data.risks.length === 0 ? "No supply-chain risks found." : "Nothing matches this search and these filters."}</p>
+        <p className="py-3 text-body-sm text-faint">{data.risks.length === 0 ? "No supply-chain risks found." : "Nothing matches this search and these filters."}</p>
       ) : (
         <ul className="m-0 list-none divide-y divide-border/60 border-y border-border p-0">
           {list.rows.map((r, i) => {
             const key = `${r.kind}:${r.ecosystem}:${r.name}:${r.version ?? ""}:${list.from + i}`;
             return (
-              <li key={key} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-[13px]">
-                <span className={cx("mt-0.5 shrink-0 rounded-full px-1.5 text-[11px]", SEVERITY[r.severity]?.tone ?? SEVERITY.low.tone)}>{SEVERITY[r.severity]?.label ?? r.severity}</span>
+              <li key={key} className="flex flex-wrap items-start gap-x-3 gap-y-1 py-2 text-body-sm">
+                <span className={cx("mt-0.5 shrink-0 rounded-full px-1.5 text-meta", SEVERITY[r.severity]?.tone ?? SEVERITY.low.tone)}>{SEVERITY[r.severity]?.label ?? r.severity}</span>
                 <EcoIcon eco={r.ecosystem} size={16} />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-baseline gap-x-2">
@@ -639,19 +660,19 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
                         {r.version ? `@${r.version}` : ""}
                       </span>
                     )}
-                    <span className="text-[12px] text-muted">{KIND_LABEL[r.kind] ?? r.kind}</span>
-                    {r.fix.available && <span className="rounded bg-ok/15 px-1 text-[11px] text-ok">fix{r.fix.version ? ` ${r.fix.version}` : ""}</span>}
-                    {!r.direct && r.via.length > 0 && <span className="text-[11.5px] text-faint">via {r.via.join(", ")}</span>}
+                    <span className="text-small text-muted">{KIND_LABEL[r.kind] ?? r.kind}</span>
+                    {r.fix.available && <span className="rounded bg-ok/15 px-1 text-meta text-ok">fix{r.fix.version ? ` ${r.fix.version}` : ""}</span>}
+                    {!r.direct && r.via.length > 0 && <span className="text-meta-lg text-faint">via {r.via.join(", ")}</span>}
                   </div>
-                  <div className="text-[12.5px] text-muted">{r.reason}</div>
-                  <div className="text-[11.5px] text-faint">{r.users.map((u) => `${u.repo.split("/")[1]}/${u.path}`).join(" · ")}</div>
+                  <div className="text-small-lg text-muted">{r.reason}</div>
+                  <div className="text-meta-lg text-faint">{r.users.map((u) => `${u.repo.split("/")[1]}/${u.path}`).join(" · ")}</div>
                 </div>
                 {r.users.length > 0 && (
                   <button
                     type="button"
                     disabled={sending === key}
                     onClick={() => void handOff(r, key)}
-                    className="shrink-0 cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-[12px] text-muted hover:border-border-strong hover:text-text disabled:opacity-50"
+                    className="shrink-0 cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-small text-muted hover:border-border-strong hover:text-text disabled:opacity-50"
                   >
                     {sending === key ? "Sending…" : "Hand to a colony"}
                   </button>
@@ -662,7 +683,7 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
         </ul>
       )}
       <Pagination view={list} onPage={list.setPage} noun="risks" />
-      <p className="mt-2 text-[11.5px] text-faint">{data.note}</p>
+      <p className="mt-2 text-meta-lg text-faint">{data.note}</p>
       <RepoNotes repos={data.repos} />
     </div>
   );

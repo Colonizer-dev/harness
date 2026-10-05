@@ -1,0 +1,77 @@
+/* The type scale (issue #1084): every text size in the cockpit is one of these named steps, used as
+   `text-<step>` (text-meta, text-small, text-body, …), never an arbitrary `text-[Npx]`. On a desktop
+   each step is exactly the pixel size it replaced, so nothing moves there. On a phone or any coarse
+   pointer the phone scale below raises every step at once: body text 16px, secondary text 14px,
+   metadata 13px, nothing under 12px. type-scale.test.ts pins both scales. */
+@theme {
+  --text-micro-xs: 8.5px;
+  --text-micro-sm: 9px;
+  --text-micro: 9.5px;
+  --text-micro-lg: 10px;
+  --text-meta-sm: 10.5px;
+  --text-meta: 11px;
+  --text-meta-lg: 11.5px;
+  --text-small: 12px;
+  --text-small-lg: 12.5px;
+  --text-body-sm: 13px;
+  --text-body: 13.5px;
+  --text-body-lg: 14px;
+  --text-lead-sm: 14.5px;
+  --text-lead: 15px;
+  --text-title-sm: 16px;
+  --text-title: 17px;
+  --text-title-lg: 18px;
+  --text-display-sm: 22px;
+  --text-display: 24px;
+  --text-display-lg: 28px;
+  --text-display-xl: 30px;
+}
+
+/* The phone scale: below 640px, and on any coarse pointer (a finger, not a mouse). */
+@media (max-width: 639.98px), (pointer: coarse) {
+  :root {
+    --text-micro-xs: 12px;
+    --text-micro-sm: 12px;
+    --text-micro: 12px;
+    --text-micro-lg: 12px;
+    --text-meta-sm: 13px;
+    --text-meta: 13px;
+    --text-meta-lg: 13px;
+    --text-small: 14px;
+    --text-small-lg: 14px;
+    --text-body-sm: 16px;
+    --text-body: 16px;
+    --text-body-lg: 16px;
+    --text-lead-sm: 17px;
+    --text-lead: 17px;
+    --text-title-sm: 18px;
+    --text-title: 19px;
+    --text-title-lg: 20px;
+  }
+
+  /* iOS Safari zooms the page in on focus when a field's text is under 16px. */
+  input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"]),
+  textarea,
+  select {
+    font-size: max(16px, 1em);
+  }
+
+  /* Touch targets: at least 44px tall for anything tapped, and 44px wide for icon buttons (the ones
+     named by aria-label). Switches, checkboxes and radios keep their drawn size; their row is the
+     target. */
+  button:not([role="switch"]),
+  [role="button"],
+  [role="tab"],
+  [role="option"],
+  [role="menuitem"],
+  [role="menuitemradio"],
+  [role="menuitemcheckbox"],
+  select,
+  summary {
+    min-height: 44px;
+  }
+  button[aria-label]:not([role="switch"]),
+  [role="button"][aria-label] {
+    min-width: 44px;
+  }
+}

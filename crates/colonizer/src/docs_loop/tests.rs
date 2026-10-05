@@ -674,6 +674,11 @@ async fn a_run_dispatches_one_colony_per_repository_then_skips_while_it_is_open(
     let app = crate::sessions::tests::app_that_can_create(&dir);
     settings_with(&app, &["acme/app", "acme/api"]);
     two_drifting_repos(&dir, &app);
+    // The colonies queue rather than boot. A boot would run in the background while the next run
+    // awaits its git reads, and reach the real GitHub for the fixture's made-up repositories: where
+    // `gh` is signed in, that answers 404 within a second, the colony fails, and the next run sees
+    // no open colony. Queued is still open, which is all this test is about.
+    app.drain.enter();
 
     let report = run_once(&app, "run_now", false, Mirror::AsIs, Duration::ZERO).await.unwrap();
     assert_eq!(report.repos.len(), 2);

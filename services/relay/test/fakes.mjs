@@ -70,11 +70,12 @@ export function within(promise, label = 'timed out', ms = 10000) {
 
 /**
  * A fresh DO with a state object that records every property touch (tests assert storage stays untouched)
- * and test-scale timers. A leftover tunnel dies of idleness after 4s, so node --test always exits. The
- * onEstablish seam feeds verified(): establishment is announced on the mothership's own socket, so a
- * connect() awaits an event, never a polling window.
+ * and test-scale timers; `env` stands in for the worker's bindings (none by default). A leftover tunnel
+ * dies of idleness after 4s, so node --test always exits. The onEstablish seam feeds verified():
+ * establishment is announced on the mothership's own socket, so a connect() awaits an event, never a
+ * polling window.
  */
-export function makeDo(opts = {}) {
+export function makeDo({ env = {}, ...opts } = {}) {
   const touched = [];
   const state = new Proxy(
     {},
@@ -92,7 +93,7 @@ export function makeDo(opts = {}) {
   );
   const relay = new InstallTunnel(
     state,
-    {},
+    env, // the worker's bindings, as the runtime hands a DO; only D1 is ever read (the throttle)
     {
       helloTimeoutMs: 5000, // comfortably above the async verifyEd25519 cost, and below production's 10000
       responseTimeoutMs: 1000,

@@ -104,7 +104,7 @@ Two settings layers sit next to the modules:
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest and carrying a small shared toolbox a repository can extend with a `.colonizer/setup.sh` hook (#753) | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Codex on an OpenAI API key; Pi, reaching models only through the provider gateway; Grok Build (experimental) and ACP (Gemini CLI handshake verified, `PLANNED`), both fetching their pinned CLI on first boot; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Codex on an OpenAI API key; Pi, reaching models only through the provider gateway; Grok Build (experimental) and ACP (Gemini CLI handshake verified, `PLANNED`), both fetching their pinned CLI on first boot; Hermes as an in-tree module that builds its pinned, hash-checked source on first boot | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
@@ -162,7 +162,7 @@ mothership's saved key for the provider is injected.
 | [`modules/agents/claude-code`](../modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/opencode`](../modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
-| [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
+| [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; builds the pinned hermes-agent on first boot, not yet exercised in a colony microVM |
 | [`modules/agents/codex`](../modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the runner fetches the pinned CLI on first boot | `SHIPPING` |
 | [`modules/agents/grok-build`](../modules/agents/grok-build) | xAI's Grok Build CLI driven headlessly on the same runner protocol; the runner fetches the pinned `grok` on first boot | experimental — not yet run in a real colony |
 | [`modules/agents/acp`](../modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
@@ -449,7 +449,7 @@ back to suspended and its VM is torn down; a mothership restart mid-warm-up or a
 suspended too, never to failed.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
-microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
+microsandbox 0.7.3 (measured on the pin of issue #639; the pin is 0.7.6 since issue #1096, whose release notes name no restore change) can capture a running VM — `msb snapshot create --full`
 checkpointed an idle 512 MiB sandbox in about half a second, guest writes flushed first under
 `--guest-flush required` — but its restore cannot bring a colony back, measured on the pinned binaries. A
 sandbox that has ever carried a `--secret` fails its restore outright (`restore virtio device virtio_fs1 …
@@ -490,9 +490,11 @@ and that stub is the one piece left for the gate.
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` and the
 per-session files and logs under `data/sessions/<id>/` are read and written through the `SessionStore` in
 `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)) — startup loads the index through it, the
-saves write it back, and the event, harness and findings appends go through it — and its contract, atomic replaces,
-at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets another backend serve the
-same colonies (`colonizer migrate-store` copies one store into another). That is
+saves write it back, and every record and ledger (the event and harness logs, findings, commit links, claims, messages,
+the stored issue, the colony's tokens) is read and written through it, the paths a microVM mounts aside — and its
+contract, atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets
+another backend serve the same colonies (`colonizer sessions migrate` copies one store into another, verifies it, and
+switches to it). That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
 
@@ -529,7 +531,8 @@ every two minutes, walks every colony whose pull request is still open and squas
 repository, at most one merge per tick. It is off by default and separate from the `automerge` setting,
 which merges a fix colony's pull request after a review passes.
 
-Five `publish` settings drive it (all off/empty by default, shown in the cockpit's Settings form):
+Six `publish` settings drive it (all off/empty by default but the quiet period, shown in the cockpit's
+Settings form):
 
 - `merge_train` — `off` (the install default) or `on`.
 - `merge_train_overrides` — comma-separated `owner=on|off` or `owner/repo=on|off`; a repo entry beats an
@@ -540,13 +543,39 @@ Five `publish` settings drive it (all off/empty by default, shown in the cockpit
   the identity Colonizer publishes as. A pull request with any commit by another author is refused.
 - `merge_train_forbid` — comma-separated case-insensitive substrings; a pull request whose commit messages
   contain one — a forbidden attribution such as `Co-Authored-By: …`, for instance — is refused.
+- `merge_train_quiet_minutes` — how long a pull request's head must have been unchanged before it merges
+  (default 10; 0 merges as soon as the head's checks are green). Used by the tick and the loop alike.
 
 A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
 no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
 branch's own CI is green. A colony another merge superseded (issue #673; see
 [colonies.md](colonies.md#when-a-merge-supersedes-a-colony)) is skipped until it is kept, so the train
-never lands a second copy of work that is already in main. The merge is a squash with `--match-head-commit` that deletes the branch — never
-a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
+never lands a second copy of work that is already in main.
+
+Every merge, the tick's and the loop's, goes through one helper (`merge_head.rs`, issue #1075), so a
+commit pushed after a pull request's first green run is never squashed away:
+
+- **CI on that exact head.** The check runs and statuses of the head commit itself must all be green; a
+  green run on an earlier head does not count, and a head nothing has run on yet waits.
+- **A quiet head.** The head must have been unchanged for `merge_train_quiet_minutes`, counted from the
+  later of the head commit's committer date and the first check run started on it (the run starts when
+  GitHub sees the push, so a commit written long before it was pushed still waits). The tick retries on
+  its next tick; the loop sits out a remaining wait no longer than `ci_wait_minutes` once per run, else
+  the next run merges it.
+- **Pinned to that head.** The merge is `PUT /repos/{repo}/pulls/{n}/merge` with `merge_method=squash`
+  and the head as `sha`, so a push landing during the merge makes GitHub refuse it (409) instead of
+  merging the older head. That refusal reads as "the head moved": the pull request waits for checks on
+  the new head and merges on a later tick or run.
+- **The branch checked afterwards.** The branch's tip is read again after the merge. Only a tip equal to
+  the merged head is deleted (and only when nothing is stacked on it). A tip with commits after the
+  merged head keeps its branch and raises **commits not merged**: a warning in the colony's log and the
+  activity feed, a line in the report, and a card in the [decisions inbox](decisions.md) until
+  someone dismisses it — the later commits need a follow-up pull request from that branch.
+- **The merged head in the report.** The tick's row says `squash-merged by the merge train at head
+  <sha>` and `GET /api/merge-train`'s `last_merge` carries `head`; the loop's item says `merged head
+  <sha>` and its `last_train_merge` records `head`.
+
+Never a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
 to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
 for exactly those readings. The one case the watcher never sees — a pull request whose head does not
 contain the current base tip even when GitHub reports CLEAN (it does when the repository does not require
@@ -804,12 +833,12 @@ is root in the guest, and root can still reach kernel interfaces, another proces
 human's terminal. Hardening narrows what root can do; it does not replace the VM wall (issue #301).
 
 Guest kernel baseline, measured 2026-09-25 on the stack as pinned then (microsandbox 0.6.18 per
-`vendor/vendor.lock`; the pin is 0.7.3 since issue #639, same libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
+`vendor/vendor.lock`; the pin is 0.7.6 since issue #1096, still libkrunfw 5.6.1): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
 `capability,selinux`. That is upstream, not pending work here: through 5.6.2 and on main, the
 kernel configs at `libkrun/libkrunfw` leave `CONFIG_SECURITY_LANDLOCK` unset (x86_64's
-`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.3
+`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.6
 still bundles the same 5.6.1 build. Pinning stays blocked upstream (issue #638) until a libkrunfw
 ships `CONFIG_SECURITY_LANDLOCK=y` with `landlock` in its LSM list — `CONFIG_SECURITY=y` on
 aarch64 — inside a microsandbox release we pin, since an msb bump is one-way (`MSB_HOME` is

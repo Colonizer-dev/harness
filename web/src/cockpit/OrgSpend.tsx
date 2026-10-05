@@ -88,13 +88,13 @@ export function OrgSpend({
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 border-b border-border px-3.5 py-3">
       <div className="flex min-w-0 flex-col gap-1">
         <span className="flex items-baseline gap-2 font-mono tabular-nums">
-          <span className="text-[13px] font-semibold text-text" title="what this org's colonies have spent in total">
+          <span className="text-body-sm font-semibold text-text" title="what this org's colonies have spent in total">
             {formatCost(cost)}
           </span>
-          {tokens != null && <span className="text-[10.5px] text-faint">{formatTokens(tokens)} tokens</span>}
+          {tokens != null && <span className="text-meta-sm text-faint">{formatTokens(tokens)} tokens</span>}
         </span>
         {mix.shown.length > 0 && (
-          <span className="flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-[10.5px] text-faint">
+          <span className="flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-meta-sm text-faint">
             {mix.shown.map((model) => (
               <span key={model.model} className="whitespace-nowrap">
                 <span title={`${formatTokens(model.tokens)} tokens`}>{model.model}</span>

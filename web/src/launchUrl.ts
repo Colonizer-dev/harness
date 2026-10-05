@@ -138,17 +138,37 @@ export function stripLaunchParams(url: string): string {
 }
 
 /**
- * Whether this is iOS Safari — or an iOS browser built on Safari's WebKit, which on iOS is every
- * browser. The Home-Screen sheet is about where iOS puts "Add to Home Screen" (the share sheet),
- * which since iOS 16.4 Chrome, Firefox and Edge on iOS offer too, and since 16.4 they can also hold
- * a push-subscribed Home-Screen web app; so the check is deliberately about the *device* (iPhone,
- * iPod, iPad, and iPadOS 13+ posing as Macintosh with a touch screen) and not the engine, and does
- * not exclude CriOS/FxiOS/EdgiOS. Guidance must show only on iOS, and this shows it only there — a
- * desktop Mac Safari has one touch point at most, and Safari on macOS installs through its own menu.
+ * Whether this is an iPhone, iPod or iPad, whatever the browser — iPadOS 13+ posing as Macintosh
+ * included, through its touch screen. A desktop Mac has one touch point at most, and Safari on macOS
+ * installs through its own menu, so it is not iOS here.
  */
-export function isIosSafari(userAgent: string, maxTouchPoints = 0): boolean {
-  if (/iPhone|iPod/.test(userAgent)) return true;
-  if (/iPad/.test(userAgent)) return true;
+export function isIosDevice(userAgent: string, maxTouchPoints = 0): boolean {
+  if (/iPhone|iPod|iPad/.test(userAgent)) return true;
   // iPadOS reports the desktop Macintosh agent; only the touch points give it away.
   return /Macintosh/.test(userAgent) && maxTouchPoints > 1;
+}
+
+/**
+ * The other browsers on iOS: Safari's WebKit, not Safari. Chrome (CriOS), Firefox (FxiOS), Edge
+ * (EdgiOS), Opera (OPiOS), DuckDuckGo, and the in-app webviews (Facebook, Instagram, Google, X, …).
+ * Brave is not here: it sends Safari's user agent unchanged, so only `navigator.brave` tells it apart.
+ */
+export const IOS_NOT_SAFARI = /CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|FBAN|FBAV|FB_IAB|Instagram|Line\/|GSA\/|Twitter|MicroMessenger|SnapChat/;
+
+/**
+ * Whether this browser is Brave, which exposes `navigator.brave` (and on iOS nothing in its user
+ * agent). False wherever there is no navigator, as in a static render or a test.
+ */
+export function isBraveBrowser(nav: unknown = typeof navigator === "undefined" ? undefined : navigator): boolean {
+  return typeof nav === "object" && nav !== null && "brave" in nav && Boolean((nav as { brave?: unknown }).brave);
+}
+
+/**
+ * Whether this is Safari itself on an iPhone or iPad (issue #1083): the one browser on iOS that can
+ * add a web app to the Home Screen, and so the one where a Home-Screen web app — and its web push —
+ * comes from. Brave (by `brave`, its user agent is Safari's), Chrome, Firefox, Edge, Opera and the
+ * in-app webviews are iOS but not Safari, and get a hand-off to Safari instead of the steps.
+ */
+export function isIosSafari(userAgent: string, maxTouchPoints = 0, brave = false): boolean {
+  return isIosDevice(userAgent, maxTouchPoints) && !brave && !IOS_NOT_SAFARI.test(userAgent);
 }

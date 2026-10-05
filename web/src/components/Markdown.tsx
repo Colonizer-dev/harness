@@ -4,7 +4,7 @@ import { cx } from "./ui";
 /** Markdown for memory notes. react-markdown never renders raw HTML, so note content stays inert. */
 export function MarkdownBlock({ children, className }: { children: string; className?: string }) {
   return (
-    <div className={cx("md break-words text-[13.5px] leading-relaxed [overflow-wrap:anywhere]", className)}>
+    <div className={cx("md break-words text-body leading-relaxed [overflow-wrap:anywhere]", className)}>
       <ReactMarkdown>{children}</ReactMarkdown>
     </div>
   );

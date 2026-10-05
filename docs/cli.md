@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `setup`, `open`, `login-item`, `telemetry`, `hotspots`, `migrate-store`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `setup`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -26,8 +26,9 @@ Every client command takes the same two global flags, before or after the subcom
 The local commands run against this machine and take none of the client flags. `update` is the
 exception: it is a thin client of a running mothership, so it follows `--host` and `--token-file`
 like any client command — but it has no `--json`. The rest (`setup`, `open`, `login-item`, `telemetry`,
-`migrate-store`, `version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
-(exit 2), and their `--help` does not list them.
+`version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
+(exit 2), and their `--help` does not list them; `hotspots` and `sessions migrate` refuse the two host
+flags and keep `--json`.
 
 `colonizer open` is local on purpose: it reprints the sign-in link and opens a browser on this
 machine, always with the local token and `COLONIZER_BIND`. The mothership on another machine cannot
@@ -67,9 +68,10 @@ colonizer telemetry show      # anonymous usage reporting (on, off; no network, 
 colonizer hotspots            # the files merged pull requests touched most, over the last 30 days
 colonizer hotspots --days 7 --top 5      # a shorter window, fewer files
 colonizer hotspots --repo acme/app       # a repository's mirror instead of the current directory
-colonizer migrate-store --to /new/data               # copy this install's colonies into another local store
-colonizer migrate-store --to /new/data --dry-run     # count what would move, write nothing
-colonizer migrate-store --from /old/data --to /new/data   # copy from a store other than this install's data dir
+colonizer sessions migrate --to local:/new/data --dry-run   # count what would move, write nothing
+colonizer sessions migrate --to local:/new/data             # copy this install's colonies, verified
+colonizer sessions migrate --from /old/data --to /new/data  # copy from a store other than the configured one
+colonizer sessions migrate --to 's3://colonies/home?endpoint=https://acct.r2.cloudflarestorage.com'  # move to a bucket, and switch
 ```
 
 `hotspots` reads a git repository on this machine — no mothership — and ranks the files its
@@ -82,6 +84,15 @@ current directory unless `--repo owner/repo` names a mirror in this machine's da
 `--git-dir PATH` names a git directory (a mirror, or a worktree's `.git`); the two refuse to
 combine. The report is where parallel colonies collide and what to split; `--json` prints
 `{days, pull_requests, files}`.
+
+`sessions migrate` copies every colony from the configured session store (or `--from`) into
+`--to`, verifies the copy by listing and by every file's SHA-256, and prints what it copied, what
+was already there and the source's checksum. Stop the mothership first; the command refuses to copy
+a store something is serving. Run it again after an interruption and it copies only what is left.
+When the source is the configured store and `--to` is a backend, it switches this install to it
+(`<config dir>/session-store.json`); a directory target is a copy, run on with `COLONIZER_DATA_DIR`.
+`--json` prints the report. The store, the switch and rollback are in
+[session-store.md](session-store.md#migration-and-rollback).
 
 Colonies — the ids are what `list` and the cockpit show:
 
@@ -102,6 +113,8 @@ colonizer pr abc123                                    # the pull request URL an
 colonizer pr abc123 --wait --timeout 30m               # wait for the checks to settle; exit 7 on failure
 colonizer map owner/repo                               # the repository's architecture map, as a text outline
 colonizer map owner/repo --find login                  # only the components a query matches
+colonizer handoff sess-1 --repo owner/repo             # a session you ran here continues in a colony
+colonizer handoff ./session.json --repo owner/repo     # from a txcript document you exported yourself
 ```
 
 `launch` takes the repository as `owner/repo`, an optional task as the last argument, and
@@ -116,13 +129,25 @@ launch guard: `--allow-duplicate` starts a second colony on an issue another col
 `--queue-behind-holder` waits behind the holder instead (the colony comes back `queued` and starts
 when the issue is its own), and `--allow-epic` starts one on an epic (an issue with sub-issues).
 Without them, an issue another colony holds or an epic is refused with a 409 (exit 5) that names
-the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `list` filters
+the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `--package P --advisory A` (always
+together) launches a supply-chain fix: a second live colony on the same package and advisory — one
+the Packages tab or the supply-chain loop started included — is refused the same way. `list` filters
 client-side: `--org` by repository owner, `--status` by the API's state names, case-insensitively.
 `answer` matches its argument against the pending question: a 1-based option number wins, then a
 whole-label match case-insensitively, and anything else goes to the agent as a free-text note —
 but a bare number that names no option is refused, never silently read as text, and with several
 questions pending only a number or label of the first is accepted (`colonizer ask <id>` shows the
 rest). An empty `list` or `token list` prints a note to stderr; `--json` prints `[]`.
+
+`handoff` continues a session you ran on this machine in a colony: the argument is either a txcript
+session id — read here with `txcript export <id> --out <file>` — or a file you exported yourself,
+and `--repo` names where the colony works. The document is uploaded, rendered to text and fenced
+into the colony's first prompt, and the colony starts from the branch the session recorded unless
+`--branch` overrides it and `--title` names it. `txcript` must be on `PATH` (a session id without
+it exits 4 with an install hint); a document over 2 MiB is refused before anything is sent. The
+answers and limits are the API's ([protocol/sessions.md](protocol/sessions.md#post-apihandoff)).
+To go the other way, a colony's conversation is `GET /api/sessions/{id}/handoff`, which writes the
+same document for `txcript continue`.
 
 `diff` prints the colony's whole diff: everything it changed against the merge-base with its
 base branch — committed and uncommitted tracked edits, plus untracked new files. The colony
@@ -339,8 +364,8 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | Scope | What it may call |
 | :--- | :--- |
 | `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}` and its `/question`, `/diff`, `/commits`, `/transcript` and `/files` (listing, archive, content) reads, `POST /api/sessions/{id}/seen`, `GET /api/loops` and `/api/loops/{id}/runs`, the built-in loops' `GET /api/merge-train`, `/api/merge-train/loop`, `/api/supply-chain-loop` and `/api/ts-any-loop`, the events WebSocket, the `/api/maps/…` reads, the `/uhp/v1/…` reads, and `GET /api/tokens/self` |
-| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm` |
-| `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
+| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm`, and the UHP cancels `POST /uhp/v1/sessions/{id}/cancel` and `/uhp/v1/responses/{id}/cancel`; and manage its own webhook subscriptions, `GET/POST /api/webhooks` and `DELETE /api/webhooks/{id}`, which receive only events about colonies within its limits ([webhooks](protocol/webhooks.md#subscriptions)) |
+| `launch` | Start colonies: `POST /api/sessions` and `POST /uhp/v1/responses`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
 for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,

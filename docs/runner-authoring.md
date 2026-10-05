@@ -28,7 +28,7 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
 
    Declaring an `exec_policy` setting is a promise that the runner enforces the [exec policy](../modules/agents/claude-code/README.md#exec-policy)
    in that variable (Claude Code and ACP do). Without it, the harness refuses to launch the module
-   while a policy is set — the install's `exec_policy` setting or a repo `.colonizer/exec-policy.json`
+   while a policy is set — the install's `exec_policy` setting, the org's exec policy or a repo `.colonizer/exec-policy.json`
    — rather than run the agent unguarded.
 
 2. **Egress declaration.** Add `egress: { "api": [...], "auth": [...], "telemetry": [...],

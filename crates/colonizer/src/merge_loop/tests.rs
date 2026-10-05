@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 mod local;
+mod quiet_head;
 mod resolve;
 
 fn t0() -> DateTime<Utc> {
@@ -40,6 +41,14 @@ struct Fake {
     local_runs: RefCell<VecDeque<LocalRun>>,
     /// Issue #968: what starting a resolve answers (resuming on `src/shared.rs` when unset).
     resolves: RefCell<VecDeque<super::resolve::Started>>,
+    /// Issue #1075: each head's own checks and push time (green, pushed an hour before `t0`, when
+    /// unset), the merge answers in order (merged when none), the branch tips after a merge (the
+    /// merged head when unset), and the quiet period in minutes (10 when unset).
+    heads: RefCell<BTreeMap<String, HeadReading>>,
+    merges: RefCell<VecDeque<Result<Option<String>, String>>>,
+    tips: RefCell<BTreeMap<String, String>>,
+    last_merged: RefCell<Option<String>>,
+    quiet: Cell<Option<u64>>,
 }
 
 impl Fake {
@@ -61,9 +70,19 @@ impl Fake {
             .borrow()
             .iter()
             .filter(|l| {
-                !["main", "read", "guards", "branch", "config"]
-                    .iter()
-                    .any(|r| l.starts_with(r))
+                ![
+                    "main",
+                    "read",
+                    "guards",
+                    "branch",
+                    "config",
+                    "head",
+                    "tip",
+                    "delete-branch",
+                    "said",
+                ]
+                .iter()
+                .any(|r| l.starts_with(r))
             })
             .cloned()
             .collect()
@@ -73,7 +92,52 @@ impl Fake {
     }
 }
 
+impl HeadOps for Fake {
+    async fn read_head(&self, _repo: &str, sha: &str) -> Result<HeadReading, String> {
+        self.say(format!("head {sha}"));
+        Ok(self.heads.borrow().get(sha).cloned().unwrap_or(HeadReading {
+            ci: merge_head::HeadCi::Green,
+            pushed_at: Some(t0() - ChronoDuration::hours(1)),
+        }))
+    }
+    async fn merge_pinned(&self, _repo: &str, number: u64, head: &str, title: &str) -> Result<Option<String>, String> {
+        let answer = self
+            .merges
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Ok(Some(format!("sha-s{number}"))));
+        if answer.is_ok() {
+            // The sessions here are `s<n>` for pull request `n`.
+            self.say(format!("merge s{number} {title}"));
+            self.merged_at.borrow_mut().push(self.now());
+            *self.last_merged.borrow_mut() = Some(head.to_string());
+        } else {
+            self.say(format!("refused s{number} sha={head}"));
+        }
+        answer
+    }
+    async fn branch_tip(&self, _repo: &str, branch: &str) -> Result<Option<String>, String> {
+        self.say(format!("tip {branch}"));
+        Ok(self
+            .tips
+            .borrow()
+            .get(branch)
+            .cloned()
+            .or_else(|| self.last_merged.borrow().clone()))
+    }
+    async fn delete_branch(&self, _repo: &str, branch: &str) -> Result<(), String> {
+        self.say(format!("delete-branch {branch}"));
+        Ok(())
+    }
+}
+
 impl Ops for Fake {
+    async fn quiet_minutes(&self) -> u64 {
+        self.quiet.get().unwrap_or(10)
+    }
+    async fn merged(&self, s: &Session, head: &str) {
+        self.say(format!("said merged {} {head}", s.id));
+    }
     fn now(&self) -> DateTime<Utc> {
         self.now.get().unwrap()
     }
@@ -116,11 +180,6 @@ impl Ops for Fake {
             .get(&s.id)
             .cloned()
             .unwrap_or(RebaseResult::Rebased("main-tip".into()))
-    }
-    async fn merge(&self, s: &Session, _head: &str, subject: &str, _delete: bool) -> Result<Option<String>, String> {
-        self.say(format!("merge {} {subject}", s.id));
-        self.merged_at.borrow_mut().push(self.now());
-        Ok(Some(format!("sha-{}", s.id)))
     }
     async fn rerun(&self, _repo: &str, run_id: u64) -> Result<(), String> {
         self.say(format!("rerun {run_id}"));
@@ -541,7 +600,11 @@ async fn a_candidate_that_shares_no_files_waits_for_its_own_turn_to_be_updated()
     // the merge, which nothing shares a file with.
     let log = fake.log.borrow();
     let at = log.iter().position(|l| l == "merge s1 Change 1 (#1)").unwrap();
-    assert_eq!(log[at + 1], "main", "{log:?}");
+    // After the merge's own bookkeeping: the branch tip, its delete, and the log line.
+    let next = log[at + 1..]
+        .iter()
+        .find(|l| !["tip", "delete-branch", "said"].iter().any(|p| l.starts_with(p)));
+    assert_eq!(next.map(String::as_str), Some("main"), "{log:?}");
     assert_eq!(item(&r, "s2").action, Action::Merged);
 }
 
@@ -773,6 +836,7 @@ fn a_redo_colony_is_told_to_use_the_pull_request_as_its_reference() {
             pr_url: "https://github.com/acme/web/pull/3".into(),
             title: "Change 3".into(),
             sha: Some("abc".into()),
+            head: None,
             at: t0(),
         },
         detail: "failed: ci".into(),
@@ -801,6 +865,7 @@ async fn main_red_after_a_train_merge_reruns_once_then_sends_a_fix_colony_and_pa
                 pr_url: "https://github.com/acme/web/pull/9".into(),
                 title: "Change 9".into(),
                 sha: Some("sha-s0".into()),
+                head: None,
                 at: t0(),
             }),
             ..RepoMemory::default()
@@ -867,6 +932,7 @@ async fn revert_on_red_reverts_only_the_train_s_own_merge() {
                 pr_url: "https://github.com/acme/web/pull/9".into(),
                 title: "Change 9".into(),
                 sha: Some("sha-s0".into()),
+                head: None,
                 at: t0(),
             }),
             ..RepoMemory::default()
@@ -969,9 +1035,10 @@ async fn the_call_budget_and_the_gap_pace_every_github_call() {
     settings.min_call_gap_ms = 2000;
     let fake = Fake::new().main(vec![main_green()]).pr("s1", vec![green(1)]);
     let r = run(&fake, &settings, &[session("s1", 1)], &mut BTreeMap::new(), false).await;
-    // guards, branch, main, read, merge: five calls, four gaps.
-    assert_eq!(r.api_calls, 5);
-    assert!(fake.now() - t0() >= ChronoDuration::seconds(8));
+    // guards, branch, main, read, then the quiet-head merge's head, merge, tip and branch delete:
+    // eight calls, seven gaps.
+    assert_eq!(r.api_calls, 8);
+    assert!(fake.now() - t0() >= ChronoDuration::seconds(14));
     settings.max_api_calls = 3;
     let fake = Fake::new().main(vec![main_green()]).pr("s1", vec![green(1)]);
     let r = run(&fake, &settings, &[session("s1", 1)], &mut BTreeMap::new(), false).await;

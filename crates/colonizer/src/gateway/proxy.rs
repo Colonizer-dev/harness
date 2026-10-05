@@ -789,6 +789,7 @@ async fn anthropic_error(
     audit: GatewayAudit,
 ) -> Response {
     let status = upstream.status();
+    let hit = redacted_url(upstream.url());
     audit.set_status(status.as_u16());
     let mut response_headers = HeaderMap::new();
     for (name, value) in upstream.headers() {
@@ -830,7 +831,10 @@ async fn anthropic_error(
         // Named, not invisible: a non-quota 4xx/5xx flags the colony for attention instead of
         // leaving it idle with a failed turn. Quota hits skip this: parking the colony and
         // pausing the queue already say what is wrong.
-        eprintln!("gateway: provider \"{}\" answered {status} for colony {colony}", provider.id);
+        match wrong_route_hint(status.as_u16(), &hit) {
+            Some(hint) => eprintln!("gateway: provider \"{}\" for colony {colony}: {hint}", provider.id),
+            None => eprintln!("gateway: provider \"{}\" answered {status} for colony {colony}", provider.id),
+        }
         flag_model_error(app, colony).await;
     }
     // Any fallback: a Claude one the colony's router retries, or a provider-prefixed one the
@@ -900,6 +904,7 @@ pub(super) async fn openai_response(
     audit: Option<GatewayAudit>,
 ) -> Response {
     let status = upstream.status();
+    let hit = redacted_url(upstream.url());
     let retry_after = upstream.headers().get("retry-after").cloned();
     if status.is_success() && info.stream {
         // Streaming 2xx headers prove the plan is back, as below.
@@ -1024,6 +1029,17 @@ pub(super) async fn openai_response(
                 response
             }
             None => {
+                // A 404/405 means the route does not exist upstream, almost always a base URL that
+                // misses the provider's API root: log the final URL (redacted) whoever asked, and
+                // tell the colony the same, so a wrong base reads as one instead of an outage.
+                let hint = wrong_route_hint(upstream_status, &hit);
+                if let Some(hint) = &hint {
+                    eprintln!("gateway: provider \"{id}\": {hint}");
+                }
+                let message = match hint {
+                    Some(hint) => format!("{message} ({hint})"),
+                    None => message,
+                };
                 if upstream_status >= 400 {
                     usage.add_failure(GatewayFailure::UpstreamError);
                     if let Some(audit) = &audit {

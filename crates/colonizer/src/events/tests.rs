@@ -72,7 +72,7 @@ async fn spent_provider_retries_hold_naming_the_error() {
     let error_text = "API Error: 502 model router: Anthropic is unreachable";
     let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
     let rt = app.runtime("abc").await;
-    // Every attempt already spent: the next transient error gives up (the default budget is four).
+    // Every attempt already spent: the next transient error gives up (the default budget is three).
     app.update_session("abc", |x| {
         x.autopilot = true;
         x.provider_retries = 4;
@@ -91,6 +91,143 @@ async fn spent_provider_retries_hold_naming_the_error() {
     let text = serde_json::to_string(&logged).unwrap();
     assert!(text.contains(error_text), "the hold names the provider's error: {text}");
     assert!(!text.contains("press Create PR"), "no Create PR over no work: {text}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The error colony World360-Lab#37 sat on for hours (issue #1093): the router's wording for a
+/// socket reset, which the boot classifier never called transient.
+const SOCKET_RESET_502: &str = "API Error: 502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)";
+
+/// Issue #1093: a 502 turn end is retried automatically — parked for the retry, not held, so the
+/// colony is not "waiting on you" — and the attention names the error and when it goes again.
+#[tokio::test]
+async fn a_502_turn_end_retries_automatically_and_names_the_error() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let before = Utc::now();
+    finish_turn(&app, "abc", &rt, true, Some(SOCKET_RESET_502.into()), None, None).await;
+
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Parked, "backing off, slot released");
+    assert_eq!(s.provider_retries, 1);
+    let attention = s.attention.expect("the park carries an attention");
+    assert_eq!(
+        attention["reason"],
+        crate::queue::PROVIDER_RETRY_REASON,
+        "not autopilot_held: nobody has to act"
+    );
+    assert_eq!(attention["cause"], GATEWAY_ERROR_CAUSE);
+    let detail = attention["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("Stopped on a model gateway error (502, connection to Anthropic)"),
+        "{detail}"
+    );
+    assert!(detail.contains("attempt 1 of 3"), "{detail}");
+    assert_eq!(
+        attention["summary"],
+        "Stopped on a model gateway error (502, connection to Anthropic)"
+    );
+    let retry_at: DateTime<Utc> = serde_json::from_value(attention["retry_at"].clone()).unwrap();
+    assert!(
+        retry_at >= before + chrono::Duration::minutes(1) && retry_at <= Utc::now() + chrono::Duration::minutes(1),
+        "the first retry is a minute out by default: {retry_at}"
+    );
+    let text = serde_json::to_string(&rt.logs.lock().await.clone()).unwrap();
+    assert!(text.contains("retrying automatically"), "each retry is logged: {text}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1093: three automatic retries that all fail on the gateway end in a hold that says so —
+/// "repeated gateway errors", the error named — and never one that asks for an answer.
+#[tokio::test]
+async fn three_gateway_failures_then_a_hold_with_the_right_wording() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    for attempt in 1..=3u32 {
+        finish_turn(&app, "abc", &rt, true, Some(SOCKET_RESET_502.into()), None, None).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Parked, "attempt {attempt} parks for the retry");
+        assert_eq!(s.provider_retries, attempt);
+        // The queue's resume, in miniature: the colony is live again for its next turn.
+        app.update_session("abc", |x| {
+            x.status = SessionStatus::Running;
+            x.parked = None;
+            x.attention = None;
+        })
+        .await;
+    }
+    finish_turn(&app, "abc", &rt, true, Some(SOCKET_RESET_502.into()), None, None).await;
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Running, "held in place, not parked again");
+    let attention = s.attention.expect("held");
+    assert_eq!(attention["reason"], "autopilot_held");
+    assert_eq!(attention["cause"], GATEWAY_ERROR_CAUSE);
+    assert_eq!(
+        attention["detail"],
+        "Stopped on repeated gateway errors (502, connection to Anthropic); 3 automatic retries did not get through"
+    );
+    assert_eq!(s.provider_retries, 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1093: an error a retry cannot fix — a refused permission or policy — holds at once, and
+/// the hold names the error rather than leaving the card to guess.
+#[tokio::test]
+async fn an_auth_or_policy_error_holds_at_once() {
+    for error in [
+        "API Error: 403 permission_error: this model is not available to your organization",
+        "API Error: 400 the request was refused by the usage policy",
+    ] {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        app.update_session("abc", |x| x.autopilot = true).await;
+        finish_turn(&app, "abc", &rt, true, Some(error.into()), None, None).await;
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Running, "{error}: not parked for a retry");
+        assert_eq!(s.provider_retries, 0, "{error}: no retry spent");
+        let attention = s.attention.expect("held");
+        assert_eq!(attention["reason"], "autopilot_held", "{error}");
+        assert_eq!(attention["cause"], TURN_ERROR_CAUSE, "{error}");
+        assert_eq!(attention["detail"], format!("Stopped on an error: {error}"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #1093: a colony the restart reconnected to, whose turn then ends on a gateway error, is
+/// continued once at once — no park, no retry spent — and only the first such turn end is.
+#[tokio::test]
+async fn a_turn_the_restart_cut_off_is_continued_once() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut commands = rt.commands_rx.lock().await.take().expect("the command channel");
+    app.update_session("abc", |x| x.autopilot = true).await;
+    rt.arm_restart_resume(Utc::now() + RESTART_RESUME_WINDOW);
+    finish_turn(&app, "abc", &rt, true, Some(SOCKET_RESET_502.into()), None, None).await;
+
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Running, "continued in place, not parked");
+    assert_eq!(s.provider_retries, 0, "the restart's own resume spends no retry");
+    assert!(s.attention.is_none(), "nothing to flag: {:?}", s.attention);
+    let sent = commands.try_recv().expect("a continue was sent");
+    assert_eq!(sent["type"], "user_message");
+    assert!(sent["text"].as_str().unwrap().contains("continue"), "{sent}");
+    let text = serde_json::to_string(&rt.logs.lock().await.clone()).unwrap();
+    assert!(text.contains("while the mothership restarted"), "{text}");
+
+    // Once: the next gateway failure takes the ordinary retry path.
+    finish_turn(&app, "abc", &rt, true, Some(SOCKET_RESET_502.into()), None, None).await;
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Parked, "the second failure backs off as usual");
+    assert!(commands.try_recv().is_err(), "and sends nothing itself");
+
+    // An expired window is no restart resume, and a clean turn end spends it too.
+    rt.arm_restart_resume(Utc::now() - chrono::Duration::seconds(1));
+    assert!(!rt.take_restart_resume(Utc::now()));
+    rt.arm_restart_resume(Utc::now() + RESTART_RESUME_WINDOW);
+    assert!(rt.take_restart_resume(Utc::now()));
+    assert!(!rt.take_restart_resume(Utc::now()), "spent");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1061,9 +1198,25 @@ async fn a_path_policy_attempt_is_logged_once_and_sanitised() {
     assert_eq!(logged[0].actor, "colony");
     assert_eq!(logged[0].colony.as_deref(), Some("abc"));
     assert_eq!(logged[0].detail.as_deref(), Some("tried to read masked `.env` (Read)"));
+    // And one boundary event in the colony's events, for the control-defeat signature (#609).
+    let boundaries = || {
+        std::fs::read_to_string(app.session_dir("abc").join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["type"] == "boundary")
+            .collect::<Vec<_>>()
+    };
+    let first = boundaries();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["kind"], "path_policy_denied");
+    assert_eq!(first[0]["control"], "path_policy:masked");
+    assert_eq!(first[0]["target"], ".env");
+    assert_eq!(first[0]["origin"], "system");
 
     handle_agent_event(&app, "abc", &rt, attempt).await;
     assert_eq!(entries().await.len(), 1, "a repeated attempt is not a second entry");
+    assert_eq!(boundaries().len(), 1, "nor a second boundary event");
     {
         let logs = rt.logs.lock().await;
         assert_eq!(
@@ -1284,5 +1437,99 @@ async fn the_account_credential_never_reaches_a_line_or_the_status() {
         assert!(!part.contains(secret), "the credential leaked: {part}");
         assert!(!part.contains("sk-ant-oat"), "nothing of the secret leaks: {part}");
     }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #609: runner `boundary` lines feed the watchdog's control-defeat signature. One denial is a
+/// wall; the third of one control in the window flags the colony with the evidence. The colony
+/// carrying on does not lift the flag — a person's own message does.
+#[tokio::test]
+async fn runner_boundary_events_flag_control_defeat_and_only_a_person_clears_it() {
+    let (app, root) = crate::sessions::tests::app_with_colony("cd1", SessionStatus::Running).await;
+    let rt = app.runtime("cd1").await;
+    let boundary = |seq: u64, host: &str| {
+        format!(
+            r#"{{"seq":{seq},"type":"boundary","kind":"egress_denied","control":"egress","detail":"Could not resolve host: {host}","target":"{host}","at":"2026-01-01T00:00:00.000Z"}}"#
+        )
+    };
+    handle_agent_event(&app, "cd1", &rt, &boundary(1, "a.example")).await;
+    assert!(
+        app.session("cd1").await.unwrap().attention.is_none(),
+        "one denial is a wall, not a defeat"
+    );
+    handle_agent_event(&app, "cd1", &rt, &boundary(2, "b.example")).await;
+    handle_agent_event(&app, "cd1", &rt, &boundary(3, "c.example")).await;
+    let attention = app.session("cd1").await.unwrap().attention.expect("the third flags");
+    assert_eq!(attention["reason"], crate::watchdog::CONTROL_DEFEAT_REASON);
+    assert_eq!(attention["signature"], "repeated_denial");
+    let targets: Vec<&str> = attention["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["target"].as_str())
+        .collect();
+    assert_eq!(targets, ["a.example", "b.example", "c.example"], "the evidence is the events");
+
+    handle_agent_event(
+        &app,
+        "cd1",
+        &rt,
+        r#"{"seq":4,"type":"assistant_text","message_id":"m1","block_index":0,"text":"carrying on"}"#,
+    )
+    .await;
+    assert!(
+        app.session("cd1").await.unwrap().attention.is_some(),
+        "the colony's own progress does not lift a control-defeat flag"
+    );
+    handle_agent_event(
+        &app,
+        "cd1",
+        &rt,
+        r#"{"seq":5,"type":"user_message","id":"u-7","text":"I looked; carry on"}"#,
+    )
+    .await;
+    assert!(
+        app.session("cd1").await.unwrap().attention.is_none(),
+        "a person's message does"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #609: a target a control refused, then named by a successful tool call, is the
+/// deny-then-reach signature — and the boundary line itself is not progress.
+#[tokio::test]
+async fn a_refused_host_reached_by_a_later_call_flags_deny_then_reach() {
+    let (app, root) = crate::sessions::tests::app_with_colony("cd2", SessionStatus::Running).await;
+    let rt = app.runtime("cd2").await;
+    let before = rt.activity.lock().await.last;
+    handle_agent_event(
+        &app,
+        "cd2",
+        &rt,
+        r#"{"seq":1,"type":"boundary","kind":"egress_denied","control":"egress","detail":"denied","target":"evil.example","at":"2026-01-01T00:00:00.000Z"}"#,
+    )
+    .await;
+    assert_eq!(rt.activity.lock().await.last, before, "a boundary event is not progress");
+    handle_agent_event(
+        &app,
+        "cd2",
+        &rt,
+        r#"{"seq":2,"type":"tool_call","message_id":"m","tool_call_id":"t9","name":"Bash","input":{"command":"node -e \"fetch('https://evil.example/x')\""}}"#,
+    )
+    .await;
+    assert!(
+        app.session("cd2").await.unwrap().attention.is_none(),
+        "not until the call succeeds"
+    );
+    handle_agent_event(
+        &app,
+        "cd2",
+        &rt,
+        r#"{"seq":3,"type":"tool_result","tool_call_id":"t9","output":"ok","is_error":false}"#,
+    )
+    .await;
+    let attention = app.session("cd2").await.unwrap().attention.expect("flagged");
+    assert_eq!(attention["signature"], "deny_then_reach");
+    assert_eq!(attention["evidence"][0]["target"], "evil.example");
     let _ = std::fs::remove_dir_all(root);
 }

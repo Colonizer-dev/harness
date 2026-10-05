@@ -1,0 +1,50 @@
+# A weekly look at how the repository is holding up: the largest Rust files and how they moved
+# since the week before, flakes seen in the last seven days of CI, whether a release-health issue
+# is open, the test count and the last CI run's duration, and (once the merge train logs anything)
+# where it hits conflicts. The report goes to the job summary and into a single "Code health"
+# issue, edited in place each Monday so the week's numbers read as one thread rather than a wall
+# of new issues. scripts/code-health.mjs builds it; the run's own log has the failure if a section
+# degraded to "unavailable".
+name: Code health
+
+on:
+  # A minute most workflows do not use, so a repository full of them does not queue this at :00.
+  schedule:
+    - cron: "37 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Reading last week's runs, and the flake artifacts they uploaded.
+  actions: read
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+concurrency:
+  group: code-health
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The pinned issue is the one thing this workflow writes. A job-level `permissions` replaces the
+    # workflow-level map outright rather than adding to it, so the two reads are repeated here.
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # fetch-depth 0 because the file sizes, the test count and last week's numbers all come
+      # from the checked-out tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Build the report, summarise it and update the pinned issue
+        run: node scripts/code-health.mjs

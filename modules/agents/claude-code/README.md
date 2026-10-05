@@ -36,7 +36,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_JEV_COMPACTION`, `COLONIZER_JEV_KEEP_THRESHOLD`, `COLONIZER_JEV_PRESERVE_RECENT` | off, 0.5, 6 | Compaction by Jev score instead of Claude Code's summary |
 | `COLONIZER_TASK_LABELS` | unset | Comma-separated task labels (set by the mothership from the issue) for `.colonizer/instructions.toml` label rules |
 | `COLONIZER_EXEC_POLICY` | unset | The install layer's exec policy as JSON (the `exec_policy` setting); see Exec policy below |
-| `COLONIZER_EXEC_POLICY_ORG` | unset | An org layer's exec policy as JSON; narrows the install layer, is narrowed by the repo file |
+| `COLONIZER_EXEC_POLICY_ORG` | unset | The org layer's exec policy as JSON (the org's workspace setting); narrows the install layer, is narrowed by the repo file |
 | `COLONIZER_FINDINGS`, `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED`, `COLONIZER_RESUME_SESSION`, `COLONIZER_IMAGE` | set by the mothership | The findings tool, a loop colony's tools, the Claude Code session to resume (a suspended colony picks up where it stopped), and the image named in the prompt |
 
 The module's settings in the cockpit (Settings → Modules) set most of these; `summaries`,
@@ -180,9 +180,16 @@ Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env
 path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
 not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
 stays the egress policy's business; ask `writes-outside-repo`), **install** (the agent module's
-`exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (`COLONIZER_EXEC_POLICY_ORG`) and
+`exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (the org's workspace settings → Exec
+policy, stored as `exec_policy` in `orgs.json` and passed as `COLONIZER_EXEC_POLICY_ORG`) and
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
-rewrite it mid-run). A malformed layer is dropped with a warning; the default always holds. Note
+rewrite it mid-run). A malformed layer is dropped with a warning; the default always holds. The
+org layer is checked when it is saved (owner-only, `PUT /api/orgs/{org}`), so it never gets that
+far: the save is refused unless the runner would keep every rule of it — JSON of at most 64 KiB,
+an object with a `rules` array, each rule a `deny`/`ask`/`allow` decision with at least one
+usable predicate (`crates/colonizer/src/exec_policy.rs`, sharing
+`test/fixtures/execpolicy-valid.json` with this parser). A pattern's regex syntax is the one thing
+it cannot check there. Note
 this is guidance in front of the model, like the delegation gate — not a boundary; the microVM is.
 
 `writes_outside` reads the boot's writable-bind list (`/colonizer/host-mounts`; env override
@@ -208,8 +215,8 @@ layering is unchanged (a stricter decision still wins, and a later layer still c
 
 Coverage: Claude Code and the ACP runner apply the policy. Codex, Grok Build, Hermes, OpenCode and
 Pi do not — the harness refuses to launch a colony on one of them while a policy is set (the
-install's `exec_policy` setting, or a repo `.colonizer/exec-policy.json`), naming the module and
-where the policy came from, so a set policy is never silently ignored.
+install's `exec_policy` setting, the org's exec policy, or a repo `.colonizer/exec-policy.json`),
+naming the module and where the policy came from — the org by name, so a set policy is never silently ignored.
 
 ## Path policy
 

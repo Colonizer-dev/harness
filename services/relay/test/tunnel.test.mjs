@@ -646,3 +646,73 @@ test('a finished stream logs one templated line, and bodies and storage never le
   assert.deepEqual(touched, []);
 });
 
+
+test('retiring the install closes its live tunnel 4404 and fails what rides on it (R2)', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  const socket = await ms.connect(relay);
+  const open = within(relay.fetch(proxyRequest('/events', { headers: { upgrade: 'websocket' } })));
+  await within(ms.next('ws_open'), 'no ws_open');
+  assert.equal((await open).status, 101);
+  const browserGone = closed(browserEnds.at(-1));
+  const pending = within(relay.fetch(proxyRequest('/slow')), 'slow never finished');
+  await within(ms.next('req'), 'no req frame');
+  const tunnelGone = closed(socket);
+
+  const retired = await relay.fetch(new Request('https://my.colonizer.dev/_retire', { method: 'POST', headers: { 'x-relay-kind': 'retire' } }));
+  assert.equal(retired.status, 204);
+  assert.equal((await tunnelGone).code, 4404);
+  assert.equal((await pending).status, 502);
+  assert.equal((await browserGone).code, 1012);
+  // Nothing is left to forward to.
+  assert.equal((await relay.fetch(proxyRequest('/after'))).status, 502);
+});
+
+test('a cockpit set-cookie reaches the browser host-only, and never as one of the relay cookies (R4)', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  await ms.connect(relay);
+  const pending = within(relay.fetch(proxyRequest('/cookies')), 'cookie response never finished');
+  const req = await within(ms.next('req'), 'no req frame');
+  ms.send({
+    t: 'res',
+    id: req.id,
+    status: 200,
+    headers: [
+      ['set-cookie', 'colonizer_token=t; Domain=my.colonizer.dev; HttpOnly; Path=/'],
+      ['set-cookie', 'wide=1;domain=.my.colonizer.dev;Secure'],
+      ['set-cookie', 'twice=2; DOMAIN=a.example; Path=/; Domain=b.example'],
+      ['set-cookie', 'plain=3; Path=/'],
+      ['set-cookie', '__Host-colonizer_session=forged; Secure; Path=/'],
+      ['set-cookie', '__HOST-COLONIZER_OAUTH=forged; Secure; Path=/'],
+    ],
+  });
+  ms.send({ t: 'body', id: req.id, chunk: '', end: true });
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.headers.getSetCookie(), ['colonizer_token=t; HttpOnly; Path=/', 'wide=1;Secure', 'twice=2; Path=/', 'plain=3; Path=/']);
+  ms.socket.close();
+});
+
+test('a browser websocket message too big for the tunnel closes that passthrough 1009 and is never sent (R5)', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  await ms.connect(relay);
+  const open = within(relay.fetch(proxyRequest('/events', { headers: { upgrade: 'websocket' } })));
+  const wsOpen = await within(ms.next('ws_open'), 'no ws_open');
+  assert.equal((await open).status, 101);
+  const browser = browserEnds.at(-1);
+  browser.accept();
+  const gone = closed(browser);
+
+  browser.send('x'.repeat(128 * 1024)); // exactly the cap: forwarded
+  const fits = await within(ms.next('ws_msg'), 'the message at the cap never arrived');
+  assert.equal(fits.data.length, 128 * 1024);
+  browser.send(new Uint8Array(128 * 1024 + 1)); // one byte over
+  const close = await within(ms.next('ws_close'), 'no ws_close for the oversized message');
+  assert.deepEqual({ id: close.id, code: close.code }, { id: wsOpen.id, code: 1009 });
+  assert.equal((await gone).code, 1009);
+  assert.equal(ms.frames.filter((f) => f.t === 'ws_msg').length, 1, 'the oversized message never reached the mothership');
+  assert.equal(ms.frames.filter((f) => f.t === 'ws_close').length, 1, 'and the close was sent once');
+  ms.socket.close();
+});

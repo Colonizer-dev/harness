@@ -602,6 +602,19 @@ pub(crate) async fn on_attempt(
     };
     let message = format!("path policy: agent tried to {access} {policy} `{path}`{who}");
     app.session_log(id, "warn", message.clone()).await;
+    // The mount refused the attempt, so it is a control refusing something too (issue #609): a
+    // boundary event for the watchdog's control-defeat signature, once per distinct attempt.
+    crate::boundary::emit(
+        app,
+        id,
+        crate::boundary::Boundary::new(
+            "path_policy_denied",
+            &format!("path_policy:{policy}"),
+            &format!("tried to {access} {policy} `{path}`{who}"),
+            Some(path),
+        ),
+    )
+    .await;
     if let Some(s) = app.session(id).await {
         let mut entry = crate::activity::Entry::new("colony.path_policy", "colony").colony(&s);
         entry.detail = Some(format!("tried to {access} {policy} `{path}`{who}"));

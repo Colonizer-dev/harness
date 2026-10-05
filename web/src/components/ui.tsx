@@ -14,7 +14,7 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 export function buttonClass(variant: ButtonProps["variant"] = "secondary", size: ButtonProps["size"] = "md"): string {
   return cx(
     "inline-flex shrink-0 cursor-pointer select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-    size === "sm" ? "h-7 px-2.5 text-[12.5px]" : "h-9 px-3.5 text-sm",
+    size === "sm" ? "h-7 px-2.5 text-small-lg" : "h-9 px-3.5 text-sm",
     variant === "primary" && "bg-accent text-on-accent hover:bg-accent-hover disabled:hover:bg-accent",
     variant === "secondary" && "border border-border bg-panel text-text hover:bg-panel-2",
     variant === "ghost" && "text-muted hover:bg-panel-2 hover:text-text",
@@ -54,7 +54,7 @@ export function Badge({
     <span
       title={title}
       className={cx(
-        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11.5px] font-semibold leading-4",
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-meta-lg font-semibold leading-4",
         TONE[tone],
         className,
       )}
@@ -147,6 +147,7 @@ export function ordinal(n: number): string {
 const PARK_REASONS: Record<string, string> = {
   provider_quota_exhausted: "provider quota exhausted",
   hold_timeout: "hold timed out",
+  provider_retry: "gateway error, retrying automatically",
   repo_pr_rate_limit: "repo's daily PR cap reached",
 };
 
@@ -375,7 +376,7 @@ export function InfoButton({ label, children, className }: { label: string; chil
         id={id}
         hidden={!open}
         className={cx(
-          "absolute top-full z-30 mt-1.5 w-max max-w-[min(18rem,calc(100vw-2rem))] space-y-1.5 rounded-lg border border-border bg-panel-2 px-3 py-2 text-left text-[12px] font-normal leading-snug text-text shadow-[var(--shadow)] [overflow-wrap:anywhere]",
+          "absolute top-full z-30 mt-1.5 w-max max-w-[min(18rem,calc(100vw-2rem))] space-y-1.5 rounded-lg border border-border bg-panel-2 px-3 py-2 text-left text-small font-normal leading-snug text-text shadow-[var(--shadow)] [overflow-wrap:anywhere]",
           align === "end" ? "right-0" : "left-0",
         )}
       >
@@ -409,6 +410,10 @@ export function attentionText(attention: Attention): string {
       return "Held too long — parked, resume to continue";
     case "repo_pr_rate_limit":
       return "Repo's daily PR cap reached — parked, resume to continue";
+    case "control_defeat":
+      return "A control may have been bypassed";
+    case "provider_retry":
+      return attention.summary?.trim() || attention.detail?.trim() || "Retrying a provider error automatically";
     default:
       return "Needs attention";
   }
@@ -416,12 +421,13 @@ export function attentionText(attention: Attention): string {
 
 /** The amber marker for colonies the watchdog flagged. */
 export function AttentionBadge({ attention, className }: { attention: Attention | null | undefined; className?: string }) {
-  if (!attention) return null;
+  // An automatic retry backing off (issue #1093) needs nobody, so it is no amber "Needs attention".
+  if (!attention || attention.reason === "provider_retry") return null;
   return (
     <span
       title={attentionText(attention)}
       className={cx(
-        "inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-warn-soft px-2 py-0.5 text-[11.5px] font-semibold leading-4 text-warn",
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-warn-soft px-2 py-0.5 text-meta-lg font-semibold leading-4 text-warn",
         className,
       )}
     >

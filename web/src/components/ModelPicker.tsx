@@ -169,12 +169,12 @@ function Menu({
                   onMouseEnter={() => setActive(i)}
                   onClick={() => pick(option.value)}
                   className={cx(
-                    "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px]",
+                    "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-body-sm",
                     i === active ? "bg-panel-2 text-text" : "text-muted",
                   )}
                 >
                   <span className="flex min-w-0 flex-1 items-center gap-2">{option.label}</span>
-                  {option.hint && <span className="shrink-0 text-[11.5px] text-faint">{option.hint}</span>}
+                  {option.hint && <span className="shrink-0 text-meta-lg text-faint">{option.hint}</span>}
                   <span className="w-3.5 shrink-0 text-accent">{selected && <IconCheck size={14} />}</span>
                 </li>
               );
@@ -257,7 +257,7 @@ export function ModelPicker({
     { value: "", text: emptyLabel, label: <span className="truncate italic">{emptyLabel}</span> },
     ...choices.map((m) => ({ value: m, text: m, label: <span className="truncate">{labelFor(parsed.provider, m)}</span>, hint: labelFor(parsed.provider, m) !== m ? m : undefined })),
     ...(parsed.model && !choices.includes(parsed.model)
-      ? [{ value: parsed.model, text: parsed.model, label: <span className="truncate font-mono text-[12.5px]">Unknown: {parsed.model}</span> }]
+      ? [{ value: parsed.model, text: parsed.model, label: <span className="truncate font-mono text-small-lg">Unknown: {parsed.model}</span> }]
       : []),
     { value: CUSTOM, text: "Custom…", label: <span className="truncate text-muted">Custom…</span> },
   ];
@@ -316,11 +316,11 @@ export function ModelPicker({
           aria-label={`${name}: custom model ID`}
           spellCheck={false}
           autoComplete="off"
-          className={cx(inputClass, "font-mono text-[12.5px]")}
+          className={cx(inputClass, "font-mono text-small-lg")}
         />
       )}
       {needsKey && (
-        <p className="flex items-center gap-1.5 text-[12px] text-warn">
+        <p className="flex items-center gap-1.5 text-small text-warn">
           <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />
           {providerName} has no key yet.
           {setKey && (

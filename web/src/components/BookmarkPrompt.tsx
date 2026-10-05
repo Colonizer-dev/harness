@@ -58,8 +58,8 @@ export function BookmarkPrompt({ address = currentAddress() }: { address?: strin
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <h2 className="text-[14px] font-semibold">Bookmark this cockpit</h2>
-          <p className="mt-0.5 text-[12.5px] text-muted">
+          <h2 className="text-body-lg font-semibold">Bookmark this cockpit</h2>
+          <p className="mt-0.5 text-small-lg text-muted">
             {phone
               ? "Keep Colonizer a tap away: add it to your home screen, or bookmark this address."
               : `Press ${bookmarkShortcut()} to keep this address. Unlike the one-time link in your terminal, it doesn't change.`}

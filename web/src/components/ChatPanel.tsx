@@ -36,6 +36,7 @@ import type { MemoryScope, Origin } from "../types";
 import { AntAvatar, type AntActivity } from "./AntAvatar";
 import { antActivity, describeTool, isNoiseTool, toolDetail, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
+import { BoundaryRow } from "./BoundaryRow";
 import {
   IconAlert,
   IconBranch,
@@ -211,22 +212,22 @@ export function ChatPanel({
         <AskUserToolUI />
         <ThreadPrimitive.Root className="flex h-full min-h-0 flex-col">
           {state.connection === "reconnecting" && (
-            <div className="flex items-center gap-2 border-b border-border bg-warn-soft px-4 py-1.5 text-[12.5px] text-warn">
+            <div className="flex items-center gap-2 border-b border-border bg-warn-soft px-4 py-1.5 text-small-lg text-warn">
               <Spinner /> Reconnecting to the colony…
             </div>
           )}
           {queued.length > 0 && (
-            <div role="status" className="flex items-center gap-2 border-b border-border bg-panel-2 px-4 py-1.5 text-[12.5px] text-muted">
+            <div role="status" className="flex items-center gap-2 border-b border-border bg-panel-2 px-4 py-1.5 text-small-lg text-muted">
               <Spinner className="text-faint" /> Queued — sends when you're back online
             </div>
           )}
           <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border px-4 py-1.5">
-            <span className="text-[12px] text-faint">{simple ? "Described in plain language" : "Raw commands and output"}</span>
+            <span className="text-small text-faint">{simple ? "Described in plain language" : "Raw commands and output"}</span>
             <button
               type="button"
               onClick={toggleView}
               title={simple ? "Show the exact commands the agent ran" : "Describe each step in plain language"}
-              className="cursor-pointer rounded-md border border-border px-2 py-0.5 text-[12px] text-muted hover:bg-panel-2 hover:text-text"
+              className="cursor-pointer rounded-md border border-border px-2 py-0.5 text-small text-muted hover:bg-panel-2 hover:text-text"
             >
               {simple ? "Show detail" : "Simple view"}
             </button>
@@ -269,6 +270,7 @@ export function ChatPanel({
                     {thread.notices[message.id]?.map((notice) => (
                       <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
                     ))}
+                    {thread.boundaries[message.id]?.map((notice, i) => <BoundaryRow key={i} record={notice.record} />)}
                   </div>
                 )}
               </ThreadPrimitive.Messages>
@@ -276,6 +278,7 @@ export function ChatPanel({
               {thread.notices[END_OF_THREAD]?.map((notice) => (
                 <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
               ))}
+              {thread.boundaries[END_OF_THREAD]?.map((notice, i) => <BoundaryRow key={i} record={notice.record} />)}
               <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
               {/* What the outbox is still holding from this panel: the messages as queued bubbles,
                   the answer as a note at the foot, until the worker reports them delivered. */}
@@ -299,7 +302,7 @@ export function ChatPanel({
 
 function EmptyChat({ connection, live }: { connection: StreamState["connection"]; live: boolean }) {
   return (
-    <div className="grid h-full min-h-48 place-items-center text-center text-[13px] text-muted">
+    <div className="grid h-full min-h-48 place-items-center text-center text-body-sm text-muted">
       <div className="flex flex-col items-center gap-2">
         {connection === "open" || !live ? (
           <>
@@ -327,10 +330,10 @@ function SessionBrief({ text, origin }: { text: string; origin?: Origin }) {
   const firstLine = trimmed.split("\n").find((line) => line.trim()) ?? "";
   return (
     <MessagePrimitive.Root className={cx("my-3", enter)}>
-      <details className="group rounded-xl border border-border bg-panel text-[13px]">
+      <details className="group rounded-xl border border-border bg-panel text-body-sm">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-3 py-2 hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
           <IconChevron size={13} className="shrink-0 text-faint transition-transform group-open:rotate-90" />
-          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted">
+          <span className="shrink-0 text-meta font-semibold uppercase tracking-wide text-muted">
             {(origin && BRIEF_LABEL[origin]) || "Colony brief"}
           </span>
           <span className="min-w-0 flex-1 truncate text-muted">{firstLine}</span>
@@ -348,12 +351,12 @@ function WatchdogNotice({ text, at }: { text: string; at?: Date }) {
   const enter = useEnter();
   return (
     <MessagePrimitive.Root className={cx("my-3", enter)}>
-      <details className="group rounded-lg border border-warn/25 bg-warn-soft text-[12.5px] text-warn">
+      <details className="group rounded-lg border border-warn/25 bg-warn-soft text-small-lg text-warn">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-1.5 [&::-webkit-details-marker]:hidden">
           <IconAlert size={13} className="shrink-0" />
           <span className="min-w-0 flex-1 truncate font-medium">Watchdog nudged the agent after no progress</span>
           {at && (
-            <span className="shrink-0 text-[11.5px] opacity-75">{at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            <span className="shrink-0 text-meta-lg opacity-75">{at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
           )}
           <IconChevron size={13} className="shrink-0 opacity-75 transition-transform group-open:rotate-90" />
         </summary>
@@ -371,7 +374,7 @@ function MemoryNoticeRow({ notice, onOpen }: { notice: MemoryNotice; onOpen?: ()
   const enter = useEnter();
   const { proposal } = notice;
   return (
-    <div className={cx(enter, "my-2 ml-10 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-panel-2/60 px-3 py-1.5 text-[12.5px] text-muted")}>
+    <div className={cx(enter, "my-2 ml-10 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border bg-panel-2/60 px-3 py-1.5 text-small-lg text-muted")}>
       <IconMemory size={13} className="shrink-0 text-accent" />
       <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
         Proposed a {SCOPE_WORD[proposal.scope] ?? proposal.scope} memory: <span className="font-medium text-text"><InlineCode text={proposal.title} /></span>
@@ -401,9 +404,9 @@ function UserMessage({ origin }: { origin?: Origin }) {
     <MessagePrimitive.Root className={cx("my-4 flex justify-end", enter)}>
       <div className="max-w-[85%]">
         {label && (
-          <div className="mb-1 text-right text-[11px] font-semibold uppercase tracking-wide text-faint">{label}</div>
+          <div className="mb-1 text-right text-meta font-semibold uppercase tracking-wide text-faint">{label}</div>
         )}
-        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent-soft px-3.5 py-2 text-[14px] leading-relaxed">
+        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-accent-soft px-3.5 py-2 text-body-lg leading-relaxed">
           <MessagePrimitive.Parts />
         </div>
       </div>
@@ -416,8 +419,8 @@ function QueuedMessage({ text }: { text: string }) {
   return (
     <div className="my-4 flex justify-end">
       <div className="max-w-[85%]">
-        <div className="mb-1 text-right text-[11px] font-semibold uppercase tracking-wide text-faint">Queued</div>
-        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-dashed border-border-strong bg-accent-soft/60 px-3.5 py-2 text-[14px] leading-relaxed text-muted">
+        <div className="mb-1 text-right text-meta font-semibold uppercase tracking-wide text-faint">Queued</div>
+        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-dashed border-border-strong bg-accent-soft/60 px-3.5 py-2 text-body-lg leading-relaxed text-muted">
           {text}
         </div>
       </div>
@@ -428,7 +431,7 @@ function QueuedMessage({ text }: { text: string }) {
 /** The note under an answer queued while offline: the card above stays open until the worker's POST lands. */
 function QueuedAnswerNote() {
   return (
-    <div className="flex flex-wrap items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent">
+    <div className="flex flex-wrap items-center gap-2 py-2 pl-10 text-body-sm font-medium text-accent">
       <IconQuestion size={15} /> Your answer was queued — it sends when you're back online
     </div>
   );
@@ -443,7 +446,7 @@ function QueuedAnswerNote() {
 const SMOOTH_TEXT = { drainMs: 700, maxCharIntervalMs: 8 };
 
 function MarkdownText() {
-  return <MarkdownTextPrimitive smooth={SMOOTH_TEXT} className="md break-words text-[14px] leading-relaxed" />;
+  return <MarkdownTextPrimitive smooth={SMOOTH_TEXT} className="md break-words text-body-lg leading-relaxed" />;
 }
 
 /** A settler's report, which its card already shows in the report box, so the transcript under it leaves it out. */
@@ -457,7 +460,7 @@ function SettlerText({ text }: TextMessagePartProps) {
 function ReasoningPart({ text }: ReasoningMessagePartProps) {
   if (!text?.trim()) return null;
   return (
-    <details className="group rounded-lg text-[13px] text-muted">
+    <details className="group rounded-lg text-body-sm text-muted">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 [&::-webkit-details-marker]:hidden">
         <IconChevron size={13} className="transition-transform group-open:rotate-90" />
         Thinking
@@ -503,7 +506,7 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
   const activity = describeTool(toolName, input);
   const ActivityGlyph = ACTIVITY_ICONS[activity.icon];
   return (
-    <details className={cx("group my-1.5 rounded-xl border border-border bg-panel-2/50 text-[13px] open:bg-panel-2", enter)}>
+    <details className={cx("group my-1.5 rounded-xl border border-border bg-panel-2/50 text-body-sm open:bg-panel-2", enter)}>
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-3 py-2 [&::-webkit-details-marker]:hidden">
         <span
           className={cx(
@@ -523,21 +526,21 @@ function ToolCallCard({ toolName, args, result, isError }: ToolCallMessagePartPr
           </>
         ) : (
           <>
-            <span className="shrink-0 font-mono text-[12.5px] font-semibold text-accent">{toolName}</span>
-            <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-muted">{toolSummary(input)}</span>
+            <span className="shrink-0 font-mono text-small-lg font-semibold text-accent">{toolName}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-small-lg text-muted">{toolSummary(input)}</span>
           </>
         )}
         <IconChevron size={14} className="shrink-0 text-faint transition-transform group-open:rotate-90" />
       </summary>
       <div className="space-y-2 border-t border-border px-3 py-2">
-        {simple && <p className="font-mono text-[12px] font-semibold text-accent">{toolName}</p>}
-        <pre className="scroll-thin max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-muted">
+        {simple && <p className="font-mono text-small font-semibold text-accent">{toolName}</p>}
+        <pre className="scroll-thin max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-small text-muted">
           {JSON.stringify(input, null, 2)}
         </pre>
         {done && (
           <pre
             className={cx(
-              "scroll-thin max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-panel p-2 font-mono text-[12px]",
+              "scroll-thin max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-panel p-2 font-mono text-small",
               failed ? "text-err" : "text-text",
             )}
           >
@@ -661,7 +664,7 @@ function CrewStrip({ views, live }: { views: SubagentView[]; live: boolean }) {
       {views.map((view, index) => (
         <CrewAnt key={view.agent.id} view={view} state={states[index]} index={index} />
       ))}
-      <span className="ml-auto pb-2 font-mono text-[11.5px] text-muted">{summary}</span>
+      <span className="ml-auto pb-2 font-mono text-meta-lg text-muted">{summary}</span>
     </div>
   );
 }
@@ -707,16 +710,16 @@ function TurnNotice({ turn }: { turn: TurnSummary }) {
   if (turn.isError) {
     const result = turn.result?.trim();
     return (
-      <div role="alert" className={cx("my-3 ml-10 rounded-lg border border-err/30 bg-err-soft px-3 py-2 text-[13px] text-err", enter)}>
+      <div role="alert" className={cx("my-3 ml-10 rounded-lg border border-err/30 bg-err-soft px-3 py-2 text-body-sm text-err", enter)}>
         <div className="flex flex-wrap items-center gap-x-2">
           <IconX size={13} strokeWidth={3} />
           <span className="font-semibold">Turn failed</span>
           {model && (
-            <span className="min-w-0 max-w-full truncate font-mono text-[12px] opacity-75" title={modelTitle}>
+            <span className="min-w-0 max-w-full truncate font-mono text-small opacity-75" title={modelTitle}>
               · {model}
             </span>
           )}
-          {meta && <span className="text-[12px] opacity-75">{model && "· "}{meta}</span>}
+          {meta && <span className="text-small opacity-75">{model && "· "}{meta}</span>}
         </div>
         {result && (
           <div className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{result.length > 600 ? `${result.slice(0, 600)}…` : result}</div>
@@ -725,7 +728,7 @@ function TurnNotice({ turn }: { turn: TurnSummary }) {
     );
   }
   return (
-    <div className={cx("-mt-2 mb-3 ml-10 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-faint", enter)}>
+    <div className={cx("-mt-2 mb-3 ml-10 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-small text-faint", enter)}>
       <span className="font-medium text-ok">Turn complete</span>
       {model && (
         <span className="min-w-0 max-w-full truncate font-mono" title={modelTitle}>
@@ -776,13 +779,13 @@ function WaitingForAnswer() {
   };
 
   return (
-    <div className={cx("flex flex-wrap items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent", enter)}>
+    <div className={cx("flex flex-wrap items-center gap-2 py-2 pl-10 text-body-sm font-medium text-accent", enter)}>
       <IconQuestion size={15} /> Waiting for your answer
       {offscreen && (
         <button
           type="button"
           onClick={jump}
-          className="cursor-pointer rounded-md border border-accent/40 px-2 py-0.5 text-[12px] font-medium hover:bg-accent-soft"
+          className="cursor-pointer rounded-md border border-accent/40 px-2 py-0.5 text-small font-medium hover:bg-accent-soft"
         >
           Jump to the question
         </button>
@@ -799,7 +802,7 @@ function ActivityLine({ state, hasOpenQuestion, live }: { state: StreamState; ha
   if (state.agentState === "working") return <WorkingLine detail={state.agentDetail} />;
   if (state.agentState === "error" || state.agentState === "exited") {
     return (
-      <div className="py-2 pl-10 text-[13px] text-err">
+      <div className="py-2 pl-10 text-body-sm text-err">
         Agent {state.agentState === "error" ? "reported an error" : "exited"}
         {state.agentDetail ? `: ${state.agentDetail}` : ""}
       </div>
@@ -811,7 +814,7 @@ function ActivityLine({ state, hasOpenQuestion, live }: { state: StreamState; ha
 function WorkingLine({ detail }: { detail: string | null | undefined }) {
   const enter = useEnter();
   return (
-    <div className={cx("flex items-center gap-2 py-2 pl-10 text-[13px] text-muted", enter)}>
+    <div className={cx("flex items-center gap-2 py-2 pl-10 text-body-sm text-muted", enter)}>
       <Spinner className="text-accent" /> {detail || "Working in the microVM…"}
     </div>
   );
@@ -855,7 +858,7 @@ function ModelPicker({ stream, state, enabled }: { stream: SessionStream | null;
         disabled={!enabled || switchingModel !== null}
         aria-busy={switchingModel !== null}
         aria-label="Model for the next turns"
-        className="h-9 max-w-40 cursor-pointer truncate rounded-xl border border-border bg-panel-2 px-2 text-[12.5px] text-muted outline-none hover:text-text focus:border-accent disabled:cursor-not-allowed disabled:opacity-60"
+        className="h-9 max-w-40 cursor-pointer truncate rounded-xl border border-border bg-panel-2 px-2 text-small-lg text-muted outline-none hover:text-text focus:border-accent disabled:cursor-not-allowed disabled:opacity-60"
       >
         {options.map((m) => (
           <option key={m.id} value={m.id}>
@@ -895,7 +898,7 @@ function Composer({
                   ? "Send a follow-up — the agent reads it next…"
                   : "Message the agent…"
           }
-          className="scroll-thin max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[14px] leading-5 outline-none placeholder:text-faint"
+          className="scroll-thin max-h-40 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-body-lg leading-5 outline-none placeholder:text-faint"
         />
         {picker}
         {isRunning ? (

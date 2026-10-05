@@ -60,6 +60,13 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
+    // Issue #1074: GitHub refuses the account, so nothing is torn down for a push that cannot land.
+    if let Some(open) = crate::github_breaker::paused(&app) {
+        let message = crate::github_breaker::pause_message(&open);
+        app.session_log(&id, "error", format!("not publishing: {message}")).await;
+        app.update_session(&id, |x| x.error = Some(message)).await;
+        return;
+    }
     // Issue #910: the repo's daily pull-request cap, applied together with the claim, so a colony
     // over the cap keeps its worktree and its branch and simply waits for tomorrow. The park tears
     // the microVM down, as every park does, unless the org turns `discard_vm` off (or the worktree
@@ -1073,6 +1080,12 @@ pub async fn publish(
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if crate::authority::external_writes_blocked() {
         return Err(client_error(StatusCode::CONFLICT, BLOCKED));
+    }
+    if let Some(open) = crate::github_breaker::paused(&app) {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &crate::github_breaker::pause_message(&open),
+        ));
     }
     if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) || s.suspended.is_some() {
         return Err(client_error(

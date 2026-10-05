@@ -23,7 +23,9 @@ use crate::batch::{ExportResource, Item, Record};
 use crate::hashing::HashKey;
 use crate::proto::common::v1::{AnyValue, ArrayValue, KeyValue, KeyValueList, any_value};
 use crate::proto::logs::v1::{LogRecord, SeverityNumber};
-use crate::proto::metrics::v1::{AggregationTemporality, Gauge, Metric, NumberDataPoint, Sum, metric, number_data_point};
+use crate::proto::metrics::v1::{
+    AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, Sum, metric, number_data_point,
+};
 use crate::proto::resource::v1::Resource;
 use crate::proto::trace::v1::{Span, Status, span, status};
 use allowlist::{Naming, Rule};
@@ -179,6 +181,7 @@ impl Policy {
     /// or path, since `hashed` does not reach it. The name is still redacted and capped.
     pub fn span(&self, kind: SpanKind, subject: &str) -> SpanBuilder<'_> {
         let mut fields = Fields::new(self, allowlist::for_span(kind), true);
+        fields.cap = fields.cap.min(SPAN_ATTRIBUTE_BYTES);
         let subject = match (kind, self.config.repo_names) {
             (SpanKind::InvokeAgent, RepoNames::Hashed) => self.hash(subject).unwrap_or_default(),
             _ => subject.to_string(),
@@ -188,7 +191,8 @@ impl Policy {
         } else {
             format!("{} {subject}", kind.as_str())
         };
-        let name = fields.text(&name, None, self.config.max_attribute_bytes);
+        let cap = fields.cap;
+        let name = fields.text(&name, None, cap);
         SpanBuilder {
             fields,
             span: Span {
@@ -207,6 +211,7 @@ impl Policy {
             name,
             unit,
             sum: None,
+            histogram: None,
             point: NumberDataPoint::default(),
         }
     }
@@ -264,11 +269,18 @@ fn redact_under(key: &str, value: String) -> String {
     }
 }
 
+/// The longest attribute value a span carries, whatever `max_attribute_bytes` says: Tempo's
+/// distributor truncates span attributes at 2 KiB, so a span's are cut here first, with the marker.
+pub const SPAN_ATTRIBUTE_BYTES: usize = 2048;
+
 /// The attributes of one record under construction, and whether anything in it was cut.
 struct Fields<'p> {
     policy: &'p Policy,
     tables: [&'static [Rule]; 2],
     span: bool,
+    /// The attribute cap: `max_attribute_bytes`, and at most [`SPAN_ATTRIBUTE_BYTES`] on a span
+    /// ([`Policy::span`] lowers it).
+    cap: usize,
     attributes: Vec<KeyValue>,
     truncated: bool,
 }
@@ -279,6 +291,7 @@ impl<'p> Fields<'p> {
             policy,
             tables,
             span,
+            cap: policy.config.max_attribute_bytes,
             attributes: Vec::new(),
             truncated: false,
         }
@@ -320,7 +333,7 @@ impl<'p> Fields<'p> {
                 }
             }
             _ => match value {
-                AttrValue::Str(s) => AttrValue::Str(self.text(&s, Some(key), policy.config.max_attribute_bytes)),
+                AttrValue::Str(s) => AttrValue::Str(self.text(&s, Some(key), self.cap)),
                 other => other,
             },
         };
@@ -508,6 +521,25 @@ impl SpanBuilder<'_> {
         self
     }
 
+    /// The span's kind; [`span::SpanKind::Internal`] unless set.
+    pub fn kind(mut self, kind: span::SpanKind) -> Self {
+        self.span.kind = kind as i32;
+        self
+    }
+
+    /// A span event: a name from a fixed set (`colonizer.suspended`) at a time, with no attributes.
+    /// Like a span's name it is structure, so it is still redacted and capped.
+    pub fn event(mut self, name: &str, unix_nanos: u64) -> Self {
+        let cap = self.fields.cap;
+        let name = self.fields.text(name, None, cap);
+        self.span.events.push(span::Event {
+            time_unix_nano: unix_nanos,
+            name,
+            ..span::Event::default()
+        });
+        self
+    }
+
     pub fn finish(mut self) -> Item {
         self.span.attributes = self.fields.finish();
         Item(Record::Span(self.span))
@@ -520,6 +552,7 @@ pub struct MetricBuilder<'p> {
     name: &'static str,
     unit: &'static str,
     sum: Option<bool>,
+    histogram: Option<HistogramDataPoint>,
     point: NumberDataPoint,
 }
 
@@ -547,6 +580,20 @@ impl MetricBuilder<'_> {
         self
     }
 
+    /// A cumulative explicit-bucket histogram instead of a number: `counts` has one more entry than
+    /// `bounds` (the last bucket is everything above the last bound), and `sum` is the sum of every
+    /// observation. A non-finite `sum` is left out, as [`MetricBuilder::double`] leaves one out.
+    pub fn histogram(mut self, bounds: &[f64], counts: &[u64], sum: f64) -> Self {
+        self.histogram = Some(HistogramDataPoint {
+            count: counts.iter().sum(),
+            sum: sum.is_finite().then_some(sum),
+            bucket_counts: counts.to_vec(),
+            explicit_bounds: bounds.to_vec(),
+            ..HistogramDataPoint::default()
+        });
+        self
+    }
+
     /// A point attribute: structure only, like a span's.
     pub fn attr(mut self, key: &str, value: impl Into<AttrValue>, tier: Tier) -> Self {
         self.fields.attr(key, value.into(), tier);
@@ -554,7 +601,22 @@ impl MetricBuilder<'_> {
     }
 
     pub fn finish(mut self) -> Item {
-        self.point.attributes = self.fields.finish();
+        let attributes = self.fields.finish();
+        if let Some(mut point) = self.histogram {
+            point.attributes = attributes;
+            point.start_time_unix_nano = self.point.start_time_unix_nano;
+            point.time_unix_nano = self.point.time_unix_nano;
+            return Item(Record::Metric(Metric {
+                name: self.name.to_string(),
+                unit: self.unit.to_string(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    data_points: vec![point],
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                })),
+                ..Metric::default()
+            }));
+        }
+        self.point.attributes = attributes;
         let data_points = vec![self.point];
         let data = match self.sum {
             None => metric::Data::Gauge(Gauge { data_points }),

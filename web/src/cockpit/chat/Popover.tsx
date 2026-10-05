@@ -227,19 +227,19 @@ export function SearchList<T extends ListItem>({
             aria-expanded="true"
             aria-controls={`${base}-list`}
             aria-activedescendant={shown[active] ? `${base}-${active}` : undefined}
-            className="bare-field min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
+            className="bare-field min-w-0 flex-1 border-0 bg-transparent text-body-sm text-text outline-none placeholder:text-faint"
           />
         </div>
       )}
       <div ref={list} id={`${base}-list`} role="listbox" tabIndex={searchable ? -1 : 0} className="scroll-thin min-h-0 flex-1 overflow-y-auto p-1 outline-none">
-        {loading && <div className="px-3 py-3 text-[12.5px] text-faint">Loading…</div>}
-        {!loading && shown.length === 0 && <div className="px-3 py-3 text-[12.5px] text-faint">{emptyText}</div>}
+        {loading && <div className="px-3 py-3 text-small-lg text-faint">Loading…</div>}
+        {!loading && shown.length === 0 && <div className="px-3 py-3 text-small-lg text-faint">{emptyText}</div>}
         {shown.map((item, i) => {
           const groupRow = item.group && item.group !== lastGroup ? item.group : null;
           lastGroup = item.group;
           return (
             <div key={item.id}>
-              {groupRow && <div className="px-2.5 pb-1 pt-2 text-[10.5px] font-semibold uppercase tracking-wider text-faint">{groupRow}</div>}
+              {groupRow && <div className="px-2.5 pb-1 pt-2 text-meta-sm font-semibold uppercase tracking-wider text-faint">{groupRow}</div>}
               <div
                 id={`${base}-${i}`}
                 data-index={i}
@@ -256,8 +256,8 @@ export function SearchList<T extends ListItem>({
               >
                 {item.leading}
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px]">{item.label}</div>
-                  {(item.disabled || item.hint) && <div className="truncate text-[11.5px] text-faint">{item.disabled || item.hint}</div>}
+                  <div className="truncate text-body-sm">{item.label}</div>
+                  {(item.disabled || item.hint) && <div className="truncate text-meta-lg text-faint">{item.disabled || item.hint}</div>}
                 </div>
                 {item.trailing}
                 {item.id === selected && <IconCheck size={14} className="shrink-0 text-accent" />}
@@ -312,7 +312,7 @@ export function Select<T extends ListItem>({
           }
         }}
         className={cx(
-          "flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-border bg-panel px-2.5 py-1.5 text-left text-[13px] text-text hover:border-border-strong focus-visible:border-accent focus-visible:outline-none",
+          "flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-border bg-panel px-2.5 py-1.5 text-left text-body-sm text-text hover:border-border-strong focus-visible:border-accent focus-visible:outline-none",
           className,
         )}
       >

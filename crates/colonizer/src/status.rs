@@ -312,9 +312,13 @@ pub(crate) async fn status(
             "reset_unix": quota.reset_unix,
             "providers": quota.providers,
             "kind": quota.kind,
+            "provider_details": quota.details.iter().map(providers::QuotaProviderDetail::to_json).collect::<Vec<_>>(),
         }),
         "quota_cards": quota_cards,
         "account_alerts": account_alerts,
+        // Issue #1074: the GitHub account's circuit breaker, so the cockpit banners a suspension or
+        // a revoked token above every view without a second poll. `{"paused": false}` when all is well.
+        "github_pause": crate::github_breaker::status_json(&app, chrono::Utc::now()).await,
         // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
         "ledger": app.ledger.snapshot(),
         "modules": {
