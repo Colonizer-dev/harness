@@ -178,6 +178,10 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You turned down a remote access sign-in from ${target || "a GitHub account"}`;
     case "remote.unpair":
       return "You unbound the remote access link's owner";
+    case "remote.device_approve":
+      return "You signed a browser in to the remote access link";
+    case "remote.device_revoke":
+      return "You signed a browser out of the remote access link";
     case "workspace.enable":
       return `You switched the ${target || entry.org || ""} workspace on`;
     case "workspace.disable":

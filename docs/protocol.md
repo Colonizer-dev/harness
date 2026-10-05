@@ -121,6 +121,7 @@ Every heading of the single-page protocol, in its original order, and the area f
 | <a id="get-apiremote"></a>`GET /api/remote` | [protocol/remote-access.md](protocol/remote-access.md#get-apiremote) |
 | <a id="put-apiremote-enabled-bool"></a>`PUT /api/remote {"enabled": bool}` | [protocol/remote-access.md](protocol/remote-access.md#put-apiremote-enabled-bool) |
 | <a id="post-apiremotereset"></a>`POST /api/remote/reset` | [protocol/remote-access.md](protocol/remote-access.md#post-apiremotereset) |
+| <a id="signing-a-browser-in-on-the-link-apiremotedevices"></a>Signing a browser in on the link: `/api/remote/devices` | [protocol/remote-access.md](protocol/remote-access.md#signing-a-browser-in-on-the-link-apiremotedevices) |
 | <a id="pairing-get-apiremotepairing-post-apiremotepairingconfirm-post-apiremotepairingreject-delete-apiremoteowner"></a>Pairing: `GET /api/remote/pairing`, `POST /api/remote/pairing/confirm`, `POST /api/remote/pairing/reject`, `DELETE /api/remote/owner` | [protocol/remote-access.md](protocol/remote-access.md#pairing-get-apiremotepairing-post-apiremotepairingconfirm-post-apiremotepairingreject-delete-apiremoteowner) |
 | <a id="the-tunnel-version-1"></a>The tunnel, version 1 | [protocol/remote-access.md](protocol/remote-access.md#the-tunnel-version-1) |
 | <a id="611-fleet-export-bundle-687"></a>6.11 Fleet export bundle (#687) | [protocol/fleet-export.md](protocol/fleet-export.md#611-fleet-export-bundle-687) |

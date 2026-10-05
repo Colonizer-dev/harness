@@ -63,6 +63,28 @@ A relay older than the retire endpoint gets the old owner unbound instead (`DELE
 The three switches record `remote.enable`, `remote.disable` and `remote.reset` in the activity
 log (§6.9), with actor `you`, but only when the state actually changes.
 
+## Signing a browser in on the link: `/api/remote/devices`
+
+This machine's install token is never accepted on a tunnelled request (review finding R3): bearer,
+cookie and the `?token=` sign-in link all answer **401** there, saying where to sign in instead. A
+browser elsewhere gets a **link credential** (`clk_…`) of its own, which authenticates only
+tunnelled requests, with the owner's reach (the local-only pairing decisions excepted). The
+mothership keeps only its SHA-256 hash, in `<config>/remote/links.json` (0600).
+
+- `POST /api/remote/devices/invites` answers `{"url": "https://<host>/?pair=<invite>", "expires_at",
+  "ttl_secs": 300}`; **409** while remote access is off. The invite is single-use and opens only
+  through the tunnel; presented anywhere else it is spent and opens nothing.
+- Opened on the link, the invite shows six digits and sets the pairing cookie, as a phone's does.
+  `POST /api/remote/devices/confirm {"code"}` approves it — local-only (**403** through the link),
+  **404** for a wrong or expired code, counted against the pairing rate limit — and records
+  `remote.device_approve`.
+- The browser's poll, `POST /api/phone/claim`, then answers **200** and sets the link credential as
+  its `colonizer_token` cookie on the link's origin (with `Secure`, like every tunnelled cookie).
+- `GET /api/remote/devices` answers `{"devices": [{"id", "label", "paired_at"}], "pending": […]}`;
+  `DELETE /api/remote/devices/{id}` signs one browser out (`remote.device_revoke`).
+- `POST /api/remote/reset` rotates every link credential. Revoking one, or a reset, ends its
+  in-flight requests, streamed bodies and open sockets at once.
+
 ## Pairing: `GET /api/remote/pairing`, `POST /api/remote/pairing/confirm`, `POST /api/remote/pairing/reject`, `DELETE /api/remote/owner`
 
 The relay forwards only the install's bound owner. The first GitHub sign-in on the link gets a
