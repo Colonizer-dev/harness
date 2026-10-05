@@ -270,8 +270,9 @@ fn read_file(path: &Path) -> (Vec<Entry>, usize) {
     (out, skipped)
 }
 
-/// Both files, oldest first, and the count of lines that would not read.
-fn read_all(data_dir: &Path) -> (Vec<Entry>, usize) {
+/// Both files, oldest first, and the count of lines that would not read. `pub(crate)` for the
+/// Prometheus counter seed (#852), which counts the log's launches and outcomes once at start.
+pub(crate) fn read_all(data_dir: &Path) -> (Vec<Entry>, usize) {
     let (mut entries, skipped_old) = read_file(&rolled_file(data_dir));
     let (live, skipped_live) = read_file(&live_file(data_dir));
     entries.extend(live);
@@ -319,7 +320,14 @@ pub(crate) async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64
             .await;
     }
     match append_line(&live, &line).await {
-        Ok(()) => *next = Some(seq + 1),
+        // The Prometheus colony counters (#852) move on the line that actually landed: one relaxed
+        // atomic add per recorded launch or outcome, and nothing else. A failed append leaves the
+        // counter low by one until the next start re-seeds it from the log, which is the right way
+        // round — a counter that over-counted a line nobody can read would never come back.
+        Ok(()) => {
+            crate::observability::metrics::on_activity(&entry.kind);
+            *next = Some(seq + 1);
+        }
         Err(e) => {
             // The seq is not consumed, and the next append retries the scan-free counter.
             *next = Some(seq);

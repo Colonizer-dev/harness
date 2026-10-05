@@ -241,9 +241,11 @@ impl Timed {
 
 impl Drop for Timed {
     fn drop(&mut self) {
-        self.counters
-            .duration_ms
-            .fetch_add(self.start.elapsed().as_millis() as u64, Ordering::SeqCst);
+        let elapsed = self.start.elapsed().as_millis() as u64;
+        self.counters.duration_ms.fetch_add(elapsed, Ordering::SeqCst);
+        // The Prometheus latency histogram (#852) rides the same drop guard as the cumulative
+        // total, so it measures exactly the span `duration_ms` does.
+        self.counters.latency.observe(elapsed);
         self.counters.dirty.store(true, Ordering::SeqCst);
     }
 }
@@ -254,6 +256,16 @@ struct ProviderStats {
     queued: Arc<AtomicU64>,
 }
 
+/// One provider's whole state, as a scrape reads it in a single lock of each map (#852). The
+/// mirror image of [`ProviderUsage`]: what one provider has done, beside what it is doing now.
+pub(crate) struct ProviderScrape {
+    pub(crate) provider: String,
+    pub(crate) usage: ProviderUsage,
+    pub(crate) latency: crate::observability::metrics::HistogramSnapshot,
+    pub(crate) in_flight: u64,
+    pub(crate) queued: u64,
+}
+
 /// Live cumulative usage for one provider, seeded from disk at startup and written back by
 /// `flush_usage` when dirty. The request path only touches these atomics, never the file.
 #[derive(Default)]
@@ -262,6 +274,10 @@ struct UsageCounters {
     failures: AtomicU64,
     fallbacks: AtomicU64,
     duration_ms: AtomicU64,
+    /// The request-latency histogram `GET /metrics` serves (#852). Not persisted: it is read by a
+    /// scrape, and a histogram that outlived a restart would report buckets the new process never
+    /// filled.
+    latency: crate::observability::metrics::Histogram,
     last_request_at: Mutex<Option<DateTime<Utc>>>,
     since: Mutex<Option<DateTime<Utc>>>,
     /// The most recent failure's code, kept with the counts it belongs to.
@@ -277,6 +293,7 @@ impl UsageCounters {
             failures: AtomicU64::new(usage.failures),
             fallbacks: AtomicU64::new(usage.fallbacks),
             duration_ms: AtomicU64::new(usage.duration_ms),
+            latency: Default::default(),
             last_request_at: Mutex::new(usage.last_request_at),
             since: Mutex::new(usage.since),
             last_failure: Mutex::new(usage.last_failure),
@@ -467,6 +484,48 @@ impl Gateway {
     /// Cumulative usage for a provider since the counters were first kept.
     pub fn usage(&self, provider: &str) -> ProviderUsage {
         self.usage_counters(provider).snapshot()
+    }
+
+    /// Every provider that already has state, read for a scrape (#852).
+    ///
+    /// Unlike [`Self::load`] and [`Self::usage`] this inserts nothing: those answer for one
+    /// provider and create a zeroed entry to do it, which a scrape calling them for a provider
+    /// present in only one of the two maps would then persist to `provider-usage.json` on the next
+    /// flush. Reading must leave no mark. The union of the two maps is walked, since a provider
+    /// that has only ever queued a request is as real as one that has answered some; a provider in
+    /// one map and not the other reads as zeroes in the other.
+    pub(crate) fn scrape_stats(&self) -> Vec<ProviderScrape> {
+        let usage = self.usage.lock().unwrap();
+        let stats = self.stats.lock().unwrap();
+        let load = |entry: Option<&Arc<ProviderStats>>| {
+            let stats = entry?;
+            Some((stats.in_flight.load(Ordering::SeqCst), stats.queued.load(Ordering::SeqCst)))
+        };
+        let mut out: Vec<ProviderScrape> = usage
+            .iter()
+            .map(|(id, counters)| {
+                let (in_flight, queued) = load(stats.get(id)).unwrap_or_default();
+                ProviderScrape {
+                    provider: id.clone(),
+                    usage: counters.snapshot(),
+                    latency: counters.latency.snapshot(),
+                    in_flight,
+                    queued,
+                }
+            })
+            .collect();
+        for (id, stats) in stats.iter().filter(|(id, _)| !usage.contains_key(*id)) {
+            let (in_flight, queued) = load(Some(stats)).unwrap_or_default();
+            out.push(ProviderScrape {
+                provider: id.clone(),
+                usage: ProviderUsage::default(),
+                latency: crate::observability::metrics::HistogramSnapshot::default(),
+                in_flight,
+                queued,
+            });
+        }
+        out.sort_by(|a, b| a.provider.cmp(&b.provider));
+        out
     }
 
     /// Writes the whole usage map atomically (see [`write_json_atomic`]). Unlike the crate's other JSON

@@ -180,6 +180,11 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
+    // The Prometheus endpoint (issue #852) is scraped by a machine, not a browser: a request with
+    // no token is a plain 401, never the sign-in page, so a scraper's error says what to do.
+    if req.method() == Method::GET && path == crate::observability::metrics::PATH {
+        return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+    }
     // The installable-app files carry no secrets, and browsers fetch the manifest without the
     // cookie: they load before sign-in, so the locked page still installs and shows its icon.
     if req.method() == Method::GET && is_public_app_file(&path) {
