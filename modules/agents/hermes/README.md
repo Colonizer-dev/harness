@@ -106,8 +106,14 @@ rewrites both locks and the `module.json` pin.
   interrupt or a turn end cancels the ask. A question is never also a `tool_call`/`tool_result`
   (§2). `clarify` stays disabled — the MCP tool replaces it. Hermes only loads MCP servers when the
   optional `mcp` Python extra is installed (`pip install -e ".[mcp]"`); without it the tool is
-  silently absent. The config's server env carries only the bridge coordinates, so mcp.mjs's own
-  gating leaves the findings, memory and loop tools unoffered here.
+  silently absent. The config's server env carries the bridge coordinates and no findings or memory
+  switch, so mcp.mjs's own gating leaves those tools unoffered here.
+- **Loop tools.** A loop colony's server env also carries `COLONIZER_LOOP` and
+  `COLONIZER_LOOP_SELF_PACED` (issue #643, [loops.md](../../../docs/loops.md)), so `mcp.mjs` offers
+  `loop_stop`, and `loop_next` on a self-paced loop. Both POST to the same bridge, which emits a
+  `loop_next` or `loop_stop` event as the codex module's does; `module.json` declares
+  `"loop_tools": true`, so a self-paced loop is briefed with `loop_next` instead of running every
+  24 hours. Like `ask_user`, they need the `[mcp]` extra.
 - **Credentials.** Only gateway routes, above: no provider secret ever enters the colony.
 
 ## Gaps

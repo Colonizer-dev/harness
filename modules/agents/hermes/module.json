@@ -4,6 +4,7 @@
   "name": "Hermes",
   "description": "Nous Research's Hermes Agent CLI, driven headlessly (hermes chat -q --format stream-json). One model; questions reach the cockpit through the colonizer ask_user MCP tool. The runner builds the pinned hermes-agent source into a venv on first boot (every download and dependency hash-checked), so nothing needs to be staged into the colony image.",
   "protocol": "colonizer-runner/1",
+  "loop_tools": true,
   "entry": [
     "node",
     "runner.mjs"

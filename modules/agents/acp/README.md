@@ -132,6 +132,18 @@ reloaded session does not get it again. Without the mount no server is registere
 (`mcpServers: []`). `memory-mcp.mjs` is the original the OpenCode and Pi modules copy; its logic is
 `memory.mjs`, a byte-for-byte copy of Claude Code's, kept identical by a test.
 
+## Loop tools
+
+A loop colony (the mothership sets `COLONIZER_LOOP=true`) gets a second stdio MCP server on
+`session/new` and `session/load` (issue #643, [loops.md](../../../docs/loops.md)):
+`colonizer_loop`, which runs `loop-tools.mjs` and offers `loop_stop`, plus `loop_next` when
+`COLONIZER_LOOP_SELF_PACED=true`. Its env carries the coordinates of a loopback loop bridge the
+runner starts for the colony; each call is clamped (15 minutes to 24 hours) and POSTed there, and
+the bridge emits a `loop_next` or `loop_stop` event, the wire the codex, grok-build and hermes
+modules use. The memory line is not added for it. `loop-tools.mjs` is the original the Pi module
+copies. `module.json` declares `"loop_tools": true`, so a self-paced loop is briefed with
+`loop_next` instead of running every 24 hours.
+
 ## Binary
 
 The `gemini` preset runs the pinned @google/gemini-cli release, which nothing stages into the colony

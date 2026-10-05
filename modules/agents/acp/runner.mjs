@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
 import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
 import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
+import { createLoopBridge, loopSwitches } from './loop-tools.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -61,15 +62,38 @@ const PRESETS = {
 // must support: memory_briefing, memory_changes and memory_search over COLONIZER_MEMORY_DIR.
 export const MEMORY_MCP = fileURLToPath(new URL('./memory-mcp.mjs', import.meta.url));
 
+// The loop tools (issue #643) as a second stdio MCP server: loop_stop for a loop colony and
+// loop_next when it is self-paced, forwarded to this runner's loopback loop bridge, which emits
+// them as protocol events (loop-tools.mjs).
+export const LOOP_MCP = fileURLToPath(new URL('./loop-tools.mjs', import.meta.url));
+
 /** The MCP servers session/new and session/load register: the memory server when memory is
- * mounted or the operator vault is staged (it then also serves vault_search, issue #777), none
- * otherwise. Both are pulled through it, never put into a prompt. */
-export function mcpServers(env = process.env) {
+ * mounted or the operator vault is staged (it then also serves vault_search, issue #777), and the
+ * loop server for a loop colony once its bridge is up (`loopBridge`). Memory and the vault are
+ * pulled through their server, never put into a prompt. */
+export function mcpServers(env = process.env, loopBridge = null) {
+  const servers = [];
   const dir = String(env.COLONIZER_MEMORY_DIR ?? '').trim();
   const vault = String(env.COLONIZER_VAULT_DIR ?? '').trim();
-  if (!dir && !vault) return [];
-  const serverEnv = [...(dir ? [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] : []), ...(vault ? [{ name: 'COLONIZER_VAULT_DIR', value: vault }] : [])];
-  return [{ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: serverEnv }];
+  if (dir || vault) {
+    const serverEnv = [...(dir ? [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] : []), ...(vault ? [{ name: 'COLONIZER_VAULT_DIR', value: vault }] : [])];
+    servers.push({ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: serverEnv });
+  }
+  const { loop, selfPaced } = loopSwitches(env);
+  if (loop && loopBridge) {
+    servers.push({
+      name: 'colonizer_loop',
+      command: process.execPath,
+      args: [LOOP_MCP],
+      env: [
+        { name: 'COLONIZER_BRIDGE_URL', value: loopBridge.url },
+        { name: 'COLONIZER_BRIDGE_TOKEN', value: loopBridge.token },
+        { name: 'COLONIZER_LOOP', value: 'true' },
+        { name: 'COLONIZER_LOOP_SELF_PACED', value: String(selfPaced) },
+      ],
+    });
+  }
+  return servers;
 }
 
 /** The preset's spec, or null for `custom` and unknown names. */
@@ -626,6 +650,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
 
   let acp = null;
   let servers = [];
+  // A loop colony's loop_next / loop_stop cross this bridge from the registered loop MCP server.
+  const loopBridge = !problem && loopSwitches(env).loop ? await createLoopBridge({ emit }) : null;
   let memoryLine = false; // the next prompt leads with MEMORY_PROMPT_APPEND
   if (!problem) acp = startAgent({ argv, env: presetSpec(preset)?.env?.(env) ?? env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
 
@@ -657,7 +683,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         emit({ type: 'log', level: 'warn', message: `cannot resume session ${resumeId}: the agent does not advertise loadSession; a fresh session starts instead` });
       }
       let session = {};
-      servers = mcpServers(env);
+      servers = mcpServers(env, loopBridge);
       if (loadable && resumeId) {
         replaying = true; // the agent replays the old conversation; the harness logged it once already
         try {
@@ -677,7 +703,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         // A fresh session has no system prompt of ours, so its first prompt carries the one fixed
         // line naming the memory tools; a reloaded session already had it.
         // A server registered only for the operator vault has no memory tools to name.
-        memoryLine = servers.length > 0 && Boolean(String(env.COLONIZER_MEMORY_DIR ?? '').trim());
+        memoryLine = servers.some((server) => server.name === 'colonizer_memory') && Boolean(String(env.COLONIZER_MEMORY_DIR ?? '').trim());
       }
       if (loadable && sessionId) emit({ type: 'agent_session', session_id: sessionId });
       modelSupported = Boolean(session.models);
@@ -759,7 +785,10 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
 
   for (;;) {
     const command = await commands.next();
-    if (dead) return 1; // a death while we awaited (or mid-command): markDead already reported it
+    if (dead) {
+      await loopBridge?.close();
+      return 1; // a death while we awaited (or mid-command): markDead already reported it
+    }
     if (!command || command.type === 'shutdown') break;
     switch (command.type) {
       case 'user_message': {
@@ -816,6 +845,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     }
     await acp.kill(); // bounded by the SIGKILL escalation inside
   }
+  await loopBridge?.close();
   emit({ type: 'status', state: 'exited' });
   return 0;
 }

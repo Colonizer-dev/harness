@@ -181,8 +181,8 @@ test('the written config pins the local backend, switches Hermes extras off, and
     },
   });
   // The colonizer MCP server rides in the config: the same mcp.mjs the other modules vendor, with
-  // only the bridge coordinates in its env (mcp.mjs's gating hides the findings, memory and loop
-  // tools) and a timeout that can hold an ask open for a human.
+  // only the bridge coordinates in its env outside a loop (mcp.mjs's gating hides the findings,
+  // memory and loop tools) and a timeout that can hold an ask open for a human.
   const colonizer = config.mcp_servers.colonizer;
   assert.equal(colonizer.command, process.execPath);
   assert.deepEqual(colonizer.args, [join(HERE, '..', 'mcp.mjs')]);
@@ -382,4 +382,88 @@ test('the bridge parks /ask until answer, and cancelAll releases a parked ask as
   h.commands.push({ type: 'shutdown' });
   await h.done;
   assertConforms(h.events);
+});
+
+/** The registered colonizer MCP server, started the way Hermes would start it from config.yaml. */
+function startMcp(server) {
+  const child = spawn(server.command, server.args, { env: { PATH: process.env.PATH, ...server.env }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const pending = new Map();
+  let id = 0;
+  child.stdout.setEncoding('utf8');
+  let buf = '';
+  child.stdout.on('data', (chunk) => {
+    buf += chunk;
+    for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      const msg = JSON.parse(line);
+      pending.get(msg.id)?.(msg);
+    }
+  });
+  const call = (method, params) =>
+    new Promise((resolve) => {
+      const n = ++id;
+      pending.set(n, resolve);
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: n, method, params })}\n`);
+    });
+  return { call, stop: () => child.kill('SIGKILL') };
+}
+
+test('loop tools (issue #643): a loop colony\'s colonizer server offers loop_next and loop_stop, and their calls leave as loop events', async (t) => {
+  const h = harness({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' });
+  h.commands.push({ type: 'user_message', id: 'initial', text: 'loop run' });
+  await waitFor(h.events, (e) => e.type === 'turn_end', 'turn_end');
+  const colonizer = h.readRecord().config.mcp_servers.colonizer;
+  assert.equal(colonizer.env.COLONIZER_LOOP, 'true');
+  assert.equal(colonizer.env.COLONIZER_LOOP_SELF_PACED, 'true');
+
+  const mcp = startMcp(colonizer);
+  t.after(() => mcp.stop());
+  await mcp.call('initialize', {});
+  const names = (await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name);
+  assert.ok(names.includes('loop_next') && names.includes('loop_stop'), names.join(', '));
+  assert.equal(names.includes('finding_file'), false, 'findings stay off: the runner passes no findings switch');
+
+  // The delay is clamped to the mothership's 15 min – 24 h before it crosses the bridge.
+  const next = await mcp.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 5, reason: 'check the deploy' } });
+  assert.equal(next.result.content[0].text, 'Next run scheduled in 15 minutes.');
+  assert.deepEqual(await waitFor(h.events, (e) => e.type === 'loop_next', 'the loop_next event'), { type: 'loop_next', delay_minutes: 15, reason: 'check the deploy' });
+  const stop = await mcp.call('tools/call', { name: 'loop_stop', arguments: { reason: 'goal met' } });
+  assert.equal(stop.result.content[0].text, 'The loop is stopped; this is its last run.');
+  assert.deepEqual(await waitFor(h.events, (e) => e.type === 'loop_stop', 'the loop_stop event'), { type: 'loop_stop', reason: 'goal met' });
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  assertConforms(h.events);
+});
+
+test('loop tools: a fixed-cadence loop gets loop_stop only, and a non-loop colony neither', async (t) => {
+  for (const [env, expected] of [
+    [{ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'false' }, ['loop_stop']],
+    [{}, []],
+  ]) {
+    const h = harness(env);
+    h.commands.push({ type: 'user_message', id: 'initial', text: 'run' });
+    await waitFor(h.events, (e) => e.type === 'turn_end', 'turn_end');
+    const mcp = startMcp(h.readRecord().config.mcp_servers.colonizer);
+    t.after(() => mcp.stop());
+    await mcp.call('initialize', {});
+    const names = (await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name);
+    assert.deepEqual(names.filter((name) => name.startsWith('loop_')), expected, JSON.stringify(env));
+    h.commands.push({ type: 'shutdown' });
+    await h.done;
+  }
+});
+
+test('loop tools: the bridge refuses a malformed loop call without emitting, and the manifest declares loop_tools', async () => {
+  const h = harness();
+  assert.deepEqual(await h.askBridge('/loop_next', { delay_minutes: 0, reason: 'x' }), { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+  assert.deepEqual(await h.askBridge('/loop_next', { delay_minutes: 30, reason: ' ' }), { error: 'loop_next needs a reason: what the next run should find or do' });
+  assert.deepEqual(await h.askBridge('/loop_stop', {}), { error: 'loop_stop needs a reason: why the loop should stop' });
+  assert.equal(count(h.events, 'loop_next') + count(h.events, 'loop_stop'), 0);
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  // The mothership reads this flag: with it, a self-paced loop on Hermes is briefed with loop_next
+  // instead of falling back to every 24 hours, and the Loops form does not warn.
+  assert.equal(JSON.parse(readFileSync(join(HERE, '..', 'module.json'), 'utf8')).loop_tools, true);
 });
