@@ -212,8 +212,8 @@ export function UpdatesPane({
           )}
 
           {update.switch_to_releases && (
-            <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px]">
-              <p className="font-semibold text-[13px]">Update is not available from here</p>
+            <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg">
+              <p className="font-semibold text-body-sm">Update is not available from here</p>
               <p className="mt-1 text-muted">{update.switch_to_releases.reason}.</p>
               <p className="mt-1.5">
                 To switch to releases, run <Code>{update.switch_to_releases.command}</Code>
@@ -223,9 +223,9 @@ export function UpdatesPane({
           )}
 
           {(update.behind?.length ?? 0) > 0 && (
-            <div className="rounded-xl border border-warn/50 bg-warn-soft px-3.5 py-2.5 text-[12.5px]">
+            <div className="rounded-xl border border-warn/50 bg-warn-soft px-3.5 py-2.5 text-small-lg">
               <div className="flex flex-wrap items-center gap-2">
-                <p className="font-semibold text-[13px]">
+                <p className="font-semibold text-body-sm">
                   {update.behind!.length === 1 ? "1 colony is" : `${update.behind!.length} colonies are`} still on the previous version
                 </p>
                 <Button
