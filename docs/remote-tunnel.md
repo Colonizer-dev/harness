@@ -15,11 +15,15 @@ tunnel client and `/api/remote` (`crates/colonizer/src/remote.rs`, #533, PR #558
 switch, link and badge (#535, PR #575), the mothership's pairing routes (#599, described in
 [Pairing and the owner](#pairing-and-the-owner)), and the security review
 ([remote-access-review.md](remote-access-review.md), #536). The relay is deployed at
-my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Review finding R1
-(the relay throwing on the client's `[name, value]` response headers) is fixed (#659); R2 is only
-narrowed (a reset drops the old install's owner, but the relay cannot delete an install), and
-R3–R5 are open. The feature is off by default and not verified end to end: the two halves do not
-follow this contract in several places, listed in
+my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Of the review's
+findings, R1 (#659), R2, R4 and R5 are fixed; R3 is fixed only for plaintext relays, and the rest of
+it (the relay sees the cockpit token, which survives a reset) waits on a product decision
+([remote-access-review.md](remote-access-review.md#status-on-main-re-checked-2026-09-27)). The
+deployed Worker predates the R2, R4 and R5 fixes until it is redeployed. The whole link is verified
+end to end against the real relay code run locally — register, tunnel, owner pairing, a cockpit GET
+and websocket through the relay, unpair, reset (`the_whole_link_round_trips_through_the_real_relay`
+in `crates/colonizer/src/remote.rs`, over `services/relay/scripts/local-relay.mjs`). The feature is
+off by default. The two halves do not follow this contract in several places, listed in
 [Where the code differs today](#where-the-code-differs-today). The client as
 built is described in [protocol.md §6.10](protocol.md#610-remote-access-tunnel). Where this
 document pins something the issue text did not have — the `ready` frame, the `cancel` frame, the
@@ -232,7 +236,8 @@ rejects any `Host` that is not `localhost`, `127.0.0.1`, `[::1]`, the bind host 
 as `Authorization: Bearer` or the `colonizer_token` cookie (or a scoped `col_…` API token, Bearer
 only); cookie-authenticated writes and WebSocket upgrades must also carry an `Origin` that matches
 the `Host` header (#375, `server.rs`). The cookie is `HttpOnly; SameSite=Strict; Path=/` with a
-one-year `Max-Age`, host-only, and carries no `Secure` today (`auth.rs:197-199`).
+one-year `Max-Age`, host-only, and carries no `Secure` on localhost and the LAN, which are plain
+`http://`; the tunnel client adds `Secure` to every cookie it sends back through the tunnel.
 
 Tunnelled requests are dispatched in-process into the same axum router, so `host_guard` and the
 cockpit auth run unchanged; the relay does not bypass either. The tunnel client marks each request
@@ -244,7 +249,8 @@ marker, and only while remote access is on (checked per request, not at connect 
 
 Turning remote access off closes the tunnel and fails any in-flight tunnelled streams. The
 `colonizer_token` cookie set through the tunnel lands on the tunnel host only (a host-only cookie),
-separate from the localhost one; over the tunnel it MUST also carry `Secure`.
+separate from the localhost one; over the tunnel it also carries `Secure` (review finding R4,
+fixed: the tunnel client adds it, and the relay drops any `Domain` attribute).
 
 ## Cockpit API
 
@@ -314,9 +320,11 @@ code that is not six digits with `400`, and answers `409` when remote access has
 switched on (there is no install to pair). A relay answer outside the table — a `401` for a key the
 relay does not accept, a `404` for an install it does not know — becomes a `502` naming it.
 
-**Reset link** (`POST /api/remote/reset`) unbinds too: after the new key registers, the mothership
-sends the old install a signed `DELETE …/owner` with the old key, best effort, before it replaces the
-key file. The new install starts unowned.
+**Reset link** (`POST /api/remote/reset`) retires the old install: after the new key registers,
+the mothership sends a signed `DELETE /api/installs/<old id>` with the old key, before it replaces
+the key file. The relay deletes the install with its owner and pending pairings and closes its
+tunnel `4404`, so the old host, its sessions and any copy of the old key reach nothing. If the relay
+cannot be told, the reset fails `502` and keeps the old link. The new install starts unowned.
 
 Confirm, reject and unbind are recorded in the activity log as `remote.pair`, `remote.pair_reject`
 and `remote.unpair`, with the GitHub login as the target where the relay names one.
@@ -405,9 +413,11 @@ amendment to the contract; none is decided here.
   included, so subprotocols cannot be negotiated (`remote.rs:1323-1347`; review note L4).
 - Neither side closes the tunnel on an oversized chunk or text frame. The relay fails just that
   stream when a body chunk decodes to more than 49152 bytes, and closes the browser socket `1009`
-  on an oversized binary `ws_msg`; text `ws_msg` has no size check on either side, and the client
-  keeps tungstenite's default 64 MiB message limit (review finding R5). The client caps a whole
-  request body at 10 MiB (`413`) and waits at most 60 s per body frame (`408`).
+  on an oversized binary `ws_msg` from the mothership or any browser message over 128 KiB. The
+  client takes no tunnel message over 1 MiB (a bigger one ends the tunnel), refuses a body chunk
+  longer than base64 of 48 KiB with `413`, caps a whole request body at 10 MiB (`413`), waits at
+  most 60 s per body frame (`408`), and closes a tunnelled websocket `1008` when its cockpit
+  handler falls 64 frames behind (review finding R5, fixed).
 - When the tunnel closes, the relay closes browser WebSockets with `1012`, not `1001`
   (`tunnel.js:136`).
 - The relay also limits each install to a 120-request burst refilled at 20 per second, answering
@@ -416,11 +426,8 @@ amendment to the contract; none is decided here.
 
 **Headers**
 
-- The relay does not strip `Domain` from `set-cookie` (review finding R4).
 - The mothership never answers `400` for a wrong or repeated `host`: it drops whatever `host` the
   relay sent and sets its own tunnel host (`remote.rs:1082`, `:1343`).
-- The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:197-199`;
-  review finding R4).
 
 ## What is not colony work
 
