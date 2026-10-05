@@ -2475,6 +2475,163 @@ mod tests {
         assert_eq!(kinds.iter().filter(|k| *k == "remote.unpair").count(), 1);
     }
 
+    /// The owner's relay session cookie (`name=value`) for an install already bound to `account`.
+    async fn owner_session(port: u16, host: &str, account: &str) -> String {
+        let (status, headers, _) = relay_http(port, "/_auth?next=/", host, None).await;
+        assert_eq!(status, 302);
+        let location = &headers.iter().find(|(k, _)| k == "location").unwrap().1;
+        let state = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+        let oauth = headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with("__Host-colonizer_oauth="))
+            .map(|(_, v)| v.split(';').next().unwrap().to_string())
+            .unwrap();
+        let (status, headers, _) = relay_http(
+            port,
+            &format!("/_auth/callback?state={state}&code={account}"),
+            host,
+            Some(&oauth),
+        )
+        .await;
+        assert_eq!(status, 302, "the bound owner's sign-in mints a session");
+        headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with("__Host-colonizer_session="))
+            .map(|(_, v)| v.split(';').next().unwrap().to_string())
+            .expect("a session cookie")
+    }
+
+    /// A browser websocket through the local relay to `path` on `host`, with `cookie` and the
+    /// install's own https origin, as the cockpit page would open it.
+    async fn relay_socket(
+        port: u16,
+        host: &str,
+        path: &str,
+        cookie: &str,
+    ) -> Result<WebSocketStream<tokio::net::TcpStream>, tungstenite::Error> {
+        let io = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut request = format!("ws://{host}{path}").into_client_request().unwrap();
+        request.headers_mut().insert(header::COOKIE, cookie.parse().unwrap());
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, format!("https://{host}").parse().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::client_async(request, io))
+            .await
+            .expect("the relay answered the upgrade in time")
+            .map(|(ws, _)| ws)
+    }
+
+    /// The whole link, end to end through the real relay (worker, DO, D1 schema, tunnel) and the
+    /// real tunnel client, with only GitHub stubbed: register, tunnel up, pair the owner, a
+    /// cockpit GET and a cockpit websocket through the relay, then unpair and reset.
+    #[tokio::test]
+    async fn the_whole_link_round_trips_through_the_real_relay() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        let router = remote_router(&app, idle_park());
+        tokio::spawn(run(app.clone(), router.clone()));
+
+        // 1. Register and bring the tunnel up, through the cockpit's own switch.
+        let (status, view) = local(&router, &app, Method::PUT, "/api/remote", Some(json!({"enabled": true}))).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        until(&app, |v| v["connected"] == true, "the tunnel never came up").await;
+        let host = app.remote.saved().await.host.unwrap();
+
+        // 2. Nobody is forwarded before pairing: the relay sends a browser to sign in.
+        let (status, headers, _) = relay_http(port, "/api/remote", &host, None).await;
+        assert_eq!(status, 302);
+        assert!(headers.iter().any(|(k, v)| k == "location" && v.starts_with("/_auth")));
+
+        // 3. Pair: the owner's first sign-in parks a code, the local cockpit confirms it.
+        let (status, page) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 200, "{page}");
+        let code = code_on(&page);
+        let (status, answer) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let session = owner_session(port, &host, "4242:alice").await;
+
+        // 4. A cockpit GET through the relay: the relay lets the owner through, and the cockpit's
+        //    own token check still applies behind it.
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&session)).await;
+        assert_eq!(status, 401, "the relay's sign-in alone is not the cockpit's: {body}");
+        let both = format!("{session}; {}={}", crate::auth::COOKIE_NAME, app.api_token);
+        let (status, headers, body) = relay_http(port, "/api/remote", &host, Some(&both)).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "content-type" && v.contains("application/json"))
+        );
+        let seen: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(seen["host"], host.as_str());
+        assert_eq!(seen["connected"], true, "the cockpit answered over its own live tunnel");
+        // Cookies the cockpit sets come back host-only and Secure (R4).
+        let (status, headers, _) = relay_http(port, "/api/demo", &host, Some(&both)).await;
+        assert_eq!(status, 201);
+        let cookies: Vec<&str> = headers
+            .iter()
+            .filter(|(k, _)| k == "set-cookie")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(cookies, ["one=1; Path=/; HttpOnly; Secure", "two=2; Path=/; Secure"]);
+
+        // 5. A cockpit websocket (the colony event stream) through the relay, both ways.
+        let mut socket = relay_socket(port, &host, "/api/stream", &both)
+            .await
+            .expect("the upgrade went through");
+        let first = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("the stream's first frame arrived")
+            .unwrap()
+            .unwrap();
+        let tungstenite::Message::Text(first) = first else {
+            panic!("expected a text frame, got {first:?}")
+        };
+        let first: Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["type"], "sessions", "the cockpit stream's first frame");
+        socket.close(None).await.unwrap();
+        // Without the relay session there is no upgrade at all.
+        let token_only = format!("{}={}", crate::auth::COOKIE_NAME, app.api_token);
+        assert!(relay_socket(port, &host, "/api/stream", &token_only).await.is_err());
+
+        // 6. Unpair: the owner's session dies on its next request, HTTP and websocket alike.
+        let (status, _) = local(&router, &app, Method::DELETE, "/api/remote/owner", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _, _) = relay_http(port, "/api/remote", &host, Some(&both)).await;
+        assert_eq!(status, 302, "back to sign-in");
+        assert!(relay_socket(port, &host, "/api/stream", &both).await.is_err());
+
+        // 7. Reset: the old link is retired at the relay (R2) and a new one comes up.
+        let (status, _) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = relay_http(port, "/", &host, None).await;
+        assert_eq!(status, 404, "the old host is unknown");
+        until(
+            &app,
+            |v| v["connected"] == true && v["host"] != host.as_str(),
+            "the new link never came up",
+        )
+        .await;
+    }
+
     /// A signed `GET …/pairing` for `install_id` with `key`, straight at the relay: its status.
     async fn relay_knows(relay: &str, install_id: &str, key: &Ed25519KeyPair) -> StatusCode {
         signed_call(relay, install_id, key, Method::GET, "/pairing", None)
