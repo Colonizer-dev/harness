@@ -36,7 +36,7 @@ pub(crate) struct FileId {
 impl FileId {
     /// The identity of an opened file, from its own handle.
     #[cfg(unix)]
-    fn of(meta: &std::fs::Metadata) -> Self {
+    pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         FileId {
             dev: meta.dev(),
@@ -47,7 +47,7 @@ impl FileId {
     /// The identity of an opened file, from its own handle. Best effort on platforms without an
     /// inode: a `(length, creation time)` pair a rename preserves but a copy does not.
     #[cfg(not(unix))]
-    fn of(meta: &std::fs::Metadata) -> Self {
+    pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
         let created = meta
             .created()
             .ok()

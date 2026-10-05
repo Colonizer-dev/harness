@@ -27,6 +27,7 @@ pub(crate) mod cursor;
 pub mod encode;
 pub mod exporter;
 pub mod hashing;
+pub mod health;
 pub mod map;
 pub mod metrics;
 pub mod policy;

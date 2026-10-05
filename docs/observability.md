@@ -25,13 +25,44 @@ colony list, never a header), starts the add-on, and hands it the headers as one
 The add-on tails the ledgers the mothership already writes, maps them, sends them, and commits its
 read position to `<data>/observability/state.json` only after the backend acknowledged the batch.
 
-Nothing in a colony's path waits on it: the ledgers are the spool. If the backend is down, the
-exporter retries with backoff (1 s doubling to 60 s, with jitter) and reads further later; it holds
-at most one tick's batch in memory. A request the backend refuses outright (400, 413) is split in
-half until the bad record is isolated, which is dropped and counted. Lines older than **Max backlog
+Nothing in a colony's path waits on it: the ledgers are the spool. Lines older than **Max backlog
 (days)** (7 by default) are dropped instead of sent late, oldest first, and counted. A restart
 resumes from the committed offsets, and every record carries a deterministic `colonizer.record.id`,
 so a replay can be deduplicated.
+
+### When the backend says no
+
+The exporter holds at most one tick's batch in memory and reads nothing new while that batch waits.
+Its read offsets are committed, in one atomic write with the metric series, only after the backend
+acknowledged the whole batch; until then a restart or crash replays it from the ledgers.
+
+| Answer | What happens | Records dropped |
+| :--- | :--- | :--- |
+| 2xx | Committed. A `partial_success` with rejected records counts them as `rejected` and keeps the backend's message in `last_partial_success`; they are not retried (an ack is an ack). | Only those the backend says it rejected |
+| 401, 403, 407 | **The credential is wrong or expired.** The batch and its offsets are kept, exporting pauses, the state is `auth_failed` with the endpoint and the error (never the header value), and the same batch is retried with backoff. Fix the **Observability headers** secret: the add-on restarts and delivers everything from where it stopped. | None |
+| 429, 503 | Retried after the server's `Retry-After` (seconds or an HTTP-date, at most 5 minutes), or the backoff when there is none. | None |
+| Network error, timeout, 408, 502, 504, any other 5xx or 4xx (404, 405, 415, …) | Retried with backoff: 1 s doubling to 60 s, with jitter. A status that says nothing about the records never drops them. | None |
+| 400, 413, 422 | The request's records are at fault: it is split in half and each half retried, down to the single bad record, which is dropped and counted as `refused`. The rest are delivered. | The bad record only |
+
+### Health
+
+The add-on writes `<data>/observability/status.json` at most once a second, and
+`GET /api/observability/status` returns it as `exporter`. `state` is one of:
+
+| State | Meaning |
+| :--- | :--- |
+| `starting` | No request answered yet. |
+| `running` | The last batch was acknowledged. |
+| `retrying` | The backend is unreachable or busy; the batch is held until `next_retry_unix`. |
+| `auth_failed` | The backend refused the credential; nothing is dropped, the batch is held and retried. |
+| `stopped` | A clean shutdown. |
+
+It also carries `endpoint`, `last_error` (redacted, header values cut out), `last_success_unix`,
+`consecutive_failures`, `exported`, `bytes_sent` (since the add-on started), `backlog_bytes` (ledger
+bytes behind the committed offsets), `dropped` by reason, `export_failures`,
+`last_partial_success`, and `signals`: per signal (`logs`, `metrics`) its `state` (`ok`,
+`backing_off`, `auth_failed`, `off`), `endpoint`, `consecutive_failures`, `last_error`,
+`last_success_unix`, `records_sent` and `bytes_sent`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
 `<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.

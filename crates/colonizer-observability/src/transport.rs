@@ -1,5 +1,7 @@
 //! OTLP/HTTP (#849): POSTs an encoded request to the signal's URL with the operator's headers, and
-//! sorts the answer into sent, retry later, or refused. Header values never appear in an error: an
+//! sorts the answer into sent, retry later, unauthorized, or refused. Only a refusal that is about
+//! the records (400, 413, 422) may lead to a record being dropped; every other failure keeps the
+//! batch for a later retry. Header values never appear in an error: an
 //! error is built from a status code and a redacted, capped slice of the response body, and every
 //! header value is cut out of it again before it leaves this module.
 
@@ -9,18 +11,76 @@ use crate::proto::collector::logs::v1::ExportLogsServiceResponse;
 use crate::proto::collector::metrics::v1::ExportMetricsServiceResponse;
 use crate::proto::collector::trace::v1::ExportTraceServiceResponse;
 use prost::Message;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+/// The longest a `Retry-After` is honoured for; a longer one waits this long and asks again.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 
 /// What became of one request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Accepted; `rejected` records were refused by the backend's partial success and are not
-    /// retried (an ack is an ack).
-    Sent { rejected: u64 },
-    /// Worth retrying after a backoff: the network, a timeout, 408, 429, 502, 503 or 504.
-    Retry(String),
-    /// Refused for this request's content (400, 413, …): retrying it unchanged cannot help.
+    /// retried (an ack is an ack). `message` is the partial success's `error_message`, if any (a
+    /// warning when `rejected` is 0). `bytes` is the request body as it went on the wire.
+    Sent {
+        rejected: u64,
+        message: Option<String>,
+        bytes: u64,
+    },
+    /// Worth retrying after a backoff: the network, a timeout, 408, 429, 5xx, or a status that says
+    /// nothing about the records (404, 405, 415, …). `after` is the server's `Retry-After` (429 and
+    /// 503 only), capped at [`MAX_RETRY_AFTER`].
+    Retry { message: String, after: Option<Duration> },
+    /// The credential was refused (401, 403, 407): the records are fine, the key is not. Nothing is
+    /// dropped; the batch waits for a working key.
+    Unauthorized { status: u16, message: String },
+    /// Refused for this request's records (400, 413, 422): retrying it unchanged cannot help, so
+    /// the exporter bisects it down to the record at fault.
     Refused { status: u16, message: String },
+}
+
+/// How a non-2xx status is handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    Retry,
+    Unauthorized,
+    Refused,
+}
+
+/// Sorts a non-2xx status. Only statuses that name or imply bad records are `Refused`; an unknown
+/// status keeps the batch (the ledgers are the spool, so holding costs nothing but time).
+pub fn classify(status: u16) -> Class {
+    match status {
+        401 | 403 | 407 => Class::Unauthorized,
+        400 | 413 | 422 => Class::Refused,
+        _ => Class::Retry,
+    }
+}
+
+/// A `Retry-After` value, either delay-seconds or an HTTP-date, as a delay from `now`, capped at
+/// [`MAX_RETRY_AFTER`]. A date in the past is no delay; anything unparseable is `None`.
+pub fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    let delay = if let Ok(secs) = value.parse::<u64>() {
+        Duration::from_secs(secs)
+    } else {
+        let at = http_date(value)?;
+        at.duration_since(now).unwrap_or(Duration::ZERO)
+    };
+    Some(delay.min(MAX_RETRY_AFTER))
+}
+
+/// An HTTP-date (RFC 9110 §5.6.7): the IMF-fixdate form, and the obsolete RFC 850 and asctime forms.
+fn http_date(value: &str) -> Option<SystemTime> {
+    use chrono::{DateTime, NaiveDateTime};
+    let parsed = DateTime::parse_from_rfc2822(value)
+        .map(|d| d.naive_utc())
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%A, %d-%b-%y %H:%M:%S GMT"))
+        .or_else(|_| NaiveDateTime::parse_from_str(value, "%a %b %e %H:%M:%S %Y"))
+        .ok()?;
+    let secs = parsed.and_utc().timestamp();
+    let secs = u64::try_from(secs).ok()?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 /// One OTLP/HTTP destination.
@@ -91,24 +151,42 @@ impl Transport {
         for (name, value) in &self.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
+        let wire_bytes = body.len() as u64;
         let response = match builder.body(body).send().await {
             Ok(r) => r,
             // reqwest's error names the URL, which carries no credential (the mothership refuses
             // userinfo and query strings), never a header.
-            Err(e) => return Outcome::Retry(self.scrub(&format!("{url}: {}", without_url(&e)))),
+            Err(e) => {
+                return Outcome::Retry {
+                    message: self.scrub(&format!("{url}: {}", without_url(&e))),
+                    after: None,
+                };
+            }
         };
         let status = response.status().as_u16();
+        let after = match status {
+            429 | 503 => response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| retry_after(v, SystemTime::now())),
+            _ => None,
+        };
         let bytes = response.bytes().await.unwrap_or_default();
         if (200..300).contains(&status) {
+            let (rejected, message) = partial_success(request, self.encoding, &bytes);
             return Outcome::Sent {
-                rejected: rejected(request, self.encoding, &bytes),
+                rejected,
+                message: message.map(|m| self.scrub(&cap(&m))),
+                bytes: wire_bytes,
             };
         }
         let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned();
         let message = self.scrub(&format!("{url} answered {status}: {}", snippet.trim()));
-        match status {
-            408 | 429 | 502 | 503 | 504 => Outcome::Retry(message),
-            _ => Outcome::Refused { status, message },
+        match classify(status) {
+            Class::Retry => Outcome::Retry { message, after },
+            Class::Unauthorized => Outcome::Unauthorized { status, message },
+            Class::Refused => Outcome::Refused { status, message },
         }
     }
 
@@ -138,33 +216,53 @@ fn without_url(e: &reqwest::Error) -> String {
     chain.last().cloned().unwrap_or_else(|| "request failed".into())
 }
 
-/// The records a 2xx answer's `partial_success` says were refused.
-fn rejected(request: &Request, encoding: Encoding, body: &[u8]) -> u64 {
-    if body.is_empty() {
-        return 0;
+/// `text` cut to 300 bytes on a character boundary.
+fn cap(text: &str) -> String {
+    let mut end = text.len().min(300);
+    while !text.is_char_boundary(end) {
+        end -= 1;
     }
-    let n = match encoding {
+    text[..end].trim().to_string()
+}
+
+/// A 2xx answer's `partial_success`: how many records it says were refused, and its message.
+pub(crate) fn partial_success(request: &Request, encoding: Encoding, body: &[u8]) -> (u64, Option<String>) {
+    if body.is_empty() {
+        return (0, None);
+    }
+    let (n, message) = match encoding {
         Encoding::Protobuf => match request {
             Request::Logs(_) => ExportLogsServiceResponse::decode(body)
                 .ok()
                 .and_then(|r| r.partial_success)
-                .map(|p| p.rejected_log_records),
+                .map(|p| (p.rejected_log_records, p.error_message)),
             Request::Metrics(_) => ExportMetricsServiceResponse::decode(body)
                 .ok()
                 .and_then(|r| r.partial_success)
-                .map(|p| p.rejected_data_points),
+                .map(|p| (p.rejected_data_points, p.error_message)),
             Request::Traces(_) => ExportTraceServiceResponse::decode(body)
                 .ok()
                 .and_then(|r| r.partial_success)
-                .map(|p| p.rejected_spans),
-        },
-        Encoding::Json => serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|v| {
-            let p = v.get("partialSuccess")?;
-            ["rejectedLogRecords", "rejectedDataPoints", "rejectedSpans"]
-                .iter()
-                .find_map(|k| p.get(*k))
-                .and_then(|n| n.as_i64().or_else(|| n.as_str().and_then(|s| s.parse().ok())))
-        }),
+                .map(|p| (p.rejected_spans, p.error_message)),
+        }
+        .unwrap_or((0, String::new())),
+        Encoding::Json => serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                let p = v.get("partialSuccess")?;
+                let n = ["rejectedLogRecords", "rejectedDataPoints", "rejectedSpans"]
+                    .iter()
+                    .find_map(|k| p.get(*k))
+                    .and_then(|n| n.as_i64().or_else(|| n.as_str().and_then(|s| s.parse().ok())))
+                    .unwrap_or(0);
+                let m = p.get("errorMessage").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                Some((n, m))
+            })
+            .unwrap_or((0, String::new())),
     };
-    n.unwrap_or(0).max(0) as u64
+    let message = Some(message).filter(|m| !m.trim().is_empty());
+    (n.max(0) as u64, message)
 }
+
+#[cfg(test)]
+mod tests;

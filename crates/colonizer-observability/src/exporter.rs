@@ -5,8 +5,13 @@
 //!   nothing new is read while it waits, and nothing is committed, so a crash replays the same
 //!   lines (record ids are deterministic, so a backend that dedupes absorbs the replay).
 //! - **Backoff** is 1 s doubling to 60 s, with jitter, reset by the next success.
-//! - **Bisect:** a request the backend refuses outright (400, 413) is split in half and each half
-//!   retried, down to one record, which is then dropped and counted rather than retried forever.
+//! - **Bisect:** a request the backend refuses for its records (400, 413, 422) is split in half and
+//!   each half retried, down to one record, which is then dropped and counted rather than retried
+//!   forever. Nothing else is ever dropped by the transport.
+//! - **A bad credential drops nothing:** 401, 403 and 407 hold the batch and its cursors, set the
+//!   health to `auth_failed`, and retry with backoff until the key works (a fixed key reaches a
+//!   running add-on as a restart, which replays from the committed cursors).
+//! - **`Retry-After`** on a 429 or 503 is honoured (seconds or an HTTP-date, capped at 5 minutes).
 //! - **Bounded memory:** each tick reads at most `max_read_mib_per_sec` worth of lines (and at most
 //!   [`MAX_ITEMS_PER_TICK`] records), so the outbox is never more than one tick's batch. During an
 //!   outage the backlog stays on disk; a line older than `max_backlog_days` is dropped (the oldest
@@ -19,6 +24,8 @@ use crate::contract::{self, Contract};
 use crate::cursor::{Cursor, Limits, read_batch};
 use crate::encode::Request;
 use crate::hashing::HashKey;
+pub use crate::health::Status;
+use crate::health::{PartialSuccess, backlog_bytes};
 use crate::map::{Mapper, ts_nanos};
 use crate::metrics::Aggregates;
 use crate::policy::{AttrValue, ContentGate, Policy, PolicyConfig, RepoNames};
@@ -27,8 +34,6 @@ use crate::proto::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::sources::{self, SourceFile};
 use crate::state::{CursorKey, Signal, State};
 use crate::transport::{Outcome, Transport};
-use serde::Serialize;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -48,27 +53,25 @@ pub fn now_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-/// The exporter's health, written to `<data>/observability/status.json` for the mothership. It
-/// holds counts and an error string, never a header or a record.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct Status {
-    pub version: &'static str,
-    pub contract: u32,
-    pub state: &'static str,
-    pub heartbeat_unix: u64,
-    pub last_success_unix: Option<u64>,
-    pub last_error: Option<String>,
-    pub exported: u64,
-    pub dropped: BTreeMap<String, u64>,
-    pub export_failures: u64,
-}
-
 /// Requests built but not yet acknowledged, and what to commit once they are.
 struct Outbox {
     requests: Vec<Request>,
     records: u64,
     cursors: Vec<(CursorKey, Cursor)>,
     aggregates: Aggregates,
+}
+
+/// Why a flush stopped short: the outbox is kept for the next try.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    /// Retry after a backoff, or after the server's `Retry-After` when it gave one.
+    Retry(Option<Duration>),
+    /// The credential was refused.
+    Auth,
+}
+
+fn unix_now() -> u64 {
+    now_nanos() / 1_000_000_000
 }
 
 pub struct Exporter {
@@ -219,7 +222,8 @@ impl Exporter {
         if gap.is_some() {
             aggregates.drop_count("state_reset", 1);
         }
-        Ok(Exporter {
+        let endpoint = colonizer_redact::redact_text(&contract.settings.endpoint).into_owned();
+        let mut exporter = Exporter {
             destination: destination_hash(&contract),
             contract_mtime: std::fs::metadata(contract_path).and_then(|m| m.modified()).ok(),
             contract_path: contract_path.to_path_buf(),
@@ -238,10 +242,27 @@ impl Exporter {
                 version: env!("CARGO_PKG_VERSION"),
                 contract: contract::CONTRACT,
                 state: "starting",
+                endpoint,
                 ..Status::default()
             },
             last_status_write: None,
-        })
+        };
+        exporter.init_signals();
+        Ok(exporter)
+    }
+
+    /// One health entry per signal, `off` when its streams are switched off.
+    fn init_signals(&mut self) {
+        let s = &self.contract.settings;
+        let logs_on = s.stream_operational || s.stream_activity;
+        for (name, path, on) in [("logs", "/v1/logs", logs_on), ("metrics", "/v1/metrics", s.stream_metrics)] {
+            let endpoint = colonizer_redact::redact_text(&s.url(path)).into_owned();
+            let entry = self.status.signal(name);
+            entry.endpoint = endpoint;
+            if !on {
+                entry.state = "off";
+            }
+        }
     }
 
     /// The contract's colony list changes as colonies come and go; the settings never change under
@@ -265,22 +286,28 @@ impl Exporter {
             return delay - at.elapsed();
         }
         self.reload_policy();
+        let before = self.status.state;
         if self.outbox.is_none() {
             self.outbox = Some(self.read());
         }
         let wait = match self.flush().await {
-            true => {
+            None => {
                 self.backoff = None;
                 self.push_metrics().await;
                 TICK
             }
-            false => {
-                let delay = next_backoff(self.backoff.map(|(_, d)| d));
+            Some(held) => {
+                let delay = match held {
+                    Held::Retry(Some(after)) => after.max(BACKOFF_START),
+                    Held::Retry(None) | Held::Auth => next_backoff(self.backoff.map(|(_, d)| d)),
+                };
                 self.backoff = Some((Instant::now(), delay));
+                self.status.next_retry_unix = Some(unix_now() + delay.as_secs_f64().ceil() as u64);
                 delay
             }
         };
-        self.write_status(false);
+        // A change of state (say, to `auth_failed`) is written at once, not after the rate limit.
+        self.write_status(self.status.state != before);
         wait
     }
 
@@ -372,19 +399,30 @@ impl Exporter {
         }
     }
 
-    /// Sends the outbox; on success commits its cursors and series and returns true. On a
-    /// retryable failure keeps what is left and returns false.
-    async fn flush(&mut self) -> bool {
-        let Some(mut outbox) = self.outbox.take() else {
-            return true;
-        };
+    /// Sends the outbox; on success commits its cursors and series and returns `None`. On any
+    /// failure but a record-level refusal, keeps what is left (cursors uncommitted) and says why.
+    async fn flush(&mut self) -> Option<Held> {
+        let mut outbox = self.outbox.take()?;
         while let Some(request) = outbox.requests.first().cloned() {
             match self.transport.send(&request).await {
-                Outcome::Sent { rejected } => {
+                Outcome::Sent {
+                    rejected,
+                    message,
+                    bytes,
+                } => {
                     outbox.aggregates.drop_count("rejected", rejected);
                     outbox.requests.remove(0);
-                    self.status.last_success_unix = Some(now_nanos() / 1_000_000_000);
-                    self.status.last_error = None;
+                    let now = unix_now();
+                    if rejected > 0 || message.is_some() {
+                        self.status.last_partial_success = Some(PartialSuccess {
+                            at_unix: now,
+                            signal: "logs",
+                            rejected,
+                            message,
+                        });
+                    }
+                    let accepted = (request.len() as u64).saturating_sub(rejected);
+                    self.status.success("logs", now, accepted, bytes);
                 }
                 Outcome::Refused { message, .. } => {
                     outbox.requests.remove(0);
@@ -400,13 +438,21 @@ impl Exporter {
                     }
                     self.status.last_error = Some(message);
                 }
-                Outcome::Retry(message) => {
+                Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
                     outbox.aggregates.export_failures = self.aggregates.export_failures;
-                    self.status.last_error = Some(message);
+                    self.status.failure("logs", "auth_failed", message);
+                    self.status.state = "auth_failed";
+                    self.outbox = Some(outbox);
+                    return Some(Held::Auth);
+                }
+                Outcome::Retry { message, after } => {
+                    self.aggregates.export_failures += 1;
+                    outbox.aggregates.export_failures = self.aggregates.export_failures;
+                    self.status.failure("logs", "backing_off", message);
                     self.status.state = "retrying";
                     self.outbox = Some(outbox);
-                    return false;
+                    return Some(Held::Retry(after));
                 }
             }
         }
@@ -422,10 +468,12 @@ impl Exporter {
             serde_json::to_value(&self.aggregates).unwrap_or_default(),
         );
         if changed {
-            let _ = self.state.commit(&self.data_dir, false);
+            // Forced: the cursors of an acknowledged batch are written now, in one atomic write
+            // with the series, so a crash after an ack replays at most the batch in flight.
+            let _ = self.state.commit(&self.data_dir, true);
         }
         self.status.state = "running";
-        true
+        None
     }
 
     /// Pushes every metric point when the interval has passed. Points are cumulative, so a failed
@@ -452,11 +500,33 @@ impl Exporter {
             batcher.push(p);
         }
         for request in batcher.finish().requests {
+            let records = request.len() as u64;
             match self.transport.send(&request).await {
-                Outcome::Sent { .. } => {}
-                Outcome::Retry(message) | Outcome::Refused { message, .. } => {
+                Outcome::Sent {
+                    rejected,
+                    message,
+                    bytes,
+                } => {
+                    let now = unix_now();
+                    if rejected > 0 || message.is_some() {
+                        self.status.last_partial_success = Some(PartialSuccess {
+                            at_unix: now,
+                            signal: "metrics",
+                            rejected,
+                            message,
+                        });
+                    }
+                    self.status.success("metrics", now, records.saturating_sub(rejected), bytes);
+                }
+                Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
-                    self.status.last_error = Some(message);
+                    self.status.failure("metrics", "auth_failed", message);
+                    break;
+                }
+                Outcome::Retry { message, .. } | Outcome::Refused { message, .. } => {
+                    self.aggregates.export_failures += 1;
+                    self.status.failure("metrics", "backing_off", message);
+                    break;
                 }
             }
         }
@@ -467,8 +537,9 @@ impl Exporter {
         if !force && self.last_status_write.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             return;
         }
-        self.status.heartbeat_unix = now_nanos() / 1_000_000_000;
+        self.status.heartbeat_unix = unix_now();
         self.status.exported = self.aggregates.exported;
+        self.status.backlog_bytes = self.backlog();
         self.status.dropped = self.aggregates.dropped.clone();
         self.status.export_failures = self.aggregates.export_failures;
         if let Ok(bytes) = serde_json::to_vec_pretty(&self.status) {
@@ -479,6 +550,21 @@ impl Exporter {
             let _ = crate::write_atomic(&path, &bytes);
         }
         self.last_status_write = Some(Instant::now());
+    }
+
+    /// The ledger bytes not yet behind a committed cursor, over every source.
+    fn backlog(&self) -> u64 {
+        sources::discover(&self.data_dir, &self.contract.settings)
+            .iter()
+            .map(|file| {
+                let key = CursorKey {
+                    destination_hash: self.destination.clone(),
+                    signal: file.signal,
+                    relative_path: file.relative.clone(),
+                };
+                backlog_bytes(file, &self.state.cursor(&key))
+            })
+            .sum()
     }
 
     /// The last commit, forced, and a final status: called on a clean shutdown.
@@ -553,8 +639,13 @@ pub async fn send_test(contract: &Contract, headers: Vec<(String, String)>) -> s
             continue;
         };
         let result = match transport.send(&request).await {
-            Outcome::Sent { rejected } => serde_json::json!({"ok": rejected == 0, "rejected": rejected}),
-            Outcome::Retry(e) => serde_json::json!({"ok": false, "error": e}),
+            Outcome::Sent { rejected, message, .. } => {
+                serde_json::json!({"ok": rejected == 0, "rejected": rejected, "message": message})
+            }
+            Outcome::Retry { message, .. } => serde_json::json!({"ok": false, "error": message}),
+            Outcome::Unauthorized { status, message } => {
+                serde_json::json!({"ok": false, "status": status, "auth_failed": true, "error": message})
+            }
             Outcome::Refused { status, message } => serde_json::json!({"ok": false, "status": status, "error": message}),
         };
         ok &= result["ok"] == true;
