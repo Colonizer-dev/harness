@@ -5,7 +5,7 @@
 // response bodies live only in memory, never in state.storage.
 
 import { b64decode, b64encode, randomToken, verifyEd25519 } from './crypto.js';
-import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, helloMessage, pathTemplate, stripHopByHop } from './protocol.js';
+import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, helloMessage, pathTemplate, responseHeaders, stripHopByHop } from './protocol.js';
 import { offlinePage } from './pages.js';
 import { runtime } from './runtime.js';
 
@@ -170,7 +170,7 @@ export class InstallTunnel {
     if (!Number.isInteger(status) || status < 200 || status > 599) return this.#failPending(s, 502);
     let headers;
     try {
-      headers = stripHopByHop(frame.headers);
+      headers = responseHeaders(frame.headers);
     } catch {
       // A malformed header list must fail the request, not throw past the message handler and hang it.
       return this.#failPending(s, 502);

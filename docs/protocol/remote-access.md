@@ -115,7 +115,10 @@ After the hello, frames go both ways:
   larger than 10 MiB is refused with **413**, and one that never ends within a minute per frame
   is answered **408** — a stream is never left hanging without a status.
 - `{"t": "res", "id", "status", "headers"}` answers a request (hop-by-hop headers stripped, the
-  same list both sides), followed by the answer's body frames, the last with `end: true`.
+  same list both sides), followed by the answer's body frames, the last with `end: true`. Every
+  `set-cookie` in it carries `Secure` (added when the handler left it off), since the browser
+  only ever reaches the tunnel over `https://<host>`; the relay then drops any `Domain` attribute,
+  so the cookie stays on that one host.
 - `{"t": "ws_open", "id", "path", "headers"}` opens a tunnelled WebSocket: the mothership dials
   its own router over an in-memory connection, so the upgrade is a real one. `ws_msg`
   `{"t": "ws_msg", "id", "data", "binary"}` carries text as-is and binary as base64; `ws_close`

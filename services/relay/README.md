@@ -109,6 +109,11 @@ Confirming is local-only at the mothership — never through the tunnel.
 Both cookies are `__Host-` prefixed: `Secure; HttpOnly; SameSite=Lax; Path=/`, no `Domain`, sealed with
 HMAC-SHA256 under the `SESSION_SECRET` secret and verified in constant time.
 
+Cookies the cockpit sets come back host-only (review finding R4): the DO drops every `Domain` attribute
+from a forwarded `set-cookie`, so one install can never set a cookie on `my.colonizer.dev` or a sibling
+install, and drops outright any cookie named like one of the two above (`hostOnlyCookie`,
+`src/protocol.js`).
+
 ## Deploy (done by a human, out of scope for the PR)
 
 From this directory:

@@ -667,3 +667,29 @@ test('retiring the install closes its live tunnel 4404 and fails what rides on i
   // Nothing is left to forward to.
   assert.equal((await relay.fetch(proxyRequest('/after'))).status, 502);
 });
+
+test('a cockpit set-cookie reaches the browser host-only, and never as one of the relay cookies (R4)', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  await ms.connect(relay);
+  const pending = within(relay.fetch(proxyRequest('/cookies')), 'cookie response never finished');
+  const req = await within(ms.next('req'), 'no req frame');
+  ms.send({
+    t: 'res',
+    id: req.id,
+    status: 200,
+    headers: [
+      ['set-cookie', 'colonizer_token=t; Domain=my.colonizer.dev; HttpOnly; Path=/'],
+      ['set-cookie', 'wide=1;domain=.my.colonizer.dev;Secure'],
+      ['set-cookie', 'twice=2; DOMAIN=a.example; Path=/; Domain=b.example'],
+      ['set-cookie', 'plain=3; Path=/'],
+      ['set-cookie', '__Host-colonizer_session=forged; Secure; Path=/'],
+      ['set-cookie', '__HOST-COLONIZER_OAUTH=forged; Secure; Path=/'],
+    ],
+  });
+  ms.send({ t: 'body', id: req.id, chunk: '', end: true });
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.headers.getSetCookie(), ['colonizer_token=t; HttpOnly; Path=/', 'wide=1;Secure', 'twice=2; Path=/', 'plain=3; Path=/']);
+  ms.socket.close();
+});

@@ -1149,7 +1149,14 @@ async fn serve_req(
         .iter()
         // A header value that is not visible ASCII cannot ride a JSON frame; it is dropped.
         .filter(|(name, value)| !is_hop_by_hop(name.as_str()) && value.to_str().is_ok())
-        .map(|(name, value)| json!([name.as_str(), value.to_str().unwrap_or_default()]))
+        .map(|(name, value)| {
+            let value = value.to_str().unwrap_or_default();
+            if name == header::SET_COOKIE {
+                json!([name.as_str(), secure_cookie(value)])
+            } else {
+                json!([name.as_str(), value])
+            }
+        })
         .collect();
     conn.emit(json!({"t": "res", "id": &id, "status": res.status().as_u16(), "headers": head}).to_string())
         .await;
@@ -1401,6 +1408,21 @@ fn clean_headers(headers: Option<Value>, ws: bool) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A `Set-Cookie` value as it may leave through the tunnel (review finding R4): the browser reaches
+/// the cockpit there only over `https://<host>`, so every cookie gets `Secure` if it lacks it. The
+/// cockpit's own cookies stay without it on localhost and the LAN, which are plain `http://`.
+fn secure_cookie(value: &str) -> String {
+    let secure = value
+        .split(';')
+        .skip(1)
+        .any(|attribute| attribute.trim().eq_ignore_ascii_case("secure"));
+    if secure {
+        value.to_string()
+    } else {
+        format!("{value}; Secure")
+    }
+}
+
 /// The RFC 9110 §7.6.1 hop-by-hop headers, stripped on both sides of the tunnel.
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
@@ -1608,6 +1630,7 @@ mod tests {
             .route("/api/activity", get(crate::activity::list))
             .route("/api/stream", get(crate::stream::handler))
             .route("/api/big", get(big_answer))
+            .route("/api/demo", get(demo))
             .route("/api/park", get(park_handler))
             .layer(Extension(park))
             .layer(middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
@@ -1769,6 +1792,30 @@ mod tests {
         assert_eq!(view["enabled"], true);
         assert_eq!(view["host"], host.as_str());
         assert_eq!(view["connected"], true, "the supervisor knows its tunnel is live");
+    }
+
+    #[tokio::test]
+    async fn cookies_leave_the_tunnel_secure() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        ws.send(req_frame("c", "GET", "/api/demo", headers)).await.unwrap();
+        let (status, head, _) = read_response(&mut ws, "c", "the cookie answer").await;
+        assert_eq!(status, 201);
+        let cookies: Vec<&str> = head
+            .iter()
+            .filter(|pair| pair[0] == "set-cookie")
+            .map(|pair| pair[1].as_str().unwrap())
+            .collect();
+        assert_eq!(cookies, ["one=1; Path=/; HttpOnly; Secure", "two=2; Path=/; Secure"]);
+        // The same handler on localhost keeps its cookies as they were: plain http has no Secure.
+        assert_eq!(secure_cookie("a=1; secure"), "a=1; secure");
+        assert_eq!(secure_cookie("a=1; Path=/"), "a=1; Path=/; Secure");
+        assert_eq!(
+            secure_cookie("secure=1"),
+            "secure=1; Secure",
+            "a cookie named secure is not the attribute"
+        );
     }
 
     #[tokio::test]
