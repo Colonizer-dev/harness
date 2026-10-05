@@ -146,9 +146,12 @@ fn chrono_now() -> String {
 
 /// Writes the contract for `url` and returns its path.
 fn contract(root: &Root, url: &str, edit: impl FnOnce(&mut Settings)) -> PathBuf {
+    // These tests write their lines before the exporter starts, so they read the backlog; the
+    // `start_from = now` default has tests of its own below.
     let mut settings = Settings {
         endpoint: url.to_string(),
         stream_metrics: false,
+        start_from: contract::START_BACKLOG.into(),
         ..Settings::default()
     };
     edit(&mut settings);
@@ -666,4 +669,74 @@ async fn no_canary_reaches_the_wire() {
     for request in &seen {
         crate::testkit::assert_absent(&request.body, canaries.secrets(), &request.path);
     }
+}
+
+#[tokio::test]
+async fn a_new_destination_starts_now_and_a_restart_never_skips_again() {
+    let root = root("start-now");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "history");
+    append(
+        &root.0.join("activity.jsonl"),
+        &serde_json::json!({"seq": 1, "ts": chrono_now(), "kind": "colony.launch", "actor": "you"}),
+    );
+    let path = contract(&root, &collector.url, |s| s.start_from = contract::START_NOW.into());
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    assert!(collector.bodies().is_empty(), "nothing historical: {:?}", collector.bodies());
+
+    harness(&root, "after start");
+    x.tick().await;
+    assert_eq!(collector.bodies(), ["after start"]);
+
+    // Lines written while the add-on is down are delivered after a restart: the start is settled
+    // once per destination, not on every start.
+    x.shutdown();
+    harness(&root, "while down");
+    let mut y = Exporter::new(&path, Vec::new()).unwrap();
+    y.tick().await;
+    assert_eq!(collector.bodies(), ["after start", "while down"]);
+
+    // A colony that appears later is read from its first line.
+    std::fs::create_dir_all(root.0.join("sessions/beef0002")).unwrap();
+    append(
+        &root.0.join("sessions/beef0002/harness.jsonl"),
+        &serde_json::json!({"type": "harness_log", "level": "info", "message": "new colony", "ts": chrono_now()}),
+    );
+    let mut c: Contract = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    c.policy.insert("beef0002".into(), ColonyPolicy::default());
+    std::fs::write(&path, serde_json::to_vec(&c).unwrap()).unwrap();
+    y.contract_mtime = None;
+    y.tick().await;
+    assert_eq!(collector.bodies(), ["after start", "while down", "new colony"]);
+}
+
+#[tokio::test]
+async fn start_from_backlog_sends_what_the_ledgers_already_hold() {
+    let root = root("start-backlog");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "history");
+    let path = contract(&root, &collector.url, |s| s.start_from = contract::START_BACKLOG.into());
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    assert_eq!(collector.bodies(), ["history"]);
+}
+
+#[tokio::test]
+async fn an_existing_install_keeps_its_read_positions_when_start_from_arrives() {
+    // State written by a build without `start_from`: cursors, no settled destinations. Upgrading
+    // must not skip what that build had not read yet.
+    let root = root("start-upgrade");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "read before");
+    let path = contract(&root, &collector.url, |s| s.start_from = contract::START_BACKLOG.into());
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    x.state.extra.remove(DESTINATIONS_KEY);
+    x.shutdown();
+    harness(&root, "unread at upgrade");
+    let path = contract(&root, &collector.url, |s| s.start_from = contract::START_NOW.into());
+    let mut y = Exporter::new(&path, Vec::new()).unwrap();
+    y.tick().await;
+    assert_eq!(collector.bodies(), ["read before", "unread at upgrade"]);
 }

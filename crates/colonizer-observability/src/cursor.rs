@@ -149,6 +149,8 @@ pub(crate) struct Batch {
     /// The SHA-256 of each line's raw bytes (newline excluded), parallel to `lines`: the record id's
     /// key for a source with no `seq` (docs/design/observability.md, Identity).
     pub(crate) digests: Vec<[u8; 32]>,
+    /// Each line's size on disk, newline included, parallel to `lines`: what a skipped line costs.
+    pub(crate) sizes: Vec<u64>,
     pub(crate) cursor: Cursor,
     pub(crate) gaps: Vec<Gap>,
     /// Whole lines that would not parse as JSON (or UTF-8), skipped rather than fatal.
@@ -162,6 +164,7 @@ impl Batch {
         Batch {
             lines: Vec::new(),
             digests: Vec::new(),
+            sizes: Vec::new(),
             cursor: Cursor::default(),
             gaps: Vec::new(),
             malformed: 0,
@@ -273,6 +276,38 @@ pub(crate) fn read_batch(path: &Path, rolled: Option<&Path>, cursor: &Cursor, li
         },
     }
     Ok(scan.out)
+}
+
+/// A cursor bound to the live file just past its last complete line, so nothing already in it is
+/// read: where a new destination starts when it starts "now". `None` when the file does not exist
+/// (it then starts at 0 once it appears, so nothing written later is missed).
+pub(crate) fn at_end(path: &Path) -> io::Result<Option<Cursor>> {
+    let Some(mut file) = open_opt(path)? else {
+        return Ok(None);
+    };
+    let meta = file.metadata()?;
+    let len = meta.len();
+    // Walk back from the end in chunks to the last newline: a trailing fragment is a line still
+    // being written, and starts the stream.
+    let mut end = len;
+    let mut chunk = vec![0u8; CHUNK];
+    let mut offset = 0;
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK as u64);
+        let n = (end - start) as usize;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk[..n])?;
+        if let Some(i) = chunk[..n].iter().rposition(|&b| b == b'\n') {
+            offset = start + i as u64 + 1;
+            break;
+        }
+        end = start;
+    }
+    Ok(Some(Cursor {
+        file_id: Some(FileId::of(&meta)),
+        offset,
+        last_key: None,
+    }))
 }
 
 /// The opened rolled file, when it is the one the cursor named.
@@ -445,6 +480,7 @@ impl Scan<'_> {
                 let mut bytes = [0u8; 32];
                 bytes.copy_from_slice(digest.as_ref());
                 self.out.digests.push(bytes);
+                self.out.sizes.push(line.len() as u64 + 1);
             }
             None => self.out.malformed += 1,
         }

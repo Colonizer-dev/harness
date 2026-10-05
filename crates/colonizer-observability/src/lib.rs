@@ -15,7 +15,8 @@
 //!
 //! - [`contract`] is what the mothership hands over: `exporter.json` and the headers on stdin.
 //! - `cursor` and `state` tail a jsonl file safely across rotation and truncation (#842), and
-//!   [`sources`] lists which files are tailed for which signal.
+//!   [`sources`] lists which files are tailed for which signal; [`tailer`] reads them all fairly,
+//!   within a budget, with gap records for every hole (#843).
 //! - [`map`] turns ledger lines into log records and [`metrics`] folds them into metric series.
 //! - [`transport`] is OTLP/HTTP, and [`exporter`] is the loop: read, map, send, commit on ack.
 //!
@@ -33,6 +34,7 @@ pub mod metrics;
 pub mod policy;
 pub(crate) mod sources;
 pub(crate) mod state;
+pub(crate) mod tailer;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod transport;

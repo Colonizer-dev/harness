@@ -13,38 +13,43 @@
 //!   running add-on as a restart, which replays from the committed cursors).
 //! - **`Retry-After`** on a 429 or 503 is honoured (seconds or an HTTP-date, capped at 5 minutes).
 //! - **Bounded memory:** each tick reads at most `max_read_mib_per_sec` worth of lines (and at most
-//!   [`MAX_ITEMS_PER_TICK`] records), so the outbox is never more than one tick's batch. During an
-//!   outage the backlog stays on disk; a line older than `max_backlog_days` is dropped (the oldest
-//!   data first) and counted in `colonizer.observability.dropped{reason="backlog"}`.
+//!   [`crate::tailer::MAX_ITEMS_PER_TICK`] records), shared fairly among the sources by the [`crate::tailer`], so
+//!   the outbox is never more than one tick's batch. During an outage the backlog stays on disk; a
+//!   line older than `max_backlog_days` is dropped (the oldest data first), counted in
+//!   `colonizer.observability.dropped{reason="backlog"}`, and reported by one `export_gap` record.
+//! - **Where a new destination starts:** `start_from = now` (the default) binds every file that
+//!   exists to its end the first time a destination is seen, so nothing historical is sent;
+//!   `backlog` reads every file from its start, within `max_backlog_days`.
 //! - **Never in a colony's way:** this is a separate process the mothership supervises; nothing in a
 //!   colony's path waits on it.
 
 use crate::batch::{BatchConfig, Batcher, ExportResource};
 use crate::contract::{self, Contract};
-use crate::cursor::{Cursor, Limits, read_batch};
+use crate::cursor::Cursor;
 use crate::encode::Request;
 use crate::hashing::HashKey;
 pub use crate::health::Status;
 use crate::health::{PartialSuccess, backlog_bytes};
-use crate::map::{Mapper, ts_nanos};
+use crate::map::Mapper;
 use crate::metrics::Aggregates;
 use crate::policy::{AttrValue, ContentGate, Policy, PolicyConfig, RepoNames};
 use crate::proto::collector::logs::v1::ExportLogsServiceRequest;
 use crate::proto::collector::metrics::v1::ExportMetricsServiceRequest;
-use crate::sources::{self, SourceFile};
+use crate::sources;
 use crate::state::{CursorKey, Signal, State};
+use crate::tailer::{Inputs, Tailer};
 use crate::transport::{Outcome, Transport};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The most records one tick maps; the rest wait on disk for the next tick.
-pub const MAX_ITEMS_PER_TICK: usize = 20_000;
 /// The pause between ticks with nothing to retry.
 pub const TICK: Duration = Duration::from_secs(1);
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_CAP: Duration = Duration::from_secs(60);
 /// The key the metric series are committed under in `state.json`'s `extra`.
 const METRICS_KEY: &str = "metrics";
+/// The key, in `state.json`'s `extra`, of the destinations whose start position is settled.
+const DESTINATIONS_KEY: &str = "destinations";
 
 pub fn now_nanos() -> u64 {
     SystemTime::now()
@@ -58,6 +63,10 @@ struct Outbox {
     requests: Vec<Request>,
     records: u64,
     cursors: Vec<(CursorKey, Cursor)>,
+    /// Read positions of deleted colonies, dropped on commit.
+    removed: Vec<CursorKey>,
+    /// Colonies found deleted, recorded on commit so they are never stat'ed again.
+    gone: Vec<String>,
     aggregates: Aggregates,
 }
 
@@ -88,8 +97,10 @@ pub struct Exporter {
     outbox: Option<Outbox>,
     backoff: Option<(Instant, Duration)>,
     last_metrics: Option<Instant>,
-    /// Where the round-robin over sources starts next tick, so a busy file cannot starve the rest.
-    rotation: usize,
+    /// The multi-source reader: fairness, rate limit, drained and deleted colonies.
+    tailer: Tailer,
+    /// The `export_gap` records of the last read, as the tailer produced them.
+    pub(crate) last_gaps: Vec<serde_json::Value>,
     pub status: Status,
     last_status_write: Option<Instant>,
 }
@@ -237,7 +248,8 @@ impl Exporter {
             outbox: None,
             backoff: None,
             last_metrics: None,
-            rotation: 0,
+            tailer: Tailer::default(),
+            last_gaps: Vec::new(),
             status: Status {
                 version: env!("CARGO_PKG_VERSION"),
                 contract: contract::CONTRACT,
@@ -248,7 +260,44 @@ impl Exporter {
             last_status_write: None,
         };
         exporter.init_signals();
+        exporter.settle_start();
         Ok(exporter)
+    }
+
+    /// The first time a destination is seen, settles where it starts: with `start_from = now`
+    /// every existing file is bound to its end, so nothing historical is sent. Recorded in the
+    /// state, so a restart (or a later file) is never skipped again.
+    fn settle_start(&mut self) {
+        let mut settled: Vec<String> = self
+            .state
+            .extra
+            .get(DESTINATIONS_KEY)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        // A destination with read positions from before this setting existed is settled already.
+        let known =
+            settled.contains(&self.destination) || self.state.cursors.keys().any(|k| k.destination_hash == self.destination);
+        if known {
+            return;
+        }
+        if self.contract.settings.start_from != contract::START_BACKLOG {
+            let inputs = Inputs {
+                data_dir: &self.data_dir,
+                settings: &self.contract.settings,
+                colonies: &self.contract.policy,
+                state: &self.state,
+                destination: &self.destination,
+                now_unix_nanos: now_nanos(),
+            };
+            let mut seeded = self.state.clone();
+            crate::tailer::seed_at_end(&inputs, &mut seeded);
+            self.state = seeded;
+        }
+        settled.push(self.destination.clone());
+        self.state
+            .extra
+            .insert(DESTINATIONS_KEY.to_string(), serde_json::json!(settled));
+        let _ = self.state.commit(&self.data_dir, true);
     }
 
     /// One health entry per signal, `off` when its streams are switched off.
@@ -313,71 +362,38 @@ impl Exporter {
 
     /// Reads what is new in every source, within this tick's budget, into an outbox.
     fn read(&mut self) -> Outbox {
-        let settings = &self.contract.settings;
-        let files = sources::discover(&self.data_dir, settings);
-        let mut budget = settings.max_read_mib_per_sec.max(1) * 1024 * 1024 * TICK.as_secs().max(1);
-        let cutoff = match settings.max_backlog_days {
-            0 => 0,
-            days => now_nanos().saturating_sub(days * 86_400 * 1_000_000_000),
-        };
         let now = now_nanos();
+        let inputs = Inputs {
+            data_dir: &self.data_dir,
+            settings: &self.contract.settings,
+            colonies: &self.contract.policy,
+            state: &self.state,
+            destination: &self.destination,
+            now_unix_nanos: now,
+        };
+        let tailed = self.tailer.collect(&inputs);
         let mut aggregates = self.aggregates.clone();
-        let mut cursors = Vec::new();
-        let mut items = Vec::new();
+        for (reason, n) in &tailed.drops {
+            aggregates.drop_count(reason, *n);
+        }
         let mapper = Mapper {
             policy: &self.policy,
             host_id: &self.contract.host_id,
             colonies: &self.contract.policy,
             now_unix_nanos: now,
         };
-        let n = files.len();
-        let start = if n == 0 { 0 } else { self.rotation % n };
-        self.rotation = self.rotation.wrapping_add(1);
-        for i in 0..n {
-            if budget == 0 || items.len() >= MAX_ITEMS_PER_TICK {
-                break;
-            }
-            let file: &SourceFile = &files[(start + i) % n];
-            let key = CursorKey {
-                destination_hash: self.destination.clone(),
-                signal: file.signal,
-                relative_path: file.relative.clone(),
-            };
-            let cursor = self.state.cursor(&key);
-            if unchanged(file, &cursor) {
-                continue;
-            }
-            let limits = Limits {
-                max_bytes: budget.min(1024 * 1024),
-                max_lines: MAX_ITEMS_PER_TICK - items.len(),
-                max_line_bytes: 4 * 1024 * 1024,
-            };
-            let Ok(batch) = read_batch(&file.live, file.rolled.as_deref(), &cursor, &limits) else {
-                continue;
-            };
-            budget = budget.saturating_sub(batch.bytes_read.max(1));
-            for gap in &batch.gaps {
-                aggregates.drop_count(&format!("gap_{}", gap.reason.as_str()), 1);
-            }
-            aggregates.drop_count("malformed", batch.malformed);
-            for (line, digest) in batch.lines.iter().zip(&batch.digests) {
-                if cutoff > 0 && ts_nanos(line).is_some_and(|ts| ts < cutoff) {
-                    aggregates.drop_count("backlog", 1);
-                    continue;
-                }
-                match file.signal {
-                    Signal::Metrics => aggregates.fold(file.source, line),
-                    _ => {
-                        if let Some(item) = mapper.log(file.source, file.colony.as_deref(), line, digest) {
-                            items.push(item);
-                        }
+        let mut items = Vec::new();
+        for record in tailed.gaps.iter().chain(&tailed.records) {
+            match record.signal {
+                Signal::Metrics => aggregates.fold(record.source, &record.line),
+                _ => {
+                    if let Some(item) = mapper.log(record.source, record.colony.as_deref(), &record.line, &record.digest) {
+                        items.push(item);
                     }
                 }
             }
-            if batch.cursor != cursor {
-                cursors.push((key, batch.cursor));
-            }
         }
+        self.last_gaps = tailed.gaps.iter().map(|g| g.line.clone()).collect();
         let records = items.len() as u64;
         let mut batcher = Batcher::new(
             &self.resource,
@@ -394,7 +410,9 @@ impl Exporter {
         Outbox {
             requests: batch.requests,
             records,
-            cursors,
+            cursors: tailed.cursors,
+            removed: tailed.removed,
+            gone: tailed.gone,
             aggregates,
         }
     }
@@ -457,10 +475,26 @@ impl Exporter {
             }
         }
         // Everything acknowledged: commit the cursors and the series in one write.
-        let changed = !outbox.cursors.is_empty() || outbox.aggregates != self.aggregates;
+        let changed = !outbox.cursors.is_empty()
+            || !outbox.removed.is_empty()
+            || !outbox.gone.is_empty()
+            || outbox.aggregates != self.aggregates;
         outbox.aggregates.exported += outbox.records;
         for (key, cursor) in outbox.cursors {
             self.state.set_cursor(key, cursor);
+        }
+        for key in &outbox.removed {
+            self.state.cursors.remove(key);
+        }
+        if !outbox.gone.is_empty() {
+            // Only colonies the mothership still lists need remembering; one it dropped has no
+            // read positions left, so nothing would look for it again.
+            let mut gone = crate::tailer::gone(&self.state);
+            gone.extend(outbox.gone);
+            gone.retain(|id| self.contract.policy.contains_key(id));
+            self.state
+                .extra
+                .insert(crate::tailer::GONE_KEY.to_string(), serde_json::json!(gone));
         }
         self.aggregates = outbox.aggregates;
         self.state.extra.insert(
@@ -554,16 +588,17 @@ impl Exporter {
 
     /// The ledger bytes not yet behind a committed cursor, over every source.
     fn backlog(&self) -> u64 {
-        sources::discover(&self.data_dir, &self.contract.settings)
+        let gone = crate::tailer::gone(&self.state);
+        let colonies: Vec<String> = self
+            .contract
+            .policy
+            .keys()
+            .filter(|id| !gone.contains(*id))
+            .cloned()
+            .collect();
+        sources::discover(&self.data_dir, &self.contract.settings, &colonies)
             .iter()
-            .map(|file| {
-                let key = CursorKey {
-                    destination_hash: self.destination.clone(),
-                    signal: file.signal,
-                    relative_path: file.relative.clone(),
-                };
-                backlog_bytes(file, &self.state.cursor(&key))
-            })
+            .map(|file| backlog_bytes(file, &self.state.cursor(&crate::tailer::key(&self.destination, file))))
             .sum()
     }
 
@@ -578,18 +613,6 @@ impl Exporter {
 /// `<data>/observability/status.json`.
 pub fn status_path(data_dir: &Path) -> PathBuf {
     data_dir.join("observability").join("status.json")
-}
-
-/// A cheap skip: a bound cursor at the end of a file that has no rolled predecessor and has not
-/// grown. A rotation or truncation shows as a different length on the next tick.
-fn unchanged(file: &SourceFile, cursor: &Cursor) -> bool {
-    if file.rolled.is_some() || cursor.file_id.is_none() {
-        return false;
-    }
-    match std::fs::metadata(&file.live) {
-        Ok(meta) => meta.len() == cursor.offset,
-        Err(_) => false,
-    }
 }
 
 /// `send-test-event`: one log record and one metric point to the configured backend, and the

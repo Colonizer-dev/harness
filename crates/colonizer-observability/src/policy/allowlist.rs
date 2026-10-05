@@ -22,10 +22,12 @@ pub enum Source {
     JevLadder,
     JevFocus,
     Mothership,
+    /// The exporter's own `export_gap` record: a hole in what it could read (#843).
+    ExportGap,
 }
 
 impl Source {
-    pub const ALL: [Source; 11] = [
+    pub const ALL: [Source; 12] = [
         Source::Events,
         Source::Harness,
         Source::Gateway,
@@ -37,6 +39,7 @@ impl Source {
         Source::JevLadder,
         Source::JevFocus,
         Source::Mothership,
+        Source::ExportGap,
     ];
 
     /// The identifier record ids are computed over (`colonizer.rec.v1|…|<source>|…`).
@@ -53,6 +56,7 @@ impl Source {
             Source::JevLadder => "jev_ladder",
             Source::JevFocus => "jev_focus",
             Source::Mothership => "mothership",
+            Source::ExportGap => "export_gap",
         }
     }
 }
@@ -309,6 +313,10 @@ const JEV_FOCUS: &[Rule] = &[
     s("checks_run"),
 ];
 
+/// The exporter's `export_gap` record: why, how much, and where. `file` is a data-dir-relative
+/// ledger path (`sessions/<id>/events.jsonl`), never a repository path.
+const EXPORT_GAP: &[Rule] = &[s("reason"), s("file"), s("bytes"), s("lines"), s("archived")];
+
 /// `fields.*` stays off until #856 names the field keys it allows.
 const MOTHERSHIP: &[Rule] = &[s("level"), s("target")];
 
@@ -350,6 +358,7 @@ pub(crate) fn for_source(source: Source) -> [&'static [Rule]; 2] {
         Source::JevLadder => JEV_LADDER,
         Source::JevFocus => JEV_FOCUS,
         Source::Mothership => MOTHERSHIP,
+        Source::ExportGap => EXPORT_GAP,
     };
     [RECORD_COMMON, own]
 }
