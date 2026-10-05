@@ -1,8 +1,12 @@
-//! Ledger lines to OTLP log records (#845, first slice): the harness log, agent events, gateway
-//! requests, activity and the spend journal. Every value goes through the [`Policy`], so every
-//! attribute is allowlisted for its source, every string is redacted again and capped, and the
-//! content tier (prompts, completions, tool input and output, error text, paths, titles) stays
-//! behind the content gate — which this slice never opens.
+//! Ledger lines to OTLP log records (#845): every source but traces — the harness log, agent
+//! events, gateway requests, activity, the spend journal, findings, decisions, routing, the Jev
+//! ledgers, the mothership log and the exporter's own gap records. Every value goes through the
+//! [`Policy`], so every attribute is allowlisted for its source, every string is redacted again and
+//! capped, and the content tier (prompts, completions, tool input and output, error text, paths,
+//! titles, free-text reasons) stays behind the content gate, which this build never opens.
+//!
+//! Names (docs/design/observability.md, "Log record names"): the event name is `colonizer.<what>`
+//! in snake case, and a line's own fields keep their ledger names as attribute keys.
 
 use crate::batch::Item;
 use crate::contract::ColonyPolicy;
@@ -97,7 +101,76 @@ const GATEWAY_KEYS: [&str; 13] = [
     "output_tokens",
 ];
 
-const ACTIVITY_KEYS: [&str; 5] = ["kind", "actor", "colony", "repo", "target"];
+const ACTIVITY_KEYS: [&str; 6] = ["kind", "actor", "via", "colony", "repo", "target"];
+
+/// The activity kinds whose `detail` was reviewed and is harness-authored structure, sent as
+/// `summary`: a decision point's pick or miss (`decide.rs`), and the fixed suspension notice
+/// (`queue.rs`). Every other
+/// kind's `detail` (chat, questions, answers, error text, reasons, paths, and any kind added
+/// later) is content tier, behind the gate.
+pub const STRUCTURE_DETAIL_KINDS: [&str; 4] = ["decision.shadow", "decision.act", "decision.fallback", "outcome.suspended"];
+
+/// `findings.jsonl`: the finding's stage and links; its title and reason are content.
+const FINDING_KEYS: [&str; 8] = [
+    "state",
+    "issue",
+    "duplicate_of",
+    "severity",
+    "verdict",
+    "fix_session",
+    "review_session",
+    "pr",
+];
+
+/// `decisions.jsonl` (`decide::Row`); `options` is sent as a count, `outcome` as its scalars,
+/// `did` from its closed vocabulary.
+const DECISION_KEYS: [&str; 7] = ["kind", "point", "mode", "pick", "confidence", "latency_ms", "miss"];
+
+/// `decide::Row::did`'s words. The redactor reads a key ending in `id` as an identifier and skips
+/// its entropy layer, so `did` is never copied as free text: anything else is sent as `other`.
+const DID_WORDS: [&str; 3] = ["jev", "rule", "cap"];
+
+/// The scalars of a `routing.jsonl` `decision` row's record (boot.rs), sent as `decision.<key>`.
+const ROUTING_DECISION_KEYS: [&str; 12] = [
+    "point",
+    "jev_mode",
+    "jev_agrees",
+    "floor",
+    "tier",
+    "rule",
+    "source",
+    "score",
+    "model",
+    "agent",
+    "misroute",
+    "sensitivity",
+];
+
+const JEV_LADDER_KEYS: [&str; 7] = [
+    "kind",
+    "tool",
+    "tool_call_id",
+    "action",
+    "keep_call",
+    "keep_result",
+    "matched_tool_call_id",
+];
+
+/// `jev_focus.jsonl` (`verify_focus::FocusRow`); `candidates` is sent as a count.
+const JEV_FOCUS_KEYS: [&str; 10] = [
+    "kind",
+    "session",
+    "mode",
+    "chosen",
+    "would_catch",
+    "verdict",
+    "actual_first_failure_ms",
+    "focused_first_failure_ms",
+    "total_ms",
+    "checks_run",
+];
+
+const EXPORT_GAP_KEYS: [&str; 5] = ["reason", "file", "bytes", "lines", "archived"];
 
 const SPEND_KEYS: [&str; 11] = [
     "kind",
@@ -127,10 +200,22 @@ impl Mapper<'_> {
             (Source::Events | Source::Activity, Some(seq)) => seq.to_string(),
             _ => hex(digest),
         };
-        let colony_or_dash = colony.unwrap_or("-");
+        // The install-wide decision and Jev ledgers name their colony in the row's `session`; the
+        // record id keys on it (docs/design/observability.md, Source inventory).
+        let row_session = line.get("session").and_then(Value::as_str).filter(|s| !s.is_empty());
+        let per_row = matches!(
+            source,
+            Source::Decisions | Source::Routing | Source::JevLadder | Source::JevFocus
+        );
+        let colony_or_dash = if per_row {
+            row_session.unwrap_or("-")
+        } else {
+            colony.unwrap_or("-")
+        };
         let colony_id = match source {
             Source::Activity => line.get("colony").and_then(Value::as_str),
-            Source::Spend => line.get("session").and_then(Value::as_str),
+            Source::Spend => row_session,
+            _ if per_row => row_session,
             _ => colony,
         };
 
@@ -220,9 +305,17 @@ impl Mapper<'_> {
             }
             Source::Activity => {
                 let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
-                // `detail` is content for chat, question and answer lines and error text on the
-                // rest: it is never copied here.
-                copy(log, &ACTIVITY_KEYS)
+                let mut log = copy(log, &ACTIVITY_KEYS);
+                // `detail` is structure only for the reviewed kinds, sent as `summary`; for every
+                // other kind it is content (`detail`), which the closed gate drops.
+                if let Some(detail) = line.get("detail").and_then(Value::as_str) {
+                    if STRUCTURE_DETAIL_KINDS.contains(&kind) {
+                        log = log.attr("summary", detail, Tier::Structure);
+                    } else {
+                        log = log.attr("detail", detail, Tier::Content);
+                    }
+                }
+                log
                     .severity(if kind == "outcome.failed" {
                         SeverityNumber::Warn
                     } else {
@@ -235,8 +328,89 @@ impl Mapper<'_> {
                 .severity(SeverityNumber::Info)
                 .event_name("colonizer.spend")
                 .body("spend", Tier::Structure),
-            // Not mapped in this slice (#845 follow-ups); `sources` never lists them.
-            _ => return None,
+            Source::Findings => {
+                let state = line.get("state").and_then(Value::as_str).unwrap_or("finding");
+                let mut log = copy(log, &FINDING_KEYS);
+                for key in ["title", "reason"] {
+                    if let Some(text) = line.get(key).and_then(Value::as_str) {
+                        log = log.attr(key, text, Tier::Content);
+                    }
+                }
+                log.severity(SeverityNumber::Info)
+                    .event_name("colonizer.finding")
+                    .body(state, Tier::Structure)
+            }
+            Source::Decisions => {
+                let mut log = copy(log, &DECISION_KEYS);
+                if let Some(did) = line.get("did").and_then(Value::as_str) {
+                    let word = DID_WORDS.iter().find(|w| **w == did).copied().unwrap_or("other");
+                    log = log.attr("did", word, Tier::Structure);
+                }
+                if let Some(Value::Array(options)) = line.get("options") {
+                    log = log.attr("options", options.len() as i64, Tier::Structure);
+                }
+                if let Some(Value::Object(outcome)) = line.get("outcome") {
+                    for (key, value) in outcome {
+                        if let Some(v) = scalar(value) {
+                            log = log.attr(&format!("outcome.{key}"), v, Tier::Structure);
+                        }
+                    }
+                }
+                let point = line.get("point").and_then(Value::as_str).unwrap_or("decision");
+                log.severity(SeverityNumber::Info)
+                    .event_name("colonizer.decision")
+                    .body(point, Tier::Structure)
+            }
+            Source::Routing => {
+                let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
+                let mut log = copy(log, &["kind", "actual_cost_usd"]);
+                if let Some(record) = line.get("decision") {
+                    for key in ROUTING_DECISION_KEYS {
+                        if let Some(v) = record.get(key).and_then(scalar) {
+                            log = log.attr(&format!("decision.{key}"), v, Tier::Structure);
+                        }
+                    }
+                    // The rule's explanation is free text.
+                    if let Some(reason) = record.get("reason").and_then(Value::as_str) {
+                        log = log.attr("decision.reason", reason, Tier::Content);
+                    }
+                }
+                log.severity(SeverityNumber::Info)
+                    .event_name("colonizer.routing")
+                    .body(kind, Tier::Structure)
+            }
+            Source::JevLadder => {
+                let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
+                copy(log, &JEV_LADDER_KEYS)
+                    .severity(SeverityNumber::Info)
+                    .event_name("colonizer.jev_ladder")
+                    .body(kind, Tier::Structure)
+            }
+            Source::JevFocus => {
+                let kind = line.get("kind").and_then(Value::as_str).unwrap_or("");
+                let mut log = copy(log, &JEV_FOCUS_KEYS);
+                if let Some(Value::Array(candidates)) = line.get("candidates") {
+                    log = log.attr("candidates", candidates.len() as i64, Tier::Structure);
+                }
+                log.severity(SeverityNumber::Info)
+                    .event_name("colonizer.jev_focus")
+                    .body(kind, Tier::Structure)
+            }
+            Source::Mothership => {
+                let level = line.get("level").and_then(Value::as_str).unwrap_or("info");
+                let message = line.get("message").and_then(Value::as_str).unwrap_or("");
+                copy(log, &["level", "target"])
+                    .severity(severity_of(level))
+                    .event_name("colonizer.mothership_log")
+                    .body(message, Tier::Structure)
+            }
+            Source::ExportGap => {
+                let reason = line.get("reason").and_then(Value::as_str).unwrap_or("");
+                copy(log, &EXPORT_GAP_KEYS)
+                    .severity(SeverityNumber::Warn)
+                    .event_name("colonizer.export_gap")
+                    .body(reason, Tier::Structure)
+            }
         };
         Some(log.finish())
     }

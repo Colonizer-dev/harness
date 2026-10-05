@@ -1,0 +1,196 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "14340f118ba96bcaa9694c2dc19875f0"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "jev_ladder"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "decision"
+                  }
+                },
+                {
+                  "key": "tool",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                },
+                {
+                  "key": "tool_call_id",
+                  "value": {
+                    "stringValue": "toolu_1"
+                  }
+                },
+                {
+                  "key": "action",
+                  "value": {
+                    "stringValue": "drop_result"
+                  }
+                },
+                {
+                  "key": "keep_call",
+                  "value": {
+                    "doubleValue": 0.9
+                  }
+                },
+                {
+                  "key": "keep_result",
+                  "value": {
+                    "doubleValue": 0.2
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "decision"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.jev_ladder",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108180000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108180000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "dff5761c993952012b85e2fcb30de1bb"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "jev_ladder"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "reread"
+                  }
+                },
+                {
+                  "key": "tool",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                },
+                {
+                  "key": "tool_call_id",
+                  "value": {
+                    "stringValue": "toolu_7"
+                  }
+                },
+                {
+                  "key": "matched_tool_call_id",
+                  "value": {
+                    "stringValue": "toolu_1"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "reread"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.jev_ladder",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108240000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108240000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

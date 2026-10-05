@@ -43,19 +43,34 @@ tailer must know to skip them, not because it reads them.
 | `gateway` | `sessions/<id>/gateway.jsonl` | no | logs, traces | structure | `provider`, `wire`, `model`, `wire_model`, `status`, `failure`, `fallback`, `queue_ms`, `duration_ms`, `request_bytes`, `response_bytes`, `input_tokens`, `output_tokens` |
 | `findings` | `sessions/<id>/findings.jsonl` | no | logs | structure + content (`title`/`reason` are content) | `state`, `issue`, `duplicate_of`, `severity`, `verdict`, `fix_session`, `review_session`, `pr` |
 | `transcripts/` | `sessions/<id>/transcripts/` | — | never sent | — | — |
-| `activity` | `<data>/activity.jsonl(+.1)` | yes | logs | structure + content (`detail` for chat/question/answer kinds) | `kind`, `actor`, `colony`, `repo` (hashable), `target` |
+| `activity` | `<data>/activity.jsonl(+.1)` | yes | logs | structure + content (`detail` of every kind but the reviewed few) | `kind`, `actor`, `via`, `colony`, `repo` (hashable), `target`, `summary` (the `detail` of the reviewed kinds `decision.shadow`, `decision.act`, `decision.fallback`, `outcome.suspended`) |
 | `spend` | `<data>/spend.jsonl` | no | logs, metrics | structure | `kind`, `org`, `session`, `agent`, `model`, token fields, `cost_usd`, `scoring_ms` |
-| `decisions` | `<data>/decisions.jsonl` | no | logs | structure | `point`, `mode`, `options` (count only), `pick`, `confidence`, `latency_ms`, `miss`, `did`, `outcome` |
-| `routing` | `<data>/routing.jsonl` | no | logs | structure | same shape as `decisions` (`point = "routing.tier"`) |
+| `decisions` | `<data>/decisions.jsonl` | no | logs | structure | `kind`, `point`, `mode`, `options` (count only), `pick`, `confidence`, `latency_ms`, `miss`, `did` (closed: `jev`/`rule`/`cap`, else `other`), `outcome.*` (the grade's scalars) |
+| `routing` | `<data>/routing.jsonl` | no | logs | structure + content (`decision.reason`) | `kind` (`decision`/`actual`), `actual_cost_usd`, and the routing record's `decision.point`, `decision.jev_mode`, `decision.jev_agrees`, `decision.floor`, `decision.tier`, `decision.rule`, `decision.source`, `decision.score`, `decision.model`, `decision.agent`, `decision.misroute`, `decision.sensitivity` |
 | `jev_ladder` | `<data>/jev_ladder.jsonl` | no | logs, metrics | structure | `kind` (`decision`/`reread`), `tool`, `tool_call_id`, `action`, `keep_call`, `keep_result`, `matched_tool_call_id` |
-| `jev_focus` | `<data>/jev_focus.jsonl` | no | logs, metrics | structure | row fields, no free text |
+| `jev_focus` | `<data>/jev_focus.jsonl` | no | logs, metrics | structure | `kind`, `session`, `mode`, `candidates` (count only), `chosen`, `would_catch`, `verdict`, `actual_first_failure_ms`, `focused_first_failure_ms`, `total_ms`, `checks_run` |
 | `chats/` | `<data>/chats/` | — | never sent | — | — |
-| `mothership` | `<data>/logs/mothership.jsonl` (#856) | no | logs | structure | `level`, `target`, `fields` (allowlisted keys only) |
+| `mothership` | `<data>/logs/mothership.jsonl` (#856) | no | logs | structure | `level`, `target`, `fields` (allowlisted keys only; none yet) |
+| `export_gap` | the exporter's own record (#843), stream `meta` | no | logs | structure | `reason`, `file`, `bytes`, `lines`, `archived` |
 
 `decisions`, `routing`, `jev_ladder` and `jev_focus` carry no colony id on most rows (`routing`'s
 `session` field is colony-scoped, the Jev ledgers' `session` likewise) — the record id's
 `colony_or_dash` (below) is the row's own `session`/`colony` field when present, `-` otherwise.
 `activity`, `spend` and `mothership` are install-wide and use `-`.
+
+### Log record names
+
+Settled with #845. Every log record's event name is `colonizer.<what>` in snake case, one per
+source: `colonizer.harness_log`, `colonizer.agent_event`, `colonizer.gateway_request`,
+`colonizer.activity`, `colonizer.spend`, `colonizer.finding`, `colonizer.decision`,
+`colonizer.routing`, `colonizer.jev_ladder`, `colonizer.jev_focus`, `colonizer.mothership_log`,
+`colonizer.export_gap`. A line's own fields keep their ledger names as attribute keys (`provider`,
+`model`, `status`, …), exactly the allowlists above, rather than OpenTelemetry's `gen_ai.*` and
+`http.*` names: the allowlist is then the ledger's schema, checkable field by field, and a reader
+can join a record to the line it came from. The `gen_ai.*` names belong to spans (#846, #847),
+where the semantic conventions define them. The severity comes from `level` where a line has one,
+`WARN` for a failed gateway request, an `outcome.failed` activity line and every `export_gap`, and
+`INFO` otherwise.
 
 ## Identity
 
