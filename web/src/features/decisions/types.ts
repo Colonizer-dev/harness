@@ -11,8 +11,15 @@ export interface DecisionCard {
   title: string;
   url: string;
   question: string;
-  /** Parsed from an "Options:" list; empty means the card offers free text only. */
+  /** Parsed from an "Options:" list, a decision section's bold-labelled list items, or a short
+   * "X, or Y?" question; empty means the card offers free text only. */
   options: string[];
+  /** One per option: a short description after its bold label, or "". Absent on older motherships. */
+  option_details?: string[];
+  /** The option the issue recommends, exactly as in `options`. */
+  recommended?: string | null;
+  /** The first paragraph of the issue's "## Why", so the card explains itself. */
+  context?: string | null;
   /** Where the question was found. */
   source: "label" | "body" | "comment";
   /** The issue carries `needs-decision`, which an answer removes. */
@@ -25,7 +32,8 @@ export interface DecisionCard {
 /** Why a pull request needs a person, in the order the inbox lists them. */
 export type PrReason = "commits_not_merged" | "policy_hold" | "needs_redo" | "conflicted" | "red_ci" | "review_requested" | "awaiting_merge";
 
-export type PrAction = "rerun" | "redo" | "dismiss";
+/** `publish` releases a held publish through the colony's own publish route, not the inbox's. */
+export type PrAction = "rerun" | "redo" | "dismiss" | "publish";
 
 /** A pull request (or, held before publishing, a colony) that needs a person. */
 export interface PrCard {

@@ -429,6 +429,22 @@ Options:
 - Postgres
 ```
 
+A `## Decision needed` section works too. Its quoted question is the question, its list items that
+open with a bold label are the options (the text after the label is the option's description), and
+"(recommended)" in a label, `Recommended default: **X**` or "If no answer comes, build X" marks the
+recommended option with a badge; nothing is picked for you. A section with no such list but a short
+"X, or Y?" question offers the two halves. The first paragraph under the issue's `## Why` shows
+under the question:
+
+```markdown
+## Decision needed (ask exactly this, once)
+
+> **Which phone layout for the illustration: A, B or C?**
+
+- **A: stacked story (recommended).** Under 640px, show a vertical version.
+- **B: scroll the canvas.** Scale it to 0.6 and let it scroll sideways.
+```
+
 Without options the card takes free text. Pick an option (or **Other…**), add a note if you like and
 press **Post decision**: the mothership posts one comment, `Decision (maintainer): <your choice>`
 with the note under it, and removes the `needs-decision` label. Nothing is posted until you press
@@ -437,8 +453,10 @@ the button.
 **Pull requests that need you.** Each card says why and links to the pull request:
 
 - **Held by policy**: the watchdog flagged a control-defeat signature, the autopilot is holding the
-  publish because a secret was redacted from the description, or the publish was refused. **Open
-  colony** takes you to it.
+  publish because a secret was redacted from the description, or the publish was refused. Without a
+  pull request the card says "No pull request yet: publishing is held". **Open colony** takes you to
+  it, and a publish the autopilot holds offers **Publish anyway**, the colony page's own **Create
+  PR**: the same route and the same approval.
 - **Needs a redo** and **Conflicted**: the merge train's mechanical rebase conflicted, its resolve
   colony gave up, or the auto-rebase could not finish. **Dispatch redo colony** sends the merge
   train's own redo colony, once per pull request.

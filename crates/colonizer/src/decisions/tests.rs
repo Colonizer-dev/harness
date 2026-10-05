@@ -145,6 +145,156 @@ fn text_without_a_marker_asks_nothing() {
     );
 }
 
+// Trimmed copies of SupportGenius/website #7, #10 and #3, the triage format the cockpit showed as a
+// title with no options.
+const LAYOUT_ISSUE: &str = "## Why
+
+Under 640px, the hero illustration's 1120×520 canvas is scaled to fit the column: 0.31 at 390px. Its 10px labels render at about 3px, so on a phone the illustration is decoration only.
+
+## Decision needed (ask exactly this, once)
+
+> **Which phone layout for the illustration: A, B or C?**
+
+- **A: stacked story (recommended).** Under 640px, hide the canvas and show a vertical version built from the same parts: the channel chips and the widget at full width.
+- **B: scroll the canvas.** Scale it to 0.6 and let the figure scroll sideways with `scroll-snap`.
+- **C: a still frame.** Under 640px, show a static crop of the widget at the 42% frame.
+
+If no answer comes, build A.
+
+## Constraints
+
+- **Desktop:** the canvas is unchanged at 1024px and above.
+";
+
+const DOCS_ISSUE: &str = "## Why
+
+The design canvas's footer listed Quickstart, Chat API, Webhooks, Self-hosting and Changelog. Those went nowhere, so the port dropped them.
+
+## Decision needed (ask exactly this, once)
+
+> **Publish design docs now, or wait until the product repository exists?**
+
+Recommended default: **wait**. If there is no answer, close this issue as \"not planned\" and say why in the closing comment.
+
+## If the answer is \"now\"
+
+- **Content comes only from the page and the design canvas.** Invent nothing.
+";
+
+const PRIVACY_ISSUE: &str = "## Why
+
+Once the waitlist opens (#4), the site collects email addresses. It needs a privacy notice before that happens.
+
+## What
+
+- **What is collected:** the email address, the `product` field and the time of signup.
+- **Who:** the controller. See the decision below.
+
+## Decision needed (ask exactly this, once)
+
+> **Which legal entity is the controller, with what address?**
+
+Do not guess it. Recommended default if the answer is \"the same as Factory Zero\": the entity named on factory0.ventures.
+
+## Files you may touch
+
+`privacy.html` (new)
+";
+
+#[test]
+fn a_decision_section_reads_its_quoted_question_and_bold_labelled_options() {
+    let p = parse_decision(LAYOUT_ISSUE).unwrap();
+    assert_eq!(p.question, "Which phone layout for the illustration: A, B or C?");
+    assert_eq!(p.options, ["A: stacked story", "B: scroll the canvas", "C: a still frame"]);
+    assert!(p.option_details[0].starts_with("Under 640px, hide the canvas"));
+    assert_eq!(
+        p.option_details[1],
+        "Scale it to 0.6 and let the figure scroll sideways with scroll-snap."
+    );
+    assert_eq!(p.recommended.as_deref(), Some("A: stacked story"));
+    assert_eq!(p.more, 0);
+    // The bold bullets under "## Constraints" belong to another section.
+    assert_eq!(p.options.len(), 3);
+}
+
+#[test]
+fn a_short_either_or_question_offers_its_two_halves_and_the_named_default() {
+    let p = parse_decision(DOCS_ISSUE).unwrap();
+    assert_eq!(
+        p.question,
+        "Publish design docs now, or wait until the product repository exists?"
+    );
+    assert_eq!(
+        p.options,
+        ["Publish design docs now", "Wait until the product repository exists"]
+    );
+    assert_eq!(p.option_details, ["", ""]);
+    assert_eq!(p.recommended.as_deref(), Some("Wait until the product repository exists"));
+}
+
+#[test]
+fn an_open_question_in_a_section_stays_free_text() {
+    let p = parse_decision(PRIVACY_ISSUE).unwrap();
+    assert_eq!(p.question, "Which legal entity is the controller, with what address?");
+    assert!(p.options.is_empty(), "the bold bullets under ## What are not options");
+    assert_eq!(p.recommended, None);
+}
+
+#[test]
+fn either_or_stays_narrow() {
+    assert_eq!(
+        either_or("Ship it now or later?").map(|p| p.to_vec()),
+        Some(vec!["Ship it now".to_string(), "Later".to_string()])
+    );
+    assert_eq!(either_or("Which layout: A, B or C?"), None);
+    assert_eq!(either_or("Should we ship Friday or Monday?"), None);
+    assert_eq!(either_or("A or B or C?"), None);
+    assert_eq!(either_or("Ship it now or later"), None, "not a question");
+    assert_eq!(
+        either_or("Rewrite the whole rendering pipeline in a new framework this quarter, or keep it?"),
+        None
+    );
+}
+
+#[test]
+fn a_decision_card_carries_the_why_the_options_and_the_recommendation() {
+    let mut item = issue("SupportGenius/website", 7, &["needs-decision"], LAYOUT_ISSUE, 0, "t1");
+    item["title"] = json!("A readable hero illustration on phones");
+    let card = decision_from_item(&item, None, false).unwrap();
+    assert_eq!(card.question, "Which phone layout for the illustration: A, B or C?");
+    assert_eq!(card.options.len(), 3);
+    assert_eq!(card.option_details.len(), 3);
+    assert_eq!(card.recommended.as_deref(), Some("A: stacked story"));
+    let context = card.context.unwrap();
+    assert!(context.starts_with("Under 640px, the hero illustration's 1120×520 canvas"));
+    assert!(context.chars().count() <= MAX_CONTEXT + 1);
+
+    // Unlabelled, the section alone brings the card.
+    let item = issue("SupportGenius/website", 10, &[], DOCS_ISSUE, 0, "t1");
+    let card = decision_from_item(&item, None, false).unwrap();
+    assert_eq!((card.source, card.options.len()), ("body", 2));
+    assert_eq!(
+        card.context.as_deref(),
+        Some(
+            "The design canvas's footer listed Quickstart, Chat API, Webhooks, Self-hosting and Changelog. Those went nowhere, so the port dropped them."
+        )
+    );
+
+    // A label with nothing to parse still falls back to the title, with no context.
+    let item = issue("acme/web", 3, &["needs-decision"], "No marker here.", 0, "t1");
+    let card = decision_from_item(&item, None, false).unwrap();
+    assert_eq!((card.question.as_str(), card.context), ("Issue 3", None));
+    assert!(card.option_details.is_empty());
+}
+
+#[test]
+fn an_options_list_keeps_bold_labels_and_marks_the_recommended_one() {
+    let p = parse_decision("Open decision: Where?\nOptions:\n- **Disk.** Survives a restart.\n- Memory (recommended)\n").unwrap();
+    assert_eq!(p.options, ["Disk", "Memory"]);
+    assert_eq!(p.option_details, ["Survives a restart.", ""]);
+    assert_eq!(p.recommended.as_deref(), Some("Memory"));
+}
+
 #[test]
 fn an_answer_comment_is_recognised_and_built_on_one_line_with_the_note_below() {
     assert!(is_answer("Decision (maintainer): On disk"));
@@ -553,6 +703,7 @@ fn each_pull_request_card_says_why_it_needs_a_person() {
     let mut secret = colony("acme", SessionStatus::Idle);
     secret.id = "secret".into();
     secret.attention = Some(json!({"reason": "autopilot_held"}));
+    secret.git_admin_dir = Some("/data/secret.git".into());
     let mut plain_hold = colony("acme", SessionStatus::Idle);
     plain_hold.id = "plain".into();
     plain_hold.attention = Some(json!({"reason": "autopilot_held"}));
@@ -621,7 +772,8 @@ fn each_pull_request_card_says_why_it_needs_a_person() {
     let got = reasons(&sessions, &state, &[], &["secret"], std::slice::from_ref(&review_card));
     let want: Vec<(String, PrReason, Vec<&'static str>)> = vec![
         ("defeat".into(), PrReason::PolicyHold, vec![]),
-        ("secret".into(), PrReason::PolicyHold, vec![]),
+        // Held with a worktree and no pull request yet: released through the colony's own publish.
+        ("secret".into(), PrReason::PolicyHold, vec!["publish"]),
         ("refused".into(), PrReason::PolicyHold, vec![]),
         ("redo".into(), PrReason::NeedsRedo, vec!["redo"]),
         ("gaveup".into(), PrReason::NeedsRedo, vec!["redo"]),

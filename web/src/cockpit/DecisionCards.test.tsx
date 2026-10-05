@@ -21,14 +21,14 @@ import {
 import { decisionsCount, prCardColonyIds } from "./decisions";
 import { InboxView } from "./InboxView";
 
-const [withOptions, freeText] = demoDecisions();
+const [withOptions, freeText, triaged] = demoDecisions();
 const prs = demoPrCards();
 const pr = (reason: PrCard["reason"]) => prs.find((p) => p.reason === reason)!;
 
 function view(overrides: Partial<DecisionsView> = {}): DecisionsView {
   return {
-    count: 2 + prs.length,
-    decisions: [withOptions, freeText],
+    count: 3 + prs.length,
+    decisions: [withOptions, freeText, triaged],
     prs,
     orgs: [],
     writes_blocked: false,
@@ -68,6 +68,26 @@ describe("decision answers", () => {
     const html = renderToStaticMarkup(<DecisionCardView card={freeText} blocked={null} onAnswer={async () => null} />);
     expect(html).toContain("Your decision");
     expect(html).not.toContain("Other…");
+  });
+
+  it("explain themselves: the issue's why, each option's description and the recommended one", () => {
+    const html = renderToStaticMarkup(<DecisionCardView card={triaged} blocked={null} onAnswer={async () => null} />);
+    expect(html).toContain(triaged.question);
+    expect(html).toContain(triaged.context!.replace(/'/g, "&#x27;"));
+    for (const option of triaged.options) expect(html).toContain(option);
+    for (const detail of triaged.option_details!) expect(html).toContain(detail);
+    expect(html.match(/Recommended/g)).toHaveLength(1);
+    // Nothing is pre-selected: the recommendation is a badge, the click is still the operator's.
+    expect(html).not.toMatch(/checked=""/);
+    // The repo ref is never truncated away.
+    expect(html).toContain("acme/website#7");
+    expect(html).not.toMatch(/class="[^"]*\btruncate\b[^"]*"[^>]*>acme\/website#7/);
+    // Older motherships send no details or context: the card still renders.
+    const bare = renderToStaticMarkup(
+      <DecisionCardView card={{ ...triaged, option_details: undefined, context: undefined, recommended: undefined }} blocked={null} onAnswer={async () => null} />,
+    );
+    expect(bare).not.toContain("Recommended");
+    expect(bare).toContain(triaged.options[0]);
   });
 
   it("are off, and say why, while external writes are blocked", () => {
@@ -116,7 +136,15 @@ describe("pull-request cards", () => {
     const held = renderToStaticMarkup(<PrCardView card={pr("policy_hold")} blocked={null} onAction={async () => null} onOpenColony={() => {}} />);
     expect(held).toContain("Held by policy");
     expect(held).not.toContain("Open on GitHub");
-    expect(held).toContain("Open colony");
+    expect(held).toContain("No pull request yet: publishing is held");
+    expect(held).toMatch(/<button[^>]*>.*Publish anyway/);
+    expect(held).toMatch(/<button[^>]*>Open colony<\/button>/);
+    // A hold that cannot be released from here still has the colony to open.
+    const stuck = renderToStaticMarkup(
+      <PrCardView card={{ ...pr("policy_hold"), actions: [] }} blocked={null} onAction={async () => null} onOpenColony={() => {}} />,
+    );
+    expect(stuck).not.toContain("Publish anyway");
+    expect(stuck).toMatch(/<button[^>]*>Open colony<\/button>/);
   });
 
   it("turn their actions off while writes are blocked", () => {
@@ -140,13 +168,27 @@ describe("pull-request cards", () => {
     expect(dismiss).toHaveBeenCalledWith({ id: gone.id, action: "dismiss" });
     expect(say).toHaveBeenLastCalledWith("Dismissed");
   });
+
+  it("release a held publish through the colony's own publish route, never the inbox's", async () => {
+    const say = vi.fn();
+    const send = vi.fn(async () => ({}));
+    const publish = vi.fn(async () => ({}));
+    await runPrAction(send, say, pr("policy_hold"), "publish", publish);
+    expect(publish).toHaveBeenCalledWith("stuck2468");
+    expect(send).not.toHaveBeenCalled();
+    expect(say).toHaveBeenLastCalledWith(prActionSummary("publish", null));
+    // Without the route it says so instead of falling through to the inbox's.
+    expect(await runPrAction(send, say, pr("policy_hold"), "publish")).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(say).toHaveBeenLastCalledWith("this card has no colony to publish", "error");
+  });
 });
 
 describe("the inbox", () => {
   it("counts every card once, leaving out a colony that already needs you", () => {
     const sessions = [session("stuck2468", { attention: { reason: "autopilot_held" } as Session["attention"] }), session("old98765")];
     // stuck2468 already counts as a colony; its policy card does not count again.
-    expect(decisionsCount(view(), sessions)).toBe(2 + prs.length - 1);
+    expect(decisionsCount(view(), sessions)).toBe(3 + prs.length - 1);
     expect(decisionsCount(null, sessions)).toBe(0);
     expect(prCardColonyIds(view())).toEqual(new Set(["stuck2468", "old98765"]));
   });
@@ -156,7 +198,7 @@ describe("the inbox", () => {
     const html = renderToStaticMarkup(
       <InboxView sessions={sessions} onOpenColony={() => {}} onOpenNotificationSettings={() => {}} decisions={view()} />,
     );
-    expect(html).toContain(`${1 + 2 + prs.length - 1} need you`);
+    expect(html).toContain(`${1 + 3 + prs.length - 1} need you`);
     expect(html).toContain(">Decisions<");
     expect(html).toContain("not colony questions");
     expect(html).toContain("Pull requests that need you");

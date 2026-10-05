@@ -24,7 +24,11 @@ export const PR_ACTION_LABEL: Record<PrAction, string> = {
   rerun: "Re-run failed jobs",
   redo: "Dispatch redo colony",
   dismiss: "Dismiss",
+  publish: "Publish anyway",
 };
+
+/** What a pull-request card without a pull request says in its place. */
+export const NO_PR_YET = "No pull request yet: publishing is held";
 
 /** The free-text option, beside the parsed ones. */
 export const OTHER = "\u0000other";
@@ -115,8 +119,8 @@ export function DecisionCardView({
         void submit();
       }}
     >
-      <div className="flex items-center gap-2 border-b border-border bg-accent-soft/60 px-4 py-2.5">
-        <span className="grid size-6 place-items-center rounded-full bg-accent text-on-accent">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-accent-soft/60 px-4 py-2.5">
+        <span className="grid size-6 shrink-0 place-items-center rounded-full bg-accent text-on-accent">
           <IconQuestion size={14} />
         </span>
         <span className="text-[13px] font-semibold">A decision for you</span>
@@ -124,10 +128,10 @@ export function DecisionCardView({
           href={card.url}
           target="_blank"
           rel="noreferrer"
-          className="ml-auto truncate font-mono text-[12px] text-muted hover:text-text"
+          className="ml-auto inline-flex max-w-full items-center gap-1 font-mono text-[12px] text-muted [overflow-wrap:anywhere] hover:text-text"
           title={card.title}
         >
-          {cardRef(card.repo, card.number)}
+          {cardRef(card.repo, card.number)} <IconExternal size={11} className="shrink-0" />
         </a>
       </div>
       <fieldset className="min-w-0 px-4 py-4" disabled={sending || blocked !== null}>
@@ -135,16 +139,17 @@ export function DecisionCardView({
           <span className="rounded-md bg-panel-3 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
             {card.labelled ? "needs-decision" : card.source === "comment" ? "from a comment" : "from the issue"}
           </span>
-          <span className="truncate text-[11.5px] text-faint">{card.title}</span>
+          <span className="min-w-0 flex-1 text-[11.5px] leading-snug text-faint [overflow-wrap:anywhere]">{card.title}</span>
         </div>
-        <h3 className="mb-3 text-[15px] font-semibold leading-snug [text-wrap:pretty]">{card.question}</h3>
+        <h3 className={cx("text-[15px] font-semibold leading-snug [text-wrap:pretty]", card.context ? "mb-1.5" : "mb-3")}>{card.question}</h3>
+        {card.context && <p className="mb-3 text-[13px] leading-snug text-muted [text-wrap:pretty]">{card.context}</p>}
         {card.more > 0 && (
           <p className="-mt-1.5 mb-3 text-[12px] text-muted">
             The issue asks {card.more} more {card.more === 1 ? "question" : "questions"}; answer them on GitHub.
           </p>
         )}
         <div className="grid gap-2" role="radiogroup" aria-label={card.question}>
-          {card.options.map((option) => (
+          {card.options.map((option, i) => (
             <label
               key={option}
               className={cx(
@@ -154,7 +159,15 @@ export function DecisionCardView({
             >
               <input type="radio" name={name} className="sr-only" checked={picked === option} onChange={() => setPicked(option)} />
               <Indicator multi={false} checked={picked === option} />
-              <span className="min-w-0 flex-1 font-medium leading-snug">{option}</span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium leading-snug">{option}</span>
+                  {card.recommended === option && <Badge tone="ok">Recommended</Badge>}
+                </span>
+                {card.option_details?.[i] && (
+                  <span className="mt-0.5 block text-[13px] leading-snug text-muted">{card.option_details[i]}</span>
+                )}
+              </span>
             </label>
           ))}
           <label
@@ -239,10 +252,11 @@ export function PrCardView({
           <IconGitPR size={14} />
         </span>
         <Badge tone={reason.tone}>{reason.label}</Badge>
-        <span className="ml-auto truncate font-mono text-[12px] text-muted">{cardRef(card.repo, card.number)}</span>
+        <span className="ml-auto min-w-0 font-mono text-[12px] text-muted [overflow-wrap:anywhere]">{cardRef(card.repo, card.number)}</span>
       </div>
       <div className="px-4 py-3.5">
         <div className="text-[15px] font-semibold leading-snug [text-wrap:pretty]">{card.title}</div>
+        {!card.url && <p className="mt-1 text-[13px] font-medium text-warn">{NO_PR_YET}.</p>}
         <p className="mt-1 text-[13px] text-muted [text-wrap:pretty]">Why it needs you: {card.why}.</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-panel-2/60 px-4 py-3">
@@ -250,7 +264,7 @@ export function PrCardView({
           <Button
             key={action}
             size="sm"
-            variant="secondary"
+            variant={action === "publish" ? "primary" : "secondary"}
             disabled={running !== null || blocked !== null}
             title={blocked ? `Off: ${blocked}` : undefined}
             onClick={() => void run(action)}
@@ -261,6 +275,8 @@ export function PrCardView({
               <IconRefresh size={13} />
             ) : action === "dismiss" ? (
               <IconCheck size={13} />
+            ) : action === "publish" ? (
+              <IconGitPR size={13} />
             ) : (
               <IconRepeat size={13} />
             )}
@@ -268,7 +284,7 @@ export function PrCardView({
           </Button>
         ))}
         {card.colony && (
-          <Button size="sm" variant="ghost" onClick={() => onOpenColony(card.colony!)}>
+          <Button size="sm" variant="secondary" onClick={() => onOpenColony(card.colony!)}>
             Open colony
           </Button>
         )}
@@ -290,6 +306,7 @@ export function PrCardView({
 /** The toast after an action, in plain words. */
 export function prActionSummary(action: PrAction, reply: { rerun?: number[]; colony?: string } | null | undefined): string {
   if (action === "dismiss") return "Dismissed";
+  if (action === "publish") return "Publishing: the colony is opening its pull request";
   if (action === "redo") return reply?.colony ? `Redo colony ${reply.colony} dispatched` : "Redo colony dispatched";
   const n = reply?.rerun?.length ?? 0;
   return n === 1 ? "Re-running the failed jobs of 1 run" : `Re-running the failed jobs of ${n} runs`;
@@ -312,14 +329,23 @@ export async function runDecisionAnswer(
   }
 }
 
-/** Runs a pull-request card's quick action and says how it went. */
+/** Runs a pull-request card's quick action and says how it went. `publish` releases a held
+ * publish through the colony's own publish route (the colony page's "Create PR", whose click is
+ * the approval), so it needs that route; the inbox's own route never publishes. */
 export async function runPrAction(
   send: (body: PrActionRequest) => Promise<PrActionReply>,
   say: (message: string, tone?: "error") => void,
   card: PrCard,
   action: PrAction,
+  publish?: (colony: string) => Promise<unknown>,
 ): Promise<PrActionReply | null> {
   try {
+    if (action === "publish") {
+      if (!card.colony || !publish) throw new Error("this card has no colony to publish");
+      await publish(card.colony);
+      say(prActionSummary(action, null));
+      return {};
+    }
     const reply = await send({ id: card.id, action });
     say(prActionSummary(action, reply));
     return reply;
