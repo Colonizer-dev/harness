@@ -253,7 +253,7 @@ not finish the turn, and leaves the colony to the stall handling above rather th
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
-`on_quota` = true, `desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
+`on_quota` = true, `on_lifecycle` = false, `desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
 announces colonies to the outside world, so it is off until asked for. Every thirty seconds the
 mothership diffs the session list against what it last saw, seeding new colonies without firing so a
 restart does not replay a backlog, and announces the edges once each: `status` became
@@ -299,7 +299,7 @@ or headless it does nothing, logging the reason once rather than a line a tick. 
 `webhook_url` POSTs one JSON note per event:
 
 ```json
-{"id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
+{"version": 1, "id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
  "event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|provider_quota_exhausted|digest", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
@@ -313,7 +313,12 @@ The note carries no repository content — no issue title, no question text, no 
 `pr_url` are `null` and `provider` carries `{id, name, failure_pct, avg_latency_ms, requests, failure}`
 (`failure` is the code of its most recent failure, or `null`); on `provider_quota_exhausted`
 `provider` is `{id, name, reset_at, colonies}` (`colonies` is a count) — so
-a receiver reads one seven-key shape either way.
+a receiver reads one eight-key shape either way.
+`on_lifecycle` adds the whole colony lifecycle to the webhook — one event per status transition
+(`queued`, `started`, `running`, `idle`, `answered`, `publishing`, `merged`, `closed`,
+`no_changes`, `parked`, `resumed`, `stopped`, plus `cleaned`), webhook only and outside the rate
+limiter (issue #897); every payload also carries `version` (`1`). The full event list and the
+schema are in [Webhooks](webhooks.md).
 `id` is the event's stable id (issue #896): the same event always carries the same one, so a
 receiver can dedupe on it, and it also travels in the `X-Colonizer-Event-Id` header. How it is
 derived, and how to verify a request, is in [Webhooks](webhooks.md).

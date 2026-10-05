@@ -10,6 +10,7 @@ fn settings() -> NotifySettings {
         on_pull_request: true,
         on_provider: true,
         on_quota: true,
+        on_lifecycle: false,
         desktop: false,
         webhook_url: String::new(),
     }
@@ -56,6 +57,7 @@ fn seen(status: SessionStatus, attention: Option<&str>) -> Seen {
         status,
         attention: attention.map(String::from),
         rebase_orphaned: false,
+        cleaned: false,
     }
 }
 
@@ -164,6 +166,7 @@ fn rebase_orphaned_becoming_true_fires_once_and_only_with_on_attention() {
         status: SessionStatus::PrOpened,
         attention: None,
         rebase_orphaned,
+        cleaned: false,
     };
     assert_eq!(
         decide(&s, Some(&orphaned(false)), &orphaned(true)),
@@ -328,8 +331,8 @@ fn the_webhook_payload_carries_no_repository_content() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["at", "colony", "event", "id", "pr_url", "provider", "text"],
-            "the payload is exactly seven keys, one shape for receivers"
+            ["at", "colony", "event", "id", "pr_url", "provider", "text", "version"],
+            "the payload is exactly eight keys, one shape for receivers"
         );
         let mut colony_keys: Vec<&str> = value["colony"].as_object().unwrap().keys().map(String::as_str).collect();
         colony_keys.sort_unstable();
@@ -389,14 +392,16 @@ fn diff_seeds_new_colonies_announces_edges_and_prunes_gone_ones() {
             status: SessionStatus::Running,
             attention: None,
             rebase_orphaned: false,
+            cleaned: false,
         },
     );
     // The known colony failed: an edge. The fresh one is seen for the first time: not.
     let list = [known.clone(), fresh.clone()];
     let (events, next) = diff(&list, &seen, |_| s.clone());
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2, "the event a person hears, and the lifecycle record");
     assert_eq!(events[0].0.id, known.id);
     assert_eq!(events[0].1, Event::Failed);
+    assert_eq!(events[1].1, Event::Lifecycle("failed"));
     assert_eq!(next.len(), 2, "the fresh colony is seeded, not announced");
     assert!(next.contains_key(&fresh.id));
 
@@ -564,7 +569,7 @@ fn the_provider_text_and_payload_carry_no_repository_content() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["at", "colony", "event", "id", "pr_url", "provider", "text"],
+        ["at", "colony", "event", "id", "pr_url", "provider", "text", "version"],
         "one shape with the session payload"
     );
     assert!(value["colony"].is_null(), "no colony behind a provider event: {body}");
@@ -609,6 +614,11 @@ fn the_notify_module_schema_defaults_to_every_event_and_no_channel() {
         assert_eq!(schema["properties"][key]["default"], json!(true), "{key} is on by default");
     }
     assert_eq!(schema["properties"]["desktop"]["default"], json!(false));
+    assert_eq!(
+        schema["properties"]["on_lifecycle"]["default"],
+        json!(false),
+        "the lifecycle stream is opt-in"
+    );
     assert_eq!(schema["properties"]["webhook_url"]["default"], json!(""));
     assert!(
         schema["properties"]["webhook_url"]["description"]
@@ -1008,4 +1018,258 @@ async fn the_webhook_carries_the_event_id_in_a_header_and_the_body() {
     }
     assert_eq!(ids.len(), 1, "a resent event keeps its id: {ids:?}");
     let _ = std::fs::remove_dir_all(root);
+}
+
+// ---------------------------------------------------------------------------
+// The colony lifecycle (issue #897)
+// ---------------------------------------------------------------------------
+
+const ALL_STATUSES: [SessionStatus; 13] = [
+    SessionStatus::Queued,
+    SessionStatus::Starting,
+    SessionStatus::Running,
+    SessionStatus::WaitingForAnswer,
+    SessionStatus::Idle,
+    SessionStatus::Publishing,
+    SessionStatus::PrOpened,
+    SessionStatus::Merged,
+    SessionStatus::Closed,
+    SessionStatus::NoChanges,
+    SessionStatus::Parked,
+    SessionStatus::Stopped,
+    SessionStatus::Failed,
+];
+
+#[test]
+fn every_status_change_is_exactly_one_lifecycle_event() {
+    let s = settings();
+    for last in ALL_STATUSES {
+        for now in ALL_STATUSES {
+            let events = lifecycle(&s, Some(&seen(last, None)), &seen(now, None));
+            if last == now {
+                assert!(events.is_empty(), "{last:?} held: no event");
+                continue;
+            }
+            assert_eq!(events.len(), 1, "{last:?} -> {now:?}: {events:?}");
+            let Event::Lifecycle(name) = events[0] else {
+                panic!("{last:?} -> {now:?} is not a lifecycle event")
+            };
+            assert!(LIFECYCLE_EVENTS.contains(&name), "{name} is listed");
+        }
+    }
+    use SessionStatus::*;
+    for (last, now, name) in [
+        (Queued, Starting, "started"),
+        (Starting, Running, "running"),
+        (Running, WaitingForAnswer, "question"),
+        (WaitingForAnswer, Running, "answered"),
+        (WaitingForAnswer, Idle, "answered"),
+        (Running, Idle, "idle"),
+        (Idle, Running, "running"),
+        (Running, Publishing, "publishing"),
+        (Publishing, PrOpened, "pull_request"),
+        (PrOpened, Merged, "merged"),
+        (PrOpened, Closed, "closed"),
+        (Running, NoChanges, "no_changes"),
+        (Running, Parked, "parked"),
+        (Parked, Queued, "resumed"),
+        (Parked, Running, "resumed"),
+        (Stopped, Starting, "resumed"),
+        (Failed, Queued, "resumed"),
+        (Running, Stopped, "stopped"),
+        (Running, Failed, "failed"),
+        (Stopped, Queued, "resumed"),
+        (Merged, Queued, "queued"),
+    ] {
+        assert_eq!(transition(last, now), Some(name), "{last:?} -> {now:?}");
+    }
+    // Every name the table can produce is one this module lists, and every listed name but
+    // `cleaned` (not a status) is produced by some change.
+    let produced: BTreeSet<&str> = ALL_STATUSES
+        .iter()
+        .flat_map(|a| ALL_STATUSES.iter().filter_map(move |b| transition(*a, *b)))
+        .collect();
+    let listed: BTreeSet<&str> = LIFECYCLE_EVENTS.iter().copied().filter(|n| *n != "cleaned").collect();
+    assert_eq!(produced, listed);
+}
+
+#[test]
+fn cleaning_up_is_its_own_event_and_first_sight_or_a_switched_off_module_is_silent() {
+    let s = settings();
+    let mut kept = seen(SessionStatus::Merged, None);
+    let mut cleaned = kept.clone();
+    cleaned.cleaned = true;
+    assert_eq!(lifecycle(&s, Some(&kept), &cleaned), vec![Event::Lifecycle("cleaned")]);
+    assert!(
+        lifecycle(&s, Some(&cleaned), &cleaned).is_empty(),
+        "still cleaned is not an edge"
+    );
+    kept.status = SessionStatus::PrOpened;
+    assert_eq!(
+        lifecycle(&s, Some(&kept), &cleaned),
+        vec![Event::Lifecycle("merged"), Event::Lifecycle("cleaned")],
+        "two different things happened in one tick: two events"
+    );
+    assert!(
+        lifecycle(&s, None, &cleaned).is_empty(),
+        "a colony seen for the first time only seeds"
+    );
+    let off = NotifySettings {
+        enabled: false,
+        ..settings()
+    };
+    assert!(lifecycle(&off, Some(&kept), &cleaned).is_empty());
+}
+
+#[test]
+fn a_lifecycle_event_shares_the_shape_and_the_id_of_the_one_a_person_hears() {
+    let session = colony("c1", SessionStatus::Failed);
+    let told = payload(Event::Failed, Utc::now(), &session);
+    let recorded = payload(Event::Lifecycle("failed"), Utc::now(), &session);
+    assert_eq!(told["id"], recorded["id"], "one transition, one id");
+    assert_eq!(recorded["event"], "failed");
+    assert_eq!(recorded["version"], json!(SCHEMA_VERSION));
+    let merged = payload(Event::Lifecycle("merged"), Utc::now(), &colony("c1", SessionStatus::Merged));
+    assert_eq!(merged["text"], "acme/webshop #42 had its pull request merged");
+    assert_eq!(merged["colony"]["status"], "merged");
+    assert!(!merged.to_string().contains("SENTINEL"), "{merged}");
+}
+
+/// The documented schema (`docs/webhook-events.schema.json`) names every event this module can
+/// send, and the version it sends.
+#[test]
+fn the_webhook_schema_lists_every_event_and_the_version() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/webhook-events.schema.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        // The packaged crate (CI's "Test the packaged crates") has no docs/ beside it; the
+        // workspace run, which has the whole repository, is the one that checks the schema.
+        assert!(
+            !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/colonizer/src/notify.rs")).exists(),
+            "inside the workspace the schema must exist: {path}"
+        );
+        return;
+    };
+    let schema: Value = serde_json::from_str(&text).unwrap();
+    let documented: BTreeSet<&str> = schema["properties"]["event"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let names: BTreeSet<&str> = EVENT_NAMES.iter().copied().collect();
+    assert_eq!(documented, names);
+    assert_eq!(schema["properties"]["version"]["const"], json!(SCHEMA_VERSION));
+    for name in LIFECYCLE_EVENTS {
+        assert!(names.contains(name), "{name}");
+    }
+    for event in [
+        Event::Attention("stalled"),
+        Event::NeedsRebase,
+        Event::ProviderDegraded,
+        Event::JudgeDegraded,
+    ] {
+        assert!(names.contains(event.name()), "{}", event.name());
+    }
+    assert!(names.contains(crate::push_prefs::QUOTA));
+    let mut required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    assert_eq!(
+        required,
+        ["at", "colony", "event", "id", "pr_url", "provider", "text", "version"]
+    );
+}
+
+/// Walks one colony through `steps` the way the notify loop does — diff, then dispatch each edge —
+/// and answers the events its webhook received, in order.
+async fn run_colony(settings: &NotifySettings, steps: &[(SessionStatus, bool)]) -> Vec<Value> {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), Vec::new()).await;
+    let root = std::env::temp_dir().join(format!("colonizer-notify-lifecycle-{}", crate::util::short_id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let app = crate::tests::test_app(&root);
+    let client = reqwest::Client::new();
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings.clone()
+    };
+    let mut session = colony("c1", SessionStatus::Queued);
+    let mut seen = HashMap::new();
+    let mut reasons = Reasons::default();
+    for (i, (status, cleaned)) in [(SessionStatus::Queued, false)].iter().chain(steps).enumerate() {
+        session.status = *status;
+        session.cleaned_up = *cleaned;
+        session.updated_at = DateTime::from_timestamp(1_789_000_000 + i as i64, 0).unwrap();
+        let sessions = [session.clone()];
+        let (events, next) = diff(&sessions, &seen, |_| settings.clone());
+        seen = next;
+        for (s, event) in events {
+            dispatch(&app, Some(&client), s, event, &settings, &mut reasons).await;
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+    received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, body)| serde_json::from_str(body).unwrap())
+        .collect()
+}
+
+/// End to end: a colony's whole run, with the lifecycle on, is one webhook event per transition —
+/// in order, each with its own id and the schema version — and the events a person is told about
+/// are not sent to the webhook a second time.
+#[tokio::test]
+async fn a_colony_run_is_one_webhook_event_per_transition() {
+    use SessionStatus::*;
+    let on = NotifySettings {
+        on_lifecycle: true,
+        ..settings()
+    };
+    let steps = [
+        (Starting, false),
+        (Running, false),
+        (WaitingForAnswer, false),
+        (Running, false),
+        (Idle, false),
+        (Running, false),
+        (Parked, false),
+        (Running, false),
+        (Publishing, false),
+        (PrOpened, false),
+        (PrOpened, false),
+        (Merged, false),
+        (Merged, true),
+    ];
+    let got = run_colony(&on, &steps).await;
+    let names: Vec<&str> = got.iter().map(|b| b["event"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        [
+            "started",
+            "running",
+            "question",
+            "answered",
+            "idle",
+            "running",
+            "parked",
+            "resumed",
+            "publishing",
+            "pull_request",
+            "merged",
+            "cleaned"
+        ]
+    );
+    let ids: BTreeSet<&str> = got.iter().map(|b| b["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), got.len(), "every event its own id");
+    assert!(got.iter().all(|b| b["version"] == json!(SCHEMA_VERSION)));
+
+    // Off, the webhook keeps today's events: only what a person is told about.
+    let got = run_colony(&settings(), &steps).await;
+    let names: Vec<&str> = got.iter().map(|b| b["event"].as_str().unwrap()).collect();
+    assert_eq!(names, ["question", "pull_request"]);
 }
