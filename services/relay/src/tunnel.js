@@ -5,7 +5,7 @@
 // response bodies live only in memory, never in state.storage.
 
 import { b64decode, b64encode, randomToken, verifyEd25519 } from './crypto.js';
-import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, helloMessage, pathTemplate, responseHeaders, stripHopByHop } from './protocol.js';
+import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, WS_MSG_MAX, helloMessage, pathTemplate, responseHeaders, stripHopByHop } from './protocol.js';
 import { offlinePage } from './pages.js';
 import { runtime } from './runtime.js';
 
@@ -328,11 +328,20 @@ export class InstallTunnel {
     this.sockets.set(id, s);
     this.#send({ t: 'ws_open', id, path, headers: stripHopByHop(request.headers, { ws: true }) });
     server.addEventListener('message', (ev) => {
+      if (s.done) return;
       const binary = typeof ev.data !== 'string';
-      s.bytesIn += byteLength(ev.data);
+      const size = byteLength(ev.data);
+      if (size > WS_MSG_MAX) {
+        // Too big for the tunnel: end this passthrough on both sides rather than ship it.
+        this.#send({ t: 'ws_close', id, code: 1009 });
+        this.#releaseWs(s);
+        return this.#close(server, 1009, 'ws message too big');
+      }
+      s.bytesIn += size;
       this.#send({ t: 'ws_msg', id, data: binary ? b64encode(new Uint8Array(ev.data)) : ev.data, binary });
     });
     server.addEventListener('close', (ev) => {
+      if (s.done) return; // already ended, and the mothership already told
       this.#send({ t: 'ws_close', id, code: typeof ev.code === 'number' ? ev.code : 1005 });
       this.#releaseWs(s);
     });

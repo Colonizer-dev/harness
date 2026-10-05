@@ -79,6 +79,23 @@ const NONCE_CAP: usize = 1024;
 /// Frames waiting to go to the relay at once; beyond this, stream tasks wait, so a relay that
 /// stops reading slows the answer instead of growing the queue without limit.
 const OUT_QUEUE: usize = 256;
+/// The largest single message or frame the tunnel socket takes from the relay (review finding R5;
+/// tungstenite's default is 64 MiB). The relay's biggest legitimate frame is a 48 KiB body chunk
+/// as base64, or a browser websocket message it caps at 128 KiB (`WS_MSG_MAX`, tunnel.js) — at
+/// most about 768 KiB once JSON-escaped — so a relay sending more ends the tunnel instead.
+const TUNNEL_MESSAGE_MAX: usize = 1024 * 1024;
+/// Request body frames waiting for their stream at once. The reader waits for room rather than
+/// dropping one, and a stream reads its body until the end, so this only paces a burst.
+const BODY_QUEUE: usize = 16;
+/// Relay-to-cockpit websocket frames waiting for one tunnelled socket. A cockpit handler that falls
+/// this far behind gets its socket closed (1008) rather than a queue that grows without limit.
+const WS_QUEUE: usize = 64;
+/// How long a tunnelled websocket's cockpit side may take to close once its relay side is gone,
+/// before the stream is ended anyway and its slot freed.
+const WS_CLOSE_GRACE: Duration = Duration::from_secs(5);
+/// The longest base64 `chunk` a body frame may carry: [`CHUNK`] raw bytes, checked before any
+/// decoding.
+const CHUNK_B64_MAX: usize = CHUNK.div_ceil(3) * 4;
 
 /// The switch and identity as persisted (`<config>/remote/state.json`). No file means off.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -776,7 +793,7 @@ async fn handshake(
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let (mut ws, _) = tokio::time::timeout(
         HANDSHAKE_WAIT,
-        tokio_tungstenite::connect_async_tls_with_config(request, None, false, None),
+        tokio_tungstenite::connect_async_tls_with_config(request, Some(tunnel_config()), false, None),
     )
     .await
     .context("dialing the relay timed out")?
@@ -805,6 +822,13 @@ async fn handshake(
     Ok(ws)
 }
 
+/// The tunnel socket's limits: no message or frame from the relay past [`TUNNEL_MESSAGE_MAX`].
+fn tunnel_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(TUNNEL_MESSAGE_MAX))
+        .max_frame_size(Some(TUNNEL_MESSAGE_MAX))
+}
+
 /// What a relay frame carries for one open tunnelled websocket.
 enum WsIn {
     Msg(tungstenite::Message),
@@ -813,7 +837,7 @@ enum WsIn {
 
 /// Request bodies waiting for their remaining `body` frames, keyed by stream id; a sender's
 /// presence is also the stream's claim on the id.
-type Bodies = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<(String, bool)>>>>;
+type Bodies = Arc<Mutex<HashMap<String, mpsc::Sender<(String, bool)>>>>;
 
 /// The state of one live connection: the frame queue every task sends through, the routing
 /// tables for open streams, the stream budget, and the spawned tasks torn down on exit.
@@ -822,7 +846,7 @@ struct Conn {
     out: mpsc::Sender<String>,
     /// Feeds one side of a duplex pair to the in-memory websocket server per `ws_open`.
     conns: mpsc::Sender<DuplexStream>,
-    ws_in: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<WsIn>>>>,
+    ws_in: Arc<Mutex<HashMap<String, mpsc::Sender<WsIn>>>>,
     bodies: Bodies,
     live: Arc<AtomicUsize>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -898,17 +922,21 @@ impl Drop for Slot {
 
 /// Removes a stream's routing entry when its task ends — however it ends, including a refusal
 /// mid-setup. Compares channels, so an entry can only be removed while it is still this
-/// stream's own.
+/// stream's own. It holds its channel only weakly: the map's sender is the only strong one, so
+/// removing the entry (an overflowing websocket) ends the stream's receiver.
 struct Routing<T> {
-    map: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<T>>>>,
+    map: Arc<Mutex<HashMap<String, mpsc::Sender<T>>>>,
     id: String,
-    mine: mpsc::UnboundedSender<T>,
+    mine: mpsc::WeakSender<T>,
 }
 
 impl<T> Drop for Routing<T> {
     fn drop(&mut self) {
         let mut map = self.map.lock().unwrap();
-        if map.get(&self.id).is_some_and(|tx| tx.same_channel(&self.mine)) {
+        if map
+            .get(&self.id)
+            .is_some_and(|tx| self.mine.upgrade().is_some_and(|mine| tx.same_channel(&mine)))
+        {
             map.remove(&self.id);
         }
     }
@@ -971,7 +999,7 @@ async fn serve_connection(
                             app.remote.set_connected(true).await;
                         }
                         last_frame = Instant::now();
-                        dispatch(&conn, router, &text);
+                        dispatch(&conn, router, &text).await;
                     }
                     Some(Ok(tungstenite::Message::Close(frame))) => {
                         replaced = frame.is_some_and(|f| is_replaced_close(u16::from(f.code)));
@@ -1003,7 +1031,7 @@ async fn serve_connection(
 
 /// One frame from the relay: a ping, a new stream, or traffic for an open one. Frames outside the
 /// v1 set are ignored rather than allowed to kill the tunnel.
-fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
+async fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
     let Ok(frame) = serde_json::from_str::<Frame>(frame) else {
         return;
     };
@@ -1019,7 +1047,9 @@ fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
         Frame::Body { id, chunk, end } => {
             let sink = conn.bodies.lock().unwrap().get(&id.to_string()).cloned();
             if let Some(sink) = sink {
-                let _ = sink.send((chunk, end));
+                // Waits for room: the stream is reading its body, so this is a pause, not a stall.
+                // Once it has its body it drops the receiver, and late frames fail here at once.
+                let _ = sink.send((chunk, end)).await;
             }
         }
         Frame::WsOpen { id, path, headers } => start_ws(conn, id, path, headers),
@@ -1030,17 +1060,26 @@ fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
                 Some(tungstenite::Message::Text(data.into()))
             };
             let Some(message) = message else { return };
-            let sink = conn.ws_in.lock().unwrap().get(&id.to_string()).cloned();
-            if let Some(sink) = sink {
-                let _ = sink.send(WsIn::Msg(message));
-            }
+            ws_deliver(conn, &id, WsIn::Msg(message));
         }
-        Frame::WsClose { id, code } => {
-            let sink = conn.ws_in.lock().unwrap().get(&id.to_string()).cloned();
-            if let Some(sink) = sink {
-                let _ = sink.send(WsIn::Close(code));
-            }
+        Frame::WsClose { id, code } => ws_deliver(conn, &id, WsIn::Close(code)),
+    }
+}
+
+/// Hands one relay frame to its tunnelled websocket without waiting: a socket whose cockpit handler
+/// has [`WS_QUEUE`] frames unread is closed (1008) and forgotten, so neither the tunnel's reader
+/// nor the mothership's memory waits on one slow socket (review finding R5).
+fn ws_deliver(conn: &Conn, id: &Value, frame: WsIn) {
+    let key = id.to_string();
+    let sink = conn.ws_in.lock().unwrap().get(&key).cloned();
+    let Some(sink) = sink else { return };
+    if let Err(mpsc::error::TrySendError::Full(_)) = sink.try_send(frame) {
+        let mut routes = conn.ws_in.lock().unwrap();
+        if routes.get(&key).is_some_and(|tx| tx.same_channel(&sink)) {
+            routes.remove(&key); // the last strong sender: the socket's pump sees the end
         }
+        drop(routes);
+        conn.close_ws(id, 1008);
     }
 }
 
@@ -1051,18 +1090,19 @@ fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
 fn start_req(conn: &Arc<Conn>, router: Router, id: Value, method: String, path: String, headers: Option<Value>) {
     // The routing entry is claimed under the lock, so a duplicate id is refused without touching
     // the open stream — and its guard is what removes the entry, on every exit below.
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(BODY_QUEUE);
     let routing = match conn.bodies.lock().unwrap().entry(id.to_string()) {
         std::collections::hash_map::Entry::Occupied(_) => {
             conn.refuse_res(&id, StatusCode::SERVICE_UNAVAILABLE);
             return;
         }
         std::collections::hash_map::Entry::Vacant(slot) => {
-            slot.insert(tx.clone());
+            let mine = tx.downgrade();
+            slot.insert(tx);
             Routing {
                 map: conn.bodies.clone(),
                 id: id.to_string(),
-                mine: tx,
+                mine,
             }
         }
     };
@@ -1086,7 +1126,7 @@ async fn serve_req(
     method: String,
     path: String,
     headers: Option<Value>,
-    mut chunks: mpsc::UnboundedReceiver<(String, bool)>,
+    mut chunks: mpsc::Receiver<(String, bool)>,
     _slot: Slot,
     // Pure drop guard: holds the stream's routing entry until the task ends, whichever way.
     _routing: Routing<(String, bool)>,
@@ -1102,6 +1142,11 @@ async fn serve_req(
         loop {
             match tokio::time::timeout(BODY_WAIT, chunks.recv()).await {
                 Ok(Some((chunk, end))) => {
+                    // Sized before it is decoded: no chunk the relay may send is longer.
+                    if chunk.len() > CHUNK_B64_MAX {
+                        refused(StatusCode::PAYLOAD_TOO_LARGE);
+                        return;
+                    }
                     let Some(bytes) = b64_empty_ok(&chunk) else {
                         refused(StatusCode::BAD_REQUEST);
                         return;
@@ -1124,6 +1169,9 @@ async fn serve_req(
             }
         }
     }
+    // The body is in: body frames still arriving for this stream are dropped from here on, never
+    // queued (the routing entry stays, so the id stays taken).
+    drop(chunks);
     if !plausible_path(&path) {
         refused(StatusCode::BAD_REQUEST);
         return;
@@ -1187,18 +1235,19 @@ async fn serve_req(
 fn start_ws(conn: &Arc<Conn>, id: Value, path: String, headers: Option<Value>) {
     // The routing entry is claimed under the lock, so a duplicate id is refused without touching
     // the open stream — and its guard is what removes the entry, on every exit below.
-    let (tx, from_relay) = mpsc::unbounded_channel();
+    let (tx, from_relay) = mpsc::channel(WS_QUEUE);
     let routing = match conn.ws_in.lock().unwrap().entry(id.to_string()) {
         std::collections::hash_map::Entry::Occupied(_) => {
             conn.close_ws(&id, 1008);
             return;
         }
         std::collections::hash_map::Entry::Vacant(slot) => {
-            slot.insert(tx.clone());
+            let mine = tx.downgrade();
+            slot.insert(tx);
             Routing {
                 map: conn.ws_in.clone(),
                 id: id.to_string(),
-                mine: tx,
+                mine,
             }
         }
     };
@@ -1220,7 +1269,7 @@ async fn serve_ws(
     id: Value,
     path: String,
     headers: Option<Value>,
-    mut from_relay: mpsc::UnboundedReceiver<WsIn>,
+    mut from_relay: mpsc::Receiver<WsIn>,
     _slot: Slot,
     routing: Routing<WsIn>,
 ) {
@@ -1249,9 +1298,22 @@ async fn serve_ws(
         }
     };
     let (mut inner_out, mut inner_in) = inner.split();
-    // Relay → cockpit.
+    // Relay → cockpit. The channel ends when [`ws_deliver`] dropped an overflowing socket: the
+    // cockpit side is closed too. Either way the pump's end is reported, so the loop below cannot
+    // outlive it by more than [`WS_CLOSE_GRACE`] even when the cockpit never answers the close.
+    let (pump_done, mut pumped) = tokio::sync::oneshot::channel::<()>();
     conn.spawn(async move {
-        while let Some(msg) = from_relay.recv().await {
+        let _done = pump_done; // dropped, and so reported, however the pump ends
+        loop {
+            let Some(msg) = from_relay.recv().await else {
+                let _ = inner_out
+                    .send(tungstenite::Message::Close(Some(CloseFrame {
+                        code: 1008.into(),
+                        reason: Default::default(),
+                    })))
+                    .await;
+                break;
+            };
             let message = match msg {
                 WsIn::Msg(message) => message,
                 WsIn::Close(code) => {
@@ -1269,9 +1331,21 @@ async fn serve_ws(
             }
         }
     });
-    // Cockpit → relay.
+    // Cockpit → relay, until the cockpit closes or, once the pump has ended, the grace runs out.
+    let mut grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
-        match inner_in.next().await {
+        let next = tokio::select! {
+            next = inner_in.next() => next,
+            _ = &mut pumped, if grace.is_none() => {
+                grace = Some(Box::pin(tokio::time::sleep(WS_CLOSE_GRACE)));
+                continue;
+            }
+            () = async { grace.as_mut().expect("guarded").await }, if grace.is_some() => {
+                conn.close_ws(&id, 1008);
+                break;
+            }
+        };
+        match next {
             Some(Ok(tungstenite::Message::Text(text))) => {
                 conn.emit(json!({"t": "ws_msg", "id": &id, "data": text.as_str(), "binary": false}).to_string())
                     .await;
@@ -1615,6 +1689,14 @@ mod tests {
         "released"
     }
 
+    /// A websocket whose handler never reads: what a stuck cockpit socket looks like to the tunnel.
+    async fn deaf_socket(ws: axum::extract::WebSocketUpgrade) -> Response {
+        ws.on_upgrade(|socket| async move {
+            let _held = socket;
+            std::future::pending::<()>().await
+        })
+    }
+
     async fn big_answer() -> Vec<u8> {
         vec![0xAB; 120_000] // 2.4 chunks at the 48 KiB cap
     }
@@ -1631,6 +1713,7 @@ mod tests {
             .route("/api/stream", get(crate::stream::handler))
             .route("/api/big", get(big_answer))
             .route("/api/demo", get(demo))
+            .route("/api/deaf", get(deaf_socket))
             .route("/api/park", get(park_handler))
             .layer(Extension(park))
             .layer(middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
@@ -2804,14 +2887,17 @@ mod tests {
         ws.send(req_frame("big", "POST", "/api/remote", headers.clone()))
             .await
             .unwrap();
-        let oversized = util::b64_encode(&vec![0x41; MAX_BODY + 1]);
-        ws.send(
-            json!({"t": "body", "id": "big", "chunk": oversized, "end": false})
-                .to_string()
-                .into(),
-        )
-        .await
-        .unwrap();
+        // Full-size chunks, the way a relay streams an upload, until the body passes the cap.
+        let chunk = util::b64_encode(&vec![0x41; CHUNK]);
+        for _ in 0..=MAX_BODY / CHUNK {
+            ws.send(
+                json!({"t": "body", "id": "big", "chunk": chunk, "end": false})
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .unwrap();
+        }
         let res = next_frame(&mut ws, "the oversized refusal").await;
         assert_eq!(res["t"], "res");
         assert_eq!(res["id"], "big");
@@ -2823,6 +2909,76 @@ mod tests {
         ws.send(end_body("big")).await.unwrap();
         ws.send(req_frame("after", "GET", "/api/remote", headers)).await.unwrap();
         let (status, _, _) = read_response(&mut ws, "after", "the next request").await;
+        assert_eq!(status, 200);
+    }
+
+    // -- Bounded queues (review finding R5) ---------------------------------
+
+    #[tokio::test]
+    async fn a_body_chunk_past_the_cap_is_refused_before_it_is_decoded() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        ws.send(req_frame("fat", "POST", "/api/big", headers.clone())).await.unwrap();
+        // One chunk three bytes past the 48 KiB a relay may send, ending the body.
+        ws.send(body_frame("fat", &vec![0x42; CHUNK + 3])).await.unwrap();
+        let (status, _, _) = read_response(&mut ws, "fat", "the fat chunk's refusal").await;
+        assert_eq!(status, 413, "refused on its size, not routed");
+        // A chunk exactly at the cap is fine (the route then refuses the method itself).
+        ws.send(req_frame("ok", "POST", "/api/big", headers)).await.unwrap();
+        ws.send(body_frame("ok", &vec![0x42; CHUNK])).await.unwrap();
+        let (status, _, _) = read_response(&mut ws, "ok", "the full chunk").await;
+        assert_eq!(status, 405);
+    }
+
+    #[tokio::test]
+    async fn a_relay_message_past_the_cap_ends_the_tunnel() {
+        let (_app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        // A well-formed ping, padded past the tunnel's message cap: the client must not take it in.
+        let padded = json!({"t": "ping", "pad": "x".repeat(TUNNEL_MESSAGE_MAX)}).to_string();
+        let _ = ws.send(padded.into()).await;
+        let answer = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("the client reacted");
+        assert!(
+            !matches!(&answer, Some(Ok(tungstenite::Message::Text(text))) if text.contains("pong")),
+            "the oversized frame was read and answered: {answer:?}"
+        );
+        // The supervisor redials a fresh tunnel.
+        next_tunnel(&mut tunnels).await;
+    }
+
+    #[tokio::test]
+    async fn a_socket_whose_handler_stops_reading_is_closed_not_queued() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        ws.send(
+            json!({ "t": "ws_open", "id": "deaf", "path": "/api/deaf", "headers": headers })
+                .to_string()
+                .into(),
+        )
+        .await
+        .unwrap();
+        // Far more than the in-memory pipe and the per-socket queue can hold together.
+        let data = "y".repeat(60 * 1024);
+        for _ in 0..(WS_QUEUE * 2) {
+            ws.send(
+                json!({ "t": "ws_msg", "id": "deaf", "data": data, "binary": false })
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .unwrap();
+        }
+        let close = next_frame(&mut ws, "the overflow close").await;
+        assert_eq!(close["t"], "ws_close");
+        assert_eq!(close["id"], "deaf");
+        assert_eq!(close["code"], 1008);
+        // The tunnel itself is unharmed.
+        ws.send(req_frame("after", "GET", "/api/big", headers)).await.unwrap();
+        let (status, _, _) = read_response(&mut ws, "after", "a request after the overflow").await;
         assert_eq!(status, 200);
     }
 

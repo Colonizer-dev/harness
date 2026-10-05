@@ -693,3 +693,26 @@ test('a cockpit set-cookie reaches the browser host-only, and never as one of th
   assert.deepEqual(response.headers.getSetCookie(), ['colonizer_token=t; HttpOnly; Path=/', 'wide=1;Secure', 'twice=2; Path=/', 'plain=3; Path=/']);
   ms.socket.close();
 });
+
+test('a browser websocket message too big for the tunnel closes that passthrough 1009 and is never sent (R5)', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  await ms.connect(relay);
+  const open = within(relay.fetch(proxyRequest('/events', { headers: { upgrade: 'websocket' } })));
+  const wsOpen = await within(ms.next('ws_open'), 'no ws_open');
+  assert.equal((await open).status, 101);
+  const browser = browserEnds.at(-1);
+  browser.accept();
+  const gone = closed(browser);
+
+  browser.send('x'.repeat(128 * 1024)); // exactly the cap: forwarded
+  const fits = await within(ms.next('ws_msg'), 'the message at the cap never arrived');
+  assert.equal(fits.data.length, 128 * 1024);
+  browser.send(new Uint8Array(128 * 1024 + 1)); // one byte over
+  const close = await within(ms.next('ws_close'), 'no ws_close for the oversized message');
+  assert.deepEqual({ id: close.id, code: close.code }, { id: wsOpen.id, code: 1009 });
+  assert.equal((await gone).code, 1009);
+  assert.equal(ms.frames.filter((f) => f.t === 'ws_msg').length, 1, 'the oversized message never reached the mothership');
+  assert.equal(ms.frames.filter((f) => f.t === 'ws_close').length, 1, 'and the close was sent once');
+  ms.socket.close();
+});

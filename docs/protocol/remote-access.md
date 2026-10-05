@@ -137,6 +137,16 @@ clean end `1000`. A tunnelled `req` with a bad method, bad base64 or a bad path 
 are queued to the relay behind a bounded buffer, so a relay that stops
 reading slows a streaming answer instead of growing it without limit.
 
+What comes in from the relay is bounded too (review finding R5). The tunnel socket takes no
+message or frame over **1 MiB** (tungstenite's default is 64 MiB); a relay that sends one ends the
+tunnel, which redials. A body frame whose `chunk` is longer than base64 of 48 KiB is refused
+**413** before it is decoded. Request body frames wait in a 16-frame queue per stream, the reader
+pausing for room rather than dropping one, and once a stream has its body (or, for `GET` and
+`HEAD`, at once) further body frames for it are dropped, never queued. Frames for a tunnelled
+websocket wait in a 64-frame queue; a socket whose cockpit handler falls that far behind is closed
+`ws_close` `1008`, and its stream ends within 5 s even when the handler never answers the close.
+The relay, for its part, closes a passthrough `1009` when the browser sends a message over 128 KiB.
+
 If the relay goes away, the mothership redials after 1 s, doubling to at most 60 s, with a little
 jitter so a relay blip does not align every install's retries. The backoff resets to 1 s only
 once the relay has shown it accepted the hello — its first frame on the connection; the socket

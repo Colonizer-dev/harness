@@ -14,6 +14,11 @@ export const CHUNK_RAW = 36864;
 /** Inbound chunks must decode to at most this many bytes. */
 export const CHUNK_DECODED_MAX = 49152;
 
+/** The largest browser websocket message forwarded to the mothership, in bytes. A bigger one closes that
+ * passthrough 1009 instead (review finding R5): the mothership caps every tunnel message at 1 MiB, and
+ * 128 KiB stays under it even as base64 or fully JSON-escaped text. */
+export const WS_MSG_MAX = 128 * 1024;
+
 /** Seconds between tunnel pings. */
 export const PING_MS = 20000;
 
