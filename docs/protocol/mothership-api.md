@@ -253,7 +253,7 @@ not finish the turn, and leaves the colony to the stall handling above rather th
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
-`desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
+`on_quota` = true, `desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
 announces colonies to the outside world, so it is off until asked for. Every thirty seconds the
 mothership diffs the session list against what it last saw, seeding new colonies without firing so a
 restart does not replay a backlog, and announces the edges once each: `status` became
@@ -285,13 +285,21 @@ has no colony and no org, so its settings are the notify module's own global one
 not reach it, and `on_provider` has no per-org override — and the announcement carries no repository
 at all: only the id and name the operator chose, plus the counters behind the rate.
 
+A provider that runs out of quota while colonies are blocked on it opens one out-of-quota card
+(§6.5, issue #767), and the same loop announces the card once as the `provider_quota_exhausted` event
+under `on_quota` — `Z.AI is out of quota: 3 colonies are waiting; resets Oct 6, 04:00 UTC` — one line
+per provider, never one per colony. It stays quiet while the card stays open and re-arms when the
+card closes (the plan reset, or every colony moved on). Like a provider crossing, it has no per-org
+override, and it carries only the provider's id and name, its reset time and how many colonies wait.
+A colony's own `provider_quota_exhausted` attention flag is never an event of its own.
+
 The desktop channel runs `osascript -e 'display notification …'` on macOS or `notify-send` on Linux
 under a graphical session, with the text passed as an argument and escaped for AppleScript. Over SSH
 or headless it does nothing, logging the reason once rather than a line a tick. A non-empty
 `webhook_url` POSTs one JSON note per event:
 
 ```json
-{"event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|digest", "at": "2026-09-18T00:00:00+00:00",
+{"event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|provider_quota_exhausted|digest", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
  "pr_url": null,
@@ -302,7 +310,8 @@ The note carries no repository content — no issue title, no question text, no 
 `pr_url` is the colony's pull request address only on the `pull_request` and `needs_rebase` events, `null` otherwise.
 `provider` is `null` on every colony event; on `provider_degraded` it is the reverse — `colony` and
 `pr_url` are `null` and `provider` carries `{id, name, failure_pct, avg_latency_ms, requests, failure}`
-(`failure` is the code of its most recent failure, or `null`) — so
+(`failure` is the code of its most recent failure, or `null`); on `provider_quota_exhausted`
+`provider` is `{id, name, reset_at, colonies}` (`colonies` is a count) — so
 a receiver reads one six-key shape either way.
 Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
 (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries

@@ -4,7 +4,17 @@
 // is untested, like notifications.ts's lower half.
 import { describe, expect, it } from "vitest";
 
-import { colonyFromUrl, defaultPushPrefs, deviceLabel, mergePushPrefs, minutesToTime, tabFocused, timeToMinutes, urlBase64ToUint8Array, validScopeEntry } from "./push";
+import { colonyFromUrl, defaultPushPrefs, pushTarget, deviceLabel, mergePushPrefs, minutesToTime, tabFocused, timeToMinutes, urlBase64ToUint8Array, validScopeEntry } from "./push";
+
+describe("pushTarget", () => {
+  it("opens the Inbox for the out-of-quota push and a colony for a colony push (issue #767)", () => {
+    expect(pushTarget("/?view=inbox")).toEqual({ view: "inbox" });
+    expect(pushTarget("/?colony=abc123")).toEqual({ colony: "abc123" });
+    expect(pushTarget("/?colony=abc123&view=inbox")).toEqual({ colony: "abc123" });
+    expect(pushTarget("/")).toBeNull();
+    expect(pushTarget("/?view=nowhere")).toBeNull();
+  });
+});
 
 describe("colonyFromUrl", () => {
   it("names the colony a push payload or the url bar points at", () => {
@@ -60,6 +70,7 @@ describe("push prefs defaults", () => {
       needs_rebase: true,
       failed: true,
       attention: true,
+      provider_quota_exhausted: true,
       provider_degraded: false,
       digest: false,
     });

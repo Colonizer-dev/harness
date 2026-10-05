@@ -9,6 +9,7 @@ export type PushEventKind =
   | "needs_rebase"
   | "failed"
   | "attention"
+  | "provider_quota_exhausted"
   | "provider_degraded"
   | "digest";
 
