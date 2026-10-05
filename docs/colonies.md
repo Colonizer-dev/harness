@@ -131,9 +131,32 @@ There are two ways past a held issue. Both are checkboxes in the cockpit's launc
   waiter starts, the mothership checks GitHub again. If the holder's pull request merged, or
   another mothership has claimed the issue, the waiter fails instead of redoing finished work.
 
-On GitHub a launch marks the issue with the `colonizer:claimed` label and a claim comment. The
-label comes off when the colony releases the issue. When a mothership starts, it removes marks it
-left behind for colonies that are gone.
+On GitHub a launch marks the issue with the `colonizer:claimed` label, a host label such as
+`colonizer:host:omarchy` (the hostname as a slug, one fixed colour per host, created when first
+needed), and one claim comment. Filter an org's issues by the host label to see what each machine
+is working on.
+
+The claim comment is edited in place, never posted again. It shows the colony id, the host, the
+status (queued, running, waiting for an answer, pull request opened, merged, or released with a
+short reason), the branch, the pull request link once there is one, and when it was last updated.
+It never shows prompts, costs or errors. A retry on the same issue edits the same comment and names
+the colony before it. After a restart the mothership finds its comment again by the hidden
+`<!-- colonizer:claim … -->` marker, so it never posts a second one.
+
+Status edits are gentle on GitHub: at most one edit per issue every two minutes (a final state is
+never held back), no request at all when nothing changed, and a pause from 15 minutes up to four
+hours, doubling, whenever GitHub answers with a rate limit, abuse warning or 429. If the token may
+not add labels, the claim keeps only the comment and logs a warning.
+
+When the colony releases the issue (failed, stopped or no changes without a pull request, or its
+pull request closed unmerged), the comment gets its final state and both labels come off. A merged
+pull request keeps both labels as the record of who did the work. When a mothership starts, it
+removes marks it left behind for colonies that are gone.
+
+Host labels and status edits are on by default. To turn them off for an org, set
+`"claim_updates": false` in that org's settings (`orgs.json`, or `PUT /api/orgs/{org}`). The claim
+label and comment stay, since other motherships read them. `COLONIZER_NO_EXTERNAL_EFFECTS` stops
+every claim write.
 
 One rule decides every duplicate, whoever launches: the cockpit, `colonizer launch`, the API, MCP,
 the loops, burn-down, the red team or a redo. The same answer comes back every way, and a refused
@@ -141,7 +164,7 @@ launch in the cockpit shows who holds the work, with a link to that colony or it
 (or the host, for another mothership's claim) and the **Allow duplicate** option.
 
 **Limits.** The duplicate check only looks at this mothership's colonies. Other motherships are
-seen only through the GitHub label and comment. If a mothership never comes back, its label stays
+seen only through the GitHub labels and comment. If a mothership never comes back, its label stays
 until a person removes it. The full rules are in
 [protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
 

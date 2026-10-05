@@ -5,7 +5,8 @@
 //! the same repository can each launch a colony on the same issue seconds apart, and both will do
 //! the whole job. So a colony claims its issue on GitHub itself — a `colonizer:claimed` label plus
 //! a comment carrying a machine-readable marker — and a launch checks for a competing claim before
-//! starting: a live branch or pull request with the colony prefix, or the label.
+//! starting: a live branch or pull request with the colony prefix, or the label. The comment is
+//! one per issue, edited as the colony moves, beside a host label ([`live`], issue #919).
 //!
 //! Everything here degrades to the local guard: any `gh` failure falls back instead of refusing a
 //! launch, and publishing or releasing a claim never fails one. Claim closures passed to the
@@ -19,6 +20,8 @@ use crate::{
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::time::Duration;
+
+pub mod live;
 
 /// The label a running colony leaves on its issue, so a second mothership sees the claim.
 pub const CLAIM_LABEL: &str = "colonizer:claimed";
@@ -81,7 +84,9 @@ fn escape_marker_value(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// The claim comment body: a machine-parseable marker line plus a human line saying the same.
+/// The first claim comment's shape, before the live comment (issue #919): a marker line plus a
+/// human line. Kept for the parse tests; `live::render` writes the comment now.
+#[cfg(test)]
 pub fn format_claim(host: &str, colony: &str, issue: u64) -> String {
     let marker = format!(
         "<!-- colonizer:claim host=\"{}\" colony=\"{}\" issue=\"{issue}\" -->",
@@ -433,142 +438,32 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
     Ok(None)
 }
 
-/// This mothership's host, for the claim comment: the hostname plus the stable install id, or
-/// just the id where no hostname probes.
-async fn host_label(app: &App) -> String {
-    let id = crate::runtime::host_id(app);
-    match crate::runtime::probe_hostname().await {
-        Some(name) if !name.trim().is_empty() => format!("{} ({id})", name.trim()),
-        _ => id,
-    }
-}
-
-/// Claims `issue` for `colony`: the label (created first, best effort, like findings) plus the
-/// comment carrying the machine-readable marker. Best effort throughout and never an error: a
-/// failed claim must not fail the launch it runs behind.
+/// Claims `issue` for `colony`: one claim comment carrying the machine-readable marker — the
+/// issue's existing one edited when a colony claimed it before, else a new one — then the claim
+/// label and this host's label (issue #919, `claims/live.rs`). Best effort throughout and never an
+/// error: a failed claim must not fail the launch it runs behind.
 pub async fn publish_claim(app: &App, repo: &str, issue: u64, colony: &str) {
     // A kill-switch means no external writes at all, claims included.
     if crate::authority::external_writes_blocked() {
         return;
     }
-    let number = issue.to_string();
-    let host = host_label(app).await;
-    let body = format_claim(&host, colony, issue);
-    // Best effort: the label may exist already, or the token may not be allowed to create labels —
-    // the comment below carries the machine-readable claim either way.
-    let _ = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh([
-            "label",
-            "create",
-            CLAIM_LABEL,
-            "-R",
-            repo,
-            "--color",
-            CLAIM_LABEL_COLOR,
-            "--description",
-            CLAIM_LABEL_DESCRIPTION,
-        ]),
-    )
-    .await;
-    // The comment goes up before the label: a release racing this claim (a waiter taking over
-    // from a holder that just finished, issue #321) re-reads the comments after it removes the
-    // label, so either it sees this claim and puts the label back, or this label lands after
-    // its removal.
-    if let Err(e) = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "comment", number.as_str(), "-R", repo, "--body", body.as_str()]),
-    )
-    .await
-    {
-        eprintln!("claims: could not leave the claim comment on {repo}#{issue} for colony {colony}: {e:#}");
+    if !live::publish(app, repo, issue, colony).await {
         app.session_log(
             colony,
             "warn",
-            format!("could not claim #{issue} on GitHub ({e:#}); the local guard still refuses duplicates on this mothership"),
+            format!("could not claim #{issue} on GitHub; the local guard still refuses duplicates on this mothership"),
         )
         .await;
-    }
-    if let Err(e) = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--add-label", CLAIM_LABEL]),
-    )
-    .await
-    {
-        eprintln!("claims: could not add the {CLAIM_LABEL} label to {repo}#{issue} for colony {colony}: {e:#}");
     }
 }
 
-/// Releases `colony`'s claim on `issue`: the label off, plus a release note. Reads the latest
-/// claim comment first and never clobbers a different live colony's claim. Best effort throughout.
-pub async fn release_claim(app: &App, repo: &str, issue: u64, colony: &str) {
+/// Releases `colony`'s claim on `issue`: both labels off, and the claim comment edited to its final
+/// state with `reason`. Never clobbers a different live colony's claim. Best effort throughout.
+pub async fn release_claim(app: &App, repo: &str, issue: u64, colony: &str, reason: &str) {
     if crate::authority::external_writes_blocked() {
         return;
     }
-    let number = issue.to_string();
-    let comments = match exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "view", number.as_str(), "-R", repo, "--json", "comments"]),
-    )
-    .await
-    {
-        Ok(out) => comment_bodies(&serde_json::from_str(&out).unwrap_or(Value::Null)),
-        Err(e) => {
-            eprintln!("claims: could not read the comments on {repo}#{issue} to release colony {colony}'s claim: {e:#}");
-            return;
-        }
-    };
-    let latest = comments.iter().rev().filter_map(|body| parse_claim(body)).next();
-    if !ours_or_stale(latest.as_ref(), colony) {
-        let other = latest
-            .map(|claim| format!("colony {} on host {}", claim.colony, claim.host))
-            .unwrap_or_else(|| "another colony".to_string());
-        eprintln!("claims: leaving the claim on {repo}#{issue} alone: it now names {other}");
-        return;
-    }
-    // Best effort: the label may already be gone, and the comment is a courtesy.
-    let _ = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--remove-label", CLAIM_LABEL]),
-    )
-    .await;
-    // A successor may have claimed the issue while this release ran (issue #321: a waiter takes
-    // over the moment its holder finishes). `publish_claim` comments before it labels, so a
-    // re-read after the removal either sees that claim — and the label goes back — or the
-    // successor's label lands after the removal anyway.
-    let reread = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "view", number.as_str(), "-R", repo, "--json", "comments"]),
-    )
-    .await
-    .map(|out| comment_bodies(&serde_json::from_str(&out).unwrap_or(Value::Null)));
-    if let Ok(bodies) = reread
-        && let Some(successor) = bodies.iter().rev().filter_map(|body| parse_claim(body)).next()
-        && !ours_or_stale(Some(&successor), colony)
-    {
-        let _ = exec_within(
-            REMOTE_TIMEOUT,
-            &mut app.gh(["issue", "edit", number.as_str(), "-R", repo, "--add-label", CLAIM_LABEL]),
-        )
-        .await;
-        eprintln!(
-            "claims: colony {} claimed {repo}#{issue} while colony {colony} released it; its label stays",
-            successor.colony
-        );
-        return;
-    }
-    let host = host_label(app).await;
-    let body = format!(
-        "Colonizer colony `{colony}` on host `{host}` released issue #{issue}: it finished without a merged pull request, so the issue is free for another colony."
-    );
-    if let Err(e) = exec_within(
-        REMOTE_TIMEOUT,
-        &mut app.gh(["issue", "comment", number.as_str(), "-R", repo, "--body", body.as_str()]),
-    )
-    .await
-    {
-        eprintln!("claims: could not leave the release comment on {repo}#{issue} for colony {colony}: {e:#}");
-    }
+    live::release(app, repo, issue, colony, reason).await;
 }
 
 /// Publishes the claim off the serving path: call after the colony is admitted, never before.
@@ -586,8 +481,9 @@ pub fn spawn_release_if_needed(app: Shared, session: &Session) {
         return;
     }
     let (repo, colony) = (session.repo.clone(), session.id.clone());
+    let reason = live::release_reason(session.status);
     tokio::spawn(async move {
-        release_claim(&app, &repo, issue, &colony).await;
+        release_claim(&app, &repo, issue, &colony, &reason).await;
     });
 }
 
@@ -601,7 +497,7 @@ pub struct OrphanedClaim {
 }
 
 /// Whether a claim's host label is this mothership's. The label is the hostname plus the stable
-/// install id (see `host_label`), so the comparison runs on the id — never on a hostname, which
+/// install id (see `live::HostTag`), so the comparison runs on the id — never on a hostname, which
 /// can be renamed between boots. A bare id matches too, for hosts where no hostname probes.
 fn claim_is_ours(host: &str, our_host_id: &str) -> bool {
     let host = host.trim();
@@ -729,7 +625,14 @@ pub async fn reconcile_orphaned_claims(app: Shared) {
                 "claims: releasing the orphaned claim on {}#{}, colony {} no longer holds it",
                 orphan.repo, orphan.issue, orphan.colony
             );
-            release_claim(&app, &orphan.repo, orphan.issue, &orphan.colony).await;
+            release_claim(
+                &app,
+                &orphan.repo,
+                orphan.issue,
+                &orphan.colony,
+                "released (colony ended while the mothership was down)",
+            )
+            .await;
         }
     }
 }
