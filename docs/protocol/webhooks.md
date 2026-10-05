@@ -18,7 +18,7 @@ X-Colonizer-Signature: sha256=<hex>     (only when a signing secret is set)
 ```
 
 ```json
-{"id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
+{"version": 1, "id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
  "event": "question", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
@@ -26,9 +26,76 @@ X-Colonizer-Signature: sha256=<hex>     (only when a signing secret is set)
  "provider": null}
 ```
 
-Every payload has the same seven keys, whatever the event: a receiver reads one shape. The note
+Every payload has the same eight keys, whatever the event: a receiver reads one shape. The note
 carries no repository content (no issue title, no question text, no branch, no error) and never a
 secret.
+
+## Schema and versioning
+
+The payload is described by a JSON Schema,
+[webhook-events.schema.json](../webhook-events.schema.json), and a test keeps its `event` list
+equal to what the harness can send. `version` is the shape's version, `1` today. It changes only
+when a key changes meaning or goes away. A new event name or a new key does not change it, so a
+receiver must ignore event names and keys it does not know, as everywhere else in this protocol.
+
+| Key | Meaning |
+| --- | --- |
+| `version` | The payload shape's version: `1` |
+| `id` | The event's stable id (below) |
+| `event` | What happened: one of the names in the tables below |
+| `at` | When the mothership built this note (RFC 3339) |
+| `text` | One short line, at most 200 characters, naming the repository and issue (or the provider) and what happened |
+| `colony` | `{id, repo, org, issue, status}` for a colony event, `null` for a host-level one; `status` is the colony's status after the event |
+| `pr_url` | The colony's pull request on `pull_request` and `needs_rebase`, else `null` |
+| `provider` | The provider behind `provider_degraded`, `judge_degraded` or `provider_quota_exhausted`, else `null` |
+
+## Colony lifecycle events
+
+With the notify module's `on_lifecycle` setting on (off by default; issue
+[#897](https://github.com/Colonizer-dev/harness/issues/897)), the webhook receives every colony
+lifecycle transition: exactly one event per status change, plus `cleaned`. These go to the webhook
+only, never to the desktop or a phone, and they skip the anti-spam rate limiter, so the stream is an
+exact record a receiver can rebuild a colony's history from.
+
+| `event` | The colony's status became | Notes |
+| --- | --- | --- |
+| `queued` | `queued` | Waiting for a free slot |
+| `started` | `starting` | Booting its microVM |
+| `running` | `running` | Includes a new turn after `idle` |
+| `idle` | `idle` | Its turn ended; it waits for a message |
+| `question` | `waiting_for_answer` | Also the event a person is told about |
+| `answered` | `running` or `idle`, from `waiting_for_answer` | Its question was answered |
+| `publishing` | `publishing` | Pushing and opening its pull request |
+| `pull_request` | `pr_opened` | Also the event a person is told about; carries `pr_url` |
+| `merged` | `merged` | Its pull request was merged |
+| `closed` | `closed` | Its pull request was closed without merging |
+| `no_changes` | `no_changes` | It finished with nothing to push |
+| `parked` | `parked` | Set aside (out of quota, or a hold timed out), worktree kept |
+| `resumed` | `queued`, `starting` or `running`, from `parked`, `stopped` or `failed` | Coming back |
+| `stopped` | `stopped` | |
+| `failed` | `failed` | Also the event a person is told about |
+| `cleaned` | (any) | Its worktree was reclaimed; not a status change |
+
+`question`, `pull_request` and `failed` are both lifecycle events and events a person is told
+about. With `on_lifecycle` on, the webhook gets each of them once, from the lifecycle stream; the
+desktop and phones still get them through the rate limiter. Either way the id is the same. With
+`on_lifecycle` off, the webhook gets only the events a person is told about, as before. A colony
+seen for the first time (after a restart, say) is recorded without an event, so a restart never
+replays a backlog. A transition the 30-second poll did not see — a colony that went from `running`
+through `publishing` to `pr_opened` between two polls — is reported as the one change it saw.
+
+## Other events
+
+| `event` | When | Switch |
+| --- | --- | --- |
+| `attention` | The watchdog flagged a colony (`stalled`, `nudges_exhausted`, a risky hold, a control defeat) | `on_attention` |
+| `needs_rebase` | A pull request fell behind its base and no colony is left to rebase it | `on_attention` |
+| `provider_degraded` | A model provider's failure rate crossed 10% | `on_provider` |
+| `judge_degraded` | The autonomy judge could not reach its model three times running | always |
+| `provider_quota_exhausted` | A provider ran out of quota with colonies waiting on it | `on_quota` |
+| `account_needs_sign_in`, `account_resolved` | A Claude account's sign-in expired, or works again | always |
+| `ci_unavailable` | The merge-train loop found a repository's CI unable to run | always |
+| `digest` | The hourly line summing what the rate limiter held | always |
 
 ## Event ids
 
