@@ -1,0 +1,16 @@
+[package]
+name = "colonizer-redact"
+# Versioned with colonizer-harness, which depends on it and is published: release.yml checks the tag
+# against this version and publishes this crate first.
+version = "0.2.5"
+edition = "2024"
+description = "Secret redaction for Colonizer logs, shared by the harness and its observability add-on"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
+homepage = "https://colonizer.dev"
+
+[lib]
+name = "colonizer_redact"
+
+[dependencies]
+serde_json = "1.0.151"

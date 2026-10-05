@@ -1,0 +1,72 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          },
+          {
+            "key": "colonizer.install.id",
+            "value": {
+              "stringValue": "install-1"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeSpans": [
+        {
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          },
+          "spans": [
+            {
+              "attributes": [
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "is_error",
+                  "value": {
+                    "boolValue": true
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1700000000124456789",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "execute_tool Bash",
+              "parentSpanId": "0102030405060708",
+              "spanId": "fedcba9876543210",
+              "startTimeUnixNano": "1700000000123456789",
+              "status": {
+                "code": 2,
+                "message": ""
+              },
+              "traceId": "0abcdef0123456789abcdef001234567",
+              "traceState": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
