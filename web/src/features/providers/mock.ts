@@ -160,6 +160,20 @@ export function providersMock(ms: MockState): ProvidersApi {
         checked_at,
       };
     },
+    testProvider: async (id) => {
+      const provider = ms.providers.find((p) => p.id === id);
+      if (!provider) throw new ApiError("no such provider", 404);
+      await sleep(600);
+      const model = provider.models[0] ?? null;
+      if (!model) return { ok: false, url: null, status: null, model: null, latency_ms: null, error: "list at least one model to test with" };
+      const base = provider.base_url.replace(/\/+$/, "");
+      const path = provider.wire === "openai" ? "/chat/completions" : "/messages";
+      const url = /\/v\d+$/.test(base) ? `${base}${path}` : `${base}/v1${path}`;
+      // Custom endpoints in the demo stand for a base URL that misses the provider's API root.
+      return provider.preset === "custom"
+        ? { ok: false, url, status: 404, model, latency_ms: 41, error: `HTTP 404 (upstream answered 404 at ${url}; check the provider's base URL)` }
+        : { ok: true, url, status: 200, model, latency_ms: 380, error: null };
+    },
     models: () =>
       ms.later((): ModelOption[] => [
     ...ms.ANTHROPIC_MODELS.map(([id, label]) => ({ id, label, provider: "anthropic" })),
