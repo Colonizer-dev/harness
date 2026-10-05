@@ -392,10 +392,14 @@ fn a_rotation_past_the_cursor_yields_a_gap_record() {
     let mut state = State::default();
     assert_eq!(tick(&mut tailer, &root, &settings, &colonies, &mut state).records.len(), 1);
 
-    // Two rotations while the exporter was behind: the file the cursor named is gone.
+    // Two rotations while the exporter was behind: the file the cursor named is gone. Open
+    // handles keep each generation's inode allocated, so a filesystem that reuses freed inodes
+    // (ext4) cannot hand the new live file the cursor's old identity.
+    let _first = std::fs::File::open(&live).unwrap();
     append(&live, &line(2));
     std::fs::rename(&live, &rolled).unwrap();
     append(&live, &line(3));
+    let _second = std::fs::File::open(&live).unwrap();
     std::fs::rename(&live, &rolled).unwrap();
     append(&live, &line(4));
     let tailed = tick(&mut tailer, &root, &settings, &colonies, &mut state);
