@@ -1,3 +1,5 @@
+import type { BoundaryRecord } from "../events/types";
+
 export type SessionStatus =
   | "queued"
   | "starting"
@@ -14,7 +16,16 @@ export type SessionStatus =
   | "stopped"
   | "failed";
 
-export type AttentionReason = "stalled" | "waiting_for_answer" | "nudges_exhausted" | "autopilot_held" | "provider_quota_exhausted" | "hold_timeout" | "model_error";
+export type AttentionReason =
+  | "stalled"
+  | "waiting_for_answer"
+  | "nudges_exhausted"
+  | "autopilot_held"
+  | "provider_quota_exhausted"
+  | "hold_timeout"
+  | "model_error"
+  /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
+  | "control_defeat";
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
@@ -29,6 +40,10 @@ export interface Attention {
   action?: "wait";
   resume_unix?: number | null;
   reset_at?: string | null;
+  /** `control_defeat` (issue #609): which pattern fired — `repeated_denial`, `ask_bypass`, `deny_then_reach`, `publish_rewrite`. */
+  signature?: string;
+  /** `control_defeat`: the boundary events that are its evidence. */
+  evidence?: BoundaryRecord[];
 }
 
 /** A model the "Provider out of quota" card offers to switch to, with its provider's health (issue #767). */

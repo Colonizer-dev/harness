@@ -366,6 +366,21 @@ pub(crate) enum AgentEvent {
         #[serde(default)]
         tool: String,
     },
+    /// A control refused something (issue #609): an exec-policy deny or a refused ask asked again,
+    /// an egress or read-only refusal, a path-policy bind agentd could not apply. Reporting only —
+    /// the control decided before this ran; the dispatch folds it into the watchdog's
+    /// control-defeat signature (`boundary.rs`), which reads the raw event so the untrusted fields
+    /// are cleaned in one place. `kind` is open here: an unknown one is ignored there.
+    Boundary {
+        kind: String,
+        control: String,
+        #[serde(default)]
+        detail: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        at: String,
+    },
     /// Everything the harness only forwards, and any type a newer runner adds (§2: unknown types
     /// must be ignored). A known body with broken fields lands here too: it was forwarded, it just
     /// triggers no side effects.

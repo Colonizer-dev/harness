@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
 import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
+import { createAskRefusals, execPolicyBoundary } from './boundary.mjs';
 import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
 import { createLoopBridge, loopSwitches } from './loop-tools.mjs';
 
@@ -433,6 +434,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   // The operator's Allows of exec-policy asks, kept for this run (issue #759): the same command
   // under the same rule is not asked about twice. In memory only, so the agent cannot forge one.
   const execAllowCache = createExecAllowCache();
+  const askRefusals = createAskRefusals(); // exec-policy asks refused this run (issue #609)
   // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
   // the runtime reports against. Absent (an older harness) means the feature is off, silently.
   const pathPolicy = loadPathPolicy(env).policy;
@@ -501,6 +503,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (hit) {
       process.stderr.write(`${execPolicyLogLine(hit, command)}\n`);
       if (hit.decision === 'deny') {
+        // A control refusing something: reported for the watchdog's control-defeat signature (#609).
+        emit(execPolicyBoundary(hit, command));
         const reject = optionByKind(options, 'reject');
         return reply(reject ? { outcome: { outcome: 'selected', optionId: reject.optionId } } : { outcome: { outcome: 'cancelled' } });
       }
@@ -511,6 +515,10 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
       }
     }
+    // The same rule asking again after a refusal is the agent retrying what it was told no to (#609).
+    const asking = hit?.decision === 'ask';
+    const retry = asking ? askRefusals.attempt(hit, command) : null;
+    if (retry) emit(retry);
     const title = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
     const text = hit ? `${title} — ${execPolicyReason(hit)}` : title;
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
@@ -533,7 +541,12 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (!chosen && answer.response) {
       emit({ type: 'log', level: 'info', message: `a free-text reply cannot select one of the agent's options; answered cancelled for ${questionId}` });
     }
-    if (hit && chosen && !chosen.synthetic && chosen.kind?.startsWith('allow')) execAllowCache.remember(hit, command);
+    const allowed = Boolean(chosen && !chosen.synthetic && chosen.kind?.startsWith('allow'));
+    if (hit && allowed) execAllowCache.remember(hit, command);
+    if (asking && !allowed) {
+      askRefusals.refuse(hit, command);
+      emit(execPolicyBoundary({ ...hit, decision: 'ask refused' }, command));
+    }
     reply({ outcome: chosen && !chosen.synthetic ? { outcome: 'selected', optionId: chosen.optionId } : { outcome: 'cancelled' } });
   };
 

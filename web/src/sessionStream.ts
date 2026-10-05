@@ -9,6 +9,7 @@ import { settlerName, settlerRole } from "./settlers";
 import type {
   AgentEvent,
   AgentEventBody,
+  BoundaryRecord,
   AgentRef,
   AgentState,
   Answers,
@@ -91,6 +92,13 @@ export interface MemoryNotice {
   afterMessageId: string | null;
 }
 
+/** A control refused something (issue #609); shown inline, muted, where it happened. */
+export interface BoundaryNotice {
+  record: BoundaryRecord;
+  afterMessageId: string | null;
+  ts: string | null;
+}
+
 export interface LogEntry {
   source: "harness" | "agent";
   level: LogLevel;
@@ -105,6 +113,7 @@ export interface StreamState {
   messages: ChatMessage[];
   turns: TurnSummary[];
   memoryNotices: MemoryNotice[];
+  boundaries: BoundaryNotice[];
   agentState: AgentState | null;
   agentDetail: string | null;
   logs: LogEntry[];
@@ -132,6 +141,7 @@ export function initialStreamState(): StreamState {
     messages: [],
     turns: [],
     memoryNotices: [],
+    boundaries: [],
     agentState: null,
     agentDetail: null,
     logs: [],
@@ -400,6 +410,15 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
 
     case "model_changed":
       return { ...s, model: ev.model, switchingModel: null, refusedModel: null };
+
+    case "boundary": {
+      // Placed after the latest message, like a memory notice; capped like the logs.
+      const last = s.messages[s.messages.length - 1];
+      const record: BoundaryRecord = { type: "boundary", kind: ev.kind, control: ev.control, detail: ev.detail, at: ev.at };
+      if (ev.target) record.target = ev.target;
+      const notice: BoundaryNotice = { record, afterMessageId: last?.id ?? null, ts };
+      return { ...s, boundaries: [...s.boundaries, notice].slice(-MAX_LOGS) };
+    }
 
     default:
       return s; // unknown event types are ignored
@@ -702,6 +721,8 @@ export interface ThreadView {
   turns: Record<string, TurnSummary[]>;
   /** Memory proposals keyed the same way. */
   notices: Record<string, MemoryNotice[]>;
+  /** Boundary events (issue #609) keyed like `notices`: the message they follow, or END_OF_THREAD. */
+  boundaries: Record<string, BoundaryNotice[]>;
   /**
    * Every protocol message id mapped to the id of the bubble it renders in — itself for a user
    * message, the group's first id for an assistant reply. History search carries a bare message id,
@@ -764,6 +785,7 @@ export function buildThread(state: StreamState): ThreadView {
   const messages: ThreadMessageLike[] = [];
   const turns: Record<string, TurnSummary[]> = {};
   const notices: Record<string, MemoryNotice[]> = {};
+  const boundaries: Record<string, BoundaryNotice[]> = {};
   const groupOf = new Map<string, string>();
   // Assistant groups with nothing renderable (e.g. a failed turn's empty text) hand their turn
   // summaries to the message rendered before them.
@@ -891,6 +913,7 @@ export function buildThread(state: StreamState): ThreadView {
   };
   for (const turn of state.turns) (turns[placement(turn.afterMessageId)] ??= []).push(turn);
   for (const notice of state.memoryNotices) (notices[placement(notice.afterMessageId)] ??= []).push(notice);
+  for (const notice of state.boundaries) (boundaries[placement(notice.afterMessageId)] ??= []).push(notice);
 
   // Only a subagent's latest card is live; an earlier one was interrupted by the orchestrator and carries on below.
   const latest = new Set<string>();
@@ -912,5 +935,5 @@ export function buildThread(state: StreamState): ThreadView {
     i = Math.max(end, i + 1);
   }
 
-  return { messages, subagents, origins, turns, notices, renderOf: Object.fromEntries(groupOf), hasOpenQuestion };
+  return { messages, subagents, origins, turns, notices, boundaries, renderOf: Object.fromEntries(groupOf), hasOpenQuestion };
 }

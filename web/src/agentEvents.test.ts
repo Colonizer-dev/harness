@@ -35,6 +35,7 @@ const WEB_TYPES = {
   verification: true,
   jev_ladder: true,
   path_policy: true,
+  boundary: true,
 } satisfies Record<AgentEventBody["type"], true>;
 
 // Host events the mothership appends to events.jsonl itself (§6.3 Autopilot, §6.6, publish-time
