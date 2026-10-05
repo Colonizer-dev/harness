@@ -14,6 +14,8 @@ colonizer.dev. Observability goes only to the endpoint you name.
   allowlisted, gated, redacted again, capped and hashed, and how requests are batched and encoded.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
+- [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
+  serve, how to scrape it, and what a series is allowed to name.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 
