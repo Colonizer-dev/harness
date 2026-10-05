@@ -203,8 +203,10 @@ scoped token, a member's `fleet` token included, reads **403**.
   "(removed)", under the name it had: the owner writes it to `member.json` beside the rows. When
   the last member is removed the section still shows while any history remains.
 - **Redaction.** Logs are served exactly as the member sent them. Redacting secrets before they
-  leave is the member's job ([#761](https://github.com/Colonizer-dev/harness/issues/761)); the
-  owner runs no redaction pass of its own on this history.
+  leave is the member's job ([#761](https://github.com/Colonizer-dev/harness/issues/761)): the
+  member runs every log through the shared redactor before hashing and uploading it, so a log
+  written before redaction existed arrives redacted too, and its file on the member is left as it
+  is. The owner runs no redaction pass of its own on this history.
 - **Retention.** The owner keeps a synced row for `COLONIZER_FLEET_INGEST_RETENTION_DAYS` days after
   it arrives (default `90`; `0` keeps everything). The reclaim tick, every five minutes, drops older
   rows and then every payload no remaining row references that is itself older than the window —

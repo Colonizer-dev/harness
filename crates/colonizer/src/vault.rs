@@ -3,8 +3,10 @@
 //! filtered, secret-scrubbed snapshot of the in-scope folders into the session directory — already
 //! the colony's read-only `/colonizer` mount — so the guest reads it at `/colonizer/vault/` beside
 //! an `INDEX.md`. Folders are allowlisted like colony secrets (each with a
-//! [`crate::colony_secrets::Scope`]) and every note is scrubbed with the [`crate::deja::scrub`] the
-//! transcript index uses; base64- or percent-encoded secrets are not caught.
+//! [`crate::colony_secrets::Scope`]) and every note goes through [`scrub_text`]: the exact secret
+//! values the mothership knows ([`crate::deja::scrub`], as the transcript index does), then the
+//! shared pattern redactor (#761), which catches a credential no one saved. Base64- or
+//! percent-encoded secrets are not caught.
 //!
 //! Write-back goes the other way only through review. A colony's `vault_propose` tool emits a
 //! `vault_proposal` event; [`propose`] queues it on the mothership (never in the snapshot, never in
@@ -247,7 +249,7 @@ fn walk(dir: &Path, under: &Path, depth: usize, secrets: &[String], snap: &mut S
         let Ok(raw) = std::fs::read_to_string(entry.path()) else {
             continue;
         };
-        let text = scrub(&raw, secrets);
+        let text = scrub_text(&raw, secrets);
         let (front, body) = split_frontmatter(&text);
         let front = front.as_deref().map(parse_front).unwrap_or_default();
         if front.skip {
@@ -598,6 +600,14 @@ pub async fn take_proposal(data_dir: &Path, id: &str) -> io::Result<Option<Propo
     Ok(Some(proposal))
 }
 
+/// Text bound for the colony's snapshot or the operator's vault, through both secret passes: the
+/// exact values the mothership knows ([`scrub`], `[redacted]`), then the shared pattern redactor
+/// every other writer uses (#761, `[REDACTED:<kind>]`), so a token nobody saved is caught too.
+/// Paths and file names take [`scrub`] only: a mark's `:` and brackets do not belong in a path.
+fn scrub_text(text: &str, secrets: &[String]) -> String {
+    crate::redact::redact_text(&scrub(text, secrets)).into_owned()
+}
+
 /// A colony proposed a note for the operator vault: refuse a subagent's, ignore one from a colony
 /// that had no vault, scrub the secret values the mothership knows, and queue the rest for review.
 /// Nothing reaches the vault until the operator accepts it.
@@ -632,9 +642,9 @@ pub(crate) async fn propose(app: &Shared, id: &str, origin: Origin, draft_in: Dr
     );
     let (path, title, body, reason) = (
         scrub(draft_in.path, &secrets),
-        scrub(draft_in.title, &secrets),
-        scrub(draft_in.body, &secrets),
-        scrub(draft_in.reason, &secrets),
+        scrub_text(draft_in.title, &secrets),
+        scrub_text(draft_in.body, &secrets),
+        scrub_text(draft_in.reason, &secrets),
     );
     let commit = crate::memory::colony_commit(app, &s).await;
     let source = json!({"session_id": s.id, "repo": s.repo, "commit": commit, "origin": "orchestrator"});
@@ -921,6 +931,33 @@ mod tests {
         let creds = names.iter().find(|n| n.contains("creds")).unwrap();
         assert!(read(&dest.0.join("Web").join(creds)).contains("[redacted]"));
         assert!(!read(&dest.0.join("INDEX.md")).contains(secret));
+    }
+
+    /// #761: a credential the mothership never saw (so the exact-value scrub cannot know it) is
+    /// still caught by the shared redactor in a staged note, its index entry and a proposal's text.
+    #[test]
+    fn the_vault_uses_the_shared_redactor_for_unknown_secrets() {
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let (_, dest, stats) = run(
+            "redact",
+            &[("Notes/deploy.md", &format!("# Deploy {token}\n\nexport GH_TOKEN={token}\n"))],
+            NOTES,
+            &[],
+        );
+        assert_eq!(stats.notes, 1);
+        let note = read(&dest.0.join("Notes/deploy.md"));
+        assert!(!note.contains(token), "{note}");
+        assert_eq!(
+            note,
+            crate::redact::redact_text(&format!("# Deploy {token}\n\nexport GH_TOKEN={token}\n"))
+        );
+        assert!(!read(&dest.0.join("INDEX.md")).contains(token));
+        // Both passes, in order: the known value first, then the pattern.
+        let known = "hunter2-correct-horse";
+        assert_eq!(
+            scrub_text(&format!("{known} and {token}"), &[known.to_string()]),
+            "[redacted] and [REDACTED:github_token]"
+        );
     }
 
     /// A note reached by two overlapping folders ("Projects" and "Projects/web") is staged once; the

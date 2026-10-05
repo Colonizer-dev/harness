@@ -47,7 +47,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
@@ -374,7 +373,14 @@ fn collect(data_dir: &Path, origin: &Origin, state: &DrainState) -> Result<Vec<P
         let mut payloads = Vec::new();
         let mut files = Vec::new();
         for (name, path, len) in logs {
-            if len > MAX_PAYLOAD_BYTES {
+            // What travels is the redacted log (#761), so the hash, the size and the cap are its.
+            let bytes = if len > MAX_PAYLOAD_BYTES {
+                None
+            } else {
+                let Ok(bytes) = outgoing_log(name, &path) else { continue }; // gone since the stat: not referenced
+                Some(bytes).filter(|b| b.len() as u64 <= MAX_PAYLOAD_BYTES)
+            };
+            let Some(bytes) = bytes else {
                 payloads.push(PayloadRef {
                     name: name.to_string(),
                     sha256: String::new(),
@@ -382,12 +388,12 @@ fn collect(data_dir: &Path, origin: &Origin, state: &DrainState) -> Result<Vec<P
                     omitted: true,
                 });
                 continue;
-            }
-            let Ok(sha) = hash_file(&path) else { continue }; // gone since the stat: not referenced
+            };
+            let sha = sha256_hex(&bytes);
             payloads.push(PayloadRef {
                 name: name.to_string(),
                 sha256: sha.clone(),
-                bytes: len,
+                bytes: bytes.len() as u64,
                 omitted: false,
             });
             files.push((sha, name.to_string(), path));
@@ -572,7 +578,8 @@ impl Drainer<'_> {
                 continue;
             }
             let bytes = match tokio::fs::read(path).await {
-                Ok(bytes) => bytes,
+                // The same redaction `collect` hashed: a log is never uploaded as written (#761).
+                Ok(bytes) => crate::archive::redact_for_bundle(name, bytes),
                 Err(_) => return Ok(Prepared::Changed),
             };
             if sha256_hex(&bytes) != *sha {
@@ -1246,18 +1253,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
     util::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
-fn hash_file(path: &Path) -> std::io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        ctx.update(&buf[..n]);
-    }
-    Ok(util::hex(ctx.finish().as_ref()))
+/// A log's bytes as they leave this machine: read, then through the shared #761 redactor
+/// ([`crate::archive::redact_for_bundle`], as the export bundle and the archive do), so a log
+/// written before redaction existed never reaches the owner with a secret in it. The owner stores
+/// payloads exactly as sent (docs/fleet.md), so this is the only pass they get.
+fn outgoing_log(name: &str, path: &Path) -> std::io::Result<Vec<u8>> {
+    Ok(crate::archive::redact_for_bundle(name, std::fs::read(path)?))
 }
 
 /// How long a 429/503 asks us to wait: `Retry-After` in seconds or as an HTTP date, capped.

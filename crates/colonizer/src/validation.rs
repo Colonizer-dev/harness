@@ -307,11 +307,11 @@ pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
     let path = app.session_dir(session_id).join("findings.jsonl");
     let appended = {
         let _guard = rt.findings_lock.lock().await;
-        // #761: a finding's title or reason can quote what the agent saw, secrets included.
+        // #761: a finding's title or reason can quote what the agent saw, secrets included; the
+        // store redacts every appended line (`store::ledger_line`).
         let entry = line.to_string();
-        let text = crate::redact::redact_line(&entry);
         app.store()
-            .append(session_id, "findings.jsonl", text.as_bytes())
+            .append(session_id, "findings.jsonl", entry.as_bytes())
             .await
             .map_err(anyhow::Error::from)
     };
