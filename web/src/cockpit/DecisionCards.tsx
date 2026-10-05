@@ -11,6 +11,7 @@ import type { DecisionAnswerReply, DecisionAnswerRequest, DecisionCard, Decision
 
 /** The words and tone of each reason a pull request needs a person. */
 export const PR_REASON: Record<PrReason, { label: string; tone: Tone }> = {
+  commits_not_merged: { label: "Commits not merged", tone: "err" },
   policy_hold: { label: "Held by policy", tone: "err" },
   needs_redo: { label: "Needs a redo", tone: "warn" },
   conflicted: { label: "Conflicted", tone: "warn" },
@@ -22,6 +23,7 @@ export const PR_REASON: Record<PrReason, { label: string; tone: Tone }> = {
 export const PR_ACTION_LABEL: Record<PrAction, string> = {
   rerun: "Re-run failed jobs",
   redo: "Dispatch redo colony",
+  dismiss: "Dismiss",
 };
 
 /** The free-text option, beside the parsed ones. */
@@ -253,7 +255,15 @@ export function PrCardView({
             title={blocked ? `Off: ${blocked}` : undefined}
             onClick={() => void run(action)}
           >
-            {running === action ? <Spinner /> : action === "rerun" ? <IconRefresh size={13} /> : <IconRepeat size={13} />}
+            {running === action ? (
+              <Spinner />
+            ) : action === "rerun" ? (
+              <IconRefresh size={13} />
+            ) : action === "dismiss" ? (
+              <IconCheck size={13} />
+            ) : (
+              <IconRepeat size={13} />
+            )}
             {PR_ACTION_LABEL[action]}
           </Button>
         ))}
@@ -279,6 +289,7 @@ export function PrCardView({
 
 /** The toast after an action, in plain words. */
 export function prActionSummary(action: PrAction, reply: { rerun?: number[]; colony?: string } | null | undefined): string {
+  if (action === "dismiss") return "Dismissed";
   if (action === "redo") return reply?.colony ? `Redo colony ${reply.colony} dispatched` : "Redo colony dispatched";
   const n = reply?.rerun?.length ?? 0;
   return n === 1 ? "Re-running the failed jobs of 1 run" : `Re-running the failed jobs of ${n} runs`;

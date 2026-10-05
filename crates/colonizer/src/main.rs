@@ -84,6 +84,7 @@ mod maps;
 mod mcp;
 mod mem0;
 mod memory;
+mod merge_head;
 mod merge_loop;
 mod merge_train;
 mod mesh;

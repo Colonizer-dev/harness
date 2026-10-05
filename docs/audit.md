@@ -29,7 +29,9 @@ These held when the audit checked them against the code.
   train: a background tick that squash-merges an open colony pull request only when mergeability
   is clean, every check and the base branch's own CI are green, it is not a draft and carries no
   HOLD / do-not-merge / WIP mark, its commits pass the author and attribution allowlists, and the
-  branch is up to date with the base — never a force-merge, never `--admin`. `merge_train_overrides`
+  branch is up to date with the base, its head has been unchanged for `merge_train_quiet_minutes`
+  and those checks ran on that exact head; the merge is pinned to that head, and a branch that gets
+  commits after it is kept and flagged — never a force-merge, never `--admin`. `merge_train_overrides`
   turns it on or off per org or repo, and `merge_train_deny_orgs` keeps named orgs out whatever
   the overrides say.
 - **Untrusted colony output.** The worktree's `.git` is rewritten from the value recorded before the

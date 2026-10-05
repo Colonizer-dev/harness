@@ -236,6 +236,8 @@ pub(crate) struct DecisionCard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PrReason {
+    /// Issue #1075: merged, but its branch had commits after the merged head.
+    CommitsNotMerged,
     PolicyHold,
     NeedsRedo,
     Conflicted,
@@ -259,7 +261,8 @@ pub(crate) struct PrCard {
     pub reason: PrReason,
     /// The reason in a sentence.
     pub why: String,
-    /// Quick actions: `rerun` (re-run failed jobs), `redo` (dispatch a redo colony).
+    /// Quick actions: `rerun` (re-run failed jobs), `redo` (dispatch a redo colony), `dismiss`
+    /// (forget a commits-not-merged card once a person has dealt with it).
     pub actions: Vec<&'static str>,
 }
 
@@ -388,6 +391,29 @@ pub(crate) fn pr_cards(sessions: &[Session], inputs: &PrInputs, reviews: &[PrCar
     let report = inputs.loop_state.history.last();
     let report_item = |url: &str| report.and_then(|r| r.repos.iter().flat_map(|x| &x.items).find(|i| i.pr_url == url));
     let mut cards: Vec<PrCard> = Vec::new();
+    // Issue #1075: a merged pull request whose branch got commits after the merged head. Its colony
+    // is merged by now, so these come from the train's record, not from the colonies.
+    for u in inputs.loop_state.commits_not_merged.values() {
+        let org = owner(&u.repo);
+        if !inputs.orgs.contains(&org) {
+            continue;
+        }
+        cards.push(PrCard {
+            id: u.pr_url.clone(),
+            org,
+            repo: u.repo.clone(),
+            number: pr_number(&u.pr_url),
+            title: if u.title.is_empty() { u.repo.clone() } else { u.title.clone() },
+            url: Some(u.pr_url.clone()),
+            colony: u.colony.clone(),
+            reason: PrReason::CommitsNotMerged,
+            why: format!(
+                "{}; its branch is kept, so open a follow-up pull request from it",
+                u.sentence()
+            ),
+            actions: vec!["dismiss"],
+        });
+    }
     for s in sessions {
         if s.cleaned_up || s.superseded.is_some() || !inputs.orgs.contains(&s.org.to_ascii_lowercase()) {
             continue;
@@ -1105,7 +1131,7 @@ async fn answer_on<G: Gh>(app: &Shared, gh: &G, body: AnswerBody) -> Result<Valu
 struct PrActionBody {
     /// The card's id.
     id: String,
-    /// `rerun` or `redo`.
+    /// `rerun`, `redo` or `dismiss`.
     action: String,
 }
 
@@ -1128,6 +1154,13 @@ async fn pr_action(State(app): State<Shared>, Json(body): Json<PrActionBody>) ->
     }
     match body.action.as_str() {
         "rerun" => rerun_failed(&app, &card).await.map(|runs| Json(json!({"rerun": runs}))),
+        "dismiss" => {
+            let id = card.id.clone();
+            merge_loop::update(&app.cfg.config_dir, move |s| s.commits_not_merged.remove(&id))
+                .await
+                .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
+            Ok(Json(json!({"dismissed": card.id})))
+        }
         _ => redo(&app, &card).await.map(|colony| Json(json!({"colony": colony}))),
     }
 }

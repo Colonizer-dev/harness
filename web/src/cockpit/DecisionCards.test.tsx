@@ -134,6 +134,11 @@ describe("pull-request cards", () => {
     await runPrAction(redo, say, pr("conflicted"), "redo");
     expect(say).toHaveBeenLastCalledWith("Redo colony redo1234 dispatched");
     expect(prActionSummary("rerun", { rerun: [1] })).toBe("Re-running the failed jobs of 1 run");
+    const gone: PrCard = { ...pr("red_ci"), reason: "commits_not_merged", actions: ["dismiss"] };
+    const dismiss = vi.fn(async () => ({ dismissed: gone.id }));
+    await runPrAction(dismiss, say, gone, "dismiss");
+    expect(dismiss).toHaveBeenCalledWith({ id: gone.id, action: "dismiss" });
+    expect(say).toHaveBeenLastCalledWith("Dismissed");
   });
 });
 
