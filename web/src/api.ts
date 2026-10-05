@@ -3,6 +3,7 @@
 // and composes `Api`. Wiring a feature costs one line each in types.ts, api.ts, mock.ts and mockState.ts.
 import { DEMO } from "./demo";
 import { hostHttp, type HostApi } from "./features/host/api";
+import { builtWithHttp, type BuiltWithApi } from "./features/builtWith/api";
 import { fleetHttp, type FleetApi } from "./features/fleet/api";
 import { modulesHttp, type ModulesApi } from "./features/modules/api";
 import { providersHttp, type ProvidersApi } from "./features/providers/api";
@@ -25,13 +26,14 @@ export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor
 export type { SaveModuleRequest } from "./features/modules/api";
 export type { BehindInfo, CatchUpResult, StopReply } from "./features/sessions/api";
 
-export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi, ModelsApi {
+export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi, ModelsApi, BuiltWithApi {
   readonly mock: boolean;
 }
 
 export const httpApi: Api = {
   mock: false,
   ...hostHttp,
+  ...builtWithHttp,
   ...fleetHttp,
   ...modulesHttp,
   ...providersHttp,

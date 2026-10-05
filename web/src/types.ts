@@ -5,6 +5,7 @@
 export * from "./features/sessions/types";
 export * from "./features/repos/types";
 export * from "./features/host/types";
+export * from "./features/builtWith/types";
 export * from "./features/fleet/types";
 export * from "./features/providers/types";
 export * from "./features/modules/types";

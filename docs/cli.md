@@ -58,6 +58,7 @@ On this machine:
 
 ```sh
 colonizer version             # what this build is, and whether it is a release (also --version)
+colonizer about               # what Colonizer is built with, from the vendored Factory Zero stack entry
 colonizer update              # install the newest release against a running mothership, restart into it
 colonizer update --force      # also over a development build, or a build newer than the latest release
 colonizer update --check      # say whether a newer release exists and stop; no mothership needed
