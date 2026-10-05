@@ -1762,7 +1762,9 @@ pub(crate) fn start_tasks(app: &crate::Shared) {
         // Issue #321: with recovery settled, drop the claims this mothership still carries for
         // colonies it no longer holds — one that died while the harness was down never released
         // its own. Spawned: never on the boot path, and a no-op under the kill switch.
-        crate::claims::reconcile_orphaned_claims(recovery).await;
+        crate::claims::reconcile_orphaned_claims(recovery.clone()).await;
+        // Issue #919: then keep each claim comment's status current.
+        crate::claims::live::start(recovery);
     });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { watch_sandboxes(sandbox_watch).await });

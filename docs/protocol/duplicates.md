@@ -69,15 +69,19 @@ the MCP tool, the CLI), so the one check covers them; loops, burn-down, red-team
 call that path directly and launch no issue. The cockpit's
 issue lists mark epics from `GET …/issues`'s `epic` and leave them out of bulk hand-offs.
 
-On GitHub a launch marks its claim: the `colonizer:claimed` label plus a
-`<!-- colonizer:claim host="<hostname> (<host_id>)" colony="<id>" issue="<n>" -->` comment naming
-the mothership and colony. Release removes the label and posts a release note, but only while the
+On GitHub a launch marks its claim: the `colonizer:claimed` label, a `colonizer:host:<hostname slug>`
+label, and one comment starting
+`<!-- colonizer:claim host="<hostname> (<host_id>)" colony="<id>" issue="<n>" -->` naming the
+mothership and colony. A later claim on the issue edits the newest comment carrying that marker
+(rewriting the marker to the new colony) instead of posting another, and the mothership edits it as
+the colony's status changes (at most once per issue every two minutes, final states always; issue
+#919). Release removes both labels and edits the comment to its final state, but only while the
 issue's latest claim is this colony's (host id and colony both match); a merged pull request keeps
 the mark on purpose, as the record of who did the work. On boot a mothership reaps the marks it
 owns — open issues whose latest claim carries its host id but whose colony is gone from its session
 list, or ended the way a release would have followed (stopped, failed or no changes without a pull
 request, or closed) — and never touches another host's mark. A release that races a successor's
-claim puts the label back once it sees the newer claim comment. So the worst case is a mothership that
+claim puts the claim label back once it sees the newer claim in the comment. So the worst case is a mothership that
 crashes leaving its marks until its next boot; one that never returns leaves them until a human
 removes the label. GitLab, Linear and Jira should follow the same claim shape when those forges
 land. Contested-claim detection after launch, and label repair, are not implemented yet.

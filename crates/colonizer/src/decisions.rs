@@ -53,7 +53,7 @@ pub(crate) const ANSWER_PREFIX: &str = "Decision (maintainer):";
 /// The least time between two searches of one org.
 pub(crate) const POLL_EVERY_MINUTES: i64 = 5;
 /// The first pause after GitHub pushes back; each further push-back doubles it.
-const BACKOFF_FIRST_MINUTES: i64 = 15;
+pub(crate) const BACKOFF_FIRST_MINUTES: i64 = 15;
 /// The longest pause, and the longest an org's failing search waits between tries.
 const BACKOFF_MAX_MINUTES: i64 = 240;
 /// Latest-comment reads one poll may make; the rest wait for the next poll.
@@ -583,7 +583,7 @@ pub(crate) struct Gate {
     paused_until: Option<DateTime<Utc>>,
 }
 
-fn doubled(first_minutes: i64, times: u32) -> Duration {
+pub(crate) fn doubled(first_minutes: i64, times: u32) -> Duration {
     let minutes = first_minutes.saturating_mul(1i64 << times.min(16));
     Duration::minutes(minutes.min(BACKOFF_MAX_MINUTES))
 }

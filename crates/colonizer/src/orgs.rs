@@ -124,6 +124,11 @@ pub struct OrgSettings {
     /// `Some(true)` follows the module settings, point by point.
     #[serde(default)]
     pub jev: Option<bool>,
+    /// Whether this org's claimed issues get the `colonizer:host:<host>` label and status edits to
+    /// the claim comment (issue #919). `None` or `Some(true)` means yes; `Some(false)` keeps the
+    /// claim to the label and one comment, which only a release edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_updates: Option<bool>,
     #[serde(default)]
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
@@ -961,6 +966,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("jev") {
         incoming.jev = saved.jev;
+    }
+    if !named("claim_updates") {
+        incoming.claim_updates = saved.claim_updates;
     }
     if !named("agent") {
         incoming.agent = saved.agent.clone();
