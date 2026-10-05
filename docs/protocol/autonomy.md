@@ -65,7 +65,7 @@ allowance is down to whatever reserve you set, then stops. Every colony it launc
 | `spend_usd_per_colony` | 5 | What one bug-hunt colony roughly burns; paces the launches |
 | `max_live` | 2 | Cap on concurrent live burn-down colonies |
 | `repos` | `""` | Comma-separated `owner/repo` list to hunt in. Empty means burn-down is unconfigured and launches nothing |
-| `instructions` | `""` | Custom hunt prompt; empty uses a built-in bug-hunt prompt |
+| `instructions` | `""` | Custom hunt prompt; empty uses the built-in bug-hunt prompt for the repository's next focus area |
 
 Once a minute, inside the window (`reset − lead_hours` to `reset`), the scheduler plans
 `ceil((allowance − spent − reserve) / spend_usd_per_colony)` launches in total. By fraction `f` of
@@ -92,5 +92,16 @@ nothing launches; an unparseable `reset_time`/`reset_weekday` → `next_reset` n
 never opens; a launch that fails is logged and retried on the next tick.
 
 Hunt colonies run a generic bug-hunt prompt — find real bugs, verify before filing, keep pull
-requests small. They do not use the red-team runs of
-[#212](https://github.com/Colonizer-dev/harness/issues/212) (§6.7), which shipped separately.
+requests small — narrowed to one focus area. Each repository works the red-team runs' eight general
+focus areas (`error handling and edge cases`, `concurrency and race conditions`, `input validation
+and injection`, `resource leaks and exhaustion`, `auth and permission boundaries`, `core-flow logic
+errors`, `silent failures and swallowed errors`, `API and contract mismatches`) in turn, one area
+per launch, so concurrent colonies divide the work instead of repeating it. The area is chosen from
+how many hunts that repository has already had — every `burn_down` colony on it still in the session
+list, not just this window's — so the cycle carries over the reset instead of restarting at the
+first area every week. The colony's title names its area (`Burn-down hunt: input validation and
+injection`), as does its activity line. Setting `instructions` replaces the built-in prompt whole,
+area and all — and then the title is the plain `Burn-down hunt` and the activity line leaves the
+area out, because the colony is hunting what the operator wrote rather than a listed focus.
+Burn-down borrows only that list: it does not start a red-team run (§6.7,
+[red-team.md](red-team.md)) — those are launched on their own.

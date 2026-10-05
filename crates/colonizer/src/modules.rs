@@ -840,7 +840,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "spend_usd_per_colony": {"type": "number", "title": "Estimated spend per colony (USD)", "description": "What one bug-hunt colony roughly burns, used to pace launches across the window", "minimum": 0.5, "default": 5},
                 "max_live": {"type": "integer", "title": "Concurrent live burn-down colonies", "description": "Cap on how many burn-down colonies run at once", "minimum": 1, "maximum": 8, "default": 2},
                 "repos": {"type": "string", "title": "Repositories to hunt in", "description": "Comma-separated owner/repo list. Empty means burn-down is not configured and launches nothing", "default": ""},
-                "instructions": {"type": "string", "title": "Custom hunt instructions", "description": "When empty, a built-in bug-hunt prompt is used", "default": ""}
+                "instructions": {"type": "string", "title": "Custom hunt instructions", "description": "When empty, a built-in bug-hunt prompt focused on the next area this repository has not hunted yet (error handling, concurrency, input validation, resource leaks, auth, core flows, silent failures, API contracts) is used", "default": ""}
             }}),
         )],
         "voice" => crate::voice::module_providers()
