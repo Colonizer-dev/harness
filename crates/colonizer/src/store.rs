@@ -37,7 +37,9 @@ pub(crate) trait SessionStore: Send + Sync {
     /// Creates or replaces one file whole — the index's guarantees, per file.
     fn write_file<'a>(&'a self, id: &'a str, name: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, ()>;
     /// Appends one line (newline added), creating the file if needed; at least once per writer,
-    /// and readers replay it with the `seq` rule (drop repeats, per file).
+    /// and readers replay it with the `seq` rule (drop repeats, per file). Every backend stores the
+    /// line through [`ledger_line`] (#761), so no event, log or ledger line reaches a store with a
+    /// credential in it, whichever caller wrote it.
     fn append<'a>(&'a self, id: &'a str, name: &'a str, line: &'a [u8]) -> StoreFuture<'a, ()>;
     /// The session's files, relative and `/`-separated (`vm/token`), sorted, recursive.
     fn list_files<'a>(&'a self, id: &'a str) -> StoreFuture<'a, Vec<String>>;
@@ -48,6 +50,15 @@ pub(crate) trait SessionStore: Send + Sync {
     /// stamp, so an aside from an earlier second is never overwritten — and returns that name;
     /// `None` when there is no index to quarantine.
     fn quarantine_index(&self) -> StoreFuture<'_, Option<String>>;
+}
+
+/// One appended line as a backend stores it: redacted field by field (a JSON line stays valid
+/// JSON) or as text, by the shared redactor (#761). Callers that also broadcast the line redact it
+/// themselves first; for them this is a no-op that keeps a clean line byte for byte. Redacting here
+/// as well means a new writer to `events.jsonl`, `harness.jsonl`, `findings.jsonl` or any later
+/// ledger cannot forget to.
+pub(crate) fn ledger_line(line: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    crate::redact::redact_jsonl(line)
 }
 
 /// A Windows drive prefix (`C:`), refused wherever an id or a name component would go.
@@ -184,7 +195,8 @@ impl SessionStore for LocalDirStore {
         Box::pin(async move {
             let path = self.path(id, name)?;
             self.create_parent(&path).await?;
-            let text = std::str::from_utf8(line).map_err(|_| not_utf8(&path))?;
+            let line = ledger_line(line);
+            let text = std::str::from_utf8(&line).map_err(|_| not_utf8(&path))?;
             util::append_line(&path, text).await.map_err(into_io_error)
         })
     }
@@ -349,9 +361,10 @@ impl SessionStore for MemoryObjectStore {
             // Read-modify-write under the lock, held only inside this block: there is no O_APPEND
             // on an object store, and one writer per session is what keeps a lost update impossible.
             let key = Self::key(id, name)?;
+            let line = ledger_line(line);
             let mut objects = self.lock();
             let object = objects.entry(key).or_default();
-            object.extend_from_slice(line);
+            object.extend_from_slice(&line);
             object.push(b'\n');
             Ok(())
         })
@@ -741,6 +754,33 @@ mod tests {
         let (root, backends) = backends("refuse");
         for (label, store) in &backends {
             refuses_host_paths(store.as_ref(), label).await;
+        }
+        cleanup(&root);
+    }
+
+    /// #761 at the store layer: whichever caller appends, a credential in the line is stored only
+    /// as its mark, a JSON line stays valid JSON, and a clean line is stored byte for byte.
+    #[tokio::test]
+    async fn both_reference_backends_redact_every_appended_line() {
+        let (root, backends) = backends("redact");
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        for (label, s) in &backends {
+            let leaked = format!(r#"{{"seq":1,"type":"text","text":"echo {token}"}}"#);
+            s.append("abc", "events.jsonl", leaked.as_bytes()).await.unwrap();
+            s.append("abc", "events.jsonl", &event(2)).await.unwrap();
+            let plain = format!("plain text {token}");
+            s.append("abc", "harness.jsonl", plain.as_bytes()).await.unwrap();
+            let text = String::from_utf8(file(s.as_ref(), "abc", "events.jsonl").await.unwrap()).unwrap();
+            assert!(!text.contains(token), "{label}: {text}");
+            let first: Value = serde_json::from_str(text.lines().next().unwrap()).expect("still JSON");
+            assert_eq!(first["text"], "echo [REDACTED:github_token]", "{label}");
+            assert_eq!(
+                text.lines().nth(1).unwrap().as_bytes(),
+                event(2),
+                "{label}: a clean line is kept"
+            );
+            let harness = String::from_utf8(file(s.as_ref(), "abc", "harness.jsonl").await.unwrap()).unwrap();
+            assert_eq!(harness, "plain text [REDACTED:github_token]\n", "{label}");
         }
         cleanup(&root);
     }

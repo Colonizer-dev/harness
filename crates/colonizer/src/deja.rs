@@ -193,7 +193,10 @@ fn copy_transcripts(data_dir: &Path, session: &str, org: &str, repo: &str, secre
             }
             let text = std::fs::read_to_string(&path)?;
             let name = format!("{session}-{}", file.file_name().to_string_lossy());
-            std::fs::write(dest.join(name), scrub(&text, secrets))?;
+            // The known values first, then the shared pattern redactor line by line (#761): a
+            // credential nobody saved must not become recall for every colony of the org.
+            let scrubbed = scrub(&text, secrets);
+            std::fs::write(dest.join(name), crate::redact::redact_jsonl(scrubbed.as_bytes()))?;
             copied += 1;
         }
     }
@@ -506,6 +509,9 @@ esac
     }
 
     /// A stopped colony of `acme` with one transcript to index.
+    /// A credential in a transcript that is neither on the Secrets page nor a colony secret.
+    const UNSAVED: &str = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+
     fn colony_with_transcript(app: &Shared, id: &str, text: &str) -> crate::sessions::Session {
         let mut s = colony("acme", SessionStatus::Stopped);
         s.id = id.into();
@@ -567,8 +573,8 @@ esac
             &app,
             "s1",
             &format!(
-                "the token is {page_secret} and the other is {colony_secret}; in JSON it reads \"{}\"; the deploy pipeline ships weekly",
-                colony_secret
+                "the token is {page_secret} and the other is {colony_secret}; in JSON it reads \"{}\"; nobody saved {}; the deploy pipeline ships weekly",
+                colony_secret, UNSAVED
             ),
         );
         index_colony(&app, &s).await.unwrap();
@@ -585,6 +591,9 @@ esac
         let copied =
             std::fs::read_to_string(org_dir.join("sessions/acme-repo/s1-11111111-2222-3333-4444-555555555555.jsonl")).unwrap();
         assert!(copied.contains(REDACTED), "the copy is scrubbed: {copied}");
+        // #761: a token no one saved is caught by the shared redactor.
+        assert!(!copied.contains(UNSAVED), "{copied}");
+        assert!(copied.contains("[REDACTED:github_token]"), "{copied}");
 
         // (a) A later colony of the same org recalls it.
         let later = colony("acme", SessionStatus::Idle);

@@ -1282,11 +1282,12 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
         // Through the store, so the ledger line lands in `sessions/<id>/findings.jsonl` by the same
-        // name a remote backend would answer by; the store adds the newline, as `append_line` did.
+        // name a remote backend would answer by; the store adds the newline, as `append_line` did,
+        // and redacts the line (#761, `store::ledger_line`).
         let text = entry.to_string();
         let recorded = app
             .store()
-            .append(&id, "findings.jsonl", crate::redact::redact_line(&text).as_bytes())
+            .append(&id, "findings.jsonl", text.as_bytes())
             .await
             .map_err(anyhow::Error::from);
         if let Err(e) = recorded {

@@ -31,6 +31,8 @@ struct Owner {
     /// `payload:<sha>` and `row:<id>`, in arrival order.
     events: Vec<String>,
     payloads: BTreeSet<String>,
+    /// Each payload's bytes as they arrived, by hash.
+    bodies: BTreeMap<String, Vec<u8>>,
     /// Upserted by id, like the real owner.
     rows: BTreeMap<String, Value>,
     /// Every row id received, re-sends included.
@@ -105,6 +107,7 @@ async fn fake_payload(State(f): State<Fake>, UrlPath(sha): UrlPath<String>, head
     }
     assert_eq!(sha256_hex(&body), sha, "a payload travels under its own hash");
     o.events.push(format!("payload:{sha}"));
+    o.bodies.insert(sha.clone(), body.to_vec());
     o.payloads.insert(sha);
     StatusCode::NO_CONTENT.into_response()
 }
@@ -311,6 +314,33 @@ async fn payloads_are_acknowledged_before_the_rows_that_reference_them() {
         .unwrap();
     assert_eq!((again.sent, again.pending), (0, 0));
     assert_eq!(fake.with(|o| o.requests), before);
+}
+
+/// #761: a log written before redaction existed leaves this machine redacted. The payload travels
+/// under the hash and size of its redacted bytes, and the log on disk is left as it is.
+#[tokio::test]
+async fn a_payload_is_redacted_before_it_is_hashed_and_uploaded() {
+    let fake = Fake::new();
+    let url = serve(&fake).await;
+    let (_root, data) = member(1, plain);
+    let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+    let log = data.join("sessions/s00/events.jsonl");
+    let raw = format!("{{\"seq\":1,\"text\":\"export GH_TOKEN={token}\"}}\n");
+    std::fs::write(&log, &raw).unwrap();
+
+    let report = drain(&data, &origin(), &target(&url), &cfg(10), &SystemClock, false)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Synced, "{report:?}");
+    fake.with(|o| {
+        let row = &o.rows["hostA:s00"];
+        let sha = row["payloads"][0]["sha256"].as_str().unwrap();
+        let body = String::from_utf8(o.bodies[sha].clone()).unwrap();
+        assert!(!body.contains(token), "{body}");
+        assert_eq!(body, "{\"seq\":1,\"text\":\"export GH_TOKEN=[REDACTED:github_token]\"}\n");
+        assert_eq!(row["payloads"][0]["bytes"], body.len(), "the size is the redacted log's");
+    });
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), raw, "the local log is not rewritten");
 }
 
 #[tokio::test]
