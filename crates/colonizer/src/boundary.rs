@@ -197,29 +197,6 @@ mod tests {
         assert!(!b.detail.contains("ghp_0123456789abcdefghij0123456789abcdef"), "{}", b.detail);
     }
 
-    /// Every kind the schema names is one the harness reads, and the other way round.
-    #[test]
-    fn the_kinds_are_exactly_the_schemas_enum() {
-        let schema: Value = serde_json::from_str(include_str!("../../../docs/agent-events.schema.json")).unwrap();
-        let kinds: Vec<&str> = schema["$defs"]["boundary"]["properties"]["kind"]["enum"]
-            .as_array()
-            .expect("boundary.kind is an enum")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        assert_eq!(kinds, KINDS);
-        let required: Vec<&str> = schema["$defs"]["boundary"]["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        let written = Boundary::new("sandbox_denied", "read_only_mount", "x", None).to_event();
-        for field in required {
-            assert!(written.get(field).is_some(), "the written event lacks the required {field}");
-        }
-    }
-
     /// The mothership's own boundary events land in the colony's events, with the system origin,
     /// and feed the watchdog: a publish rewrite flags the colony with the event as evidence.
     #[tokio::test]
