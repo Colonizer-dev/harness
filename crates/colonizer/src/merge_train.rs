@@ -12,6 +12,7 @@ use crate::{
     activity::Entry,
     authority,
     github::{self, CiState, Mergeability, PrCommit, PrInfo, PrState},
+    merge_head,
     plugins::parse_list,
     publish,
     sessions::{Session, SessionStatus},
@@ -29,8 +30,6 @@ use tokio::sync::Mutex;
 
 /// How far apart the train's ticks sit.
 const TICK: Duration = Duration::from_secs(120);
-/// The merge gets a deadline like every other `gh` call, so a hung `gh` cannot wedge the train.
-const MERGE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long, and how far apart, the train re-reads the remaining pull requests' mergeability after
 /// a merge, waiting for GitHub to finish recomputing it against the moved base.
 const MERGEABILITY_POLLS: u32 = 10;
@@ -45,6 +44,8 @@ pub(crate) struct TrainSettings {
     deny_orgs: String,
     pub(crate) authors: String,
     pub(crate) forbid: String,
+    /// Issue #1075: minutes a head must have been unchanged before it merges.
+    pub(crate) quiet_minutes: u64,
 }
 
 pub(crate) async fn train_settings(app: &App) -> TrainSettings {
@@ -57,6 +58,9 @@ pub(crate) async fn train_settings(app: &App) -> TrainSettings {
         deny_orgs: read("merge_train_deny_orgs"),
         authors: read("merge_train_authors"),
         forbid: read("merge_train_forbid"),
+        quiet_minutes: crate::config::setting(&modules.publish, &schema, "merge_train_quiet_minutes")
+            .and_then(Value::as_u64)
+            .unwrap_or(crate::merge_head::DEFAULT_QUIET_MINUTES),
     }
 }
 
@@ -206,7 +210,8 @@ struct RepoRow {
     base: Option<String>,
     base_ci: BaseCi,
     checked_at: Option<DateTime<Utc>>,
-    last_merge: Option<(String, DateTime<Utc>)>,
+    /// The last merge: the pull request, when, and the head commit it merged (issue #1075).
+    last_merge: Option<(String, DateTime<Utc>, String)>,
     prs: Vec<PrRow>,
 }
 
@@ -555,7 +560,14 @@ async fn tick_once(app: &Shared) {
             )
             .await;
         } else {
-            train_repo(app, repo, &group, &guards).await;
+            train_repo(
+                app,
+                repo,
+                &group,
+                &guards,
+                crate::merge_head::quiet_period(settings.quiet_minutes),
+            )
+            .await;
         }
     }
 }
@@ -616,7 +628,7 @@ async fn hold(app: &Shared, repo: &str, group: &[&Session], state: TrainState, s
 
 /// Runs one repository's tick: the base branch's CI gate, the candidates in train order, at most
 /// one merge, the bounded settle wait, and the reading stored for the route.
-async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guards) {
+async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guards, quiet: Duration) {
     let now = Utc::now();
     let base = match github::default_branch(app, repo).await {
         Ok(base) => base,
@@ -705,6 +717,7 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
     let mut merged = None;
     if let Some(i) = rows.iter().position(|row| row.status == PrStatus::Next) {
         let s = ordered[i];
+        let pr_title = rows[i].title.trim().to_string();
         let mut say = |status: PrStatus, reason: String| {
             let title = std::mem::take(&mut rows[i].title);
             rows[i] = pr_row(s, title, status, reason);
@@ -726,23 +739,65 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
             if let Some(reason) = fresh.iter().find(|x| x.id == s.id).and_then(superseded_hold) {
                 say(PrStatus::Skipped, reason);
             } else {
-                let args = merge_args(&url, &head, !has_stacked_child(&fresh, s));
-                match crate::util::exec_within(MERGE_TIMEOUT, &mut app.gh(args)).await {
-                    Ok(_) => {
-                        say(PrStatus::Merged, "squash-merged by the merge train".to_string());
-                        merged = Some((url, s.clone()));
+                // Issue #1075: the shared quiet-head merge, as the merge-train loop makes it.
+                let number = merge_head::pr_number(&url).unwrap_or_default();
+                let title = format!("{pr_title} (#{number})");
+                let branch = read
+                    .and_then(|f| f.info.head_ref_name.clone())
+                    .unwrap_or_else(|| s.branch.clone());
+                let candidate = merge_head::Candidate {
+                    repo: &s.repo,
+                    number,
+                    branch: &branch,
+                    head: &head,
+                    title: &title,
+                    delete_branch: !has_stacked_child(&fresh, s),
+                    require_ci: true,
+                };
+                let gh = merge_head::GhHead { app };
+                match merge_head::merge_quiet_head(&gh, &candidate, Utc::now(), quiet).await {
+                    merge_head::Outcome::Merged(m) => {
+                        let mut reason = format!("squash-merged by the merge train at head {}", m.head);
+                        if let Some(note) = &m.branch_note {
+                            reason.push_str(&format!("; {note}"));
+                        }
+                        let drift = m.drift.as_ref().map(|tip| merge_head::Unmerged {
+                            pr_url: url.clone(),
+                            repo: s.repo.clone(),
+                            title: pr_title.clone(),
+                            colony: Some(s.id.clone()),
+                            merged_head: m.head.clone(),
+                            tip: tip.clone(),
+                            at: Some(Utc::now()),
+                            by: "merge train".to_string(),
+                        });
+                        if let Some(u) = &drift {
+                            reason.push_str(&format!("; {}", u.sentence()));
+                        }
+                        say(PrStatus::Merged, reason);
+                        merged = Some((url, s.clone(), m.head, drift));
                     }
-                    Err(e) => say(PrStatus::Waiting, format!("the merge failed: {e:#}")),
+                    merge_head::Outcome::NotYet { reason, .. } | merge_head::Outcome::HeadMoved(reason) => {
+                        say(PrStatus::Waiting, reason)
+                    }
+                    merge_head::Outcome::Failed(e) => say(PrStatus::Waiting, format!("the merge failed: {e}")),
                 }
             }
         }
     }
-    if let Some((ref url, ref s)) = merged {
-        app.session_log(&s.id, "info", format!("the merge train squash-merged {url}"))
+    if let Some((ref url, ref s, ref head, ref drift)) = merged {
+        app.session_log(&s.id, "info", format!("the merge train squash-merged {url} at head {head}"))
             .await;
         let mut entry = Entry::new("publish.merge_train", "colony").colony(s);
-        entry.detail = Some("squash-merged by the merge train".to_string());
+        entry.detail = Some(format!("squash-merged by the merge train at head {head}"));
         crate::activity::record(app, entry).await;
+        if let Some(u) = drift {
+            app.session_log(&s.id, "warn", format!("merge train: {}", u.sentence())).await;
+            let mut entry = Entry::new("publish.merge_train", "colony").colony(s);
+            entry.detail = Some(format!("{url}: {}", u.sentence()));
+            crate::activity::record(app, entry).await;
+            merge_head::record_unmerged(app, u.clone()).await;
+        }
         // GitHub recomputes the remaining pull requests' mergeability after the base moved; wait
         // (bounded) so the next tick starts from real answers.
         let others: Vec<&Session> = ordered
@@ -766,7 +821,7 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
         }
     }
     let mut row = on_row(Some(base), base_ci, rows);
-    row.last_merge = merged.as_ref().map(|(url, _)| (url.clone(), now));
+    row.last_merge = merged.as_ref().map(|(url, _, head, _)| (url.clone(), now, head.clone()));
     save(app, repo, row, group, false).await;
 }
 
@@ -923,7 +978,7 @@ async fn list() -> Json<Value> {
                 "base": row.base.clone(),
                 "base_ci": row.base_ci,
                 "checked_at": row.checked_at.map(|t| t.to_rfc3339()),
-                "last_merge": row.last_merge.as_ref().map(|(url, at)| json!({"pr_url": url, "at": at.to_rfc3339()})),
+                "last_merge": row.last_merge.as_ref().map(|(url, at, head)| json!({"pr_url": url, "at": at.to_rfc3339(), "head": head})),
                 "prs": row.prs.iter().map(|pr| json!({
                     "session": pr.session,
                     "pr_url": pr.pr_url,

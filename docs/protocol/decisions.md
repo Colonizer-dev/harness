@@ -12,15 +12,15 @@ the opt-ins and the answered issues are saved in `<config_dir>/decisions.json`.
 | `GET /api/decisions` | `{count, decisions: [decision], prs: [pr], orgs: [{org, enabled, default_on, explicit, polled_at, error}], writes_blocked, writes_blocked_reason, paused_until, poll_minutes}`. Answered from the mothership's cache and its own records; it never calls GitHub. `count` is `decisions` plus `prs`. Owner only: the cards span every opted-in org. |
 | `PUT /api/decisions/orgs/{org}` | `{enabled: bool \| null}`: opts the org in or out; `null` returns it to its default. Answers the `GET` view. `400` for a name that is not a GitHub org. Owner only. |
 | `POST /api/decisions/answer` | `{id: "owner/repo#n", choice, note?}`: posts exactly one comment, `Decision (maintainer): <choice>` with the note below it, then removes the `needs-decision` label when the issue carries it. Answers `{id, comment, label_removed, label_error}` — a label that would not come off is reported, never retried, so the comment is never posted twice. `400` for an empty choice, a choice over 500 characters or a note over 4000; `404` when no open card has the id (answered already, or never found); `409` while the same card is being answered, or while `COLONIZER_NO_EXTERNAL_EFFECTS` blocks writes; `502` when GitHub refused the comment. Owner only. |
-| `POST /api/decisions/pr-action` | `{id, action: "rerun" \| "redo"}`, for an action the card lists. `rerun` re-runs the failed jobs of the Actions runs behind the pull request's failing checks (at most five runs) → `{rerun: [run ids]}`; `409` when no failing check came from an Actions run. `redo` dispatches the merge-train loop's redo colony, with the pull request as its reference → `{colony}`; `409` when a redo colony (or a newer pull request on the same issue) already exists, or one was dispatched for this pull request before. `409` while writes are blocked. Owner only. |
+| `POST /api/decisions/pr-action` | `{id, action: "rerun" \| "redo" \| "dismiss"}`, for an action the card lists. `dismiss` forgets a `commits_not_merged` card → `{dismissed: id}`. `rerun` re-runs the failed jobs of the Actions runs behind the pull request's failing checks (at most five runs) → `{rerun: [run ids]}`; `409` when no failing check came from an Actions run. `redo` dispatches the merge-train loop's redo colony, with the pull request as its reference → `{colony}`; `409` when a redo colony (or a newer pull request on the same issue) already exists, or one was dispatched for this pull request before. `409` while writes are blocked. Owner only. |
 
 A `decision` is `{id, org, repo, number, title, url, question, options: [string], source: "label" |
 "body" | "comment", labelled, more, updated_at}`; empty `options` means the card offers free text,
 and `more` counts further questions in the same text. A `pr` is `{id, org, repo, number, title, url,
 colony, reason, why, actions}`; `id` is the pull request's URL, or `colony:<id>` for a colony held
-before it published; `reason` is one of `policy_hold`, `needs_redo`, `conflicted`, `red_ci`,
-`review_requested` and `awaiting_merge`, in the order the inbox lists them; `actions` lists `rerun`
-and `redo` where they are safe.
+before it published; `reason` is one of `commits_not_merged`, `policy_hold`, `needs_redo`,
+`conflicted`, `red_ci`, `review_requested` and `awaiting_merge`, in the order the inbox lists them;
+`actions` lists `rerun`, `redo` and `dismiss` where they are safe.
 
 ## What counts
 
@@ -36,6 +36,10 @@ inbox and only the label removal failed, so a card never invites a second answer
 
 **A pull request needs a person** when:
 
+- `commits_not_merged` (issue #1075): the merge train or its loop squash-merged it, and its branch's
+  tip afterwards had commits after the merged head. The branch is kept; the card stays until it is
+  dismissed. Read from `merge-train-loop.json`'s `commits_not_merged`, so it shows although the colony
+  is merged.
 - `policy_hold`: its colony carries a control-defeat flag, its autopilot is holding the publish
   because a secret was redacted from its pull request description, or its publish was refused.
 - `needs_redo`: the merge-train loop's mechanical rebase conflicted, or its resolve colony gave up —

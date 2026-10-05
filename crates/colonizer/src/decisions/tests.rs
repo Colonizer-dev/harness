@@ -655,3 +655,46 @@ fn each_pull_request_card_says_why_it_needs_a_person() {
     let got = reasons(&sessions, &state, &["acme/web"], &[], &[]);
     assert!(!got.iter().any(|(_, r, _)| *r == PrReason::AwaitingMerge));
 }
+
+#[test]
+fn commits_not_merged_after_a_train_merge_lead_the_inbox_until_dismissed() {
+    // Issue #1075: the colony is merged, so the card comes from the train's record alone.
+    let mut merged = pr_colony("merged", 9);
+    merged.status = SessionStatus::Merged;
+    let mut red = pr_colony("red", 4);
+    red.ci_state = Some(github::CiState::Failure);
+    let mut state = LoopState::default();
+    let url = "https://github.com/acme/web/pull/9".to_string();
+    state.commits_not_merged.insert(
+        url.clone(),
+        crate::merge_head::Unmerged {
+            pr_url: url.clone(),
+            repo: "acme/web".into(),
+            title: "Change 9".into(),
+            colony: Some("merged".into()),
+            merged_head: "aaaaaaaa1111".into(),
+            tip: "bbbbbbbb2222".into(),
+            at: None,
+            by: "merge train".into(),
+        },
+    );
+    // Another org's record stays out of an inbox not opted in to it.
+    state.commits_not_merged.insert(
+        "https://github.com/other/x/pull/1".into(),
+        crate::merge_head::Unmerged {
+            pr_url: "https://github.com/other/x/pull/1".into(),
+            repo: "other/x".into(),
+            ..Default::default()
+        },
+    );
+    let got = reasons(&[merged.clone(), red.clone()], &state, &[], &[], &[]);
+    assert_eq!(
+        got,
+        vec![
+            ("merged".to_string(), PrReason::CommitsNotMerged, vec!["dismiss"]),
+            ("red".to_string(), PrReason::RedCi, vec!["rerun"]),
+        ]
+    );
+    state.commits_not_merged.clear();
+    assert_eq!(reasons(&[merged, red], &state, &[], &[], &[]).len(), 1);
+}

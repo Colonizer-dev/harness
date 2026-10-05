@@ -23,9 +23,9 @@ export interface DecisionCard {
 }
 
 /** Why a pull request needs a person, in the order the inbox lists them. */
-export type PrReason = "policy_hold" | "needs_redo" | "conflicted" | "red_ci" | "review_requested" | "awaiting_merge";
+export type PrReason = "commits_not_merged" | "policy_hold" | "needs_redo" | "conflicted" | "red_ci" | "review_requested" | "awaiting_merge";
 
-export type PrAction = "rerun" | "redo";
+export type PrAction = "rerun" | "redo" | "dismiss";
 
 /** A pull request (or, held before publishing, a colony) that needs a person. */
 export interface PrCard {
@@ -89,4 +89,6 @@ export interface PrActionReply {
   rerun?: number[];
   /** The redo colony dispatched. */
   colony?: string;
+  /** The commits-not-merged card dismissed (issue #1075). */
+  dismissed?: string;
 }

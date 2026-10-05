@@ -531,7 +531,8 @@ every two minutes, walks every colony whose pull request is still open and squas
 repository, at most one merge per tick. It is off by default and separate from the `automerge` setting,
 which merges a fix colony's pull request after a review passes.
 
-Five `publish` settings drive it (all off/empty by default, shown in the cockpit's Settings form):
+Six `publish` settings drive it (all off/empty by default but the quiet period, shown in the cockpit's
+Settings form):
 
 - `merge_train` — `off` (the install default) or `on`.
 - `merge_train_overrides` — comma-separated `owner=on|off` or `owner/repo=on|off`; a repo entry beats an
@@ -542,13 +543,39 @@ Five `publish` settings drive it (all off/empty by default, shown in the cockpit
   the identity Colonizer publishes as. A pull request with any commit by another author is refused.
 - `merge_train_forbid` — comma-separated case-insensitive substrings; a pull request whose commit messages
   contain one — a forbidden attribution such as `Co-Authored-By: …`, for instance — is refused.
+- `merge_train_quiet_minutes` — how long a pull request's head must have been unchanged before it merges
+  (default 10; 0 merges as soon as the head's checks are green). Used by the tick and the loop alike.
 
 A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
 no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
 branch's own CI is green. A colony another merge superseded (issue #673; see
 [colonies.md](colonies.md#when-a-merge-supersedes-a-colony)) is skipped until it is kept, so the train
-never lands a second copy of work that is already in main. The merge is a squash with `--match-head-commit` that deletes the branch — never
-a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
+never lands a second copy of work that is already in main.
+
+Every merge, the tick's and the loop's, goes through one helper (`merge_head.rs`, issue #1075), so a
+commit pushed after a pull request's first green run is never squashed away:
+
+- **CI on that exact head.** The check runs and statuses of the head commit itself must all be green; a
+  green run on an earlier head does not count, and a head nothing has run on yet waits.
+- **A quiet head.** The head must have been unchanged for `merge_train_quiet_minutes`, counted from the
+  later of the head commit's committer date and the first check run started on it (the run starts when
+  GitHub sees the push, so a commit written long before it was pushed still waits). The tick retries on
+  its next tick; the loop sits out a remaining wait no longer than `ci_wait_minutes` once per run, else
+  the next run merges it.
+- **Pinned to that head.** The merge is `PUT /repos/{repo}/pulls/{n}/merge` with `merge_method=squash`
+  and the head as `sha`, so a push landing during the merge makes GitHub refuse it (409) instead of
+  merging the older head. That refusal reads as "the head moved": the pull request waits for checks on
+  the new head and merges on a later tick or run.
+- **The branch checked afterwards.** The branch's tip is read again after the merge. Only a tip equal to
+  the merged head is deleted (and only when nothing is stacked on it). A tip with commits after the
+  merged head keeps its branch and raises **commits not merged**: a warning in the colony's log and the
+  activity feed, a line in the report, and a card in the [decisions inbox](decisions.md) until
+  someone dismisses it — the later commits need a follow-up pull request from that branch.
+- **The merged head in the report.** The tick's row says `squash-merged by the merge train at head
+  <sha>` and `GET /api/merge-train`'s `last_merge` carries `head`; the loop's item says `merged head
+  <sha>` and its `last_train_merge` records `head`.
+
+Never a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
 to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
 for exactly those readings. The one case the watcher never sees — a pull request whose head does not
 contain the current base tip even when GitHub reports CLEAN (it does when the repository does not require
