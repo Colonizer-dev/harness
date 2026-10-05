@@ -7,7 +7,9 @@ import type { MockState } from "../../mockState";
 import type { DecisionsApi } from "./api";
 import type { DecisionCard, DecisionsView, PrCard } from "./types";
 
-/** The demo's open decisions: one with options parsed from the issue, one free-text only. */
+/** The demo's open decisions: one with options parsed from the issue, one free-text only, and one
+ * from a "## Decision needed" section whose bold-labelled items carry descriptions and a
+ * recommendation. */
 export function demoDecisions(): DecisionCard[] {
   return [
     {
@@ -38,6 +40,28 @@ export function demoDecisions(): DecisionCard[] {
       more: 0,
       updated_at: ago(180),
     },
+    {
+      id: "acme/website#7",
+      org: "acme",
+      repo: "acme/website",
+      number: 7,
+      title: "A readable hero illustration on phones",
+      url: "https://github.com/acme/website/issues/7",
+      question: "Which phone layout for the illustration: A, B or C?",
+      options: ["A: stacked story", "B: scroll the canvas", "C: a still frame"],
+      option_details: [
+        "Under 640px, hide the canvas and show a vertical version built from the same parts, running the same three scenes.",
+        "Scale it to 0.6 and let the figure scroll sideways with scroll-snap. The page itself must still not scroll horizontally.",
+        "Under 640px, show a static crop of the widget at the 42% frame, the same frame reduced motion uses.",
+      ],
+      recommended: "A: stacked story",
+      context:
+        "Under 640px, the hero illustration's 1120×520 canvas is scaled to fit the column: 0.31 at 390px. Its 10px labels render at about 3px, so on a phone the illustration is decoration only.",
+      source: "label",
+      labelled: true,
+      more: 0,
+      updated_at: ago(300),
+    },
   ];
 }
 
@@ -54,7 +78,7 @@ export function demoPrCards(): PrCard[] {
       colony: "stuck2468",
       reason: "policy_hold",
       why: "a secret was redacted from its pull request description; the publish waits until someone has looked",
-      actions: [],
+      actions: ["publish"],
     },
     {
       id: "https://github.com/acme/webshop/pull/61",

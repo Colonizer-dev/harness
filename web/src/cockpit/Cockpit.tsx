@@ -648,7 +648,7 @@ export function Cockpit({
               runDecisionAnswer(api.answerDecision, (message, tone) => toast(message, tone), body).finally(() => void decisions.refresh())
             }
             onDecisionPrAction={(card, action) =>
-              runPrAction(api.decisionPrAction, (message, tone) => toast(message, tone), card, action).finally(() => void decisions.refresh())
+              runPrAction(api.decisionPrAction, (message, tone) => toast(message, tone), card, action, (id) => api.publishSession(id)).finally(() => void decisions.refresh())
             }
           />
         );

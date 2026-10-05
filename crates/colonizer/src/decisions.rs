@@ -4,10 +4,13 @@
 //! Two kinds of card:
 //!
 //! - **Repo decisions.** Open issues labelled `needs-decision`, or whose body or latest comment has
-//!   a line starting "Open decision:" or "Decision needed:", in the orgs the operator opted in.
-//!   Options come from a Markdown list under an "Options:" line after the question; without one the
-//!   card offers free text. Answering posts one comment starting "Decision (maintainer):" and
-//!   removes the label when the issue carries it. Nothing is posted without the operator's click.
+//!   a line starting "Open decision:" or "Decision needed:", or a "## Decision needed" section, in
+//!   the orgs the operator opted in. Options come from a Markdown list under an "Options:" line
+//!   after the question, from the section's list items that open with a bold label
+//!   (`- **A: stacked (recommended).** …`), or from a short "X, or Y?" question; without any the
+//!   card offers free text. The card names the recommended option and the issue's "## Why".
+//!   Answering posts one comment starting "Decision (maintainer):" and removes the label when the
+//!   issue carries it. Nothing is posted without the operator's click.
 //! - **Pull requests that need a person.** A review requested from the operator; a colony pull
 //!   request the merge train marked `needs_redo`, or one that conflicts and the auto-rebase could
 //!   not fix; red CI that is not a known flake the merge loop is re-running; a colony held by
@@ -48,6 +51,9 @@ use std::{
 pub(crate) const LABEL: &str = "needs-decision";
 /// The line starts that ask for a decision in an issue's text, compared without case.
 const MARKERS: &[&str] = &["open decision:", "decision needed:"];
+/// Headings that open a decision section (`## Decision needed (ask exactly this, once)`), compared
+/// without case, a trailing colon or a parenthetical.
+const DECISION_HEADINGS: &[&str] = &["decision needed", "decision", "open decision", "decisions needed"];
 /// How an answer comment starts.
 pub(crate) const ANSWER_PREFIX: &str = "Decision (maintainer):";
 /// The least time between two searches of one org.
@@ -62,6 +68,10 @@ const MAX_COMMENT_READS: usize = 10;
 const ANSWERED_KEEP_DAYS: i64 = 30;
 /// Options parsed from one question, at most.
 const MAX_OPTIONS: usize = 10;
+/// Characters of an option's description kept for its card.
+const MAX_DETAIL: usize = 160;
+/// Characters of the "## Why" paragraph kept for a card.
+const MAX_CONTEXT: usize = 240;
 /// Failed runs one "Re-run failed jobs" click re-runs, at most.
 const MAX_RERUNS: usize = 5;
 const FILE: &str = "decisions.json";
@@ -76,6 +86,10 @@ const GH_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) struct Parsed {
     pub question: String,
     pub options: Vec<String>,
+    /// One per option: the text after a bold option label, or empty.
+    pub option_details: Vec<String>,
+    /// The option the issue recommends, exactly as it appears in `options`.
+    pub recommended: Option<String>,
     /// Further "Open decision:" lines in the same text; the card asks the first.
     pub more: usize,
 }
@@ -95,9 +109,39 @@ fn marker_rest(line: &str) -> Option<&str> {
     Some(clean(&bare[marker.len()..]))
 }
 
+/// The text of a Markdown heading line (`## Why`), when the line is one.
+fn heading_text(line: &str) -> Option<&str> {
+    let t = line.trim();
+    let rest = t.trim_start_matches('#');
+    let level = t.len() - rest.len();
+    ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with([' ', '\t']))).then(|| clean(rest))
+}
+
+/// A heading's words compared without case, emphasis, a trailing colon or a parenthetical:
+/// `## Decision needed (ask exactly this, once)` → `decision needed`.
+fn heading_key(line: &str) -> Option<String> {
+    let text = heading_text(line)?.to_ascii_lowercase();
+    let text = text.split('(').next().unwrap_or_default();
+    Some(clean(text.trim().trim_end_matches(':')).to_string())
+}
+
+/// Whether the line is a heading that opens a decision section ("## Decision needed").
+fn is_decision_heading(line: &str) -> bool {
+    heading_key(line).is_some_and(|k| DECISION_HEADINGS.contains(&k.as_str()))
+}
+
 /// Emphasis markers and whitespace around a phrase taken off.
 fn clean(text: &str) -> &str {
     text.trim().trim_matches(['*', '_', '`']).trim()
+}
+
+/// Prose for a card: inline emphasis and code marks dropped, whitespace collapsed.
+fn plain(text: &str) -> String {
+    text.replace("**", "")
+        .replace('`', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether the line opens the options list ("Options:", "**Options:**", "### Options").
@@ -107,8 +151,8 @@ fn is_options_line(line: &str) -> bool {
     bare == "options"
 }
 
-/// The text of a list item: `- a`, `* a`, `+ a`, `1. a`, `1) a`, a task box dropped.
-fn bullet(line: &str) -> Option<String> {
+/// A list item's text as written: `- a`, `* a`, `+ a`, `1. a`, `1) a`, a task box dropped.
+fn bullet_raw(line: &str) -> Option<&str> {
     let t = line.trim();
     let rest = if let Some(rest) = t.strip_prefix(['-', '*', '+']) {
         rest
@@ -123,28 +167,208 @@ fn bullet(line: &str) -> Option<String> {
         return None;
     }
     let rest = rest.trim();
-    let rest = rest
-        .strip_prefix("[ ]")
-        .or_else(|| rest.strip_prefix("[x]"))
-        .or_else(|| rest.strip_prefix("[X]"))
-        .unwrap_or(rest);
-    let text = clean(rest);
+    Some(
+        rest.strip_prefix("[ ]")
+            .or_else(|| rest.strip_prefix("[x]"))
+            .or_else(|| rest.strip_prefix("[X]"))
+            .unwrap_or(rest)
+            .trim(),
+    )
+}
+
+/// The text of a list item, emphasis around it taken off.
+fn bullet(line: &str) -> Option<String> {
+    let text = clean(bullet_raw(line)?);
     (!text.is_empty()).then(|| truncate(text, 200))
 }
 
-/// The first decision the text asks for, with the options listed under it.
+/// "(recommended)" taken out of an option label, and whether it was there.
+fn strip_recommended(label: &str) -> (String, bool) {
+    let lower = label.to_ascii_lowercase();
+    match lower.find("(recommended)") {
+        Some(at) => {
+            let joined = format!("{}{}", &label[..at], &label[at + "(recommended)".len()..]);
+            (joined.split_whitespace().collect::<Vec<_>>().join(" "), true)
+        }
+        None => (label.to_string(), false),
+    }
+}
+
+/// A list item that opens with a bold label, `- **A: stacked story (recommended).** More…`: the
+/// label (its trailing `.`/`:` and "(recommended)" taken off), the text after it, and whether the
+/// label said it was recommended.
+fn bold_option(line: &str) -> Option<(String, String, bool)> {
+    let raw = bullet_raw(line)?;
+    let fence = if raw.starts_with("**") { "**" } else { "__" };
+    let inner = raw.strip_prefix(fence)?;
+    let close = inner.find(fence)?;
+    let label = inner[..close].trim().trim_end_matches(['.', ':']).trim();
+    let (label, recommended) = strip_recommended(label);
+    let label = label.trim().trim_end_matches(['.', ':']).trim();
+    if label.is_empty() {
+        return None;
+    }
+    let detail = inner[close + fence.len()..]
+        .trim()
+        .trim_start_matches(['.', ':', '-', '\u{2013}', '\u{2014}'])
+        .trim();
+    Some((truncate(label, 200), truncate(&plain(detail), MAX_DETAIL), recommended))
+}
+
+/// What a line names as the default, if it does: "Recommended default: **wait**", or "If no
+/// answer comes, build A".
+fn named_default(line: &str) -> Option<String> {
+    let bare = undecorated(line);
+    let lower = bare.to_ascii_lowercase();
+    let short = |text: &str| {
+        let text = clean(text.split(['.', ',', ';']).next().unwrap_or_default());
+        (!text.is_empty() && text.chars().count() <= 40).then(|| text.to_string())
+    };
+    for prefix in ["recommended default:", "recommended:", "default:"] {
+        if lower.starts_with(prefix) {
+            let rest = bare[prefix.len()..].trim();
+            if let Some(inner) = rest.strip_prefix("**") {
+                return inner.find("**").and_then(|end| short(&inner[..end]));
+            }
+            return short(rest);
+        }
+    }
+    for opening in [
+        "if no answer comes,",
+        "if there is no answer,",
+        "if nobody answers,",
+        "without an answer,",
+    ] {
+        if let Some(rest) = lower.strip_prefix(opening) {
+            let rest = rest.trim_start();
+            let from = bare.len() - rest.len();
+            for verb in ["build ", "go with ", "use ", "pick ", "choose ", "take ", "do "] {
+                if rest.starts_with(verb) {
+                    return short(&bare[from + verb.len()..]);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The option a named default points at: the same words, or the option's label begins with them
+/// (`A` → `A: stacked story`, `wait` → `Wait until…`).
+fn matching_option(named: &str, options: &[String]) -> Option<String> {
+    let named = named.to_ascii_lowercase();
+    options
+        .iter()
+        .find(|o| {
+            let o = o.to_ascii_lowercase();
+            o == named || [":", " ", ".", ","].iter().any(|s| o.starts_with(&format!("{named}{s}")))
+        })
+        .cloned()
+}
+
+/// Two short alternatives read out of an "X, or Y?" / "X or Y?" question with no listed options.
+/// Kept narrow: no question word in front, one "or", no other comma, at most eight words a side.
+fn either_or(question: &str) -> Option<[String; 2]> {
+    const LEADS: &[&str] = &[
+        "which", "what", "who", "whom", "whose", "how", "where", "when", "why", "should", "shall", "do", "does", "did", "is",
+        "are", "was", "were", "can", "could", "will", "would", "may", "must", "has", "have",
+    ];
+    let q = question.trim().strip_suffix('?')?.trim();
+    let lower = q.to_ascii_lowercase();
+    let first = lower
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| !c.is_ascii_alphabetic());
+    if LEADS.contains(&first) {
+        return None;
+    }
+    let (a, b) = if let Some(at) = lower.find(", or ") {
+        (&q[..at], &q[at + ", or ".len()..])
+    } else if lower.matches(" or ").count() == 1 {
+        let at = lower.find(" or ")?;
+        (&q[..at], &q[at + " or ".len()..])
+    } else {
+        return None;
+    };
+    let fits = |s: &str| {
+        let words = s.split_whitespace().count();
+        (1..=8).contains(&words)
+            && s.chars().count() <= 60
+            && !s.contains([',', ';', ':'])
+            && !s.to_ascii_lowercase().contains(" or ")
+    };
+    let (a, b) = (clean(a), clean(b));
+    if !fits(a) || !fits(b) {
+        return None;
+    }
+    let capital = |s: &str| {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .map(|c| c.to_uppercase().chain(chars).collect::<String>())
+            .unwrap_or_default()
+    };
+    Some([capital(a), capital(b)])
+}
+
+/// The first paragraph under a "## Why" (or "## Context") heading, as one short line.
+pub(crate) fn why_context(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| heading_key(l).is_some_and(|k| matches!(k.as_str(), "why" | "context" | "background")))?;
+    let paragraph: Vec<&str> = lines[at + 1..]
+        .iter()
+        .map(|l| l.trim())
+        .skip_while(|l| l.is_empty())
+        .take_while(|l| !l.is_empty() && heading_text(l).is_none())
+        .collect();
+    let joined = plain(&paragraph.join(" "));
+    (!joined.is_empty()).then(|| truncate(&joined, MAX_CONTEXT))
+}
+
+/// The first decision the text asks for, with its options: a list under an "Options:" line, or
+/// the list items in a "## Decision needed" section that open with a bold label, or the two halves
+/// of a short "X, or Y?" question.
 pub(crate) fn parse_decision(text: &str) -> Option<Parsed> {
     let lines: Vec<&str> = text.lines().collect();
     let markers: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| marker_rest(l).is_some())
+        .filter(|(_, l)| marker_rest(l).is_some() || is_decision_heading(l))
         .map(|(i, _)| i)
         .collect();
     let first = *markers.first()?;
-    let end = markers.get(1).copied().unwrap_or(lines.len());
-    let mut question = marker_rest(lines[first]).unwrap_or_default().to_string();
+    // The section ends at the next decision or the next heading of any kind.
+    let next_heading = (first + 1..lines.len()).find(|&j| heading_text(lines[j]).is_some());
+    let end = [markers.get(1).copied(), next_heading]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(lines.len());
+    let mut question = if is_decision_heading(lines[first]) {
+        String::new()
+    } else {
+        marker_rest(lines[first]).unwrap_or_default().to_string()
+    };
     let mut i = first + 1;
+    if question.is_empty() {
+        // A blockquote before the first list item is the question as asked
+        // (`> **Which layout: A, B or C?**`).
+        let quote = (i..end)
+            .take_while(|&j| bullet(lines[j]).is_none() && !is_options_line(lines[j]))
+            .find(|&j| lines[j].trim_start().starts_with('>'));
+        if let Some(at) = quote {
+            let quoted: Vec<&str> = lines[at..end]
+                .iter()
+                .take_while(|l| l.trim_start().starts_with('>'))
+                .map(|l| clean(undecorated(l)))
+                .filter(|l| !l.is_empty())
+                .collect();
+            question = plain(&quoted.join(" "));
+            question = clean(&question).to_string();
+            i = at + quoted.len().max(1);
+        }
+    }
     if question.is_empty() {
         // "Open decision:" alone on its line: the question is the next line of prose.
         while i < end {
@@ -165,6 +389,8 @@ pub(crate) fn parse_decision(text: &str) -> Option<Parsed> {
         return None;
     }
     let mut options: Vec<String> = Vec::new();
+    let mut option_details: Vec<String> = Vec::new();
+    let mut recommended: Option<String> = None;
     if let Some(at) = (i..end).find(|&j| is_options_line(lines[j])) {
         for line in &lines[at + 1..end] {
             // A blank line before or inside the list is fine; the list ends at the first line
@@ -172,19 +398,54 @@ pub(crate) fn parse_decision(text: &str) -> Option<Parsed> {
             if line.trim().is_empty() {
                 continue;
             }
-            match bullet(line) {
-                Some(option) => {
-                    if !options.contains(&option) && options.len() < MAX_OPTIONS {
-                        options.push(option);
-                    }
+            let Some(option) = bullet(line) else { break };
+            let (option, detail, flagged) = match bold_option(line) {
+                Some((label, detail, flagged)) => (label, detail, flagged),
+                None => {
+                    let (label, flagged) = strip_recommended(&option);
+                    (label, String::new(), flagged)
                 }
-                None => break,
+            };
+            if !options.contains(&option) && options.len() < MAX_OPTIONS {
+                if flagged && recommended.is_none() {
+                    recommended = Some(option.clone());
+                }
+                options.push(option);
+                option_details.push(detail);
             }
         }
+    } else {
+        // No "Options:" line: the section's list items that open with a bold label.
+        for line in &lines[i..end] {
+            if let Some((label, detail, flagged)) = bold_option(line)
+                && !options.contains(&label)
+                && options.len() < MAX_OPTIONS
+            {
+                if flagged && recommended.is_none() {
+                    recommended = Some(label.clone());
+                }
+                options.push(label);
+                option_details.push(detail);
+            }
+        }
+    }
+    if options.is_empty()
+        && let Some(pair) = either_or(&question)
+    {
+        options = pair.to_vec();
+        option_details = vec![String::new(); 2];
+    }
+    if recommended.is_none() {
+        recommended = lines[i..end]
+            .iter()
+            .filter_map(|l| named_default(l))
+            .find_map(|named| matching_option(&named, &options));
     }
     Some(Parsed {
         question: truncate(&question, 300),
         options,
+        option_details,
+        recommended,
         more: markers.len() - 1,
     })
 }
@@ -224,6 +485,12 @@ pub(crate) struct DecisionCard {
     pub question: String,
     /// Empty: the card offers free text only.
     pub options: Vec<String>,
+    /// One per option: a short description after the option's bold label, or empty.
+    pub option_details: Vec<String>,
+    /// The option the issue recommends, exactly as in `options`.
+    pub recommended: Option<String>,
+    /// The first paragraph of the issue's "## Why", so the card explains itself.
+    pub context: Option<String>,
     /// Where it was found: `label`, `body` or `comment`.
     pub source: &'static str,
     /// The issue carries `needs-decision`, which an answer removes.
@@ -262,7 +529,8 @@ pub(crate) struct PrCard {
     /// The reason in a sentence.
     pub why: String,
     /// Quick actions: `rerun` (re-run failed jobs), `redo` (dispatch a redo colony), `dismiss`
-    /// (forget a commits-not-merged card once a person has dealt with it).
+    /// (forget a commits-not-merged card once a person has dealt with it), `publish` (release a held
+    /// publish through the colony's own publish route).
     pub actions: Vec<&'static str>,
 }
 
@@ -302,9 +570,10 @@ pub(crate) fn decision_from_item(item: &Value, latest_comment: Option<&str>, ans
         (None, Some(p)) if !comment_answered && !answered_here => (Some(p), "body"),
         _ => return None,
     };
-    let (question, options, more) = match parsed {
-        Some(p) => (p.question, p.options, p.more),
-        None => (title.clone(), Vec::new(), 0),
+    let context = why_context(item["body"].as_str().unwrap_or_default());
+    let (question, options, option_details, recommended, more) = match parsed {
+        Some(p) => (p.question, p.options, p.option_details, p.recommended, p.more),
+        None => (title.clone(), Vec::new(), Vec::new(), None, 0),
     };
     Some(DecisionCard {
         id: format!("{repo}#{number}"),
@@ -315,6 +584,9 @@ pub(crate) fn decision_from_item(item: &Value, latest_comment: Option<&str>, ans
         title,
         question,
         options,
+        option_details,
+        recommended,
+        context,
         source,
         labelled,
         more,
@@ -439,7 +711,18 @@ pub(crate) fn pr_cards(sessions: &[Session], inputs: &PrInputs, reviews: &[PrCar
             actions,
         };
         if let Some(why) = policy_hold(s, inputs.secret_held) {
-            cards.push(card(PrReason::PolicyHold, why, Vec::new()));
+            // A publish autopilot holds can be released the way the colony page does it: its own
+            // "Create PR" (`POST /api/sessions/{id}/publish`, which mints the approval). The card
+            // only names the action; the cockpit sends it to that endpoint, never through here.
+            let releasable = attention_reason(s) == Some("autopilot_held")
+                && url.is_none()
+                && s.suspended.is_none()
+                && crate::publish::can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some());
+            cards.push(card(
+                PrReason::PolicyHold,
+                why,
+                if releasable { vec!["publish"] } else { Vec::new() },
+            ));
             continue;
         }
         let Some(pr) = url.as_deref() else { continue };
@@ -1136,7 +1419,7 @@ async fn answer_on<G: Gh>(app: &Shared, gh: &G, body: AnswerBody) -> Result<Valu
 struct PrActionBody {
     /// The card's id.
     id: String,
-    /// `rerun`, `redo` or `dismiss`.
+    /// `rerun`, `redo` or `dismiss`; `publish` is named on cards but sent to the colony's publish route.
     action: String,
 }
 
@@ -1166,7 +1449,13 @@ async fn pr_action(State(app): State<Shared>, Json(body): Json<PrActionBody>) ->
                 .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
             Ok(Json(json!({"dismissed": card.id})))
         }
-        _ => redo(&app, &card).await.map(|colony| Json(json!({"colony": colony}))),
+        "redo" => redo(&app, &card).await.map(|colony| Json(json!({"colony": colony}))),
+        // The click that releases a held publish is its approval, minted by the colony's own
+        // publish route under its own scope; this route does not publish.
+        _ => Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "a held publish is released through POST /api/sessions/{id}/publish",
+        )),
     }
 }
 
