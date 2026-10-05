@@ -17,6 +17,7 @@ read by the mothership when it starts.
 - [Questions, and who answers them](#questions-and-who-answers-them)
 - [Suspending a colony that waits for you](#suspending-a-colony-that-waits-for-you)
 - [Stop, resume and delete](#stop-resume-and-delete)
+- [Recovering on its own](#recovering-on-its-own)
 - [Budgets and plan balance](#budgets-and-plan-balance)
 - [What a colony cost](#what-a-colony-cost)
 - [Verifying "done"](#verifying-done)
@@ -341,6 +342,53 @@ a VM snapshot, is in
 
 The mothership also stops colonies itself: when a budget or the host-disk quota is passed, and
 when a microVM dies on its own. In every case the worktree is kept, so Resume continues.
+
+## Recovering on its own
+
+Some failures have no work behind them: a provider that blipped, a status that fell out of step, a
+parent that paused, a sign-in that expired. The mothership handles these itself rather than
+handing each one to you as a colony that needs you.
+
+- **A transient provider error is retried, not held** (issue #980). When an autopilot colony's turn
+  ends with an error the retry classifier calls transient — a gateway 5xx, 429 or 529, an
+  "unreachable" or overloaded provider, a timeout, a dropped or refused connection — the colony is
+  parked with reason `provider_retry` (worktree kept, parallel slot released) and continued
+  automatically after 2, 5, 10, then 20 minutes. Each attempt is a `provider_retry` line in the
+  colony log. Only when the attempts run out is the colony held as `autopilot_held`, and the message
+  then names the provider's own error. A turn that ends cleanly resets the count. The Watchdog
+  setting `provider_retry_max_attempts` (default 4, at most 4, `0` turns the retry off) sets the
+  budget. An error that is not transient still holds at once, as before.
+- **A stale "waiting for an answer" is reconciled** (issue #981). On every watchdog tick, a colony
+  whose status is `waiting_for_answer` but which has no question actually pending is set back to
+  `idle`, and the colony log says why. This runs even with the Watchdog module off. An answer to one
+  question also no longer closes a different one still open (a subagent's exec-policy `ask`, say),
+  so `colonizer ask` and `colonizer answer` see what the cockpit shows.
+- **A stacked colony waits for its parent instead of failing** (issue #982). A colony launched with
+  `after` waits while its parent is `stopped` or `parked`, since the parent may still be resumed.
+  When the parent fails, the child moves onto the parent's own parent and keeps waiting there; a
+  failed parent with nothing above it leaves the child queued. Only a parent whose record is gone,
+  or one that made no changes, still retires the child. A new `after` launch onto a parent that has
+  already failed is refused, as before.
+- **Claude accounts are health-checked** (issue #983). Every five minutes the mothership makes a
+  cheap check against each configured Claude account. **Settings → Connections** shows the result
+  on the Claude card — reachable, token rejected, or unreachable — with when it last ran, and
+  `GET /api/claude-accounts` carries each account's `health_status` and `health_checked_at`. An API
+  key account is not called and always reads as reachable.
+- **An expired sign-in holds its colonies and tells you once** (issue #984). When Anthropic answers
+  a subscription account with 401 or 403, the account is marked and every colony routed to it is
+  parked with reason `waiting_for_account`. The colonies release their slots, use none of their
+  provider retries and do not land in "Needs you" one by one. You get one notification per account
+  and change of state ("Claude account `default` needs you to sign in again. N colonies are waiting
+  on it.", then a resolved message). The cockpit shows a banner with a **Sign in** button,
+  `colonizer list` prints a warning line, and `GET /api/status` carries `account_alerts`. Once you
+  sign in again — noticed from the credential file's timestamp, never its contents — the colonies
+  resume through the normal queue. A usage limit (429) is not an expired sign-in: it keeps the quota
+  pause described in [providers.md](protocol/providers.md).
+
+The marks for a broken account are kept in memory. After a mothership restart, waiting colonies
+resume, and if the account is still broken it is marked and announced again, through the same
+notification rate limits as every other alert. A keychain-held credential has no file timestamp,
+so a re-sign-in there is not noticed until the mothership restarts.
 
 ## Services that come back after a resume
 
