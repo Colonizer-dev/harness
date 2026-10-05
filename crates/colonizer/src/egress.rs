@@ -915,9 +915,9 @@ mod tests {
         let recorded = serde_json::to_value(record(&booted, &compile(&booted.policy, &[]), 0)).unwrap();
         assert!(recorded.get("module").is_none(), "{recorded}");
 
-        // A module that declares nothing fixed (hermes, pi) adds nothing: no `module` source, no
-        // record entry, no empty-list noise.
-        let booted = resolve(&modules, &org, Some(&module("hermes", &[], &[], &["*.sentry.io"], &[])));
+        // A module that declares nothing fixed (pi) adds nothing: no `module` source, no record
+        // entry, no empty-list noise.
+        let booted = resolve(&modules, &org, Some(&module("pi", &[], &[], &["*.sentry.io"], &[])));
         assert_eq!(booted.module, None);
         assert_eq!(booted.sources.allow, vec!["global"]);
         // A module whose every host the operator already listed adds nothing of its own.
