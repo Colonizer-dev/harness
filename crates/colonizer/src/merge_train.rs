@@ -480,6 +480,10 @@ async fn run(app: Shared) {
 /// everything is green, one pull request merged. Repositories the train never touches are still
 /// reported, so the route can say why nothing moves there.
 async fn tick_once(app: &Shared) {
+    // Issue #1074: no merges while GitHub refuses the account; the train waits for the breaker.
+    if crate::github_breaker::paused(app).is_some() {
+        return;
+    }
     // Bound to a local first: a read guard in the `for` expression would live for the whole tick and
     // deadlock against update_session's write lock.
     let sessions = app.sessions.read().await.clone();

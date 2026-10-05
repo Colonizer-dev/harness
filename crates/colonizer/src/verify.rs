@@ -1388,6 +1388,18 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
         Autopilot::Publish => {
             if crate::authority::external_writes_blocked() {
                 app.session_log(&id, "warn", crate::events::AUTOPILOT_BLOCKED.into()).await;
+            } else if let Some(open) = crate::github_breaker::hold_publish(&app, &id) {
+                // Issue #1074: GitHub refuses the account, so the publish waits, like the kill-switch
+                // holds it, and goes out by itself once the breaker's probe finds GitHub working.
+                app.session_log(
+                    &id,
+                    "warn",
+                    format!(
+                        "autopilot: not publishing yet, {}; the publish is held and goes out once GitHub works again",
+                        crate::github_breaker::pause_message(&open)
+                    ),
+                )
+                .await;
             } else if let Some(s) = app.session(&id).await.filter(|s| s.status.is_live()) {
                 // Issue #98: the confirmed verdict is the approval. The host verifier mints the
                 // publish grant — reviewer is the verifier, builder the colony's agent — bound to

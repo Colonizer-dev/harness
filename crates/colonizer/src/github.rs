@@ -106,12 +106,31 @@ impl App {
             .or_else(|| env_nonempty("GITHUB_TOKEN"))
     }
 
+    /// `gh` as the mothership's GitHub identity — the way every `gh` call reaches GitHub. Checks the
+    /// account's circuit breaker first (issue #1074, `github_breaker.rs`): while GitHub refuses the
+    /// account, this hands back a command that fails at once with the cause instead of calling
+    /// GitHub, and otherwise tags the command so its failure feeds the breaker.
     pub fn gh<I, S>(&self, args: I) -> Command
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut c = Command::new("gh");
+        let identity = crate::github_breaker::identity(self);
+        if let Some(refusal) = crate::github_breaker::guard(self, &identity) {
+            return refusal;
+        }
+        let mut c = self.gh_unguarded(args);
+        crate::github_breaker::mark(self, &identity, &mut c);
+        c
+    }
+
+    /// [`App::gh`] without the breaker: only the breaker's own probe calls this directly.
+    pub(crate) fn gh_unguarded<I, S>(&self, args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut c = Command::new(crate::github_breaker::gh_program());
         c.args(args).env("GH_PROMPT_DISABLED", "1").env("NO_COLOR", "1");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
@@ -140,11 +159,18 @@ impl App {
     /// The host's own `url.<base>.insteadOf`/`pushInsteadOf` rewrites ride along
     /// ([`host_url_rewrites_from`]) — nothing else from its config does — so a mirror, an SSH rewrite or
     /// a local stand-in for github.com keeps working without buying back the rest of the config.
+    ///
+    /// Like [`App::gh`], it checks the account's circuit breaker first (issue #1074).
     pub fn git_remote(&self) -> Command {
+        let identity = crate::github_breaker::identity(self);
+        if let Some(refusal) = crate::github_breaker::guard(self, &identity) {
+            return refusal;
+        }
         let mut c = git_network(std::env::vars_os().collect());
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
+        crate::github_breaker::mark(self, &identity, &mut c);
         c
     }
 
@@ -432,7 +458,7 @@ pub fn classify(error: &str) -> Option<Denial> {
     let text = error.to_ascii_lowercase();
     // Checked first: GitHub answers a suspended account with a 403, which would otherwise read as a
     // refused credential and send the operator off to reconnect an account that cannot be used.
-    if text.contains("suspended") && (text.contains("http 403") || text.contains("account")) {
+    if crate::github_breaker::classify(error) == crate::github_breaker::Failure::Suspended {
         Some(Denial::Suspended)
     } else if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
         Some(Denial::NotVisible)
@@ -524,34 +550,37 @@ pub fn is_transient(error: &str) -> bool {
         return false;
     }
     let text = error.to_ascii_lowercase();
-    // `resolve host` is git's and curl's DNS failure (`Could not resolve host`); it sits safely
-    // beside `classify` because that one matches the longer `could not resolve to a repository`
-    // first, and this function never runs before that check.
-    const TRANSIENT: &[&str] = &[
-        "error connecting to",
-        "connection reset",
-        "connection refused",
-        "connection timed out",
-        "timed out",
-        "timeout",
-        "temporary failure",
-        "name resolution",
-        "resolve host",
-        "dns",
-        "network is unreachable",
-        "broken pipe",
-        "http 429",
-        "http 500",
-        "http 502",
-        "http 503",
-        "http 504",
-        "service unavailable",
-        "internal server error",
-        "bad gateway",
-        "gateway timeout",
-    ];
-    TRANSIENT.iter().any(|m| text.contains(m))
+    TRANSIENT_MARKERS.iter().any(|m| text.contains(m))
 }
+
+/// What a transient GitHub or network failure says, lowercased; shared with
+/// `github_breaker::classify`.
+// `resolve host` is git's and curl's DNS failure (`Could not resolve host`); it sits safely
+// beside `classify` because that one matches the longer `could not resolve to a repository`
+// first, and `is_transient` never runs before that check.
+pub(crate) const TRANSIENT_MARKERS: &[&str] = &[
+    "error connecting to",
+    "connection reset",
+    "connection refused",
+    "connection timed out",
+    "timed out",
+    "timeout",
+    "temporary failure",
+    "name resolution",
+    "resolve host",
+    "dns",
+    "network is unreachable",
+    "broken pipe",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "service unavailable",
+    "internal server error",
+    "bad gateway",
+    "gateway timeout",
+];
 
 /// One 20-minute budget shared across the whole pre-worktree phase: each step gets whatever remains.
 const BOOT_RETRY_BUDGET: Duration = Duration::from_secs(20 * 60);

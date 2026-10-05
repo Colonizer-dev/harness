@@ -690,7 +690,8 @@ pub fn start(app: Shared) {
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             every.tick().await;
-            if crate::authority::external_writes_blocked() {
+            // Issue #1074: no claim edits against an account GitHub refuses.
+            if crate::authority::external_writes_blocked() || crate::github_breaker::paused(&app).is_some() {
                 continue;
             }
             let sessions = app.sessions.read().await.clone();

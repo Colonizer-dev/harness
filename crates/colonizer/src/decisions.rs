@@ -856,6 +856,11 @@ async fn answer_with<G: Gh>(gh: &G, card: &DecisionCard, choice: &str, note: Opt
 
 /// One tick: search the org that is due, if any, and keep what it found.
 async fn tick<G: Gh>(app: &Shared, gh: &G, now: DateTime<Utc>) {
+    // Issue #1074: the inbox does not poll an account GitHub refuses; it picks up where it left off
+    // once the breaker closes.
+    if crate::github_breaker::paused(app).is_some() {
+        return;
+    }
     let stored = load(app);
     let enabled: Vec<String> = org_opt_ins(app, &stored)
         .await

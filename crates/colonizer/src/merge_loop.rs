@@ -2546,7 +2546,8 @@ async fn record(app: &App, report: &Report, sessions: &[Session]) {
 async fn tick(app: &Shared) {
     let dir = app.cfg.config_dir.clone();
     let state = load(&dir).await;
-    if !state.settings.enabled || RUNNING.load(Ordering::SeqCst) {
+    // Issue #1074: no merges while GitHub refuses the account; the run waits for the breaker.
+    if !state.settings.enabled || RUNNING.load(Ordering::SeqCst) || crate::github_breaker::paused(app).is_some() {
         return;
     }
     let now = Utc::now();

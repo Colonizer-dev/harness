@@ -52,6 +52,34 @@ export interface AccountAlert {
   waiting: number;
 }
 
+/**
+ * GET /api/status `github_pause` and GET /api/github/status (issue #1074): the GitHub account's
+ * circuit breaker. While GitHub refuses the account, launches, publishes, merges and GitHub writes
+ * wait, and a slow probe resumes them once GitHub works again. `{ paused: false }` when all is well.
+ */
+export interface GitHubPause {
+  paused: boolean;
+  cause?: "suspended" | "token_revoked" | "secondary_rate_limit";
+  /** The cause in words, e.g. "GitHub account suspended". */
+  message?: string;
+  /** What a person does next, e.g. "contact GitHub support". */
+  next_step?: string;
+  since?: string;
+  /** When the probe asks GitHub again (RFC3339). */
+  next_probe_at?: string;
+  probes?: number;
+  /** What GitHub last said, truncated. */
+  detail?: string;
+  /** Colonies waiting in the queue. */
+  queued?: number;
+  /** Autopilot publishes waiting to go out. */
+  held_publishes?: number;
+  /** Calls refused without reaching GitHub while paused. */
+  refused_calls?: number;
+  /** Secondary rate limits in the last ten minutes, while not paused. */
+  secondary_limits_recent?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------

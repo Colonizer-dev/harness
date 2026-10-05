@@ -44,6 +44,7 @@ pub(crate) struct Feature {
 /// list greppable and the conflicts between alphabetical neighbours.
 pub(crate) const ALL: &[&Feature] = &[
     &crate::decisions::FEATURE,
+    &crate::github_breaker::FEATURE,
     &crate::handoff::FEATURE,
     &crate::history::FEATURE,
     &crate::maps::FEATURE,
