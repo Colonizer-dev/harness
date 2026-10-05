@@ -627,10 +627,17 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/models/assignments", routing::get(assignments))
         .route("/api/models/switch", routing::post(switch))
+        .route("/api/models/plans", routing::get(plans::plans))
+        .route("/api/models/profiles", routing::get(profiles::list).post(profiles::create))
+        .route(
+            "/api/models/profiles/{id}",
+            routing::put(profiles::update).delete(profiles::delete),
+        )
 }
 
-/// This module's feature descriptor (`features.rs`). No `token_scope`: both routes are owner-only,
-/// like every other model setting, so a scoped API token gets 403.
+/// This module's feature descriptor (`features.rs`). No `token_scope`: every route — the switch,
+/// plan usage and the saved profiles — is owner-only, like every other model setting, so a scoped
+/// API token gets 403.
 pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
     name: "model_switch",
     routes,
@@ -640,13 +647,37 @@ pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
     start_tasks: None,
 };
 
-/// A switch is a settings save, like the Settings forms it stands in for.
-const ACTIVITY: &[crate::activity::Rule] = &[crate::activity::rule(
-    "POST",
-    "/api/models/switch",
-    "settings.save",
-    crate::activity::Target::Fixed("models", "module:agent"),
-)];
+/// A switch is a settings save, like the Settings forms it stands in for; so is saving, renaming
+/// or deleting a model profile.
+const ACTIVITY: &[crate::activity::Rule] = &[
+    crate::activity::rule(
+        "POST",
+        "/api/models/switch",
+        "settings.save",
+        crate::activity::Target::Fixed("models", "module:agent"),
+    ),
+    crate::activity::rule(
+        "POST",
+        "/api/models/profiles",
+        "settings.save",
+        crate::activity::Target::Named("model profile", "module:agent"),
+    ),
+    crate::activity::rule(
+        "PUT",
+        "/api/models/profiles/{id}",
+        "settings.save",
+        crate::activity::Target::Named("model profile", "module:agent"),
+    ),
+    crate::activity::rule(
+        "DELETE",
+        "/api/models/profiles/{id}",
+        "settings.remove",
+        crate::activity::Target::Named("model profile", "module:agent"),
+    ),
+];
+
+mod plans;
+mod profiles;
 
 #[cfg(test)]
 mod tests;

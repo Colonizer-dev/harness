@@ -138,6 +138,8 @@ export interface ProviderQuotaProbe {
   url: string;
   /** Non-empty RFC 6901 JSON pointer naming the remaining-token number in the answer, like `/data/remaining`. */
   pointer: string;
+  /** Optional RFC 6901 pointer naming the plan's total in the same answer, so used vs. limit can be drawn. */
+  limit_pointer?: string;
 }
 
 export interface ModelProvider extends ProviderLimits {

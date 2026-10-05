@@ -23,6 +23,11 @@ Part of the [Colonizer protocol](../protocol.md).
 | `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 | `GET /api/models/assignments` | The header model switcher's view (issue #1051): what every model role resolves to install-wide and per org, with where it comes from; the agent modules with their roles; the models on offer with health and quota (below) |
+| `GET /api/models/plans` | `{plans: [plan], checked_at}`: what is known about each plan the model roles use, for the switcher's usage bars (below) |
+| `GET /api/models/profiles` | `{profiles: [profile]}`: the saved model profiles, then the starters this install can run (below) |
+| `POST /api/models/profiles` | `{name, module?, roles: {role: model}}`: saves a profile in the install config; `409` on a taken name |
+| `PUT /api/models/profiles/{id}` | `{name?, module?, roles?}`: renames a profile or replaces its roles; a starter is a `400` |
+| `DELETE /api/models/profiles/{id}` | Deletes a saved profile; a starter is a `400` |
 | `POST /api/models/switch` | `{scope: "install"\|"org", org?, module?, roles: {role: model\|null}, apply?: "new"\|"running", dry_run?}`: switches a scope's agent module and role models in one validated step, optionally restarting the scope's colonies (below) |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
@@ -76,8 +81,34 @@ values, and they restart through the quota card's restart path (a live or parked
 resumed cold, a queued one simply boots). `dry_run: true` answers the plan and changes nothing; the
 cockpit counts the colonies with it before asking to restart them. The reply is
 `{dry_run, scope, org, module, changes: [change], affected: [id], colonies: [id], failed: [{id, ok: false, error}]}`,
-`changes` in the quota card's `{scope, target, key, was, now}` shape. Both routes are owner-only: a
-scoped API token gets `403`.
+`changes` in the quota card's `{scope, target, key, was, now}` shape.
+
+`GET /api/models/plans` lists the Claude account (`id: "anthropic"`, `kind: "claude"`) when a role
+runs on a Claude model or its cap is hit. It then lists each provider (`kind: "provider"`) that a
+role routes to or whose plan is out. Each plan is
+`{id, name, kind, used_by, exhausted, reset_at, reset_unix, last_limit, requests, failures, last_request_at, since, balance}`:
+- `used_by` lists the roles in plain words (`orchestrator`, `subagents`, `background`, …).
+- `reset_*` is set only while the plan is exhausted.
+- `last_limit` (`{at, reset_at, reset_unix}`) is the last limit the gateway recorded, even after
+  its reset has passed.
+- `requests`/`failures` are the gateway's counts (`null` for Claude, which it does not proxy).
+- `balance` is the provider's plan-balance probe through the 60 s probe cache:
+  `{remaining, limit, pct_left, error, checked_at}`. `limit` comes from `quota.limit_pointer`, and
+  `pct_left` is derived only when both numbers are known. `balance` is `null` without a probe.
+
+Nothing is estimated.
+
+`GET /api/models/profiles` answers saved profiles (`{id, name, module, roles, created_at, updated_at, builtin: false}`,
+kept in `model-profiles.json` in the config directory) followed by starters (`builtin: true`, ids
+`starter-…`). The starters are derived on each read from what is configured: "Claude only"
+(`opus`/`sonnet`/`haiku`) with a Claude login, and one per provider that lists a model (first
+three), only on the roles an org can override. A starter whose name a saved profile has taken is not
+listed. A profile's `roles` maps a role key (`model`, `*_model`, `model_*`) to a model id, where `""`
+means the module default. The models are checked only when the profile is applied: the cockpit
+loads it into a `POST /api/models/switch`. Names are 1–60 characters and unique regardless of
+case, and an install keeps at most 50 profiles. A profiles file that won't parse is refused, never
+overwritten. Saving, renaming and deleting a profile record `settings.save`/`settings.remove`
+activity. Every `/api/models/*` route is owner-only: a scoped API token gets `403`.
 
 **Org workspaces.** `Session` gains `"org": "<repo owner>"`.
 

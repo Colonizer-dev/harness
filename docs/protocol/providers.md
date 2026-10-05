@@ -171,8 +171,9 @@ because a fallback request goes to the API as is — or, for quota exhaustion on
 configured provider that lists the model and speaks the same wire, which the gateway retries itself; see Quota
 exhaustion below. A cross-wire, unknown-provider, own-provider or unlisted fallback is a `400` on save, and only a
 Claude fallback reaches the colony's route, so only it covers an unreachable, timed-out or full connection). `quota` is where to read what is left in a prepaid token
-plan: `{url, pointer}` — a `GET` the health check makes with the provider's own credential, and a non-empty
-RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
+plan: `{url, pointer, limit_pointer?}` — a `GET` the health check makes with the provider's own credential, a non-empty
+RFC 6901 JSON pointer starting with `/` into its answer for the remaining count, and optionally a second
+pointer to the plan's total (answered as `quota.limit`) — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
 else. `PUT /api/providers/{id}` with `quota` omitted keeps the saved probe, like `pricing`; an empty `url`
 clears it. The origin rule reaches the base URL itself: a save that moves a keyed provider to another
