@@ -392,11 +392,29 @@ async fn register(relay: &str, key: &Ed25519KeyPair) -> Result<(String, String),
 }
 
 /// `wss://my.colonizer.dev` → `https://my.colonizer.dev` (and ws → http, for a local test relay).
+/// Plaintext `ws://` is accepted only for a loopback host (review finding R3): everything the
+/// tunnel and the signed calls carry — cookies, tokens, bodies — would otherwise cross the network
+/// in the clear, so a relay anywhere else must be `wss://`.
 fn http_base(relay: &str) -> Result<String> {
     if let Some(rest) = relay.strip_prefix("wss://") {
         Ok(format!("https://{rest}"))
     } else if let Some(rest) = relay.strip_prefix("ws://") {
-        Ok(format!("http://{rest}"))
+        let base = format!("http://{rest}");
+        let host = reqwest::Url::parse(&base)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+        let loopback = host.is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !loopback {
+            bail!("COLONIZER_REMOTE_URL may be plaintext ws:// only for a loopback relay; use wss://, got {relay:?}")
+        }
+        Ok(base)
     } else {
         bail!("COLONIZER_REMOTE_URL must be a ws:// or wss:// URL, got {relay:?}")
     }
@@ -714,6 +732,10 @@ async fn connect_and_serve(app: &Shared, router: &Router) -> (bool, bool) {
         return (false, false);
     };
     let relay = app.remote.relay().await;
+    if let Err(e) = http_base(&relay) {
+        eprintln!("remote: not dialing: {e:#}");
+        return (false, false);
+    }
     let Ok(request) = format!("{relay}/tunnel/{install_id}").into_client_request() else {
         eprintln!("remote: bad relay URL {relay:?}");
         return (false, false);
@@ -1685,6 +1707,50 @@ mod tests {
     }
 
     // -- The tests ----------------------------------------------------------
+
+    #[test]
+    fn plaintext_ws_is_only_for_a_loopback_relay() {
+        assert_eq!(http_base("wss://my.colonizer.dev").unwrap(), "https://my.colonizer.dev");
+        assert_eq!(
+            http_base("wss://relay.example.com:8443").unwrap(),
+            "https://relay.example.com:8443"
+        );
+        for local in [
+            "ws://127.0.0.1:7000",
+            "ws://localhost:7000",
+            "ws://LOCALHOST",
+            "ws://[::1]:7000",
+            "ws://127.8.9.10",
+        ] {
+            assert!(http_base(local).is_ok(), "{local} is loopback");
+        }
+        // Anything off this machine over plaintext would carry cookies, tokens and bodies in the clear.
+        for remote in [
+            "ws://my.colonizer.dev",
+            "ws://relay.example.com:80",
+            "ws://10.0.0.5:7000",
+            "ws://[2001:db8::1]:7000",
+            "ws://localhost.evil.example",
+            "ws://127.0.0.1.evil.example",
+            "ws://",
+        ] {
+            let refused = http_base(remote).expect_err(remote).to_string();
+            assert!(refused.contains("wss://"), "{remote}: {refused}");
+        }
+        assert!(http_base("https://my.colonizer.dev").is_err());
+    }
+
+    #[tokio::test]
+    async fn enabling_against_a_plaintext_remote_relay_is_refused() {
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay("ws://relay.example.com".into()).await;
+        let Err(refused) = set_enabled(&app, true).await else {
+            panic!("a plaintext relay off this machine was accepted");
+        };
+        assert!(refused.message().contains("wss://"), "{}", refused.message());
+        assert!(!app.remote.enabled().await, "the switch stays off");
+    }
 
     #[tokio::test]
     async fn a_tunnelled_request_round_trips() {

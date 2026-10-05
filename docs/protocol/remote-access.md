@@ -21,7 +21,9 @@ answers `{"install_id": "...", "host": "<install_id>.my.colonizer.dev"}`. The re
 install to that host, so the mothership's tunnel URL is `wss://<relay>/tunnel/<install_id>` and
 the Host every tunnelled request carries is `<install_id>.…`. The relay base is
 `COLONIZER_REMOTE_URL` (default `wss://my.colonizer.dev`); the registration URL is the same host
-over `https://` (`http://` for a `ws://` base) plus `/api/installs`.
+over `https://` (`http://` for a `ws://` base) plus `/api/installs`. A `ws://` base is accepted only
+when its host is loopback (`localhost`, `127.0.0.0/8`, `[::1]`): enabling against any other
+plaintext relay is refused before anything is sent, and the supervisor will not dial one.
 
 ## `GET /api/remote`
 
