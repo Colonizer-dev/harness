@@ -17,9 +17,12 @@
 //! - Batches are capped by row count and by body bytes. A batch the owner refuses without naming a
 //!   row is split in half until the bad row stands alone; a row that exhausts its attempts is
 //!   retired — listed, never retried, never blocking the rows behind it.
-//! - Failures are states, not errors: a 401 stops the drain and asks for attention (#769 has no
-//!   token refresh), a 403 means this machine was removed from the fleet and stops syncing, and a
-//!   429 or 503 waits out its `Retry-After`. Nothing local is ever deleted by any of them.
+//! - Failures are states, not errors: a 401 trades the membership's refresh credential for a fresh
+//!   fleet token once per drain (`POST /api/fleet/peer/refresh`) and retries; a second 401, or a
+//!   refresh the owner refuses, stops the drain and asks for attention. A 403 means this machine
+//!   was removed from the fleet and stops syncing — it never refreshes, and the owner's tombstone
+//!   refuses a removed member's refresh besides. A 429 or 503 waits out its `Retry-After`. Nothing
+//!   local is ever deleted by any of them.
 //!
 //! Joining is not consent. The push is off for every new membership until the member's operator
 //! has seen the preview (`GET /api/fleet/sync/preview`) and turned it on
@@ -142,8 +145,10 @@ pub enum SyncStatus {
     Synced,
     /// The owner asked us to wait (429/503); `next_attempt_at` says until when.
     Backoff,
-    /// The owner no longer accepts our token (401). Needs attention: there is no refresh, so a
-    /// person re-joins or checks the owner. Background drains stop; a manual one tries again.
+    /// The owner no longer accepts our token (401), and the one refresh this drain allowed did not
+    /// help — no refresh credential, the owner refused it, or the fresh token was refused too.
+    /// Needs attention: a person re-joins or checks the owner. Background drains stop; a manual one
+    /// tries again.
     Unauthorized,
     /// The owner says this machine is not a member (403): removed from the fleet. Syncing stops;
     /// everything local stays.
@@ -243,6 +248,9 @@ pub struct Target {
     pub owner_url: String,
     pub member_id: String,
     pub token: String,
+    /// The refresh credential the owner handed over with the token (#762): what a 401 trades for
+    /// a fresh fleet token. `None` on a membership from before refresh, which re-joins instead.
+    pub refresh: Option<String>,
 }
 
 /// The drain's knobs; the defaults are what the background task uses.
@@ -307,6 +315,10 @@ pub struct DrainReport {
     /// True when the drain did not run: stopped by a 401/403, or backing off.
     pub skipped: bool,
     pub next_attempt_at: Option<DateTime<Utc>>,
+    /// The fresh fleet token a 401 refresh handed back this drain, for the caller to store in the
+    /// membership. Never serialized: a report is what the cockpit's trigger answers.
+    #[serde(skip)]
+    pub refreshed_token: Option<String>,
 }
 
 /// One row waiting to be sent, with what it takes to send it.
@@ -448,6 +460,10 @@ struct Drainer<'a> {
     state: DrainState,
     report: DrainReport,
     waits: u32,
+    /// The fleet token in use: the membership's, until a refresh replaces it.
+    token: String,
+    /// Whether this drain has spent its one refresh.
+    refreshed: bool,
 }
 
 impl Drainer<'_> {
@@ -460,7 +476,7 @@ impl Drainer<'_> {
     async fn call(&mut self, build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder) -> Result<Answer, Stop> {
         loop {
             let res = build(&self.http)
-                .bearer_auth(&self.target.token)
+                .bearer_auth(&self.token)
                 .timeout(REQUEST_TIMEOUT)
                 .send()
                 .await
@@ -468,9 +484,16 @@ impl Drainer<'_> {
             let status = res.status().as_u16();
             match status {
                 200..=299 => return Ok(Answer::Success(read_bounded(res).await?)),
+                401 if !self.refreshed => {
+                    // Once per drain: trade the refresh credential for a fresh token and retry.
+                    self.refreshed = true;
+                    self.token = self.refresh().await?;
+                    self.report.refreshed_token = Some(self.token.clone());
+                    continue;
+                }
                 401 => {
                     return Err(Stop::Unauthorized(
-                        "the owner no longer accepts this member's fleet token; re-join the fleet, or check the owner".into(),
+                        "the owner refused this member's refreshed fleet token too; re-join the fleet, or check the owner".into(),
                     ));
                 }
                 403 => {
@@ -500,6 +523,44 @@ impl Drainer<'_> {
                 }
                 _ => return Err(Stop::Error(format!("the owner answered {status}"))),
             }
+        }
+    }
+
+    /// The one refresh a drain allows (#762): the membership's refresh credential for a fresh fleet
+    /// token. A 403 is a removal — the owner keeps a removed member's tombstone, and never
+    /// refreshes it — so it stops as removed; any other refusal, or no credential at all, stops as
+    /// unauthorized. An owner that cannot be reached is an ordinary error the next tick retries.
+    async fn refresh(&mut self) -> Result<String, Stop> {
+        let Some(secret) = self.target.refresh.clone() else {
+            return Err(Stop::Unauthorized(
+                "the owner no longer accepts this member's fleet token, and this membership has no refresh credential; re-join the fleet, or check the owner".into(),
+            ));
+        };
+        let url = self.url("/api/fleet/peer/refresh");
+        let res = self
+            .http
+            .post(&url)
+            .json(&json!({"member_id": self.target.member_id, "refresh": secret}))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| Stop::Error(format!("the owner could not be reached to refresh the fleet token: {e}")))?;
+        let status = res.status().as_u16();
+        let body = read_bounded(res).await.unwrap_or_default();
+        match status {
+            200..=299 => serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|v| v["token"].as_str().map(str::to_string))
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| Stop::Unauthorized("the owner's token refresh named no token; re-join the fleet".into())),
+            403 => Err(Stop::Removed(format!(
+                "the owner refused to refresh the fleet token: {}",
+                error_of(&body)
+            ))),
+            _ => Err(Stop::Unauthorized(format!(
+                "the owner no longer accepts this member's fleet token and refused its refresh ({status}): {}; re-join the fleet, or check the owner",
+                error_of(&body)
+            ))),
         }
     }
 
@@ -710,6 +771,8 @@ pub async fn drain(
         state,
         report: DrainReport::default(),
         waits: 0,
+        token: target.token.clone(),
+        refreshed: false,
     };
     let sizes: Vec<usize> = pending.iter().map(|p| p.body_bytes).collect();
     let mut stop = None;
@@ -787,7 +850,7 @@ async fn drain_app(app: &Shared, force: bool) -> Result<std::result::Result<Drai
         return Ok(Err(NotRun::NoConsent));
     }
     let origin = Origin::for_config(&app.cfg.config_dir)?;
-    let report = drain(
+    let mut report = drain(
         &app.cfg.data_dir,
         &origin,
         &target,
@@ -796,6 +859,11 @@ async fn drain_app(app: &Shared, force: bool) -> Result<std::result::Result<Drai
         force,
     )
     .await?;
+    // A refresh rotated the token on the owner: keep the new one, or the next drain's 401 would
+    // spend the refresh again on a token that is already gone.
+    if let Some(token) = report.refreshed_token.take() {
+        app.fleet_members.set_member_token(&target.member_id, &token).await;
+    }
     Ok(Ok(report))
 }
 
