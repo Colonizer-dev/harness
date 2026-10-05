@@ -26,7 +26,7 @@ prints one non-JSON banner line per turn, which this runner surfaces as a `warn`
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
-| `COLONIZER_HERMES_BIN` | `hermes` | The hermes command (split on spaces) |
+| `COLONIZER_HERMES_BIN` | unset | The hermes command (split on spaces). Unset, the runner takes `hermes` from the `PATH`, then the pinned build it stages on first boot (below) |
 | `COLONIZER_HERMES_HOME` | `/tmp/colonizer-hermes` | `HERMES_HOME`; the runner writes `config.yaml` (as JSON, valid YAML) and the session-id file here. The config carries a `model:` block naming the resolved provider and default, rewritten before every turn so it always matches the CLI flags — without it Hermes' first-run guard sees "no API keys or providers found" (it ignores the top-level `providers:` map) and exits |
 | `COLONIZER_MODEL` | none — required | `<provider>/<model>`, which must match a gateway route; anything else refuses the turn |
 | `COLONIZER_DISABLED_TOOLS` | empty | The module's Disabled tools setting: comma-separated Hermes toolset names appended (deduplicated) to the always-off list in `agent.disabled_toolsets`. Whole toolsets only — a single tool inside one (only `write_file` within `file`, say) cannot be turned off; `memory`, `skills`, `delegation`, `cronjob`, `tts` and `clarify` are always off already |
@@ -38,6 +38,51 @@ does pricing and budget accounting; the colony VM needs no provider secret and n
 The gateway expects the bare model (the claude-code router strips the same `<id>/` prefix), so `-m`
 gets the remainder after the route prefix. Nous Portal models (`nous/…`) are refused: Portal credits
 are a prepaid pool the gateway cannot account for ([#199](https://github.com/Colonizer-dev/harness/issues/199)).
+
+## Staging on first boot
+
+Hermes ships no release binaries, and PyPI stops at 0.19.0, so the runner builds the pinned
+hermes-agent itself the first time a colony boots without one (`stage.mjs`). Every byte that runs is
+checked against a hash in this module:
+
+| File | Pins |
+| :--- | :--- |
+| `hermes.lock` | the GitHub source tarball of tag `v2026.9.24`'s exact commit (`f97608f1…`, also `requires.pins.hermes.source_rev` in `module.json`), uv 0.12.23 per architecture, a python-build-standalone CPython 3.13 per architecture, and the sha256 of `hermes-requirements.lock` |
+| `hermes-requirements.lock` | every Python dependency of `hermes-agent[mcp]`, exported from upstream's own `uv.lock` with all of its PyPI hashes, plus the `setuptools` and `wheel` build backend |
+
+The steps: download uv for this architecture and check its sha256; use the image's `python3.11`–`3.13`
+if it has one (the colony toolbox images carry Debian's 3.11 or the python preset's 3.13), otherwise
+download the pinned CPython and check its sha256; download the source tarball and check its sha256;
+`uv venv`; `uv pip install --require-hashes --only-binary :all: -r hermes-requirements.lock`, so
+every dependency is a wheel whose hash is listed; then `uv pip install --no-deps
+--no-build-isolation --no-index -e` on the source tree, editable as upstream's installer does it,
+built by the hash-pinned setuptools. The `[mcp]` extra is in the lock, so the `ask_user` tool is
+always there. uv runs with `UV_NO_CONFIG` and `UV_PYTHON_DOWNLOADS=never`, so neither a stray config
+nor a managed-Python download changes what is installed.
+
+Any mismatch fails closed: a download whose sha256 differs is deleted unextracted, a requirements
+file that differs from its pinned sha256 or lists a requirement without a hash is refused before any
+download, uv refuses a wheel whose hash is not listed, and the runner then ends with `status error`
+naming the step. Nothing is left half-trusted: the build lives in
+`~/.cache/colonizer/hermes/<commit>-<lock digest>/<platform>/`, beside the other fetched CLIs, and a
+`staged.json` marker written last is what later boots look for. Without it the directory is wiped and
+rebuilt. With it, staging is skipped (a rebuild also happens when the interpreter the venv was made
+from is gone). A new pin removes the previous build.
+
+**Cost**, measured in a `node:24-bookworm-slim` container: about 40 seconds on a fast link, on
+linux-arm64 with the pinned CPython and on linux-x64 with Debian's Python 3.11 alike. It takes
+420–490 MB of disk: the source tree 217 MB (the editable install keeps it), the venv 143 MB, uv
+40 MB, and the CPython 90 MB when it is downloaded. The downloads are about 75 MB of source, 20 MB of
+uv, 30–35 MB of CPython when needed, and the wheels. The colony needs `codeload.github.com`,
+`github.com` and its release-asset hosts, `pypi.org` and `files.pythonhosted.org`; the module
+declares them under `egress.extra`.
+
+To move the pin, run `node scripts/pin-hermes.mjs <tag>` (add `--uv <version>` or `--python
+<version>+<release>` to move those too). It resolves the tag's commit with `git ls-remote`, hashes
+each download, checks uv's and CPython's against the `.sha256` and `SHA256SUMS` files their releases
+publish, regenerates `hermes-requirements.lock` with the pinned uv, proves it with a wheels-only
+`--require-hashes` dry run for Python 3.11, 3.12 and 3.13 on x86_64 and aarch64, and only then
+rewrites both locks and the `module.json` pin.
 
 ## Recorded decisions
 
@@ -67,15 +112,16 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
 
 ## Gaps
 
-- Nothing stages the `hermes` binary into the colony VM yet; the harness refuses the launch and the
-  boot on the stock preset images, which carry no agent CLIs, and on a custom image the runner's
-  preflight fails loudly (`status error`, non-zero exit, the pinned install command in the message)
-  when it is missing.
-- Questions need the `[mcp]` extra: an image whose hermes-agent install skipped it silently has no
-  `ask_user` tool, and the model then has no channel to ask anything.
+- First boot pays for staging (above). A colony whose cache does not persist pays it every boot.
+- A custom image with its own `hermes` on the `PATH` is used as is, without the pinned build. It
+  is the operator's word, still probed with `hermes --version` by the runner's preflight.
+- Questions need the `[mcp]` extra. The staged build always has it, but a custom image whose
+  hermes-agent install skipped it silently has no `ask_user` tool, and the model then has no
+  channel to ask anything.
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
   launch a Hermes colony while one is set (the install's `exec_policy` setting, or a repo
   `.colonizer/exec-policy.json`).
 - No end-to-end colony run: the live verification above used a fake Anthropic-wire gateway and no
-  microVM, so the real gateway's pricing and budget path has not yet seen Hermes traffic, and the
-  in-VM preflight has only run against the stub. Not `SHIPPING`.
+  microVM, so the real gateway's pricing and budget path has not yet seen Hermes traffic. The
+  first-boot staging has run for real only in Linux containers (both architectures), not in a
+  colony microVM. Not `SHIPPING`.

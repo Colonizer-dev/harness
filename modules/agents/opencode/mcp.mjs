@@ -5,6 +5,9 @@
 // When COLONIZER_MEMORY_DIR is mounted it also serves shared memory's read tools (issue #766):
 // colonizer_memory_briefing, colonizer_memory_changes and colonizer_memory_search answer here, from
 // memory-mcp.mjs, and never cross the bridge. Memory is pulled through them, never injected.
+// When the operator vault is staged (COLONIZER_VAULT_DIR, issue #777) it serves colonizer_vault_search
+// over that read-only snapshot the same way, and forwards colonizer_vault_propose to the bridge,
+// which emits a vault_proposal event for the operator to review.
 // Asks can wait on a human for minutes, so while one is in flight the server sends periodic
 // progress notifications on the call's progressToken to hold the request open.
 // Loop colonies (docs/protocol.md, Loops) also get colonizer_loop_stop, plus colonizer_loop_next
@@ -12,13 +15,14 @@
 
 import { createInterface } from 'node:readline';
 
-import { callMemoryTool, MEMORY_READ_TOOL_NAMES, MEMORY_READ_TOOLS, memoryState } from './memory-mcp.mjs';
+import { callMemoryTool, callVaultSearch, MEMORY_READ_TOOL_NAMES, MEMORY_READ_TOOLS, memoryState, VAULT_SEARCH_TOOL } from './memory-mcp.mjs';
 
 const BRIDGE = process.env.COLONIZER_BRIDGE_URL ?? '';
 const TOKEN = process.env.COLONIZER_BRIDGE_TOKEN ?? '';
 const LOOP = process.env.COLONIZER_LOOP === 'true';
 const SELF_PACED = process.env.COLONIZER_LOOP_SELF_PACED === 'true';
 const MEMORY_DIR = process.env.COLONIZER_MEMORY_DIR ?? '';
+const VAULT_DIR = process.env.COLONIZER_VAULT_DIR ?? '';
 // The delay bounds the bridge clamps to; here they only word the description.
 const NEXT_MIN_MINUTES = 15;
 const NEXT_MAX_MINUTES = 24 * 60;
@@ -40,6 +44,12 @@ const TOOLS = [
     description: 'Propose a durable, reusable learning for shared memory (scope repo, org or global). Nothing is written directly; the proposal goes to review.',
     inputSchema: { type: 'object', properties: { scope: { type: 'string', enum: ['repo', 'org', 'global'] }, title: { type: 'string' }, content: { type: 'string' }, kind: { type: 'string', enum: ['plan', 'decision', 'file_change', 'failure', 'architecture', 'convention'], description: 'What the entry is; default convention' }, confidence: { type: 'number', minimum: 0, maximum: 1, description: 'How sure you are it holds beyond this task, 0 to 1' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['scope', 'title', 'content'] },
   },
+  VAULT_DIR && VAULT_SEARCH_TOOL,
+  VAULT_DIR && {
+    name: 'vault_propose',
+    description: "Propose a note for the operator's vault. It goes to a review queue; nothing is written until a person accepts it, and then only as a new note in the vault's inbox folder. Never include secrets.",
+    inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Where under the inbox folder, such as web/deploy-order.md' }, title: { type: 'string' }, body: { type: 'string', description: 'The note, in Markdown' }, reason: { type: 'string', description: 'Why the operator should keep it' } }, required: ['path', 'title', 'body', 'reason'] },
+  },
   LOOP && SELF_PACED && {
     name: 'loop_next',
     description: `Schedule this loop's next run: minutes from now (${NEXT_MIN_MINUTES} to ${NEXT_MAX_MINUTES}) and why.`,
@@ -59,7 +69,7 @@ const TOOLS = [
   },
 ].filter(Boolean);
 
-const PATHS = { ask_user: '/ask', finding_file: '/finding', memory_propose: '/memory', loop_next: '/loop_next', loop_stop: '/loop_stop' };
+const PATHS = { ask_user: '/ask', finding_file: '/finding', memory_propose: '/memory', vault_propose: '/vault', loop_next: '/loop_next', loop_stop: '/loop_stop' };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 // What this colony has been told about shared memory, so memory_changes can say what is new.
 const memorySession = memoryState();
@@ -90,6 +100,7 @@ async function onCall(name, args, progressToken) {
   // A tool the env gated off (loop_next/loop_stop without COLONIZER_LOOP) is unknown, not forwarded.
   if (!TOOLS.some((tool) => tool.name === name)) throw Object.assign(new Error(`unknown tool ${name}`), { code: -32602 });
   try {
+    if (name === VAULT_SEARCH_TOOL.name) return { content: [{ type: 'text', text: await callVaultSearch(args, { vaultDir: VAULT_DIR }) }] };
     if (MEMORY_READ_TOOL_NAMES.includes(name)) return { content: [{ type: 'text', text: await callMemoryTool(name, args, { dir: MEMORY_DIR, state: memorySession }) }] };
     const data = await forward(PATHS[name], args, progressToken);
     if (data?.cancelled) return { content: [{ type: 'text', text: 'The question was cancelled before the user answered.' }], isError: true };

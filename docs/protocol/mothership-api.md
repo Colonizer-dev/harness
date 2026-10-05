@@ -184,6 +184,14 @@ back to an initial. The same record is the seen-set behind the prompt:
 (`pending`). `source` = `{session_id, repo, origin}` or `{user: true}`; a colony's note gains `reviewed: true`
 when approved, or `reviewed: false` when stored with review off.
 
+**Operator vault proposals.** Notes colonies proposed for the operator vault (issue #777, [memory](memory.md#the-operator-vaults-tools-issue-777)). Owner only.
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/vault/proposals` | `{configured, inbox, proposals: [{id, path, title, body, reason, source, created_at}]}`, newest first; `inbox` is the folder an accepted note lands in, relative to the vault |
+| `POST /api/vault/proposals/{id}/accept` | Writes the note as a new file at `<inbox>/<path>` in the vault and drops the proposal: `{ok, path}`. `409` when no vault is configured or the file already exists (nothing is overwritten), `400` when the inbox or path would leave the vault or crosses a symlink; the proposal stays queued on any error |
+| `POST /api/vault/proposals/{id}/reject` | Drops the proposal; the vault is not touched |
+
 **Watchdog.** New module kind `watchdog` (provider `default`, on by default; settings
 `stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 4) and kind `memory` (provider `files`,
 on by default; setting `require_review` = true; off lets only `repo` notes skip review). `Session`

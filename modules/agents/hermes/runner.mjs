@@ -9,11 +9,13 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+
+import { stageHermes } from './stage.mjs';
 
 export const DEFAULT_TURN_TIMEOUT_SECS = 3600;
 export const DEFAULT_HERMES_HOME = '/tmp/colonizer-hermes';
@@ -264,6 +266,21 @@ export function probeHermes({ bin = ['hermes'], execFileImpl = execFile, timeout
       }
     });
   });
+}
+
+/** The install command for a custom image, named when staging fails or an explicit binary is missing. */
+export const CUSTOM_IMAGE_INSTALL =
+  'git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11–3.13 venv, then pip install -e ".[mcp]" (without the mcp extra Hermes silently loads no MCP servers)';
+
+/** The hermes command: COLONIZER_HERMES_BIN (split on spaces), then `hermes` on the PATH, then the
+ * pinned build stage.mjs makes in the cache on first boot (reused on later boots). `venvBin` is the
+ * staged venv's bin dir, for the caller to put on the PATH; a staging failure throws. */
+export async function resolveHermes({ env = process.env, stage = stageHermes, log = () => {} } = {}) {
+  const explicit = String(env.COLONIZER_HERMES_BIN ?? '').trim();
+  if (explicit) return { bin: explicit.split(' ').filter(Boolean), source: 'env' };
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'hermes'))) return { bin: [join(dir, 'hermes')], source: 'path' };
+  const staged = await stage({ env, log });
+  return { bin: [staged.bin], source: staged.cached ? 'cache' : 'staged', venvBin: dirname(staged.bin) };
 }
 
 const truncate = (text) => {
@@ -575,11 +592,21 @@ async function main() {
   };
   const refuse = backendRefusal(process.env);
   if (refuse) fail(refuse);
-  const bin = (process.env.COLONIZER_HERMES_BIN || 'hermes').split(' ').filter(Boolean);
+  let resolved;
+  try {
+    resolved = await resolveHermes({ env: process.env, log: (m) => emit({ type: 'log', level: m.level, message: m.message }) });
+  } catch (error) {
+    fail(`hermes could not be staged on first boot: ${error?.message ?? error}. Nothing unverified was run. Retry the colony, or boot an image with hermes on PATH: ${CUSTOM_IMAGE_INSTALL}.`);
+  }
+  // The staged venv's own bin dir first, so anything Hermes spawns by name finds the same Python.
+  if (resolved.venvBin) process.env.PATH = `${resolved.venvBin}:${process.env.PATH ?? ''}`;
+  const bin = resolved.bin;
   const probe = await probeHermes({ bin });
   if (!probe.ok) {
     fail(
-      `${probe.error}. This module needs hermes-agent v2026.9.24 in the colony image: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv, then pip install -e ".[mcp]" (without the mcp extra Hermes silently loads no MCP servers). Nothing stages that binary into the VM yet.`,
+      resolved.source === 'env'
+        ? `${probe.error}. COLONIZER_HERMES_BIN names a hermes that does not run; unset it to use the pinned build the runner stages, or install hermes-agent v2026.9.24: ${CUSTOM_IMAGE_INSTALL}.`
+        : `${probe.error}. Install hermes-agent v2026.9.24: ${CUSTOM_IMAGE_INSTALL}.`,
     );
   }
   emit({ type: 'log', level: 'info', message: `hermes probe: ${probe.version}; terminal backend local; disabled toolsets: ${disabledToolsets(process.env).join(', ')}` });

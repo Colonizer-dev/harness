@@ -28,6 +28,7 @@ import { createHistoryServer, HISTORY_PROMPT_APPEND, HISTORY_SERVER } from './hi
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
+import { createVaultServer, VAULT_PROMPT_APPEND, VAULT_SERVER, vaultDecision } from './vault.mjs';
 import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
@@ -465,6 +466,7 @@ export function backgroundRecordName(command) {
  * @param {object} [extras]
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
+ * @param {object} [extras.vaultServer]  in-process operator vault MCP server (issue #777)
  * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
  * @param {object} [extras.historyServer] in-process colony-history search MCP server, read-only (issue #739)
  * @param {object} [extras.coordinateServer]  in-process colony-to-colony coordination MCP server (issue #834)
@@ -475,7 +477,7 @@ export function backgroundRecordName(command) {
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, historyServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, vaultServer, recallServer, historyServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -489,6 +491,8 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   }
   if (env.COLONIZER_BACKGROUND_MODEL) claudeEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.COLONIZER_BACKGROUND_MODEL;
   const memory = Boolean(env.COLONIZER_MEMORY_DIR && memoryServer);
+  // The operator vault (issue #777): the mothership sets the dir only when it staged notes for this colony.
+  const vault = Boolean(env.COLONIZER_VAULT_DIR && vaultServer);
   // Both halves of the recall credential: the mothership sets them only when deja is enabled for
   // this colony's org, so a half-set pair is a misconfiguration, not a reason to half-serve it.
   const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
@@ -520,6 +524,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (waitServer) appended.push(WAIT_PROMPT_APPEND);
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
+  if (vault) appended.push(VAULT_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
   if (history) appended.push(HISTORY_PROMPT_APPEND);
   if (coordinate) appended.push(COORDINATION_PROMPT_APPEND);
@@ -573,6 +578,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   const mcpServers = {};
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
+  if (vault) mcpServers[VAULT_SERVER] = vaultServer;
   if (recall) mcpServers[RECALL_SERVER] = recallServer;
   if (history) mcpServers[HISTORY_SERVER] = historyServer;
   if (coordinate) mcpServers[COORDINATION_SERVER] = coordinateServer;
@@ -645,13 +651,13 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
       ],
     });
   }
-  if (memory) {
-    // The same for shared memory: a subagent searches it but never proposes to it, so every proposal
-    // under review is one the orchestrator chose to make.
+  if (memory || vault) {
+    // The same for shared memory and the operator vault: a subagent searches them but never
+    // proposes to them, so every proposal under review is one the orchestrator chose to make.
     preToolUse.push({
       hooks: [
         async (input) => {
-          const reason = memoryDecision(input.tool_name, input);
+          const reason = memoryDecision(input.tool_name, input) ?? vaultDecision(input.tool_name, input);
           if (!reason) return { continue: true };
           return {
             continue: true,
@@ -1393,6 +1399,11 @@ async function main() {
     memoryServer = createMemoryServer({ dir: process.env.COLONIZER_MEMORY_DIR, emit, createSdkMcpServer, tool, z });
   }
 
+  let vaultServer;
+  if (process.env.COLONIZER_VAULT_DIR) {
+    vaultServer = createVaultServer({ dir: process.env.COLONIZER_VAULT_DIR, emit, createSdkMcpServer, tool, z });
+  }
+
   let findingsServer;
   if (process.env.COLONIZER_FINDINGS === 'true') {
     findingsServer = createFindingsServer({ emit, createSdkMcpServer, tool, z });
@@ -1452,6 +1463,7 @@ async function main() {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
+    vaultServer,
     recallServer,
     historyServer,
     coordinateServer,

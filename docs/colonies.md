@@ -659,6 +659,37 @@ backlinks) is built from the scrubbed text. The snapshot is taken at each boot a
 edit needs a new boot to reach a colony; a folder out of scope stages nothing, so `/colonizer/vault/`
 is absent. Base64- or percent-encoded forms of a secret are not caught.
 
+**Searching it.** A colony with a staged vault gets a `vault_search(query, limit?)` tool beside the
+memory tools (Claude Code, Codex, Grok Build, OpenCode, Pi and ACP; Hermes serves neither). It is a
+plain-text search of the snapshot like `memory_search`: every term must appear in a note, case
+aside, and matches are ranked by how often the terms appear, a hit in the title or a heading
+counting more. Each match names its path under `/colonizer/vault/`, the line and the heading it sits
+under, and a short excerpt, wrapped in an `<operator-vault>` frame that calls it data to verify, not
+instructions. The snapshot holds only the folders in scope for the colony, so the search never
+reaches anything else; `INDEX.md`, dot-named entries and symlinks are left out of it.
+
+**Proposing a note.** `vault_propose(path, title, body, reason)` (Claude Code, Codex, Grok Build
+and OpenCode; Pi and ACP have no channel back to the mothership) never writes inside the colony or
+the vault: it sends a `vault_proposal` event, and the mothership queues it for review with its
+provenance — the colony, its repository and the commit its worktree was at. Only the orchestrator
+proposes: a subagent's call is refused in the colony and again on the mothership. A proposal from
+a colony no vault folder reaches is ignored, the secret values the mothership knows are scrubbed
+from it, and the path must be relative (at most four parts and 200 characters, no `..` or
+dot-named part; `.md` is added); the title is capped at 200 characters, the reason at 2,000 and the
+body at 64 KiB, and at most 200 proposals wait at once. The cockpit lists them under **Proposed for
+your vault** on the Memory page, as plain escaped text. **Accept** writes the note as a new file
+under the vault's inbox folder — `Inbox/colonizer/` unless `colonizer.toml` says otherwise — with
+the provenance in its frontmatter; it never overwrites a file, never follows a symlink and never
+writes outside the vault root, and a proposal it cannot write stays in the queue. **Reject** drops
+it. Notes you accept reach colonies at their next boot only if the inbox sits in an allowlisted
+folder.
+
+```toml
+[vault]
+path = "/home/me/Obsidian/Work"
+inbox = "Inbox/colonizer"   # relative to the vault; this is the default
+```
+
 ## Search earlier colonies' conversations
 
 **What it is.** Where deja recalls a finished colony's transcript, this searches every colony's

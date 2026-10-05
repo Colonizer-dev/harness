@@ -62,11 +62,14 @@ const PRESETS = {
 export const MEMORY_MCP = fileURLToPath(new URL('./memory-mcp.mjs', import.meta.url));
 
 /** The MCP servers session/new and session/load register: the memory server when memory is
- * mounted, none otherwise. Memory is pulled through it, never put into a prompt. */
+ * mounted or the operator vault is staged (it then also serves vault_search, issue #777), none
+ * otherwise. Both are pulled through it, never put into a prompt. */
 export function mcpServers(env = process.env) {
   const dir = String(env.COLONIZER_MEMORY_DIR ?? '').trim();
-  if (!dir) return [];
-  return [{ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] }];
+  const vault = String(env.COLONIZER_VAULT_DIR ?? '').trim();
+  if (!dir && !vault) return [];
+  const serverEnv = [...(dir ? [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] : []), ...(vault ? [{ name: 'COLONIZER_VAULT_DIR', value: vault }] : [])];
+  return [{ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: serverEnv }];
 }
 
 /** The preset's spec, or null for `custom` and unknown names. */
@@ -673,7 +676,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         sessionId = String(session.sessionId ?? '');
         // A fresh session has no system prompt of ours, so its first prompt carries the one fixed
         // line naming the memory tools; a reloaded session already had it.
-        memoryLine = servers.length > 0;
+        // A server registered only for the operator vault has no memory tools to name.
+        memoryLine = servers.length > 0 && Boolean(String(env.COLONIZER_MEMORY_DIR ?? '').trim());
       }
       if (loadable && sessionId) emit({ type: 'agent_session', session_id: sessionId });
       modelSupported = Boolean(session.models);
