@@ -784,7 +784,13 @@ async fn a_colony_with_a_full_queue_is_refused_without_queueing() {
             let app = app.clone();
             let token = token.clone();
             let body = body.clone();
-            tokio::spawn(async move { post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), body).await })
+            // The status only: a response held in a finished task keeps its slot until it is dropped,
+            // and the tasks need not reach the queue in the order they were spawned.
+            tokio::spawn(async move {
+                post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), body)
+                    .await
+                    .status()
+            })
         });
     }
     for _ in 0..1000 {
@@ -806,7 +812,7 @@ async fn a_colony_with_a_full_queue_is_refused_without_queueing() {
 
     drop(held);
     for task in tasks {
-        assert_eq!(task.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(task.await.unwrap(), StatusCode::OK);
     }
     let lines = audit_lines(&app, "c1");
     assert_eq!(lines.iter().filter(|l| l["failure"] == "queue_full").count(), 1);

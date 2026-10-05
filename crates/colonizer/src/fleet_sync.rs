@@ -335,7 +335,7 @@ fn collect(data_dir: &Path, origin: &Origin, state: &DrainState) -> Result<Vec<P
             .or_insert_with(|| fleet_export::mirror_identity(data_dir, &s.repo))
             .clone();
         let record = ImportedSession::of(origin, s, identity);
-        let dir = data_dir.join("sessions").join(&s.id);
+        let dir = crate::store::local_session_dir(data_dir, &s.id);
         let mut logs = Vec::new();
         let mut seed = serde_json::to_vec(&record)?;
         for name in LOG_BASENAMES {

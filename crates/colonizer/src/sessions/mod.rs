@@ -13,7 +13,7 @@ use crate::{
     protocol::{Origin, QuestionRisk},
     restack, spend,
     stack::Stacked,
-    util::{append_line, read_trimmed, short_id, truncate, valid_repo},
+    util::{append_line, short_id, truncate, valid_repo},
     watchdog::Activity,
 };
 // The boot sequence itself lives in boot.rs; re-exported here because lifecycle and queue reach

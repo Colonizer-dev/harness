@@ -1051,13 +1051,13 @@ fn advance_state(run: &mut RedTeamRun, sessions: &[Session]) {
 /// within each hunter's ledger and each finding is counted once per state it reached. Filed counts a
 /// finding that matched an open issue too: either way it is on GitHub. Legacy lines with no `state`
 /// are read by what they carry (`findings::records` does that).
-fn counts_for(app: &App, run: &RedTeamRun) -> Counts {
+async fn counts_for(app: &App, run: &RedTeamRun) -> Counts {
     let mut counts = Counts::default();
     for hunter in &run.hunters {
-        let record = app.session_dir(&hunter.session_id).join("findings.jsonl");
+        let ledger = findings::ledger(app, &hunter.session_id).await;
         // Title → the states that finding reached, in first-seen order of titles.
         let mut reached: Vec<(String, Vec<String>)> = Vec::new();
-        for line in findings::records(&record) {
+        for line in findings::records_in(&ledger) {
             let at = match reached.iter().position(|(title, _)| *title == line.title) {
                 Some(at) => at,
                 None => {
@@ -1144,11 +1144,10 @@ type Verdict = (Option<String>, Option<String>, Option<String>);
 /// with the latest ledger verdict per title and prose from the hunter's last raw `finding` event.
 /// The events log goes through the bounded regular-file reader: a live VM appending to it cannot
 /// grow the read past the cap, and a planted symlink cannot turn it into a host-file read.
-fn hunter_findings(app: &App, hunter: &Hunter) -> Vec<HunterFinding> {
-    let dir = app.session_dir(&hunter.session_id);
+async fn hunter_findings(app: &App, hunter: &Hunter) -> Vec<HunterFinding> {
     let mut titles: Vec<String> = Vec::new();
     let mut verdicts: HashMap<String, Verdict> = HashMap::new();
-    for line in findings::records(&dir.join("findings.jsonl")) {
+    for line in findings::records_in(&findings::ledger(app, &hunter.session_id).await) {
         if !titles.contains(&line.title) {
             titles.push(line.title.clone());
         }
@@ -1164,7 +1163,10 @@ fn hunter_findings(app: &App, hunter: &Hunter) -> Vec<HunterFinding> {
         }
     }
     let mut prose: HashMap<String, (String, String)> = HashMap::new();
-    if let Ok(content) = crate::github::read_regular_file(&dir.join("events.jsonl"), 2_000_000) {
+    // The newest 2 MB of the event log, through the store: the log grows while the hunter lives,
+    // so the read is bounded, and a hunter's last word on a finding is at the end.
+    if let Ok(Some(tail)) = app.store().read_tail(&hunter.session_id, "events.jsonl", 2_000_000).await {
+        let content = String::from_utf8_lossy(&tail);
         for line in content.lines() {
             let Ok(event) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -1195,14 +1197,17 @@ fn hunter_findings(app: &App, hunter: &Hunter) -> Vec<HunterFinding> {
 /// mount host files, so the hunters' ledgers travel inline — each finding's verdict, body and
 /// evidence cut to an equal share of what the intro, the task and the per-hunter headers leave of
 /// the budget — with each ledger's host path named for the record. The task is a merge only.
-fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
+async fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
     let mut text = format!(
         "You are the synthesis judge for red-team run {} on {}. A colony cannot read files on the\n\
          mothership host, so every hunter's findings ledger is quoted inline below, its host path\n\
          named for the record.\n",
         run.id, run.repo,
     );
-    let per_hunter: Vec<(&Hunter, Vec<HunterFinding>)> = run.hunters.iter().map(|h| (h, hunter_findings(app, h))).collect();
+    let mut per_hunter: Vec<(&Hunter, Vec<HunterFinding>)> = Vec::new();
+    for h in &run.hunters {
+        per_hunter.push((h, hunter_findings(app, h).await));
+    }
     let security = run.preset == Preset::Security;
     let leads = if security { prescan_block(run) } else { String::new() };
     let task = if security {
@@ -1384,7 +1389,7 @@ async fn launch_synthesis(app: &Shared, run: &mut RedTeamRun) {
                 })
                 .await;
         } else {
-            let launched = launch_hunter(app.clone(), synthesis_brief(app, run)).await;
+            let launched = launch_hunter(app.clone(), synthesis_brief(app, run).await).await;
             attach_synthesis(app, &id, launched).await;
         }
     }
@@ -1556,7 +1561,7 @@ async fn one_step(app: &Shared, id: &str) {
         }
         advance_state(&mut run, &sessions);
     }
-    run.counts = counts_for(app, &run);
+    run.counts = counts_for(app, &run).await;
     // Synthesis fires exactly once, at this transition into done and only with something to merge:
     // `stored` is the pre-tick record, so a run already done (or stopped) never synthesizes.
     if stored.state != RedTeamState::Done && run.state == RedTeamState::Done && run.counts.found > 0 {
@@ -2565,7 +2570,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let counts = counts_for(&app, &run);
+        let counts = counts_for(&app, &run).await;
         assert_eq!(
             counts,
             Counts {
@@ -2602,7 +2607,7 @@ mod tests {
         tick_once(&app).await;
         assert_eq!(synthesis_colonies(&app).await, 1, "further ticks never launch a second one");
         // The brief publishes nothing and carries the ledgers inline, cut under the cap.
-        let brief = synthesis_brief(&app, &run);
+        let brief = synthesis_brief(&app, &run).await;
         for key in ["autopilot", "autofix", "automerge"] {
             assert_eq!(brief[key], false, "the judge publishes nothing: {key} is off");
         }
@@ -3789,7 +3794,7 @@ mod tests {
         // The synthesis brief ranks by severity with proof and merges confirmed leads.
         let mut done = stored.clone();
         done.state = RedTeamState::Done;
-        let brief = synthesis_brief(&app, &done);
+        let brief = synthesis_brief(&app, &done).await;
         let text = brief["instructions"].as_str().unwrap();
         assert!(text.contains("ranked by\nseverity"), "{text}");
         assert!(text.contains("\"proof\""), "{text}");
@@ -3799,7 +3804,10 @@ mod tests {
         // A general run's synthesis brief is untouched by any of that.
         let mut general = done.clone();
         general.preset = Preset::General;
-        let text = synthesis_brief(&app, &general)["instructions"].as_str().unwrap().to_string();
+        let text = synthesis_brief(&app, &general).await["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(!text.contains("prescan_leads") && !text.contains("Pre-scan leads"), "{text}");
         let _ = std::fs::remove_dir_all(root);
     }

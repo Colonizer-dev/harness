@@ -163,19 +163,15 @@ pub(crate) fn redact_for_bundle(rel: &str, bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
-/// The session directory read through the session store (#325), so a future remote backend serves
-/// the archive like everything else, plus its fingerprint. `None` when there is no session directory.
-async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(String, u64, Vec<u8>)>, String)>> {
-    let dir = data_dir.join("sessions").join(id);
-    match tokio::fs::metadata(&dir).await {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => return Ok(None),
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+/// The session's files read through the session store (#325), so a remote backend serves the
+/// archive like everything else, plus its fingerprint. `None` when the session has no files.
+async fn snapshot(store: &dyn SessionStore, id: &str) -> anyhow::Result<Option<(Vec<(String, u64, Vec<u8>)>, String)>> {
+    let names = store.list_files(id).await?;
+    if names.is_empty() {
+        return Ok(None);
     }
-    let store = crate::store::LocalDirStore::new(data_dir);
     let (mut files, mut total, mut newest) = (Vec::new(), 0u64, 0u64);
-    for name in store.list_files(id).await? {
+    for name in names {
         // Credentials are never read, so they neither travel nor move the fingerprint (a resumed
         // colony's fresh tokens are not a change to its logs).
         if is_credential_file(&name) {
@@ -186,10 +182,12 @@ async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(Stri
         };
         // #761: a log written before redaction existed is redacted on its way into the bundle.
         let bytes = redact_for_bundle(&name, bytes);
-        let mtime = tokio::fs::metadata(dir.join(&name))
+        let mtime = store
+            .stat(id, &name)
             .await
             .ok()
-            .and_then(|m| m.modified().ok())
+            .flatten()
+            .and_then(|stat| stat.modified)
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             // Nanoseconds: a same-size rewrite inside the second that wrote the last bundle must
             // still read as a change.
@@ -272,11 +270,16 @@ fn write_bundle(dir: &Path, id: &str, mut revision: u32, files: Vec<(String, u64
 /// the archive root. `None` when there is nothing to do: no session directory, or a fingerprint
 /// that already matches the newest bundle.
 pub(crate) async fn archive_session(app: &App, s: &Session) -> anyhow::Result<Option<String>> {
-    archive_data(&app.cfg.data_dir, s, &crate::runtime::host_id(app)).await
+    archive_data(app.store(), &app.cfg.data_dir, s, &crate::runtime::host_id(app)).await
 }
 
-async fn archive_data(data_dir: &Path, s: &Session, mothership: &str) -> anyhow::Result<Option<String>> {
-    let Some((files, fingerprint)) = snapshot(data_dir, &s.id).await? else {
+async fn archive_data(
+    store: &dyn SessionStore,
+    data_dir: &Path,
+    s: &Session,
+    mothership: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some((files, fingerprint)) = snapshot(store, &s.id).await? else {
         return Ok(None);
     };
     let rel_dir = rel_dir_of(s);
@@ -325,9 +328,9 @@ async fn archive_data(data_dir: &Path, s: &Session, mothership: &str) -> anyhow:
 /// Hook A (issue #496): the colony just crossed onto a terminal status. Snapshot its logs off the
 /// update path — an archive must never block or fail a colony that just finished, so the spawned
 /// task's whole error path is a printout.
-pub(crate) fn spawn_on_end(data_dir: PathBuf, session: Session, mothership: String) {
+pub(crate) fn spawn_on_end(store: std::sync::Arc<dyn SessionStore>, data_dir: PathBuf, session: Session, mothership: String) {
     tokio::spawn(async move {
-        if let Err(e) = archive_data(&data_dir, &session, &mothership).await {
+        if let Err(e) = archive_data(store.as_ref(), &data_dir, &session, &mothership).await {
             eprintln!("archive: could not archive {}'s logs: {e:#}", session.id);
         }
     });

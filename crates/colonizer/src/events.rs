@@ -366,12 +366,8 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // another chance — but once a later event succeeds, `agent_seq` jumps past the lost one and
         // the gap is permanent. This is a second chance, not a retry that is guaranteed to happen.
         app.storage_failed("append to the colony's event log", &e).await;
-        app.session_log(
-            id,
-            "error",
-            format!("could not append to {}: {e:#}", rt.events_path.display()),
-        )
-        .await;
+        app.session_log(id, "error", format!("could not append to events.jsonl: {e:#}"))
+            .await;
     }
     rt.broadcast(Some(file_seq), file_line.to_string());
 
@@ -1206,9 +1202,7 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     )
     .await;
     let _serial = rt.findings_lock.lock().await;
-    let dir = app.session_dir(&id);
-    let record = dir.join("findings.jsonl");
-    if findings::count(&record) >= findings::MAX_PER_COLONY {
+    if findings::count_in(&findings::ledger(&app, &id).await) >= findings::MAX_PER_COLONY {
         let message = format!(
             "did not file \"{}\": this colony has already filed {} findings, the most one colony may",
             finding.title,
@@ -1238,7 +1232,8 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     if let Some(note) = crate::redact::redaction_note("finding-body.md", &text, "filing") {
         app.session_log(&id, "warn", note).await;
     }
-    let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md"), &grant).await;
+    // The body goes to `gh --body-file` by path, so it is written into the local working copy.
+    let outcome = findings::file(&app, &s, &finding, &app.session_dir(&id).join("finding-body.md"), &grant).await;
     let (level, message, entry) = match &outcome {
         Ok(findings::Filed::Issue(url)) => (
             "info",
@@ -1271,12 +1266,8 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.
             app.storage_failed("append to the colony's findings log", &e).await;
-            app.session_log(
-                &id,
-                "error",
-                format!("could not record the finding in {}: {e:#}", record.display()),
-            )
-            .await;
+            app.session_log(&id, "error", format!("could not record the finding in findings.jsonl: {e:#}"))
+                .await;
         }
     }
     app.session_log(&id, level, message).await;

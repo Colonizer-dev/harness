@@ -289,12 +289,8 @@ pub(crate) async fn emit_chain(app: &Shared, session_id: &str, mut event: Value)
         // The line still reaches every open browser; what failed is the durable copy, and a gap in
         // the host's own event log must not be silent any more than a gap in agentd's would be.
         app.storage_failed("append to the colony's event log", &e).await;
-        app.session_log(
-            session_id,
-            "error",
-            format!("could not append to {}: {e:#}", rt.events_path.display()),
-        )
-        .await;
+        app.session_log(session_id, "error", format!("could not append to events.jsonl: {e:#}"))
+            .await;
     }
     rt.broadcast(seq, line);
 }
@@ -304,14 +300,13 @@ pub(crate) async fn emit_chain(app: &Shared, session_id: &str, mut event: Value)
 /// or autofix outcome landing here must never interleave a cap decision mid-write.
 pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
     let rt = app.runtime(session_id).await;
-    let path = app.session_dir(session_id).join("findings.jsonl");
     let appended = {
         let _guard = rt.findings_lock.lock().await;
         // #761: a finding's title or reason can quote what the agent saw, secrets included.
         let entry = line.to_string();
         let text = crate::redact::redact_line(&entry);
         app.store()
-            .append(session_id, "findings.jsonl", text.as_bytes())
+            .append(session_id, crate::findings::LEDGER_FILE, text.as_bytes())
             .await
             .map_err(anyhow::Error::from)
     };
@@ -322,7 +317,7 @@ pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
         app.session_log(
             session_id,
             "error",
-            format!("could not record the outcome in {}: {e:#}", path.display()),
+            format!("could not record the outcome in findings.jsonl: {e:#}"),
         )
         .await;
     }

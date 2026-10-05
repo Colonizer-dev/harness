@@ -917,7 +917,7 @@ async fn events_socket(
     // connection is attached to, so a tab left open across a resume learns its cursor belongs to
     // a retired run. It carries no `seq` field, so it passes seq filtering like `harness_log`,
     // and old clients ignore the unknown frame.
-    let current_epoch = run_epoch_for_dir(&app.session_dir(&id));
+    let current_epoch = run_epoch(app.store(), &id).await;
     if tx
         .send(text(json!({"type": "run_epoch", "epoch": current_epoch}).to_string()))
         .await
@@ -949,7 +949,7 @@ async fn events_socket(
     // `InvalidData` error, which reads exactly like EOF here and would silently truncate the
     // replay at the first corrupt line. Split chunks decode (or skip) one at a time instead.
     let mut skipped = 0u64;
-    if let Ok(bytes) = tokio::fs::read(&rt.events_path).await {
+    if let Ok(Some(bytes)) = app.store().read_file(&id, "events.jsonl").await {
         for chunk in bytes.split(|b| *b == b'\n') {
             if chunk.is_empty() {
                 continue;
@@ -974,10 +974,9 @@ async fn events_socket(
             &id,
             "warn",
             format!(
-                "skipped {} unreadable {} in {} during replay; the transcript continues past the gap",
+                "skipped {} unreadable {} in events.jsonl during replay; the transcript continues past the gap",
                 skipped,
                 if skipped == 1 { "line" } else { "lines" },
-                rt.events_path.display(),
             ),
         )
         .await;

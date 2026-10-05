@@ -130,6 +130,7 @@ mod stack;
 mod stale;
 mod status;
 mod store;
+mod store_config;
 mod stream;
 mod summaries;
 mod supersede;
