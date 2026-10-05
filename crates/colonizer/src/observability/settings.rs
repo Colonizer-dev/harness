@@ -324,7 +324,7 @@ pub fn validate(
 
 /// The endpoint rules: a http(s) URL, no credentials in it, no query string, and a plain `http://`
 /// only to a loopback or private host unless `allow_insecure` says otherwise.
-fn check_endpoint(endpoint: &str, allow_insecure: bool) -> Result<(), String> {
+pub(crate) fn check_endpoint(endpoint: &str, allow_insecure: bool) -> Result<(), String> {
     let (scheme, rest) = if let Some(r) = endpoint.strip_prefix("https://") {
         ("https", r)
     } else if let Some(r) = endpoint.strip_prefix("http://") {

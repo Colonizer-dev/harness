@@ -56,3 +56,25 @@ export interface AutonomyStatus {
   consecutive_failures: number;
   alerted: boolean;
 }
+
+/**
+ * GET /api/observability/status (issue #839): whether OTLP export is on, why not, where each
+ * setting came from, the header names (never values) and the exporter add-on's own health.
+ */
+export interface ObservabilityStatus {
+  state: "off" | "invalid" | "no_addon" | "starting" | "running" | "restarting" | "refused" | "failed";
+  configured: boolean;
+  reason?: string;
+  error?: string | null;
+  endpoint?: string;
+  protocol?: string;
+  headers?: { source: "env" | "secret" | "none"; names: string[] };
+  exporter?: { state?: string; exported?: number; last_error?: string | null; dropped?: Record<string, number> } | null;
+}
+
+/** POST /api/observability/test: what the backend answered for each signal. */
+export interface ObservabilityTest {
+  ok: boolean;
+  error?: string;
+  signals?: Record<string, { ok: boolean; status?: number; error?: string; rejected?: number }>;
+}

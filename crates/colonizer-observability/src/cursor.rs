@@ -146,6 +146,9 @@ impl Gap {
 #[derive(Clone, Debug)]
 pub(crate) struct Batch {
     pub(crate) lines: Vec<Value>,
+    /// The SHA-256 of each line's raw bytes (newline excluded), parallel to `lines`: the record id's
+    /// key for a source with no `seq` (docs/design/observability.md, Identity).
+    pub(crate) digests: Vec<[u8; 32]>,
     pub(crate) cursor: Cursor,
     pub(crate) gaps: Vec<Gap>,
     /// Whole lines that would not parse as JSON (or UTF-8), skipped rather than fatal.
@@ -158,6 +161,7 @@ impl Batch {
     fn empty() -> Self {
         Batch {
             lines: Vec::new(),
+            digests: Vec::new(),
             cursor: Cursor::default(),
             gaps: Vec::new(),
             malformed: 0,
@@ -435,7 +439,13 @@ impl Scan<'_> {
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
         {
-            Some(value) => self.out.lines.push(value),
+            Some(value) => {
+                self.out.lines.push(value);
+                let digest = ring::digest::digest(&ring::digest::SHA256, line);
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(digest.as_ref());
+                self.out.digests.push(bytes);
+            }
             None => self.out.malformed += 1,
         }
     }

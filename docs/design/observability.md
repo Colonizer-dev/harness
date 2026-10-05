@@ -299,7 +299,7 @@ only what #840 did not: environment overrides and the master switch.
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | overrides `compression` |
 | `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_{ENDPOINT,PROTOCOL,HEADERS,TIMEOUT,COMPRESSION}` | per-signal variants, take precedence over the unsuffixed form for that signal only (traces can go to a different collector than logs) |
 | `OTEL_RESOURCE_ATTRIBUTES` | merged into the resource attributes below, `k=v,k2=v2`, additive |
-| `OTEL_SERVICE_NAME` | overrides `service.name` (default `colonizer-mothership`) |
+| `OTEL_SERVICE_NAME` | overrides `service.name` (default `colonizer`) |
 | `OTEL_SDK_DISABLED` | `true` forces export off for this process, overriding a saved+enabled module — the one override that can only turn export *off* |
 | `COLONIZER_OBSERVABILITY=on` | master switch for an **env-only** deployment: with no module saved (or saved disabled), this plus `OTEL_EXPORTER_OTLP_ENDPOINT` is enough to export, every other field at its settings.rs default. With a module saved and enabled, this does nothing extra |
 

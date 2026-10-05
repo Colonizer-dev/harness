@@ -62,6 +62,11 @@ fn token(n: usize) -> String {
     token_from(ALNUM, n)
 }
 
+/// A short random hex id for a test's temp directory.
+pub(crate) fn unique() -> String {
+    hex(&random_bytes(6))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -8,6 +8,7 @@ import { ModuleProviderMark, isAdvancedField } from "../settingsGuide";
 import { IconCheck, IconChevron } from "../icons";
 import { Pane, Row } from "./ui";
 import { AutonomyHealth } from "./AutonomyHealth";
+import { ObservabilityRows } from "./ObservabilityRows";
 import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestRow, isDirty, kindInfo, useHeadroom, valueOf, type ModuleDraft } from "./moduleFields";
 
 // ---------------------------------------------------------------------------
@@ -321,6 +322,7 @@ export function ModulePane({
 
         {module.kind === "voice" && draft.provider !== "browser" && <VoiceKeyRow provider={draft.provider} name={providerInfo?.name ?? draft.provider} />}
         {module.kind === "voice" && <VoiceTestRow unsaved={dirty} />}
+        {module.kind === "observability" && <ObservabilityRows unsaved={dirty} />}
 
         {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
       </div>

@@ -1,0 +1,546 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeMetrics": [
+        {
+          "metrics": [
+            {
+              "description": "",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "colonizer.colony.status",
+                        "value": {
+                          "stringValue": "queued"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ]
+              },
+              "metadata": [],
+              "name": "colonizer.colonies",
+              "unit": "{colony}"
+            },
+            {
+              "description": "",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "colonizer.colony.status",
+                        "value": {
+                          "stringValue": "running"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ]
+              },
+              "metadata": [],
+              "name": "colonizer.colonies",
+              "unit": "{colony}"
+            },
+            {
+              "description": "",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "asInt": "1",
+                    "attributes": [],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ]
+              },
+              "metadata": [],
+              "name": "colonizer.queue.depth",
+              "unit": "{colony}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.gateway.requests",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "2",
+                    "attributes": [
+                      {
+                        "key": "provider",
+                        "value": {
+                          "stringValue": "openrouter"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "qwen3-coder"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{request}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.gateway.failures",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "provider",
+                        "value": {
+                          "stringValue": "openrouter"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "qwen3-coder"
+                        }
+                      },
+                      {
+                        "key": "failure",
+                        "value": {
+                          "stringValue": "rate_limited"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{request}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.gateway.input_tokens",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "900",
+                    "attributes": [
+                      {
+                        "key": "provider",
+                        "value": {
+                          "stringValue": "openrouter"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "qwen3-coder"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{token}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.gateway.output_tokens",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "80",
+                    "attributes": [
+                      {
+                        "key": "provider",
+                        "value": {
+                          "stringValue": "openrouter"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "qwen3-coder"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{token}"
+            },
+            {
+              "description": "",
+              "histogram": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "provider",
+                        "value": {
+                          "stringValue": "openrouter"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "qwen3-coder"
+                        }
+                      }
+                    ],
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "count": "2",
+                    "exemplars": [],
+                    "explicitBounds": [
+                      50.0,
+                      100.0,
+                      250.0,
+                      500.0,
+                      1000.0,
+                      2500.0,
+                      5000.0,
+                      10000.0,
+                      30000.0,
+                      60000.0,
+                      120000.0,
+                      300000.0
+                    ],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "sum": 932.0,
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ]
+              },
+              "metadata": [],
+              "name": "colonizer.gateway.duration",
+              "unit": "ms"
+            },
+            {
+              "description": "",
+              "histogram": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "provider",
+                        "value": {
+                          "stringValue": "openrouter"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "qwen3-coder"
+                        }
+                      }
+                    ],
+                    "bucketCounts": [
+                      "2",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "count": "2",
+                    "exemplars": [],
+                    "explicitBounds": [
+                      50.0,
+                      100.0,
+                      250.0,
+                      500.0,
+                      1000.0,
+                      2500.0,
+                      5000.0,
+                      10000.0,
+                      30000.0,
+                      60000.0,
+                      120000.0,
+                      300000.0
+                    ],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "sum": 32.0,
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ]
+              },
+              "metadata": [],
+              "name": "colonizer.gateway.queue_time",
+              "unit": "ms"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.spend.cost",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asDouble": 0.42,
+                    "attributes": [
+                      {
+                        "key": "org",
+                        "value": {
+                          "stringValue": "acme"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "claude-opus-4-5"
+                        }
+                      },
+                      {
+                        "key": "kind",
+                        "value": {
+                          "stringValue": "turn"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "USD"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.spend.input_tokens",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "1200",
+                    "attributes": [
+                      {
+                        "key": "org",
+                        "value": {
+                          "stringValue": "acme"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "claude-opus-4-5"
+                        }
+                      },
+                      {
+                        "key": "kind",
+                        "value": {
+                          "stringValue": "turn"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{token}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.spend.output_tokens",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "340",
+                    "attributes": [
+                      {
+                        "key": "org",
+                        "value": {
+                          "stringValue": "acme"
+                        }
+                      },
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "claude-opus-4-5"
+                        }
+                      },
+                      {
+                        "key": "kind",
+                        "value": {
+                          "stringValue": "turn"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{token}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.observability.exported",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "6",
+                    "attributes": [],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{record}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.observability.dropped",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "2",
+                    "attributes": [
+                      {
+                        "key": "colonizer.drop.reason",
+                        "value": {
+                          "stringValue": "backlog"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{record}"
+            },
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.observability.export_failures",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "0",
+                    "attributes": [],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1789999940000000000",
+                    "timeUnixNano": "1790000000000000000"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{request}"
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}
