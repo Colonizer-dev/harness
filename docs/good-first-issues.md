@@ -1,7 +1,7 @@
 # Good first issues
 
-Small, self-contained work to start on: each of these touches one or two files, needs no microVM,
-no KVM and no running colony, and checks out with the commands in
+Small, self-contained work to start on. A candidate touches one or two files, needs no microVM, no
+KVM and no running colony, and checks out with the commands in
 [CONTRIBUTING.md](../CONTRIBUTING.md#your-first-pr-in-15-minutes).
 
 ## The list
@@ -19,7 +19,9 @@ comment on it).
 
 ## For maintainers
 
-- Label the ones on the list when triaging. `gh issue edit` takes several numbers at once:
+- Label a small, self-contained issue `good first issue` when you triage it — that label is the
+  list, so the query above finds it without editing this page. `gh issue edit` takes several
+  numbers at once:
 
   ```sh
   gh issue edit <n> <n> … --add-label "good first issue"
@@ -34,4 +36,4 @@ comment on it).
   > green pull request is CONTRIBUTING → "Your first PR in 15 minutes". Comment on the issue to
   > claim it before you start, and ask anything here in Q&A or on the issue itself.
 
-- When an issue on the list closes, remove it from this page.
+- When one of these issues closes, drop the label so the query above stops returning it.

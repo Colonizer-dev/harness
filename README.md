@@ -95,7 +95,7 @@ the mothership has sanitized it and opened the pull request. The diagram is in
 | [Providers](docs/providers.md) · [Loops](docs/loops.md) · [Jev](docs/jev.md) · [Hosted](docs/hosted.md) | Model providers, built-in loops, second opinions, the hosted contract |
 | [Vision](docs/vision.md) · [Gaps](docs/gaps.md) · [Decisions](docs/decisions.md) | Why, the roadmap, what is not built, what was decided against |
 | [CHANGELOG](CHANGELOG.md) · [changelog.d/](changelog.d/README.md) | Every release, and what has merged since |
-| [Development](docs/development.md) · [Runner authoring](docs/runner-authoring.md) · [Good first issues](docs/good-first-issues.md) | Tests, a new agent module, where to start |
+| [Development](docs/development.md) · [Runner authoring](docs/runner-authoring.md) · [Good first issues](docs/good-first-issues.md) | Tests, a new agent module, starter issues |
 
 ## Development
 
