@@ -18,6 +18,35 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.8] - 2026-10-06
+
+### Added
+
+- **A "Built with" list, and `colonizer about` to print it.** The products the venture is made of are said out loud: each one with the words the Factory Zero registry puts before its name, its status said in words — `live` or `planned` — and a link, so a product the venture has chosen but not yet switched on is never shown as though it were in use. The list is the venture's own entry in that registry (venture FZ-006), kept as a vendored copy in `built-with.json` and read with no network call, so what is claimed cannot change under a running install and the day it was taken is on the record. Run `colonizer about` to read it, or `GET /api/built-with` for the same list as JSON. ([#944])
+
+### Changed
+
+- **The per-repo daily pull-request cap is opt-in.** v0.2.7 capped every repository at five opened
+  pull requests per UTC day by default; the default is now no cap. Set one for every repository with
+  `max_prs_per_day` in the publish settings, or per repository with `max_prs_per_day` under
+  `[colonizer]` in its `.colonizer/config.toml`, which still wins (`0` is uncapped in either place).
+  Colonies already parked with `repo_pr_rate_limit` requeue on their own within a few minutes once no
+  cap holds them back, instead of waiting for the UTC day to roll over. ([#910])
+  <!-- colonizer-notice {"severity":"fixes-running","line":"Colonies parked by the daily PR cap resume: the cap is now off unless you set one."} -->
+- **The good-first-issues page says the list is empty instead of sending newcomers after a list that is not there.** PR #930 emptied the page when all eight issues on its 2026-09-28 snapshot closed, but CONTRIBUTING still promised that "every issue" on it runs on a plain laptop and the README still advertised it as where to start — both promises about a page with no issues on it. CONTRIBUTING now describes starter issues as a category rather than a populated list and names the page as the source of truth; the README row reads "starter issues"; and the page's maintainer notes say that the `good first issue` label is the list, so a new candidate appears by being labelled rather than by editing the page. ([#931])
+
+### Fixed
+
+- **A colony whose agent never produced a turn after boot no longer sits in `starting` forever.** Nothing acted as a boot deadline: `starting` is set when the queue admits a colony and only becomes `running` on the first agent link, and if that link never came — an agent that died on its first requests — the colony showed `starting` with no card, no flag and no log line, indefinitely. The watchdog now watches that state and flags it `stalled`, so it appears in the cockpit's "needs you" list and in notifications.
+
+  It waits on the boot rather than on a shared stall timer, because a boot legitimately takes far longer than a stall: the queue stamps the colony's admission instant when it builds the runtime, before it even starts the boot, so a first colony pulling a cold multi-gigabyte image would otherwise be reported as a dead agent while it was still downloading. The session already records when a boot finished, so the watchdog adds that boot's own length to the admission instant instead — 15 minutes after the boot completed for a link that never came, whose log line is `watchdog: its boot finished more than 15 min ago and its agent still has not linked; this colony needs you — nothing it is doing can be seen`, and 45 minutes for a boot that never completed at all, which gets a different line saying so. A healthy boot, however slow its image pull, is left alone.
+
+  That boot clock is measured from the admission stamp and not from the last progress the watchdog saw, so it cannot be restarted by the colony's own traffic: an agent that is evidently working — it is what is making the requests — but never links its event stream is exactly the case this is for, and a gateway request in flight on every tick used to hold such a colony off indefinitely. A request through the gateway still counts as progress for a colony that has already got a turn, so a slow model is left alone as before.
+
+  It is never nudged: a nudge is a message to an agent that has not connected, so there is nobody to send it to. A colony parked on an exhausted provider keeps its quota reason and card instead — that flag is the more specific story. ([#760])
+- **Colonies no longer hit 403s from the crates.io CDN, PyPI or npm because the guest had no IPv6 route.** A colony's microVM gets an IPv4 gateway but no global IPv6 address and no `::/0` route, while the names it fetches from are dual-stack; glibc's built-in RFC 6724 table ranks `::/0` ahead of IPv4, so a resolver that relayed the AAAA record sent cargo, curl, node and python to an address the VM could not route. Every boot now appends a prefer-IPv4 table to the guest's `/etc/gai.conf` (`precedence ::ffff:0:0/96 100` and `precedence ::/0 10` — both are needed, the second is what demotes a native AAAA), from the boot script, and emits one event in the colony's log saying so when the guest has no IPv6 egress. A `/etc/gai.conf` that already carries an operator's own `precedence` line is left alone, and a guest that cannot write one says so on stderr and boots regardless. Agents do not need to point cargo, npm or pip at a third-party mirror to get past this. ([#946])
+- **Autopilot no longer holds a colony as "tests fail" when its tests never ran because a download failed.** The fresh-checkout verification of a completion claim now tells a run that died before its tests — rustup could not fetch a pinned toolchain, the crates.io or npm registry was unreachable, a DNS lookup failed, a connection was reset or timed out — from a real test failure. Such a run is retried after 30 seconds, 2 minutes and 5 minutes; if every attempt fails the same way, the colony is held with "verification could not run (network: <cause>)" on its card, never "the completion claim was contradicted", and Create PR still publishes it. A run whose test harness started is judged as before, so a real test failure still holds at once. A toolchain pinned in `rust-toolchain.toml` that the colony image already has is now used as installed, so rustup does not go to the network for it. ([#1117])
+
 ## [v0.2.7] - 2026-10-06
 
 ### Added
@@ -2644,6 +2673,7 @@ Macs. ([#74])
 [#754]: https://github.com/Colonizer-dev/harness/issues/754
 [#756]: https://github.com/Colonizer-dev/harness/issues/756
 [#759]: https://github.com/Colonizer-dev/harness/issues/759
+[#760]: https://github.com/Colonizer-dev/harness/issues/760
 [#761]: https://github.com/Colonizer-dev/harness/issues/761
 [#762]: https://github.com/Colonizer-dev/harness/issues/762
 [#763]: https://github.com/Colonizer-dev/harness/issues/763
@@ -2694,12 +2724,15 @@ Macs. ([#74])
 [#919]: https://github.com/Colonizer-dev/harness/issues/919
 [#924]: https://github.com/Colonizer-dev/harness/issues/924
 [#927]: https://github.com/Colonizer-dev/harness/issues/927
+[#931]: https://github.com/Colonizer-dev/harness/issues/931
 [#932]: https://github.com/Colonizer-dev/harness/issues/932
 [#933]: https://github.com/Colonizer-dev/harness/issues/933
 [#934]: https://github.com/Colonizer-dev/harness/issues/934
 [#935]: https://github.com/Colonizer-dev/harness/issues/935
 [#939]: https://github.com/Colonizer-dev/harness/issues/939
 [#940]: https://github.com/Colonizer-dev/harness/issues/940
+[#944]: https://github.com/Colonizer-dev/harness/issues/944
+[#946]: https://github.com/Colonizer-dev/harness/issues/946
 [#952]: https://github.com/Colonizer-dev/harness/issues/952
 [#958]: https://github.com/Colonizer-dev/harness/issues/958
 [#967]: https://github.com/Colonizer-dev/harness/issues/967
@@ -2724,6 +2757,8 @@ Macs. ([#74])
 [#1093]: https://github.com/Colonizer-dev/harness/issues/1093
 [#1096]: https://github.com/Colonizer-dev/harness/issues/1096
 [#1097]: https://github.com/Colonizer-dev/harness/issues/1097
+[#1117]: https://github.com/Colonizer-dev/harness/issues/1117
+[v0.2.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.8
 [v0.2.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.7
 [v0.2.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.6
 [v0.2.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.5
