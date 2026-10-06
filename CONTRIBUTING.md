@@ -8,8 +8,10 @@ and where a new module plugs into it, is in [docs/architecture.md](docs/architec
 
 ## Your first PR in 15 minutes
 
-Every issue in [docs/good-first-issues.md](docs/good-first-issues.md) runs on a plain laptop: no
-KVM, no microVM, no protoc, no libkrun. From a fresh clone:
+Starter issues run on a plain laptop: no KVM, no microVM, no protoc, no libkrun.
+[docs/good-first-issues.md](docs/good-first-issues.md) holds the current list — empty at the
+moment, with a live query on the page — and choosing candidates is a maintainer call. From a fresh
+clone:
 
 1. Install Node 24 (what CI pins) — it runs the web build, the script tests and the changelog
    steps. A Rust issue also needs stable Rust from rustup (`--profile minimal`, plus the rustfmt
