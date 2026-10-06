@@ -35,7 +35,7 @@ export function BoundaryRow({ record, evidence = false }: { record: BoundaryReco
       data-boundary={record.kind}
       title={record.detail}
       className={cx(
-        "flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px]",
+        "flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-small",
         evidence ? "my-0.5" : "my-1 ml-10 text-faint",
       )}
     >

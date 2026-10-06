@@ -372,7 +372,7 @@ export function NestMapView({
   return (
     <div className="relative flex min-h-0 flex-col">
       {/* The map's own bar: which repository, what drew it, and the way to draw it again. */}
-      <div className="relative z-[5] flex flex-wrap items-center gap-x-4 gap-y-2 px-6 pb-2 pt-3 text-[13px]">
+      <div className="relative z-[5] flex flex-wrap items-center gap-x-4 gap-y-2 px-6 pb-2 pt-3 text-body-sm">
         {repos.length > 0 && <RepoPicker repos={repos} value={repo} onChange={pickRepo} />}
         {stored_ && (
           <span className="text-faint" title={new Date(stored_.generated_at).toLocaleString()}>
@@ -397,7 +397,7 @@ export function NestMapView({
               </button>
             )}
             <button type="button" onClick={() => setRawOpen(true)} className={MAP_BUTTON}>
-              <span aria-hidden="true" className="font-mono text-[11px]">{"{ }"}</span>
+              <span aria-hidden="true" className="font-mono text-meta">{"{ }"}</span>
               Raw JSON
             </button>
             {!drawing && !drawingQueued && (
@@ -475,7 +475,7 @@ export function NestMapView({
                   {m.title && labelsShown && (
                     <span
                       title={m.label}
-                      className="map-text absolute z-[1] truncate whitespace-nowrap text-[10.5px] uppercase tracking-[0.1em] text-faint"
+                      className="map-text absolute z-[1] truncate whitespace-nowrap text-meta-sm uppercase tracking-[0.1em] text-faint"
                       style={{ left: m.title.x - m.box.x, top: m.title.y - m.box.y, width: m.title.w, textAlign: "center" }}
                     >
                       {m.label}
@@ -513,7 +513,7 @@ export function NestMapView({
                         style={{ width: c.r * 2, height: c.r * 2 }}
                       >
                         {inside.length > 0 && (
-                          <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 font-mono text-[10.5px] font-semibold text-on-accent tabular-nums">
+                          <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-accent px-1 font-mono text-meta-sm font-semibold text-on-accent tabular-nums">
                             {inside.length}
                           </span>
                         )}
@@ -539,9 +539,9 @@ export function NestMapView({
                         className="map-text absolute z-[2] cursor-pointer"
                         style={{ left: c.label.x, top: c.label.y, width: c.label.w, textAlign: layout.labelSide === "below" ? "center" : "left" }}
                       >
-                        <span className="block truncate text-[12px] font-medium leading-[17px] text-text">{c.component.label}</span>
+                        <span className="block truncate text-small font-medium leading-[17px] text-text">{c.component.label}</span>
                         {c.component.sublabel && sublabelsShown && !c.compact && (
-                          <span className="block truncate text-[10.5px] leading-[15px] text-faint">{c.component.sublabel}</span>
+                          <span className="block truncate text-meta-sm leading-[15px] text-faint">{c.component.sublabel}</span>
                         )}
                       </span>
                     )}
@@ -582,7 +582,7 @@ export function NestMapView({
                           <span aria-hidden="true" className="absolute -inset-1 rounded-full border border-dashed border-accent/60" />
                         )}
                         {blocked && (
-                          <span aria-hidden="true" className="absolute -right-2 -top-2 grid size-4 place-items-center rounded-full bg-warn text-[10px] font-bold text-bg">
+                          <span aria-hidden="true" className="absolute -right-2 -top-2 grid size-4 place-items-center rounded-full bg-warn text-micro-lg font-bold text-bg">
                             {session.status === "waiting_for_answer" && !isAnsweredWaiting(session) ? "?" : "‖"}
                           </span>
                         )}
@@ -642,7 +642,7 @@ export function NestMapView({
                   type="button"
                   disabled={starting || !data}
                   onClick={() => void drawMap()}
-                  className="cursor-pointer rounded-md border-0 bg-text px-3.5 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85 disabled:opacity-50"
+                  className="cursor-pointer rounded-md border-0 bg-text px-3.5 py-2 text-body-sm font-medium text-bg transition-opacity hover:opacity-85 disabled:opacity-50"
                 >
                   {starting ? "Starting…" : "Map this repo"}
                 </button>
@@ -671,7 +671,7 @@ export function NestMapView({
             <button type="button" aria-label="zoom in" onClick={() => zoomBy(1.25)} className={ZOOM_BUTTON}>
               +
             </button>
-            <button type="button" onClick={() => setUserView(null)} disabled={!userView} className={`${ZOOM_BUTTON} w-auto px-2.5 text-[12px]`}>
+            <button type="button" onClick={() => setUserView(null)} disabled={!userView} className={`${ZOOM_BUTTON} w-auto px-2.5 text-small`}>
               Fit
             </button>
           </div>
@@ -725,8 +725,8 @@ function MapTunnel({ d, hot }: { d: string; hot: boolean }): ReactElement {
 function MapNote({ title, children }: { title: string; children: ReactNode }): ReactElement {
   return (
     <div className="absolute inset-x-0 z-[4] flex justify-center px-6" style={{ top: SURFACE_Y + 70 }}>
-      <div className="v3-pop max-w-[460px] rounded-xl border border-border-strong px-5 py-4 text-[13.5px] leading-relaxed text-muted shadow-[0_12px_40px_rgb(0_0_0/0.3)]">
-        <div className="mb-1 text-[15px] font-semibold text-text">{title}</div>
+      <div className="v3-pop max-w-[460px] rounded-xl border border-border-strong px-5 py-4 text-body leading-relaxed text-muted shadow-[0_12px_40px_rgb(0_0_0/0.3)]">
+        <div className="mb-1 text-lead font-semibold text-text">{title}</div>
         {children}
       </div>
     </div>
@@ -762,13 +762,13 @@ function ChamberPanel({
     <div
       role="dialog"
       aria-label={c.label}
-      className="v3-pop scroll-thin absolute z-[6] animate-[ck-in_160ms_ease-out_both] overflow-y-auto rounded-xl border border-border-strong p-3.5 text-[13px] shadow-[0_16px_48px_rgb(0_0_0/0.4)]"
+      className="v3-pop scroll-thin absolute z-[6] animate-[ck-in_160ms_ease-out_both] overflow-y-auto rounded-xl border border-border-strong p-3.5 text-body-sm shadow-[0_16px_48px_rgb(0_0_0/0.4)]"
       style={{ left, top, width, maxHeight }}
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[14px] font-semibold text-text">{c.label}</div>
-          <div className="truncate text-[12px] text-faint">
+          <div className="truncate text-body-lg font-semibold text-text">{c.label}</div>
+          <div className="truncate text-small text-faint">
             {c.type}
             {c.sublabel ? ` · ${c.sublabel}` : ""}
           </div>
@@ -779,10 +779,10 @@ function ChamberPanel({
       </div>
       {c.sources.length > 0 && (
         <div className="mt-3">
-          <div className="mb-1 text-[11.5px] text-faint">Lives in</div>
+          <div className="mb-1 text-meta-lg text-faint">Lives in</div>
           <ul className="m-0 list-none space-y-0.5 p-0">
             {c.sources.slice(0, 6).map((s) => (
-              <li key={s.path} className="truncate font-mono text-[11.5px] text-muted" title={s.path}>
+              <li key={s.path} className="truncate font-mono text-meta-lg text-muted" title={s.path}>
                 {s.path}
                 {s.line ? `:${s.line}` : ""}
               </li>
@@ -792,10 +792,10 @@ function ChamberPanel({
       )}
       {hitFiles.size > 0 && (
         <div className="mt-3">
-          <div className="mb-1 text-[11.5px] text-faint">Being changed</div>
+          <div className="mb-1 text-meta-lg text-faint">Being changed</div>
           <ul className="m-0 list-none space-y-0.5 p-0">
             {[...hitFiles].slice(0, 6).map((f) => (
-              <li key={f} className="truncate font-mono text-[11.5px] text-accent" title={f}>
+              <li key={f} className="truncate font-mono text-meta-lg text-accent" title={f}>
                 {f}
               </li>
             ))}
@@ -804,10 +804,10 @@ function ChamberPanel({
       )}
       {readFiles.size > 0 && (
         <div className="mt-3">
-          <div className="mb-1 text-[11.5px] text-faint">Reading</div>
+          <div className="mb-1 text-meta-lg text-faint">Reading</div>
           <ul className="m-0 list-none space-y-0.5 p-0">
             {[...readFiles].slice(0, 6).map((f) => (
-              <li key={f} className="truncate font-mono text-[11.5px] text-muted" title={f}>
+              <li key={f} className="truncate font-mono text-meta-lg text-muted" title={f}>
                 {f}
               </li>
             ))}
@@ -816,16 +816,16 @@ function ChamberPanel({
       )}
       <div className="mt-3 border-t border-border pt-2">
         {inside.length === 0 ? (
-          <div className="text-[12.5px] text-faint">No colony is working here.</div>
+          <div className="text-small-lg text-faint">No colony is working here.</div>
         ) : (
           inside.map(({ session }) => (
             <div key={session.id} className="flex items-center gap-2 py-1">
-              <button type="button" onClick={() => onSelect(session.id)} className="min-w-0 flex-1 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-[13px] text-text hover:underline">
+              <button type="button" onClick={() => onSelect(session.id)} className="min-w-0 flex-1 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-body-sm text-text hover:underline">
                 {taskLine(session, "open session")}
-                <span className="ml-1.5 font-mono text-[11px] text-faint">{session.issue != null ? `#${session.issue}` : ""}</span>
+                <span className="ml-1.5 font-mono text-meta text-faint">{session.issue != null ? `#${session.issue}` : ""}</span>
               </button>
-              <span className="text-[11.5px] text-faint">{statusLabel(session)}</span>
-              <button type="button" onClick={() => onOpen(session.id)} className="cursor-pointer rounded-md border-0 bg-text px-2 py-0.5 text-[11.5px] font-medium text-bg hover:opacity-85">
+              <span className="text-meta-lg text-faint">{statusLabel(session)}</span>
+              <button type="button" onClick={() => onOpen(session.id)} className="cursor-pointer rounded-md border-0 bg-text px-2 py-0.5 text-meta-lg font-medium text-bg hover:opacity-85">
                 open
               </button>
             </div>
@@ -839,10 +839,10 @@ function ChamberPanel({
 type RepoMapComponent = NonNullable<RepoMap["map"]>["map"]["components"][number];
 
 const ZOOM_BUTTON =
-  "grid h-8 w-8 cursor-pointer place-items-center rounded-lg border border-border bg-panel text-[15px] text-muted shadow-[0_4px_14px_rgb(0_0_0/0.25)] transition-colors hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50";
+  "grid h-8 w-8 cursor-pointer place-items-center rounded-lg border border-border bg-panel text-lead text-muted shadow-[0_4px_14px_rgb(0_0_0/0.25)] transition-colors hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50";
 
 const MAP_BUTTON =
-  "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-3 text-[12.5px] text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-3 text-small-lg text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50";
 
 /** When a map was drawn, as a local date and time ("24 Sep, 15:58"). */
 function formatWhen(iso: string): string {
@@ -876,8 +876,8 @@ function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; 
       className="m-auto w-[min(860px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
     >
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="raw-map-title" className="min-w-0 flex-1 truncate text-[15px] font-semibold">
-          Raw map · <span className="font-mono text-[13px] text-muted">{value.repo}</span>
+        <h2 id="raw-map-title" className="min-w-0 flex-1 truncate text-lead font-semibold">
+          Raw map · <span className="font-mono text-body-sm text-muted">{value.repo}</span>
         </h2>
         <button
           type="button"
@@ -898,7 +898,7 @@ function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; 
           ×
         </button>
       </div>
-      <pre className="scroll-thin m-0 max-h-[70vh] overflow-auto px-5 py-4 font-mono text-[12px] leading-relaxed text-muted">{text}</pre>
+      <pre className="scroll-thin m-0 max-h-[70vh] overflow-auto px-5 py-4 font-mono text-small leading-relaxed text-muted">{text}</pre>
     </dialog>
   );
 }

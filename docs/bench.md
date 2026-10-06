@@ -348,6 +348,90 @@ bench fixture admitted 3 of 3 candidates, `services/telemetry` 54 of 107 (53 sur
 An LM-rewrite method and PR-mirroring; and the human review of the first 20 accepted tasks plus the
 colony trial that opens the pool to scoring.
 
+## Measuring a skill pack
+
+A skill pack is the hardest kind of change to grade. It is prompt-only, so nothing breaks, and the
+effect it claims — less code written — is the same effect that appears when a requirement got cut.
+So a pack is measured the same way any other change is: two labelled runs of the same task set,
+differing in exactly one thing, then `compare`.
+
+**The arms.** Same `scripts/bench.mjs` task set, same repository, same model and routing, run twice
+under two labels:
+
+```sh
+# baseline: the mothership's claude-code `plugins` skillset setting as it is today (`archify`)
+node scripts/bench.mjs run --repo owner/bench --label without
+
+# then switch ponytail on in Settings -> Skillsets and run the identical set
+node scripts/bench.mjs run --repo owner/bench --label with
+
+node scripts/bench.mjs compare bench-without.json bench-with.json
+```
+
+Only the `plugins` setting differs between the arms. Everything else — the task set, the
+per-task timeouts, the scorer, the held-out suite — is held fixed, because a second moving part is
+a second explanation for whatever the comparison shows.
+
+**What the harness produces.** Per task, the run file carries `passed` and `failures`, `visible` and
+`heldout` check results, `cost_usd` and `routed_cost_usd` (and their `total_cost_usd`), the six
+`token_categories` (`read`, `search`, `command_output`, `edit`, `reasoning`, `replay`, described at
+the top of this page), `working_ms` and `wall_ms`, `turns`, `tool_calls`, `questions`,
+`watchdog_nudges`, `subagents`, and `changed` — the **file names** the branch touched, with
+`outside` naming any the task's `changed_within` list did not allow. Per run it sums the costs and
+times and gives the pass rate, `clean_rate` and the `gap` between resolved and clean-resolved, plus
+the held-out suite's own pass rate and its `compare` line. `clean` comes from the
+[trajectory monitor](trajectory-monitor.md); `--heldout <dir>` adds the companion checks, which are
+the control against a pack that learned the visible tests.
+
+**What it does not produce.** Two of the numbers the issue asks for are not in the run file, and
+pretending otherwise would be the easiest way to turn this into marketing:
+
+- **Diff LOC.** The bench records *changed file names*, never lines added or removed. Count them
+  separately — `git diff --numstat origin/<base>...<branch>` on each bench pull request, or
+  `git diff --shortstat` summed over the run's branches — and keep that alongside the run file.
+- **Reviewer-flagged regressions.** Nothing in the harness reads a review. The signal that a pack
+  over-cut a requirement lives in the pull requests themselves: flag them when a review turns up a
+  dropped validation, a removed error path, a security or accessibility cut, or an unstated scope
+  reduction. A pack that raises its pass rate while its review flags go up has bought the score.
+
+So the honest grade for a pack is three columns side by side: what the bench measured, what the
+branch diffs measured, and what reviewers flagged.
+
+**The confound, named.** The `plugins` setting is install-wide: it is one value for the whole
+mothership, not per colony. The two arms are therefore **serial** — they cannot overlap, and any
+colony that runs while an arm is in flight is on whatever configuration the setting currently
+holds. Run the bench on a mothership nothing else is using, close the arms back to back, and record
+the window; a comparison taken across a setting that moved underneath it is not a comparison.
+
+**The sample-size caveat, which the rest of this page already insists on.** Four hand-written tasks
+at one run each is **one sample per task**. A pass-rate move on four tasks is noise until it
+repeats, and so is a few cents of cost: report medians and spread across repeated runs, not a
+single figure. The one result worth acting on is a task that flips **pass → fail** — especially
+`readme-typo`, the scope-discipline task, or any held-out family whose `gap` widens. Not a slightly
+cheaper run.
+
+### Not yet
+
+**ponytail: not measured (as of 2026-10-05).** No bench run has been performed for the vendored
+[ponytail](skill-packs.md#ponytail) pack, and this page reports no result for it — none exists. The
+environment that would run it has no mothership to talk to, no `gh` to open the bench repository's
+pull requests, and no model credentials, so a run could not have produced a real number and one was
+not invented in place of it.
+
+For a maintainer who has all three:
+
+```sh
+node scripts/bench.mjs seed --repo owner/bench
+# arm 1 — the install's current `plugins` setting, untouched
+node scripts/bench.mjs run --repo owner/bench --label without
+# switch ponytail on in Settings -> Skillsets (or set `plugins` to `archify,ponytail`), then:
+node scripts/bench.mjs run --repo owner/bench --label with
+node scripts/bench.mjs compare bench-without.json bench-with.json
+```
+
+Then repeat both arms a few times, collect diff LOC from the two runs' pull requests, and read the
+reviews on them for over-cutting, before writing any result here. Until then the pack stays opt-in.
+
 ## External suites (SWE-bench)
 
 The bench scores tasks this harness wrote; `scripts/swebench.mjs` scores the colonies on work nobody here

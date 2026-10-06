@@ -29,7 +29,7 @@ turns out to be guidance is a finding.
 | System-prompt text: rules for questions, limits, memory, findings and delegation, appended at startup | `modules/agents/claude-code/runner.mjs:35` (`SYSTEM_PROMPT_APPEND`), assembled at `runner.mjs:504-518` |
 | Skill packs: vendored skills and tool servers, switched on per org | [skill-packs.md](skill-packs.md). The read-only mount is a boundary; the `SKILL.md` text is guidance |
 | Denial hints: `classifyDenial(text)` → `{class, hint}` (`egress`, `read_only`, `tool_disabled`); on an errored tool result the runner adds `denial: {class, hint}` to the `tool_result` event, and a `PostToolUseFailure` hook repeats the hint to the agent as `additionalContext` — mid-turn, bound to the failed call, so it costs no extra turn — at most once per class per session. `is_error` and content are unchanged, the hook returns no decision, and a strip test proves the events are identical without the layer apart from `denial` | `modules/agents/claude-code/denials.mjs`, hook in `modules/agents/claude-code/runner.mjs:672-693` |
-| Watchdog nudges: `decide()` nudges a colony with no progress and flags it after `max_nudges`; gateway traffic counts as progress. A hint loop — consecutive denied tool results — is nudged with a message naming the denied boundary | `crates/colonizer/src/watchdog.rs` (`decide`, `nudge_text`, `hint_loop_text`); the busy check is `gateway.colony_busy`, called at `watchdog.rs:269` |
+| Watchdog nudges: `decide()` nudges a colony with no progress and flags it after `max_nudges`; gateway traffic counts as progress. A hint loop — consecutive denied tool results — is nudged with a message naming the denied boundary | `crates/colonizer/src/watchdog/mod.rs` (`decide`, `nudge_text`, `hint_loop_text`); the busy check is `gateway.colony_busy`, called from `check_all` in `watchdog/mod.rs` |
 | Autonomy judge: answers a colony's question when nobody does, choosing only among the options the agent offered, capped by risk class | `crates/colonizer/src/autonomy.rs` |
 | Choice-card re-ask: a turn that ends on a plain-text question is held open and the agent asks again as a card | `modules/agents/claude-code/runner.mjs` (turn handling) |
 
@@ -47,7 +47,7 @@ crossed boundary is a stop.
 
 ## Watchdog signatures
 
-The watchdog (`decide()` in `crates/colonizer/src/watchdog.rs`) keys on three signatures:
+The watchdog (`decide()` in `crates/colonizer/src/watchdog/mod.rs`) keys on three signatures:
 
 - **Hint-loop** — consecutive errored `tool_result` events carrying a `denial`, with no successful
   (non-errored) tool result in between, count as *not progress*: from two in a row the watchdog
@@ -87,7 +87,7 @@ other than Claude Code and ACP apply no exec policy and classify no denials.
 
 ### The control-defeat signature
 
-`note_boundary` and `note_reach_result` in `crates/colonizer/src/watchdog.rs` fold each boundary
+`note_boundary` and `note_reach_result` in `crates/colonizer/src/watchdog/defeat.rs` fold each boundary
 event into the colony's trail, timed on the mothership's own receive clock, and fire on:
 
 | Signature | Fires when |

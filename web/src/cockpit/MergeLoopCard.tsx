@@ -22,32 +22,32 @@ const TONE: Record<MergeLoopAction, Tone> = {
   skipped: "neutral",
 };
 
-const field = "rounded-md border border-border bg-panel px-2 py-1 text-[12.5px] text-text outline-none focus:border-accent";
+const field = "rounded-md border border-border bg-panel px-2 py-1 text-small-lg text-text outline-none focus:border-accent";
 
 /** A run's report: the counts line, why it stopped if it did, then every pull request with its reason. */
 export function MergeLoopReportView({ report, now }: { report: MergeLoopReport; now?: number }): ReactElement {
   const rows = reportRows(report);
   return (
     <div className="mt-3 rounded-lg border border-border bg-panel-2/40 px-3 py-2.5">
-      <p className="m-0 flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+      <p className="m-0 flex flex-wrap items-center gap-2 text-small-lg text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Last dry run" : "Last run"}</span>
         {report.finished_at && <span>{relative(report.finished_at, now)}</span>}
         <span>· {report.summary}</span>
       </p>
-      {report.forced_dry_run && <p className="m-0 mt-1 text-[12px] text-warn">External writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS), so the run only looked.</p>}
+      {report.forced_dry_run && <p className="m-0 mt-1 text-small text-warn">External writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS), so the run only looked.</p>}
       {report.repos
         .filter((r) => r.paused || r.heal.length > 0)
         .map((r) => (
-          <p key={r.repo} className="m-0 mt-1 text-[12px] text-warn">
+          <p key={r.repo} className="m-0 mt-1 text-small text-warn">
             {r.repo}: {r.paused ? `paused — ${r.paused}` : r.heal.join(" · ")}
           </p>
         ))}
       {rows.length > 0 && (
         <ul className="m-0 mt-2 list-none space-y-1 p-0">
           {rows.map((row) => (
-            <li key={`${row.repo}${row.pr}`} className="flex flex-wrap items-baseline gap-x-2 text-[12.5px]">
+            <li key={`${row.repo}${row.pr}`} className="flex flex-wrap items-baseline gap-x-2 text-small-lg">
               <Badge tone={TONE[row.action]}>{row.label}</Badge>
-              <a href={row.pr_url} className="font-mono text-[11.5px] text-faint hover:underline">
+              <a href={row.pr_url} className="font-mono text-meta-lg text-faint hover:underline">
                 {row.repo}
                 {row.pr}
               </a>
@@ -63,7 +63,7 @@ export function MergeLoopReportView({ report, now }: { report: MergeLoopReport; 
 
 function NumberField({ label, value, min, max, onChange, unit }: { label: string; value: number; min: number; max: number; unit?: string; onChange: (n: number) => void }) {
   return (
-    <label className="flex items-center gap-2 text-[12.5px] text-muted">
+    <label className="flex items-center gap-2 text-small-lg text-muted">
       {label}
       <input type="number" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} className={cx(field, "w-20")} />
       {unit}
@@ -100,16 +100,16 @@ export function MergeLoopPanel({
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1 basis-64">
           <div className="flex items-center gap-2">
-            <span className="text-[14px] font-medium text-text">Merge train</span>
+            <span className="text-body-lg font-medium text-text">Merge train</span>
             <Badge tone="neutral">built-in</Badge>
             {view.running && <Badge tone="info">running</Badge>}
           </div>
-          <p className="m-0 mt-0.5 text-[12.5px] text-muted">
+          <p className="m-0 mt-0.5 text-small-lg text-muted">
             Merges colony pull requests one at a time — only on a green main and fresh CI — and rebases only when it is mechanical.{" "}
             {draft.enabled ? `Every ${minutes} min in ${opted} ${opted === 1 ? "repository" : "repositories"}` : "Off"}
             {draft.enabled && view.next_run_at ? ` · next ${relative(view.next_run_at, now)}` : ""}
           </p>
-          {view.writes_blocked && <p className="m-0 mt-0.5 text-[12px] text-warn">External writes are blocked: every run is a dry run.</p>}
+          {view.writes_blocked && <p className="m-0 mt-0.5 text-small text-warn">External writes are blocked: every run is a dry run.</p>}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <Switch checked={draft.enabled} onChange={(on) => onChange({ ...draft, enabled: on })} label="Merge train loop enabled" />
@@ -128,14 +128,14 @@ export function MergeLoopPanel({
       </div>
 
       <details className="mt-2">
-        <summary className="cursor-pointer text-[12.5px] text-muted">Repositories and limits</summary>
+        <summary className="cursor-pointer text-small-lg text-muted">Repositories and limits</summary>
         <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2">
           <NumberField label="Every" value={minutes} min={15} max={10080} unit="min" onChange={(n) => onChange({ ...draft, cadence: { every: "interval", minutes: n } })} />
           <NumberField label="Merges per run" value={draft.max_merges} min={1} max={20} onChange={(n) => onChange({ ...draft, max_merges: n })} />
           <NumberField label="Cooldown" value={draft.cooldown_secs} min={30} max={3600} unit="s" onChange={(n) => onChange({ ...draft, cooldown_secs: n })} />
           <NumberField label="Wait for CI" value={draft.ci_wait_minutes} min={1} max={120} unit="min" onChange={(n) => onChange({ ...draft, ci_wait_minutes: n })} />
         </div>
-        <label className="mt-2 flex items-center gap-2 text-[12.5px] text-muted">
+        <label className="mt-2 flex items-center gap-2 text-small-lg text-muted">
           Known-flaky checks
           <input
             type="text"
@@ -145,7 +145,7 @@ export function MergeLoopPanel({
             className={cx(field, "min-w-0 flex-1")}
           />
         </label>
-        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-[12.5px] text-muted">
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-small-lg text-muted">
           {(
             [
               ["self_heal", "Self-heal a red main (re-run once, then a fix colony)"],
@@ -169,9 +169,9 @@ export function MergeLoopPanel({
           {toggleRepos(draft, repoNames).map((repo) => {
             const state = repoOptIn(draft, repo);
             return (
-              <li key={repo} className="flex flex-wrap items-center gap-3 py-1.5 text-[12.5px]">
+              <li key={repo} className="flex flex-wrap items-center gap-3 py-1.5 text-small-lg">
                 <Switch checked={state === "on" || state === "org"} disabled={state === "org" || state === "never"} onChange={(on) => onChange(setRepoOptIn(draft, repo, on))} label={`Merge train in ${repo}`} />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-text">{repo}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-small text-text">{repo}</span>
                 {state === "org" && <span className="text-faint">on for its org</span>}
                 <label className="flex items-center gap-1 text-muted">
                   cap
@@ -196,7 +196,7 @@ export function MergeLoopPanel({
         </ul>
       </details>
 
-      {view.last_report ? <MergeLoopReportView report={view.last_report} now={now} /> : <p className="m-0 mt-2 text-[12.5px] text-faint">Not run yet. A dry run lists what it would merge, update, rebase and skip, and why.</p>}
+      {view.last_report ? <MergeLoopReportView report={view.last_report} now={now} /> : <p className="m-0 mt-2 text-small-lg text-faint">Not run yet. A dry run lists what it would merge, update, rebase and skip, and why.</p>}
     </section>
   );
 }

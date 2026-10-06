@@ -53,7 +53,7 @@ export function DocsLoopCard({ onOpenColony }: { onOpenColony: (id: string) => v
 
   if (!view) {
     return (
-      <p className="mt-6 flex items-center gap-2 text-[13px] text-muted">
+      <p className="mt-6 flex items-center gap-2 text-body-sm text-muted">
         <Spinner /> Loading the Docs &amp; README loop…
       </p>
     );
@@ -121,11 +121,11 @@ export function DocsLoopPanel({
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1 basis-72">
           <div className="flex items-center gap-2">
-            <h2 className="m-0 text-[15px] font-semibold text-text">{view.name}</h2>
+            <h2 className="m-0 text-lead font-semibold text-text">{view.name}</h2>
             <Badge tone="neutral">built in</Badge>
             <Badge tone={view.enabled ? "ok" : "neutral"}>{view.enabled ? "On" : "Off"}</Badge>
           </div>
-          <p className="mt-1 text-[12.5px] text-muted">
+          <p className="mt-1 text-small-lg text-muted">
             Finds docs that fell behind the code — merged changes their docs never caught up with, broken links and anchors, commands that are gone, changelog gaps — without a model, then sends one docs-only colony per repository.
             {view.enabled
               ? ` Runs ${describeInterval(settings.interval_hours)}${view.next_run_at ? `, next ${relative(view.next_run_at, now)}` : ""}.`
@@ -144,7 +144,7 @@ export function DocsLoopPanel({
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5" aria-label="Runs on">
         {settings.allow.map((a) => (
-          <span key={a} className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 font-mono text-[11.5px] text-text">
+          <span key={a} className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 font-mono text-meta-lg text-text">
             {a}
             <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-faint hover:text-text" aria-label={`stop running on ${a}`} disabled={busy} onClick={() => onTarget(a, false)}>
               ✕
@@ -159,7 +159,7 @@ export function DocsLoopPanel({
           }}
         >
           <input
-            className={cx(inputClass, "h-7 w-48 py-0 text-[12.5px]")}
+            className={cx(inputClass, "h-7 w-48 py-0 text-small-lg")}
             placeholder="owner or owner/name"
             aria-label="repository or org to run on"
             value={entry}
@@ -169,14 +169,14 @@ export function DocsLoopPanel({
             Enable
           </Button>
         </form>
-        {entryError && <span className="text-[12px] text-err">{entryError}</span>}
+        {entryError && <span className="text-small text-err">{entryError}</span>}
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3 text-[12.5px] text-muted">
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-small-lg text-muted">
         <label className="flex items-center gap-1.5">
           Runs
           <select
-            className={cx(inputClass, "h-7 w-auto py-0 text-[12.5px]")}
+            className={cx(inputClass, "h-7 w-auto py-0 text-small-lg")}
             value={settings.interval_hours}
             disabled={busy}
             onChange={(e) => onSave({ ...settings, interval_hours: Number(e.target.value) })}
@@ -192,7 +192,7 @@ export function DocsLoopPanel({
         <label className="flex items-center gap-1.5">
           Cooldown after a dispatch
           <select
-            className={cx(inputClass, "h-7 w-auto py-0 text-[12.5px]")}
+            className={cx(inputClass, "h-7 w-auto py-0 text-small-lg")}
             value={settings.cooldown_hours}
             disabled={busy}
             onChange={(e) => onSave({ ...settings, cooldown_hours: Number(e.target.value) })}
@@ -207,7 +207,7 @@ export function DocsLoopPanel({
         </label>
       </div>
 
-      {report ? <DocsReportView report={report} now={now} onOpenColony={onOpenColony} /> : view.enabled ? <p className="mt-3 text-[12.5px] text-faint">No run yet.</p> : null}
+      {report ? <DocsReportView report={report} now={now} onOpenColony={onOpenColony} /> : view.enabled ? <p className="mt-3 text-small-lg text-faint">No run yet.</p> : null}
     </section>
   );
 }
@@ -216,14 +216,14 @@ export function DocsLoopPanel({
 export function DocsReportView({ report, now = Date.now(), onOpenColony }: { report: DocsReport; now?: number; onOpenColony: (id: string) => void }): ReactElement {
   return (
     <div className="mt-4 border-t border-border pt-3">
-      <div className="text-[12.5px] text-muted">
+      <div className="text-small-lg text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Dry run" : "Last run"}</span> {relative(report.at, now)} · {summarizeReport(report)}
       </div>
       <ul className="m-0 mt-2 list-none space-y-2 p-0">
         {report.repos.map((r) => (
-          <li key={r.repo} className="text-[12.5px]">
+          <li key={r.repo} className="text-small-lg">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[12px] text-text">{r.repo}</span>
+              <span className="font-mono text-small text-text">{r.repo}</span>
               <Badge tone={ACTION_TONE[r.action]}>{DOCS_ACTION_LABEL[r.action]}</Badge>
               <span className="text-muted">{r.reason}</span>
               {r.colony && (
@@ -237,7 +237,7 @@ export function DocsReportView({ report, now = Date.now(), onOpenColony }: { rep
                 {r.findings.map((f, i) => (
                   <li key={i}>
                     <span className="text-text">{DOCS_KIND_LABEL[f.kind]}</span>
-                    {findingPlace(f) ? <span className="font-mono text-[11.5px] text-faint"> {findingPlace(f)}</span> : null}
+                    {findingPlace(f) ? <span className="font-mono text-meta-lg text-faint"> {findingPlace(f)}</span> : null}
                     {f.advisory ? <span className="text-faint"> (advisory)</span> : null} — {f.message}
                   </li>
                 ))}

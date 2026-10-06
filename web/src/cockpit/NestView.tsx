@@ -174,7 +174,7 @@ export function NestLiveStrip({
       role="log"
       aria-label="live events"
       aria-live="polite"
-      className="nest-strip relative z-[5] flex min-h-[37px] items-center gap-x-5 overflow-hidden border-b border-border px-6 py-2 text-[12.5px] text-faint"
+      className="nest-strip relative z-[5] flex min-h-[37px] items-center gap-x-5 overflow-hidden border-b border-border px-6 py-2 text-small-lg text-faint"
     >
       {shown.length === 0 ? (
         <span>No changes yet — moves land here as they happen.</span>
@@ -420,8 +420,8 @@ export function NestView({
     <div className={`cockpit nest nest-v3 scroll-thin relative grid min-h-0 flex-1 ${mode === "map" ? "grid-rows-[auto_auto_minmax(560px,auto)_auto]" : "grid-rows-[auto_auto_minmax(340px,1fr)_auto]"} overflow-y-auto overflow-x-hidden`}>
       <div className="relative z-[5] flex flex-wrap items-end justify-between gap-x-6 gap-y-3 px-6 pb-4 pt-5">
         <div className="min-w-0">
-          <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em] text-text">Nest</h1>
-          <div className="mt-2 text-[14px] text-muted tabular-nums">{meta}</div>
+          <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em] text-text">Nest</h1>
+          <div className="mt-2 text-body-lg text-muted tabular-nums">{meta}</div>
         </div>
         {/* The nest by colony, or the same colonies walking a map of the software. */}
         <div role="tablist" aria-label="nest view" className="flex rounded-lg border border-border p-0.5">
@@ -432,7 +432,7 @@ export function NestView({
               role="tab"
               aria-selected={mode === m}
               onClick={() => switchMode(m)}
-              className={`cursor-pointer rounded-md border-0 px-3 py-1 text-[13px] transition-colors ${mode === m ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+              className={`cursor-pointer rounded-md border-0 px-3 py-1 text-body-sm transition-colors ${mode === m ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
             >
               {m === "nest" ? "Nest" : "Map"}
             </button>
@@ -495,7 +495,7 @@ export function NestView({
                 <span className="absolute left-0 top-6 h-[34px] w-[38px] rounded-full bg-ok opacity-[0.26]" />
                 <span className="absolute left-[30px] top-5 h-[38px] w-10 rounded-full bg-ok opacity-[0.32]" />
                 <span className="absolute left-[14px] top-0 h-[42px] w-11 rounded-full bg-ok opacity-[0.42]" />
-                <span className="absolute -right-1 -top-1 min-w-5 rounded-[10px] border border-ok bg-panel px-1.5 text-center font-mono text-[10px] font-semibold leading-[18px] text-ok tabular-nums">
+                <span className="absolute -right-1 -top-1 min-w-5 rounded-[10px] border border-ok bg-panel px-1.5 text-center font-mono text-micro-lg font-semibold leading-[18px] text-ok tabular-nums">
                   {backlogCount}
                 </span>
               </span>
@@ -679,7 +679,7 @@ export function NestView({
                   <circle cx="12" cy="12" r="2.8" fill="currentColor" />
                 </svg>
               </span>
-              <span className="font-mono text-[10px] tracking-[0.2em] text-faint">MOTHERSHIP</span>
+              <span className="font-mono text-micro-lg tracking-[0.2em] text-faint">MOTHERSHIP</span>
             </button>
 
             {placed.map(({ session, slot, index, edge }) => {
@@ -731,15 +731,15 @@ export function NestView({
                   {diameter >= 112 && (
                     <Avatar name={session.repo.split("/")[0]} src={avatarFor(session.repo.split("/")[0])} size={22} rounded="md" />
                   )}
-                  <span className="max-w-full truncate font-mono text-[11px] font-medium text-text">
+                  <span className="max-w-full truncate font-mono text-meta font-medium text-text">
                     {chamberLabel(session, diameter)}
                   </span>
-                  <span className="text-[11px] transition-colors duration-500" style={{ color: edge }}>
+                  <span className="text-meta transition-colors duration-500" style={{ color: edge }}>
                     {status}
                   </span>
                   {diameter >= 112 && cost != null && (
                     <span
-                      className={`font-mono text-[10.5px] tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-faint"}`}
+                      className={`font-mono text-meta-sm tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-faint"}`}
                     >
                       <LiveCost value={cost} />
                     </span>
@@ -774,7 +774,7 @@ export function NestView({
                 <span
                   key={`balloon-${session.id}`}
                   title={text}
-                  className="nest-glass absolute -translate-x-1/2 -translate-y-full truncate rounded-full border px-2 py-0.5 font-mono text-[10.5px] text-muted"
+                  className="nest-glass absolute -translate-x-1/2 -translate-y-full truncate rounded-full border px-2 py-0.5 font-mono text-meta-sm text-muted"
                   style={{ left: slot.x, top: slot.y - slot.r - 6, maxWidth: diameter, borderColor: edge }}
                 >
                   <span
@@ -792,7 +792,7 @@ export function NestView({
                 return (
                   <span
                     key={`rise-${session.id}-${rise.at}`}
-                    className="nest-float absolute -translate-x-1/2 font-mono text-[11px] font-medium text-accent tabular-nums"
+                    className="nest-float absolute -translate-x-1/2 font-mono text-meta font-medium text-accent tabular-nums"
                     style={{ left: slot.x + slot.r * 0.55, top: slot.y - slot.r * 0.55 }}
                   >
                     +{formatCost(rise.delta)}
@@ -814,10 +814,10 @@ export function NestView({
                   borderRadius: "48% 52% 45% 55% / 52% 46% 54% 48%",
                 }}
               >
-                <span aria-hidden="true" className="text-[22px] leading-none">
+                <span aria-hidden="true" className="text-display-sm leading-none">
                   +
                 </span>
-                <span className="font-mono text-[10px] tracking-[0.1em]">DIG</span>
+                <span className="font-mono text-micro-lg tracking-[0.1em]">DIG</span>
               </button>
             )}
           </div>
@@ -853,8 +853,8 @@ export function NestView({
       {waiting.length > 0 && (
         <section aria-label="needs you" className="relative z-[5] px-6 pb-24">
           <div className="mb-2 flex items-baseline gap-2.5">
-            <h2 className="m-0 text-[14px] font-medium text-text">Needs you</h2>
-            <span className="text-[13px] text-faint">{waiting.length} waiting</span>
+            <h2 className="m-0 text-body-lg font-medium text-text">Needs you</h2>
+            <span className="text-body-sm text-faint">{waiting.length} waiting</span>
           </div>
           <div className="max-h-[168px] overflow-y-auto border-y border-border scroll-thin [@media(max-height:820px)]:max-h-[96px]">
             {waiting.map((session) => (
@@ -871,13 +871,13 @@ export function NestView({
                   style={{ animation: "ck-beacon 1.8s ease-out infinite" }}
                 />
                 <span className="flex min-w-0 flex-col">
-                  <span className="truncate text-[14px]">
+                  <span className="truncate text-body-lg">
                     {taskLine(session, "waiting on your answer")}{" "}
-                    <span className="font-mono text-[12px] text-faint">{chamberLabel(session, 112)}</span>
+                    <span className="font-mono text-small text-faint">{chamberLabel(session, 112)}</span>
                   </span>
-                  {questions[session.id] && <span className="truncate text-[12.5px] text-warn">{questions[session.id]}</span>}
+                  {questions[session.id] && <span className="truncate text-small-lg text-warn">{questions[session.id]}</span>}
                 </span>
-                <span className="shrink-0 rounded-md bg-text px-3 py-1 text-[13px] font-medium text-bg">answer →</span>
+                <span className="shrink-0 rounded-md bg-text px-3 py-1 text-body-sm font-medium text-bg">answer →</span>
               </button>
             ))}
           </div>

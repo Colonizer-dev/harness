@@ -77,14 +77,14 @@ export function ObservabilityRows({ unsaved }: { unsaved: boolean }) {
   const failures = test && "signals" in test && test.signals ? Object.entries(test.signals).filter(([, r]) => !r.ok) : [];
   return (
     <>
-      <p role="status" className={cx("py-2.5 text-[12.5px] [overflow-wrap:anywhere]", line.tone === "ok" ? "text-ok" : line.tone === "warn" ? "text-warn" : "text-muted")}>
+      <p role="status" className={cx("py-2.5 text-small-lg [overflow-wrap:anywhere]", line.tone === "ok" ? "text-ok" : line.tone === "warn" ? "text-warn" : "text-muted")}>
         {line.text}
       </p>
       <div className="space-y-2 py-2.5">
-        <label htmlFor={id} className="block text-[13px] font-medium">
+        <label htmlFor={id} className="block text-body-sm font-medium">
           Headers
         </label>
-        <p className="text-[12.5px] text-muted">
+        <p className="text-small-lg text-muted">
           {names.length > 0
             ? `Sending ${names.join(", ")} (from ${status?.headers?.source === "env" ? "OTEL_EXPORTER_OTLP_HEADERS" : "the saved secret"}).`
             : "None saved."}{" "}
@@ -116,12 +116,12 @@ export function ObservabilityRows({ unsaved }: { unsaved: boolean }) {
           <Button disabled={busy !== null || unsaved || !status?.configured} onClick={() => void runTest()}>
             {busy === "test" && <Spinner />} Send test
           </Button>
-          <span className="text-[12.5px] text-muted">
+          <span className="text-small-lg text-muted">
             {unsaved ? "Save first: the test uses the saved settings." : "Sends one log record and one metric point to the backend."}
           </span>
         </div>
         {test && (
-          <p role="status" className={cx("text-[12.5px] [overflow-wrap:anywhere]", test.ok ? "text-ok" : "text-err")}>
+          <p role="status" className={cx("text-small-lg [overflow-wrap:anywhere]", test.ok ? "text-ok" : "text-err")}>
             {test.ok
               ? "The backend accepted the test log record and metric point."
               : "error" in test && test.error

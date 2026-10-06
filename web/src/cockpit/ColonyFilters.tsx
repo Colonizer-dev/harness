@@ -105,7 +105,7 @@ function HeaderMenu({ label, active, warn = false, align = "left", children }: {
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className={`inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent p-0 text-[12.5px] ${warn ? "text-warn" : active ? "text-text" : "text-muted"} hover:text-text`}
+        className={`inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent p-0 text-small-lg ${warn ? "text-warn" : active ? "text-text" : "text-muted"} hover:text-text`}
       >
         {label}
         {active && <span aria-label="filtered" className="size-1.5 rounded-full bg-accent" />}
@@ -132,7 +132,7 @@ function Option({ selected, onClick, children }: { selected: boolean; onClick: (
       role="menuitemcheckbox"
       aria-checked={selected}
       onClick={onClick}
-      className={`flex w-full cursor-pointer items-center gap-2 rounded-md border-0 px-2 py-1.5 text-left text-[12.5px] ${selected ? "bg-panel-2 text-text" : "bg-transparent text-muted hover:bg-panel-2 hover:text-text"}`}
+      className={`flex w-full cursor-pointer items-center gap-2 rounded-md border-0 px-2 py-1.5 text-left text-small-lg ${selected ? "bg-panel-2 text-text" : "bg-transparent text-muted hover:bg-panel-2 hover:text-text"}`}
     >
       <span aria-hidden="true" className="w-3 shrink-0 text-accent">{selected ? "✓" : ""}</span>
       {children}
@@ -159,7 +159,7 @@ export function ColonyFilterHeader({
   const set = (patch: Partial<ColonyFilters>) => onChange({ ...filters, ...patch });
   const orgs = workspaces.length > 0 ? workspaces : [...new Set(sessions.map(orgOf))].map((org) => ({ org, avatar: null }));
   return (
-    <div className={`${COLONY_GRID} py-2 text-[12.5px] text-muted`}>
+    <div className={`${COLONY_GRID} py-2 text-small-lg text-muted`}>
       <span />
       <label className="flex min-w-0 items-center gap-1.5">
         <span className="sr-only">filter colonies by title or repository</span>
@@ -171,7 +171,7 @@ export function ColonyFilterHeader({
           value={filters.query}
           onChange={(e) => set({ query: e.target.value })}
           placeholder="Colony"
-          className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[12.5px] text-text outline-none placeholder:text-muted"
+          className="min-w-0 flex-1 border-0 bg-transparent p-0 text-small-lg text-text outline-none placeholder:text-muted"
         />
         {filters.query && <span aria-label="filtered" className="size-1.5 shrink-0 rounded-full bg-accent" />}
       </label>

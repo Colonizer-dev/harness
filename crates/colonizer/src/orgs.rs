@@ -479,7 +479,46 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
 /// absent value the minimum.
 pub(crate) fn provider_retry_max_attempts(modules: &ModulesConfig) -> u64 {
     let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
-    setting_u64(&modules.watchdog, &schema, "provider_retry_max_attempts").min(4)
+    setting_u64(&modules.watchdog, &schema, "provider_retry_max_attempts").min(PROVIDER_RETRY_MAX_ATTEMPTS)
+}
+
+/// The most automatic retries the watchdog setting may ask for (issue #1093).
+pub(crate) const PROVIDER_RETRY_MAX_ATTEMPTS: u64 = 10;
+
+/// The wait before each automatic retry when the setting is absent or unreadable (issue #1093): one
+/// minute, then five, then fifteen.
+pub(crate) const DEFAULT_PROVIDER_RETRY_SCHEDULE: [i64; 3] = [1, 5, 15];
+
+/// The wait, in minutes, before each automatic retry after a transient provider error (issues #980,
+/// #1093), from the watchdog module's `provider_retry_schedule_minutes`: a comma- or space-separated
+/// list such as "1, 5, 15", indexed by the attempt already spent. Retries past the end of the list
+/// wait its last entry. Each entry is clamped to 1..=1440 minutes and the list to
+/// [`PROVIDER_RETRY_MAX_ATTEMPTS`] entries; a value with no number in it reads as the default, so a
+/// hand-edited typo never turns the backoff into an immediate retry loop.
+pub(crate) fn provider_retry_schedule(modules: &ModulesConfig) -> Vec<i64> {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    parse_retry_schedule(&setting_str(&modules.watchdog, &schema, "provider_retry_schedule_minutes"))
+}
+
+fn parse_retry_schedule(raw: &str) -> Vec<i64> {
+    let schedule: Vec<i64> = raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(|part| part.trim().parse::<i64>().ok())
+        .map(|minutes| minutes.clamp(1, 1440))
+        .take(PROVIDER_RETRY_MAX_ATTEMPTS as usize)
+        .collect();
+    if schedule.is_empty() {
+        DEFAULT_PROVIDER_RETRY_SCHEDULE.to_vec()
+    } else {
+        schedule
+    }
+}
+
+/// The wait before automatic retry number `attempt` (1-based) on `schedule`: its entry, or the last
+/// one once the attempts outrun the list. Never panics on an empty schedule.
+pub(crate) fn provider_retry_delay(schedule: &[i64], attempt: u32) -> chrono::Duration {
+    let idx = (attempt.saturating_sub(1) as usize).min(schedule.len().saturating_sub(1));
+    chrono::Duration::minutes(schedule.get(idx).copied().unwrap_or(DEFAULT_PROVIDER_RETRY_SCHEDULE[0]))
 }
 
 /// Whether colonies waiting on a user answer are suspended once the grace period below passes, from
@@ -1510,12 +1549,12 @@ mod tests {
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
     }
 
-    /// Issue #980: the automatic-retry budget reads the watchdog setting, defaults to four, and a
-    /// hand-edited value never exceeds the schema's range.
+    /// Issue #980/#1093: the automatic-retry budget reads the watchdog setting, defaults to three,
+    /// and a hand-edited value never exceeds the schema's range.
     #[test]
-    fn the_provider_retry_budget_reads_the_watchdog_setting_with_a_default_of_four() {
+    fn the_provider_retry_budget_reads_the_watchdog_setting_with_a_default_of_three() {
         let modules = ModulesConfig::default();
-        assert_eq!(provider_retry_max_attempts(&modules), 4, "the schema default");
+        assert_eq!(provider_retry_max_attempts(&modules), 3, "the schema default");
         let mut configured = ModulesConfig::default();
         configured
             .watchdog
@@ -1531,7 +1570,46 @@ mod tests {
             .watchdog
             .settings
             .insert("provider_retry_max_attempts".into(), json!(99));
-        assert_eq!(provider_retry_max_attempts(&configured), 4, "clamped to the schema range");
+        assert_eq!(provider_retry_max_attempts(&configured), 10, "clamped to the schema range");
+    }
+
+    /// Issue #1093: the retry schedule is a watchdog setting — 1, 5, 15 minutes by default — read
+    /// leniently, clamped, and never empty; attempts past its end wait its last entry.
+    #[test]
+    fn the_provider_retry_schedule_reads_the_watchdog_setting() {
+        let modules = ModulesConfig::default();
+        assert_eq!(provider_retry_schedule(&modules), vec![1, 5, 15], "the schema default");
+        let mut configured = ModulesConfig::default();
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_schedule_minutes".into(), json!("2,10 30"));
+        assert_eq!(provider_retry_schedule(&configured), vec![2, 10, 30], "commas or spaces");
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_schedule_minutes".into(), json!("0, 99999"));
+        assert_eq!(provider_retry_schedule(&configured), vec![1, 1440], "each entry clamped");
+        for broken in [json!("soon"), json!(""), json!(5)] {
+            configured
+                .watchdog
+                .settings
+                .insert("provider_retry_schedule_minutes".into(), broken.clone());
+            assert_eq!(
+                provider_retry_schedule(&configured),
+                vec![1, 5, 15],
+                "{broken} reads as the default"
+            );
+        }
+        let schedule = [1, 5, 15];
+        assert_eq!(provider_retry_delay(&schedule, 1), chrono::Duration::minutes(1));
+        assert_eq!(provider_retry_delay(&schedule, 3), chrono::Duration::minutes(15));
+        assert_eq!(
+            provider_retry_delay(&schedule, 7),
+            chrono::Duration::minutes(15),
+            "the last entry repeats"
+        );
+        assert_eq!(provider_retry_delay(&[], 1), chrono::Duration::minutes(1), "never panics");
     }
 
     /// Parking discards the microVM unless the operator said otherwise, and a value the schema
@@ -1730,6 +1808,14 @@ mod tests {
             .is_ok(),
             "an empty stack is not set, not an error"
         );
+        assert!(
+            validate(&OrgSettings {
+                exec_policy: Some("   ".into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "a blank exec policy is not set, not an error"
+        );
         let bad_model = OrgSettings {
             agent: Some(AgentOverrides {
                 model: Some("two words".into()),
@@ -1922,6 +2008,7 @@ mod tests {
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
+            exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny", "command": "rm -rf"}]}"#.into()),
             watchdog: Some(WatchdogOverrides {
                 waiting_minutes: Some(45),
                 ..Default::default()
@@ -1975,6 +2062,10 @@ mod tests {
         assert_eq!(
             incoming.max_parallel, None,
             "a field the client names as null is a real request to inherit"
+        );
+        assert_eq!(
+            incoming.exec_policy, saved.exec_policy,
+            "an org's exec policy survives a save from a web build that predates it"
         );
         assert_eq!(
             incoming.repo_max_parallel,

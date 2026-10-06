@@ -31,6 +31,7 @@ import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { focusTurn } from "./turnFocus";
+import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
@@ -50,6 +51,7 @@ import { AccountBanner } from "./AccountBanner";
 import { GitHubBanner } from "./GitHubBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
+import { GATEWAY_RETRY_MESSAGE } from "./questions";
 
 // The Chat view (and its highlighter, which it loads later still) stays out of the main bundle.
 const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
@@ -81,7 +83,7 @@ function storedTheme(): "light" | "dark" | null {
 }
 
 /** The toast for a failed inspector action: what failed, on which colony, and why. */
-export function actionError(action: "stop" | "resume", colony: string, error: unknown): string {
+export function actionError(action: "stop" | "resume" | "retry", colony: string, error: unknown): string {
   return `Couldn't ${action} ${colony}: ${errorMessage(error)}`;
 }
 
@@ -102,6 +104,7 @@ export function Cockpit({
   liveConnection,
   liveStorage = null,
   update,
+  onUpdateChanged,
   autopilotDefault,
   launchRequests,
   settingsRequests,
@@ -146,6 +149,8 @@ export function Cockpit({
   /** A storage frame the stream pushed; the overview's storage panel shows it (issue #446). */
   liveStorage?: StorageSummary | null;
   update: UpdateStatus | null;
+  /** Takes a fresh update status after the banner restarted colonies on the new version (issue #1097). */
+  onUpdateChanged?: (update: UpdateStatus) => void;
   autopilotDefault: boolean;
   /** Bumped by Setup's launch row, which lives in the settings body App owns. */
   launchRequests: number;
@@ -509,6 +514,22 @@ export function Cockpit({
     [onSessionChanged, sessions, toast],
   );
 
+  // Retry on a colony stopped on a model gateway error (issue #1093): one backing off an automatic
+  // retry is parked, so Retry now resumes it; one held after the retries ran out is still live, so
+  // Retry sends its agent on again.
+  const retry = useCallback(
+    async (id: string) => {
+      const target = sessions.find((s) => s.id === id);
+      if (target?.status === "parked") return act(id, "resume", (x) => api.resumeSession(x));
+      try {
+        await api.messageSession(id, GATEWAY_RETRY_MESSAGE);
+      } catch (error) {
+        toast(actionError("retry", target ? `${target.repo}#${target.issue}` : id, error), "error");
+      }
+    },
+    [act, api, sessions, toast],
+  );
+
   // The global quota banner's keyed dismissal: dismissing hides this pause, and a new reset (or a
   // new pause scope) re-shows it — the same pattern as the storage alert App owns.
   const [dismissedQuota, setDismissedQuota] = useState<ReadonlySet<string>>(() => new Set());
@@ -603,7 +624,7 @@ export function Cockpit({
       case "chat":
         return (
           <Page width="full">
-            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
+            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-body-sm text-muted">Loading chat…</div>}>
               <ChatView
                 org={selectedOrg}
                 repos={repos}
@@ -785,6 +806,16 @@ export function Cockpit({
           {/* Issue #1074: while GitHub refuses the account (suspended, a revoked token, repeated
               secondary limits), one banner above every view names the cause and the next step. */}
           <GitHubBanner pause={status?.github_pause} onReconnect={() => onOpenSettings("connections")} />
+          {/* Issue #1097: a release whose notes flag a critical or fixes-running fix is a banner
+              above every view, with how many colonies its probe found affected here; after the
+              update, the affected colonies still on the previous version are offered a restart. */}
+          <UpdateBanner
+            update={update}
+            onOpenUpdates={() => onOpenSettings("updates")}
+            onRestart={(ids) =>
+              void restartOnNewVersion(api, { ids }, (message, tone) => toast(message, tone ?? "info"), onUpdateChanged)
+            }
+          />
           {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
               so above every view, like the quota banner. It clears itself when the drain finishes,
               so there is nothing to dismiss. Absent on a mothership from before the drain. */}
@@ -792,7 +823,7 @@ export function Cockpit({
             <div className="px-6 pt-4">
               <div
                 role="status"
-                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-small-lg text-warn"
               >
                 Draining for an update or restart: new colonies stay queued until it finishes.
               </div>
@@ -810,7 +841,7 @@ export function Cockpit({
               <button
                 type="button"
                 onClick={() => setDashOpen(true)}
-                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-[12.5px] text-muted transition-colors hover:text-text"
+                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-small-lg text-muted transition-colors hover:text-text"
               >
                 Dashboard
               </button>
@@ -859,6 +890,7 @@ export function Cockpit({
             onOpenColony={openColonyById}
             onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
             onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
+            onRetry={(id) => void retry(id)}
             onLaunch={() => setView("launch")}
             onOpenSettings={(section) => onOpenSettings(section)}
           />

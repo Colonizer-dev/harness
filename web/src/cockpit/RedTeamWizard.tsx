@@ -38,8 +38,8 @@ function RedTeamIntro() {
       <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-err/10 text-err">
         <HackerIcon size={24} />
       </span>
-      <div className="min-w-0 space-y-1.5 text-[12.5px] leading-snug text-muted">
-        <p className="text-[14px] font-semibold text-text">What is a red team?</p>
+      <div className="min-w-0 space-y-1.5 text-small-lg leading-snug text-muted">
+        <p className="text-body-lg font-semibold text-text">What is a red team?</p>
         <p>
           A red team attacks your own code on purpose, the way an outsider would, so you find the holes first. Hunters read
           the repository, try real exploits inside sealed microVMs, and keep only findings they can reproduce.
@@ -200,21 +200,21 @@ export function WizardBody({
     <div className="flex max-h-[calc(100dvh-24px)] flex-col">
       <div className="shrink-0 border-b border-border px-5 pb-3 pt-4">
         <div className="flex items-center gap-2">
-          <h2 id="redteam-wizard-title" className="flex min-w-0 flex-1 items-center gap-2 text-[16px] font-semibold">
+          <h2 id="redteam-wizard-title" className="flex min-w-0 flex-1 items-center gap-2 text-title-sm font-semibold">
             <HackerIcon size={18} className="shrink-0 text-err" />
             <span className="truncate">Red team · {org}</span>
           </h2>
-          <button type="button" onClick={() => onOpenHistory(org)} className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-[12.5px] text-muted hover:bg-panel-2 hover:text-text">
+          <button type="button" onClick={() => onOpenHistory(org)} className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-small-lg text-muted hover:bg-panel-2 hover:text-text">
             History
           </button>
           <button type="button" aria-label="Close red-team wizard" onClick={onClose} className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
             ✕
           </button>
         </div>
-        <ol className="mt-3 flex items-center gap-2 text-[12px]" aria-label="steps">
+        <ol className="mt-3 flex items-center gap-2 text-small" aria-label="steps">
           {STEPS.map((label, i) => (
             <li key={label} aria-current={step === i ? "step" : undefined} className={cx("flex items-center gap-1.5", step === i ? "text-text" : i < step ? "text-muted" : "text-faint")}>
-              <span className={cx("grid size-5 place-items-center rounded-full border text-[11px] tabular-nums", step === i ? "border-accent bg-accent text-on-accent" : "border-border")}>{i + 1}</span>
+              <span className={cx("grid size-5 place-items-center rounded-full border text-meta tabular-nums", step === i ? "border-accent bg-accent text-on-accent" : "border-border")}>{i + 1}</span>
               {label}
               {i < STEPS.length - 1 && <span aria-hidden="true" className="mx-1 h-px w-6 bg-border" />}
             </li>
@@ -255,7 +255,7 @@ export function WizardBody({
                             : "cursor-pointer border-border bg-panel-2 hover:border-text/30",
                       )}
                     >
-                      <span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">
+                      <span className="flex items-center justify-between gap-2 text-body font-semibold">
                         <span className="flex min-w-0 items-center gap-2">
                           {h.logo ? (
                             <img src={h.logo} alt="" width={22} height={22} className="size-[22px] shrink-0 rounded-md" />
@@ -266,9 +266,9 @@ export function WizardBody({
                           )}
                           <span className="truncate">{h.name}</span>
                         </span>
-                        <span className={cx("rounded-full px-1.5 py-px text-[10.5px] font-medium", selectable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
+                        <span className={cx("rounded-full px-1.5 py-px text-meta-sm font-medium", selectable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
                       </span>
-                      <span className="text-[12px] leading-snug text-muted">{h.blurb}</span>
+                      <span className="text-small leading-snug text-muted">{h.blurb}</span>
                     </button>
                   );
                 })}
@@ -288,34 +288,34 @@ export function WizardBody({
                       preset === p.id ? "border-accent bg-accent-soft" : "border-border bg-panel-2 hover:border-text/30",
                     )}
                   >
-                    <span className="text-[13.5px] font-semibold">{p.name}</span>
-                    <span className="text-[12px] leading-snug text-muted">{p.blurb}</span>
+                    <span className="text-body font-semibold">{p.name}</span>
+                    <span className="text-small leading-snug text-muted">{p.blurb}</span>
                   </button>
                 ))}
               </div>
             </Field>
             <Field label="Repositories" hint="One run per repository. A repository that already has an active run is skipped.">
               {repos === null ? (
-                <p className="flex items-center gap-2 text-[13px] text-muted">
+                <p className="flex items-center gap-2 text-body-sm text-muted">
                   <Spinner /> Loading repositories…
                 </p>
               ) : repos.length === 0 ? (
-                <p className="text-[13px] text-muted">No repositories found for {org}.</p>
+                <p className="text-body-sm text-muted">No repositories found for {org}.</p>
               ) : (
                 <div className="max-h-48 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1.5 scroll-thin">
-                  <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-[12.5px] text-muted hover:bg-panel-2">
+                  <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-small-lg text-muted hover:bg-panel-2">
                     <input type="checkbox" checked={picked.length === repos.length} onChange={(e) => setPicked(e.target.checked ? repos.map((r) => r.full_name) : [])} />
                     All {repos.length}
                   </label>
                   {repos.map((r) => (
-                    <label key={r.full_name} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-[13px] hover:bg-panel-2">
+                    <label key={r.full_name} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-body-sm hover:bg-panel-2">
                       <input
                         type="checkbox"
                         checked={picked.includes(r.full_name)}
                         onChange={(e) => setPicked((p) => (e.target.checked ? [...p, r.full_name] : p.filter((x) => x !== r.full_name)))}
                       />
                       <span className="min-w-0 flex-1 truncate">{r.full_name.split("/")[1]}</span>
-                      <span className="text-[11.5px] tabular-nums text-faint">{sessions.filter((s) => s.repo === r.full_name).length} colonies</span>
+                      <span className="text-meta-lg tabular-nums text-faint">{sessions.filter((s) => s.repo === r.full_name).length} colonies</span>
                     </label>
                   ))}
                 </div>
@@ -333,7 +333,7 @@ export function WizardBody({
               <ModelPicker value={subagentModel} onChange={setSubagentModel} models={models} emptyLabel="Agent default" ariaLabel="Subagent model" />
             </Field>
             {hunter === "shannon" ? (
-              <p className="text-[12.5px] leading-snug text-muted">Shannon runs one colony per repository; there is no swarm size to set.</p>
+              <p className="text-small-lg leading-snug text-muted">Shannon runs one colony per repository; there is no swarm size to set.</p>
             ) : (
               <Field label={`Hunters per repository: ${swarm}`} hint="Each hunter is a full colony with its own microVM and focus area.">
                 <input type="range" min={1} max={8} value={swarm} onChange={(e) => setSwarm(Number(e.target.value))} aria-label="Hunters per repository" className="w-full accent-[var(--accent)]" />
@@ -344,7 +344,7 @@ export function WizardBody({
 
         {step === 2 && (
           <div className="space-y-5">
-            <div role="note" className="rounded-xl border border-warn/40 bg-warn/10 p-3.5 text-[13px] leading-snug">
+            <div role="note" className="rounded-xl border border-warn/40 bg-warn/10 p-3.5 text-body-sm leading-snug">
               <p className="font-semibold text-warn">Red-team runs are expensive</p>
               <p className="mt-1 text-text">
                 This starts {hunters} autonomous {hunters === 1 ? "colony" : "colonies"} ({swarmSize} per repository × {picked.length}), each in long sessions reading and reproducing code
@@ -357,16 +357,16 @@ export function WizardBody({
               </p>
             </div>
             {preset === "security" && (
-              <p className="text-[12.5px] leading-snug text-muted">
+              <p className="text-small-lg leading-snug text-muted">
                 Security preset: before the hunters launch, this machine pre-scans the repository&apos;s committed files and history (no model tokens, no repository code run) and
                 hands each lead to the hunter whose focus it matches. The report adds the leads and an operator checklist of what code cannot prove.
               </p>
             )}
-            <label className="flex cursor-pointer items-start gap-2.5 text-[13px]">
+            <label className="flex cursor-pointer items-start gap-2.5 text-body-sm">
               <input type="checkbox" checked={autofix} onChange={(e) => setAutofix(e.target.checked)} className="mt-0.5" />
               <span>
                 <span className="font-medium">Let hunters fix what they find</span>
-                <span className="block text-[12px] text-muted">Off: hunters only report findings and never open, merge or change anything. On costs more and opens pull requests.</span>
+                <span className="block text-small text-muted">Off: hunters only report findings and never open, merge or change anything. On costs more and opens pull requests.</span>
               </span>
             </label>
             <Field label="When">
@@ -378,15 +378,15 @@ export function WizardBody({
                     role="radio"
                     aria-checked={schedule.every === every}
                     onClick={() => setSchedule(every === "once" ? { every } : every === "weekly" ? { every, weekday: 0, time: "02:00" } : { every, day: 1, time: "02:00" })}
-                    className={cx("cursor-pointer rounded-full border px-3 py-1 text-[12.5px]", schedule.every === every ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text")}
+                    className={cx("cursor-pointer rounded-full border px-3 py-1 text-small-lg", schedule.every === every ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text")}
                   >
                     {every === "once" ? "Once, now" : every === "weekly" ? "Weekly" : "Monthly"}
                   </button>
                 ))}
               </div>
-              {schedule.every === "once" && <p className="mt-2 text-[12px] text-muted">Starts as soon as no colony is live.</p>}
+              {schedule.every === "once" && <p className="mt-2 text-small text-muted">Starts as soon as no colony is live.</p>}
               {schedule.every === "weekly" && (
-                <div className="mt-2 flex items-center gap-2 text-[13px]">
+                <div className="mt-2 flex items-center gap-2 text-body-sm">
                   <select aria-label="Weekday" value={schedule.weekday} onChange={(e) => setSchedule({ ...schedule, weekday: Number(e.target.value) })} className="rounded-md border border-border bg-panel px-2 py-1">
                     {WEEKDAYS.map((d, i) => (
                       <option key={d} value={i}>
@@ -396,11 +396,11 @@ export function WizardBody({
                   </select>
                   at
                   <input aria-label="Time" type="time" value={schedule.time} onChange={(e) => setSchedule({ ...schedule, time: e.target.value })} className="rounded-md border border-border bg-panel px-2 py-1" />
-                  <span className="text-[12px] text-muted">your time</span>
+                  <span className="text-small text-muted">your time</span>
                 </div>
               )}
               {schedule.every === "monthly" && (
-                <div className="mt-2 flex items-center gap-2 text-[13px]">
+                <div className="mt-2 flex items-center gap-2 text-body-sm">
                   day
                   <select aria-label="Day of month" value={schedule.day} onChange={(e) => setSchedule({ ...schedule, day: Number(e.target.value) })} className="rounded-md border border-border bg-panel px-2 py-1">
                     {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
@@ -411,7 +411,7 @@ export function WizardBody({
                   </select>
                   at
                   <input aria-label="Time" type="time" value={schedule.time} onChange={(e) => setSchedule({ ...schedule, time: e.target.value })} className="rounded-md border border-border bg-panel px-2 py-1" />
-                  <span className="text-[12px] text-muted">{schedule.day > 28 ? "the month's last day when shorter" : "your time"}</span>
+                  <span className="text-small text-muted">{schedule.day > 28 ? "the month's last day when shorter" : "your time"}</span>
                 </div>
               )}
             </Field>
@@ -420,7 +420,7 @@ export function WizardBody({
       </div>
 
       <div className="flex shrink-0 items-center gap-2 border-t border-border px-5 py-3">
-        <span className="mr-auto text-[12.5px] text-muted">
+        <span className="mr-auto text-small-lg text-muted">
           {picked.length} {picked.length === 1 ? "repository" : "repositories"} · {hunters} {hunters === 1 ? "hunter" : "hunters"}
           {preset === "security" ? " · security" : ""}
         </span>
@@ -442,8 +442,8 @@ export function WizardBody({
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <section>
-      <h3 className="text-[12.5px] font-semibold text-text">{label}</h3>
-      {hint && <p className="mb-2 text-[12px] text-muted">{hint}</p>}
+      <h3 className="text-small-lg font-semibold text-text">{label}</h3>
+      {hint && <p className="mb-2 text-small text-muted">{hint}</p>}
       {!hint && <div className="mb-2" />}
       {children}
     </section>

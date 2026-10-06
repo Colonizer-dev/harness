@@ -11,8 +11,8 @@ Part of the [Colonizer protocol](../protocol.md).
   disk, the actions Create PR, Stop, Resume, Clean up; chat beside a terminal), Code, Chat, Loops,
   Secrets, Host, Inbox (behind the bell) and History, plus memory and settings. The Settings dialog
   has Setup, Connections, Model providers, Runtime, Live map, Remote access, Add your phone, API
-  tokens, Fleet, Updates, Usage data, Notifications and Desktop, the module settings, and one entry
-  per org workspace.
+  tokens, Fleet, Updates, Usage data, Notifications, Desktop and Built with, the module settings, and
+  one entry per org workspace.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.

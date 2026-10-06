@@ -204,7 +204,7 @@ export function SessionView({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="shrink-0 border-b border-border bg-panel px-4 py-3">
+      <header className="shrink-0 border-b border-border bg-panel px-4 py-3 max-sm:max-h-[45dvh] max-sm:overflow-y-auto">
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
           {narrow && (
             <button
@@ -219,9 +219,9 @@ export function SessionView({
           <div className="min-w-0 flex-1 basis-64">
             <div className="flex flex-wrap items-center gap-2">
               {showOrg && (
-                <span className="rounded-md bg-panel-3 px-1.5 py-px text-[11.5px] font-medium text-muted">{orgOf(session)}</span>
+                <span className="rounded-md bg-panel-3 px-1.5 py-px text-meta-lg font-medium text-muted">{orgOf(session)}</span>
               )}
-              <span className="font-mono text-[12.5px] text-muted">
+              <span className="font-mono text-small-lg text-muted">
                 {session.repo}
                 {session.issue != null && `#${session.issue}`}
               </span>
@@ -242,10 +242,10 @@ export function SessionView({
               {session.autopilot && <Badge>Autopilot</Badge>}
               {session.origin === "burn_down" && <Badge tone="accent">Burn-down</Badge>}
             </div>
-            <h1 className="mt-1 text-[17px] font-semibold leading-snug [overflow-wrap:anywhere]">
+            <h1 className="mt-1 text-title font-semibold leading-snug [overflow-wrap:anywhere]">
               {session.issue_title || (session.issue != null ? `Issue #${session.issue}` : "Open colony")}
             </h1>
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[12.5px] text-muted">
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-small-lg text-muted">
               <span className="inline-flex min-w-0 items-center gap-1">
                 <IconBranch size={13} className="shrink-0" />
                 <code className="truncate font-mono">{session.branch}</code>
@@ -385,7 +385,7 @@ export function SessionView({
               {busy === "cleanup" ? <Spinner /> : <IconTrash size={15} />} Clean up
             </Button>
             <label
-              className="inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted"
+              className="inline-flex cursor-pointer items-center gap-1.5 text-small-lg text-muted"
               title="Kept worktrees skip automatic reclamation; cleaning up removes the worktree and makes the colony unresumable"
             >
               <input
@@ -408,7 +408,7 @@ export function SessionView({
           </div>
         </div>
         {attention && (
-          <div role="status" className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+          <div role="status" className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-warn-soft px-3 py-2 text-body-sm text-warn">
             <IconAlert size={14} className="shrink-0" />
             <span className="font-semibold">{attentionText(attention)}</span>
             <span className="opacity-80">· last activity {minutesAgo(session.last_activity_at ?? attention.since)}</span>
@@ -426,7 +426,13 @@ export function SessionView({
                 ))}
               </div>
             )}
-            {attention.reason === "autopilot_held" && (
+            {attention.reason === "autopilot_held" && attention.cause === "gateway_error" && (
+              <span className="opacity-80">The automatic retries are spent; message the agent to try again, or stop the colony.</span>
+            )}
+            {attention.reason === "autopilot_held" && attention.cause === "turn_error" && (
+              <span className="opacity-80">Check the chat, then message the agent or press {finishing ? "Finish PR" : "Create PR"}.</span>
+            )}
+            {attention.reason === "autopilot_held" && !attention.cause && (
               <span className="opacity-80">
                 {attention.detail
                   ? `Press ${finishing ? "Finish PR" : "Create PR"} to publish anyway, or message the agent.`
@@ -436,12 +442,12 @@ export function SessionView({
           </div>
         )}
         {session.error && (
-          <div role="alert" className="mt-3 rounded-lg bg-err-soft px-3 py-2 text-[13px] text-err [overflow-wrap:anywhere]">
+          <div role="alert" className="mt-3 rounded-lg bg-err-soft px-3 py-2 text-body-sm text-err [overflow-wrap:anywhere]">
             {session.error}
           </div>
         )}
         {session.status === "parked" && (
-          <div role="status" className="mt-3 flex flex-wrap items-center gap-x-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+          <div role="status" className="mt-3 flex flex-wrap items-center gap-x-2 rounded-lg bg-warn-soft px-3 py-2 text-body-sm text-warn">
             <IconAlert size={14} className="shrink-0" />
             <span className="font-semibold">Parked — {parkedLabel(session.parked) || "out of tokens"}</span>
             <span className="opacity-80">
@@ -452,7 +458,7 @@ export function SessionView({
           </div>
         )}
         {session.model_substitutions?.length ? (
-          <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-[13px] [overflow-wrap:anywhere]">
+          <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-body-sm [overflow-wrap:anywhere]">
             <span className="font-semibold">Routed for sensitivity: </span>
             <span className="text-muted">
               {session.model_substitutions
@@ -462,13 +468,13 @@ export function SessionView({
           </div>
         ) : null}
         {diagnosis && (
-          <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-[13px] [overflow-wrap:anywhere]">
+          <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-body-sm [overflow-wrap:anywhere]">
             <span className="font-semibold">Status: </span>
             <span className="text-muted">{diagnosis.text}</span>
           </div>
         )}
         {supersededHeld && superseded && (
-          <div role="status" className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+          <div role="status" className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-body-sm text-warn">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <IconAlert size={14} className="shrink-0" />
               <span className="font-semibold">
@@ -505,7 +511,7 @@ export function SessionView({
             )}
           </div>
         )}
-        {publishStage && <div className="mt-2 text-[12.5px] text-muted">{publishStage}</div>}
+        {publishStage && <div className="mt-2 text-small-lg text-muted">{publishStage}</div>}
       </header>
 
       <ActivityStrip logs={state.logs} />
@@ -582,7 +588,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
       aria-selected={active}
       onClick={onClick}
       className={cx(
-        "-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2.5 text-[13px] font-medium",
+        "-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2.5 text-body-sm font-medium",
         active ? "border-accent text-text" : "border-transparent text-muted hover:text-text",
       )}
     >
@@ -593,7 +599,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 
 function PanelHeader({ icon, title, children }: { icon: ReactNode; title: string; children?: ReactNode }) {
   return (
-    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-4 text-[11.5px] font-semibold uppercase tracking-wide text-muted">
+    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-4 text-meta-lg font-semibold uppercase tracking-wide text-muted">
       {icon}
       {title}
       <span className="ml-auto min-w-0 truncate font-normal normal-case tracking-normal text-faint">{children}</span>
@@ -623,7 +629,7 @@ function ActivityStrip({ logs }: { logs: LogEntry[] }) {
   const last = logs[logs.length - 1];
   const dot = (level: string) => (level === "error" ? "bg-err" : level === "warn" ? "bg-warn" : "bg-ok");
   return (
-    <div className="shrink-0 border-b border-border bg-panel-2/50 text-[12.5px]">
+    <div className="shrink-0 border-b border-border bg-panel-2/50 text-small-lg">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -636,7 +642,7 @@ function ActivityStrip({ logs }: { logs: LogEntry[] }) {
         <IconChevronDown size={14} className={cx("shrink-0 transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <ol className="scroll-thin max-h-48 overflow-y-auto px-4 pb-2 font-mono text-[12px]">
+        <ol className="scroll-thin max-h-48 overflow-y-auto px-4 pb-2 font-mono text-small">
           {logs
             .slice()
             .reverse()

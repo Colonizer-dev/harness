@@ -793,6 +793,7 @@ export function App() {
               remoteOn={remote?.enabled ?? false}
               fleet={fleet}
               update={updateStatus}
+              onUpdateChanged={setUpdateStatus}
               liveConnection={liveConnection}
               liveStorage={liveStorage}
               autopilotDefault={autopilotDefault}
@@ -924,10 +925,10 @@ export function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; o
         recovered ? "border-warn/30 bg-warn-soft" : "border-err/30 bg-err-soft",
       )}
     >
-      <p className={cx("text-[14px] font-semibold", tone)}>{heading}</p>
-      {storage.message && <p className={cx("mt-1.5 font-mono text-[12px] [overflow-wrap:anywhere]", tone)}>{storage.message}</p>}
-      <p className="mt-1.5 text-[12.5px] text-muted">{note}</p>
-      {meta.length > 0 && <p className={cx("mt-1.5 text-[12px]", tone)}>{meta.join(" · ")}</p>}
+      <p className={cx("text-body-lg font-semibold", tone)}>{heading}</p>
+      {storage.message && <p className={cx("mt-1.5 font-mono text-small [overflow-wrap:anywhere]", tone)}>{storage.message}</p>}
+      <p className="mt-1.5 text-small-lg text-muted">{note}</p>
+      {meta.length > 0 && <p className={cx("mt-1.5 text-small", tone)}>{meta.join(" · ")}</p>}
       <div className="mt-3 flex justify-end">
         <Button size="sm" onClick={onDismiss}>
           Dismiss
@@ -959,7 +960,7 @@ function EmptyState({ narrow, org, onOpenSidebar }: { narrow: boolean; org: stri
             <IconSpark size={22} />
           </div>
           <h2 className="text-lg font-semibold">{org ? `Pick an issue in ${org} to launch a colony` : "Pick an issue to launch a colony"}</h2>
-          <p className="mt-2 text-[13.5px] text-muted">
+          <p className="mt-2 text-body text-muted">
             Each colony is a private microVM with a fresh git worktree and a coding agent. Watch it work, answer its questions,
             open a terminal, and create the pull request when you're happy. The Mothership keeps them all in sight.
           </p>

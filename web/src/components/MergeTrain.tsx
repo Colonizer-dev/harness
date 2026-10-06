@@ -23,19 +23,19 @@ function RepoTrain({ repo, now }: { repo: MergeTrainRepo; now?: Date }) {
   const skipped = withStatus("skipped");
   return (
     <div className="py-2.5">
-      <p className="flex flex-wrap items-center gap-2 text-[13px]">
+      <p className="flex flex-wrap items-center gap-2 text-body-sm">
         <span className="font-medium">{repo.repo}</span>
         <Badge tone={STATE_TONE[repo.state]}>{repo.state === "on" ? "train on" : repo.state}</Badge>
         <Badge tone={CI_TONE[repo.base_ci]} title={repo.base ? `CI on ${repo.base}` : undefined}>
           {repo.base ? `${repo.base} · base CI ${repo.base_ci}` : `base CI ${repo.base_ci}`}
         </Badge>
         {repo.last_merge && (
-          <a href={repo.last_merge.pr_url} className="ml-auto text-[12px] text-faint hover:underline" title={`Last merge: ${repo.last_merge.pr_url}`}>
+          <a href={repo.last_merge.pr_url} className="ml-auto text-small text-faint hover:underline" title={`Last merge: ${repo.last_merge.pr_url}`}>
             last merged {timeAgo(repo.last_merge.at, now)}
           </a>
         )}
       </p>
-      <p className="mt-1 text-[12.5px] text-muted">
+      <p className="mt-1 text-small-lg text-muted">
         {next ? (
           <>
             Next up:{" "}
@@ -50,7 +50,7 @@ function RepoTrain({ repo, now }: { repo: MergeTrainRepo; now?: Date }) {
         {rebase.length > 0 && ` · ${rebase.length} needs rebase`}
       </p>
       {skipped.length > 0 && (
-        <p className="mt-0.5 text-[12.5px] text-warn">
+        <p className="mt-0.5 text-small-lg text-warn">
           Skipped: {skipped.map((p) => `${p.title} (${p.reason})`).join(", ")}
         </p>
       )}
@@ -63,7 +63,7 @@ export function MergeTrain({ repos, now }: { repos: MergeTrainRepo[]; now?: Date
   if (visible.length === 0) return null;
   return (
     <div className="mt-3 rounded-xl border border-border bg-panel-2/40 px-4 pb-1">
-      <p className="pt-2.5 text-[12.5px] font-medium text-muted">Merge train</p>
+      <p className="pt-2.5 text-small-lg font-medium text-muted">Merge train</p>
       <div className="divide-y divide-border">
         {visible.map((repo) => (
           <RepoTrain key={repo.repo} repo={repo} now={now} />

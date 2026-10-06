@@ -23,6 +23,11 @@ Part of the [Colonizer protocol](../protocol.md).
 | `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 | `GET /api/models/assignments` | The header model switcher's view (issue #1051): what every model role resolves to install-wide and per org, with where it comes from; the agent modules with their roles; the models on offer with health and quota (below) |
+| `GET /api/models/plans` | `{plans: [plan], checked_at}`: what is known about each plan the model roles use, for the switcher's usage bars (below) |
+| `GET /api/models/profiles` | `{profiles: [profile]}`: the saved model profiles, then the starters this install can run (below) |
+| `POST /api/models/profiles` | `{name, module?, roles: {role: model}}`: saves a profile in the install config; `409` on a taken name |
+| `PUT /api/models/profiles/{id}` | `{name?, module?, roles?}`: renames a profile or replaces its roles; a starter is a `400` |
+| `DELETE /api/models/profiles/{id}` | Deletes a saved profile; a starter is a `400` |
 | `POST /api/models/switch` | `{scope: "install"\|"org", org?, module?, roles: {role: model\|null}, apply?: "new"\|"running", dry_run?}`: switches a scope's agent module and role models in one validated step, optionally restarting the scope's colonies (below) |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
@@ -76,8 +81,34 @@ values, and they restart through the quota card's restart path (a live or parked
 resumed cold, a queued one simply boots). `dry_run: true` answers the plan and changes nothing; the
 cockpit counts the colonies with it before asking to restart them. The reply is
 `{dry_run, scope, org, module, changes: [change], affected: [id], colonies: [id], failed: [{id, ok: false, error}]}`,
-`changes` in the quota card's `{scope, target, key, was, now}` shape. Both routes are owner-only: a
-scoped API token gets `403`.
+`changes` in the quota card's `{scope, target, key, was, now}` shape.
+
+`GET /api/models/plans` lists the Claude account (`id: "anthropic"`, `kind: "claude"`) when a role
+runs on a Claude model or its cap is hit. It then lists each provider (`kind: "provider"`) that a
+role routes to or whose plan is out. Each plan is
+`{id, name, kind, used_by, exhausted, reset_at, reset_unix, last_limit, requests, failures, last_request_at, since, balance}`:
+- `used_by` lists the roles in plain words (`orchestrator`, `subagents`, `background`, …).
+- `reset_*` is set only while the plan is exhausted.
+- `last_limit` (`{at, reset_at, reset_unix}`) is the last limit the gateway recorded, even after
+  its reset has passed.
+- `requests`/`failures` are the gateway's counts (`null` for Claude, which it does not proxy).
+- `balance` is the provider's plan-balance probe through the 60 s probe cache:
+  `{remaining, limit, pct_left, error, checked_at}`. `limit` comes from `quota.limit_pointer`, and
+  `pct_left` is derived only when both numbers are known. `balance` is `null` without a probe.
+
+Nothing is estimated.
+
+`GET /api/models/profiles` answers saved profiles (`{id, name, module, roles, created_at, updated_at, builtin: false}`,
+kept in `model-profiles.json` in the config directory) followed by starters (`builtin: true`, ids
+`starter-…`). The starters are derived on each read from what is configured: "Claude only"
+(`opus`/`sonnet`/`haiku`) with a Claude login, and one per provider that lists a model (first
+three), only on the roles an org can override. A starter whose name a saved profile has taken is not
+listed. A profile's `roles` maps a role key (`model`, `*_model`, `model_*`) to a model id, where `""`
+means the module default. The models are checked only when the profile is applied: the cockpit
+loads it into a `POST /api/models/switch`. Names are 1–60 characters and unique regardless of
+case, and an install keeps at most 50 profiles. A profiles file that won't parse is refused, never
+overwritten. Saving, renaming and deleting a profile record `settings.save`/`settings.remove`
+activity. Every `/api/models/*` route is owner-only: a scoped API token gets `403`.
 
 **Org workspaces.** `Session` gains `"org": "<repo owner>"`.
 
@@ -128,6 +159,19 @@ gateway half).
 shadowing the sandbox module's `preset` (`auto`, which reads each repository's stack at boot, unless
 something is pinned above it). `null` inherits.
 
+`exec_policy` (issue #924) is this org's layer of the exec policy, as the JSON a runner reads: an
+object with a `rules` array, at most 64 KiB — the cap both runners put on a layer, so a larger one is
+refused at save time rather than dropped at boot. (The API counts UTF-16 units, as the runners do.)
+Every rule must be one the runner would keep whole: a `deny`/`ask`/`allow` decision with at least one
+usable `command`, `script`, `touches` or `writes_outside` predicate — a policy the runner would trim
+is refused rather than saved with a rule the operator believes holds
+(`crates/colonizer/src/exec_policy.rs`, which shares its fixture with the runner's `parsePolicy`; a
+pattern's regex syntax is the one thing it cannot check). It narrows the install agent module's
+`exec_policy` setting and is narrowed again by a colony's own `.colonizer/exec-policy.json`
+([exec policy](../../modules/agents/claude-code/README.md#exec-policy)); `null` or blank adds no layer.
+An org's colonies on an agent module that does not apply the policy refuse to boot while any layer is
+set, the same as for the install's.
+
 `close_superseded_prs` (issue #673) is not inherited either: a list of this org's repositories, full
 `owner/name`, whose superseded colonies' pull requests Colonizer may close on GitHub when another
 colony's pull request merges over them (*Duplicate-colony prevention*, *Superseded colony work*).
@@ -167,6 +211,7 @@ recorded never matches, and the list must name at least one vendor or be cleared
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
+  "exec_policy": "{\"rules\": [{\"id\": \"deny-rm\", \"decision\": \"deny\", \"command\": \"rm -rf\"}]}",
   "egress": {"mode": null, "allow": ["registry.npmjs.org"], "block": null},
   "memory": {"enabled": true},
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3},
@@ -241,12 +286,13 @@ when approved, or `reviewed: false` when stored with review off.
 | `POST /api/vault/proposals/{id}/reject` | Drops the proposal; the vault is not touched |
 
 **Watchdog.** New module kind `watchdog` (provider `default`, on by default; settings
-`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 4) and kind `memory` (provider `files`,
+`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 3,
+`provider_retry_schedule_minutes` = `"1, 5, 15"`) and kind `memory` (provider `files`,
 on by default; setting `require_review` = true; off lets only `repo` notes skip review). `Session`
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2, "detail": "…"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -259,12 +305,20 @@ colony blocked on an exhausted provider is flagged `provider_quota_exhausted` in
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
 `autopilot_held`. An error the retry classifier calls transient (a gateway 5xx, 429 or 529, an
-unreachable or overloaded provider, a timeout, a dropped or refused connection) is retried first
-(issue #980): the colony parks with `parked.reason` and `attention.reason` `provider_retry`, and the
-queue tick continues it after 2, 5, 10 and 20 minutes, re-checking under the lifecycle lock that it
-is still parked for that reason. After `provider_retry_max_attempts` (0–4; 0 turns the retry off)
-it is held as `autopilot_held`, with a message naming the provider's error; a clean turn end resets
-the count (`Session.provider_retries`). A colony whose Claude account answered 401 or 403 parks
+unreachable or overloaded provider, a timeout, a dropped, reset or refused connection, a gateway
+restart) is retried first (issues #980, #1093): the colony parks with `parked.reason` and
+`attention.reason` `provider_retry`, and the queue tick continues it after each wait in
+`provider_retry_schedule_minutes` (default 1, 5, 15; the last entry repeats), re-checking under the
+lifecycle lock that it is still parked for that reason. The retry's attention also carries
+`cause: "gateway_error"`, `summary` ("Stopped on a model gateway error (502, connection to
+Anthropic)"), `detail`, `retry_at`, `attempt` and `max_attempts`; nobody has to act on it. After
+`provider_retry_max_attempts` (0–10, default 3; 0 turns the retry off) it is held as
+`autopilot_held` with `cause: "gateway_error"` and a `detail` naming the error ("Stopped on repeated
+gateway errors (502, connection to Anthropic); 3 automatic retries did not get through"); a clean
+turn end resets the count (`Session.provider_retries`). An error that is not transient holds at
+once with `cause: "turn_error"` and the error's first line as `detail`. A colony the mothership
+reconnected to after its own restart whose first turn end within 15 minutes is a transient gateway
+error is sent one `user_message` to continue instead, with no park and no retry spent. A colony whose Claude account answered 401 or 403 parks
 with reason `waiting_for_account` ahead of all of this (Claude account health, in
 [harness-api.md](harness-api.md#get-apistatus)). On every tick, whether or not the watchdog is
 enabled, a colony that is `waiting_for_answer` with no question actually pending is set back to

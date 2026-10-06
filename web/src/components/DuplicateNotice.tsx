@@ -16,7 +16,7 @@ export function describeHolder(holder: DuplicateHolder): string {
 export function DuplicateNotice({ holder, onOpen }: { holder: DuplicateHolder; onOpen?: () => void }): ReactElement {
   const remote = holder.kind === "remote_claim";
   return (
-    <p role="status" className="rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-2 text-[12.5px] text-muted [overflow-wrap:anywhere]">
+    <p role="status" className="rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-2 text-small-lg text-muted [overflow-wrap:anywhere]">
       <span className="font-medium text-text">{holder.what}</span> is already being done by{" "}
       {holder.colony && onOpen && !remote ? (
         <button type="button" onClick={onOpen} className="cursor-pointer font-mono text-accent hover:underline">

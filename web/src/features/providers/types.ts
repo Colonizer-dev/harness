@@ -31,6 +31,21 @@ export interface StatusQuota {
    * builds, which the banner derives from `providers` instead (see `quotaPauseKind`).
    */
   kind?: "account" | "provider" | null;
+  /**
+   * Each exhausted plan's display name and the roles routed to it, e.g.
+   * `{ id: "byteplus", name: "BytePlus", used_by: ["subagents", "background"] }`; an account pause
+   * carries one `anthropic` entry named "Claude". Absent from older mothership builds, which the
+   * banner covers by looking the ids up in the provider catalog.
+   */
+  provider_details?: QuotaProviderDetail[];
+}
+
+/** One exhausted plan in GET /api/status `quota.provider_details`. */
+export interface QuotaProviderDetail {
+  id: string;
+  name: string;
+  /** Plain-word roles that route here: `orchestrator`, `subagents`, `background`, `small tasks`, … */
+  used_by: string[];
 }
 
 /**
@@ -123,6 +138,8 @@ export interface ProviderQuotaProbe {
   url: string;
   /** Non-empty RFC 6901 JSON pointer naming the remaining-token number in the answer, like `/data/remaining`. */
   pointer: string;
+  /** Optional RFC 6901 pointer naming the plan's total in the same answer, so used vs. limit can be drawn. */
+  limit_pointer?: string;
 }
 
 export interface ModelProvider extends ProviderLimits {

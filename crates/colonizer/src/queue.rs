@@ -72,11 +72,6 @@ pub(crate) const HOLD_RESUME_SCHEDULE: [chrono::Duration; 3] = [
     chrono::Duration::hours(9),
 ];
 
-/// The delay before each automatic retry after a transient provider error (issue #980), indexed by
-/// the attempt already spent (`provider_retries - 1`) and measured from the park's `at`: 2, 5, 10
-/// then 20 minutes. Four entries, so at most four retries before the colony is held for a person.
-pub(crate) const PROVIDER_RETRY_SCHEDULE_MINUTES: [i64; 4] = [2, 5, 10, 20];
-
 /// The one-shot note a backoff resume hands the agent (issue #876): the question timed out unanswered,
 /// so it should pick the safe option itself and say what it chose.
 pub(crate) const HOLD_RESUME_NOTE: &str = "Your question timed out while you were parked; choose the option marked \
@@ -126,17 +121,17 @@ pub(crate) fn hold_parked(s: &Session) -> bool {
 
 /// Whether a colony parked by the automatic provider-error retry (issue #980) is due to resume at
 /// `now`: it is parked for [`PROVIDER_RETRY_REASON`] and the delay for the attempt it is backing off
-/// (`provider_retries - 1` into [`PROVIDER_RETRY_SCHEDULE_MINUTES`]) has passed since the park's
-/// `at`. Pure, so the backoff is testable apart from the tick that acts on it.
-pub(crate) fn provider_retry_due(s: &Session, now: DateTime<Utc>) -> bool {
+/// (`provider_retries` on `schedule`, the watchdog's `provider_retry_schedule_minutes`, issue #1093)
+/// has passed since the park's `at`. Pure, so the backoff is testable apart from the tick that acts
+/// on it.
+pub(crate) fn provider_retry_due(s: &Session, now: DateTime<Utc>, schedule: &[i64]) -> bool {
     if s.status != SessionStatus::Parked {
         return false;
     }
     let Some(park) = s.parked.as_ref().filter(|p| p.reason == PROVIDER_RETRY_REASON) else {
         return false;
     };
-    let idx = (s.provider_retries.saturating_sub(1) as usize).min(PROVIDER_RETRY_SCHEDULE_MINUTES.len() - 1);
-    now >= park.at + chrono::Duration::minutes(PROVIDER_RETRY_SCHEDULE_MINUTES[idx])
+    now >= park.at + orgs::provider_retry_delay(schedule, s.provider_retries)
 }
 
 /// What the queue does with a hold-parked colony on one tick (issue #876), decided as a pure function
@@ -486,6 +481,9 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Quota-parked colonies whose provider recovered rejoin the queue on this same 5 s tick, ahead
     // of admission; a colony that only just parked keeps its terminal state until its reset passes.
     resume_quota_parked(app).await;
+    // A colony parked on its repository's daily PR cap (issue #910) requeues the same tick a new
+    // UTC day brings, since the cap is counted in UTC days.
+    resume_repo_pr_rate_limit_parked(app).await;
     // Read once per tick, so a settings save applies at once — to the hold timeout here and the
     // suspension settings just below (issue #562).
     let modules = app.modules.read().await.clone();
@@ -848,13 +846,14 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
 /// it — events.rs owns the counter, and only a successful turn or the final give-up resets it.
 pub(crate) async fn resume_provider_retry_parked(app: &Shared) {
     let now = Utc::now();
+    let schedule = orgs::provider_retry_schedule(&app.modules.read().await.clone());
     let ids: Vec<String> = {
         let sessions = app.sessions.read().await;
         sessions
             .iter()
             // Issue #673: a merge covered this colony's work — it stays parked until it is kept.
             .filter(|s| !crate::supersede::blocks_start(s))
-            .filter(|s| provider_retry_due(s, now))
+            .filter(|s| provider_retry_due(s, now, &schedule))
             .map(|s| s.id.clone())
             .collect()
     };
@@ -867,7 +866,7 @@ pub(crate) async fn resume_provider_retry_parked(app: &Shared) {
         // own does not know this reason. A refusal (a race, a supersession, a failed rotation)
         // leaves it parked; the next tick looks again.
         let still_due = app
-            .update_session(&id, |x| provider_retry_due(x, now))
+            .update_session(&id, |x| provider_retry_due(x, now, &schedule))
             .await
             .is_some_and(|(_, due)| due);
         if !still_due {
@@ -1665,6 +1664,81 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
     }
 }
 
+/// Colonies parked because their repository's daily pull-request cap was reached (issue #910)
+/// rejoin the queue once the UTC day rolls over: the cap is counted in UTC days, so a new day is
+/// the whole reset, and the worktree never left. The two routes are the quota pass's: a park that
+/// discarded the microVM is a plain requeue, and one that kept it goes through the resume handler,
+/// which warms it and queues when no slot is free.
+pub(crate) async fn resume_repo_pr_rate_limit_parked(app: &Shared) {
+    let today = Utc::now().date_naive();
+    let due = |s: &Session| {
+        s.status == SessionStatus::Parked
+            && s.parked
+                .as_ref()
+                .is_some_and(|p| p.reason == crate::publish::REPO_PR_RATE_LIMIT_REASON && p.at.date_naive() < today)
+    };
+    let (cold, kept): (Vec<String>, Vec<String>) = {
+        let sessions = app.sessions.read().await;
+        let mut cold = Vec::new();
+        let mut kept = Vec::new();
+        for s in sessions
+            .iter()
+            .filter(|s| due(s))
+            // Issue #673: a merge covered this colony's work — it stays parked, park record
+            // intact, until it is kept; the tick after that resumes it like any other.
+            .filter(|s| !crate::supersede::blocks_start(s))
+        {
+            if s.parked.as_ref().is_some_and(|p| p.vm_kept) {
+                kept.push(s.id.clone());
+            } else {
+                cold.push(s.id.clone());
+            }
+        }
+        (cold, kept)
+    };
+    for id in cold {
+        // Queued holds no slot, so the flip needs no admission; the loop in `start_queued` boots it.
+        // The status and the park are re-checked under the lock, so a colony an operator just
+        // resumed or republished wins instead of being doubled.
+        let flipped = app
+            .update_session(&id, |x| {
+                let due = x.status == SessionStatus::Parked
+                    && x.parked
+                        .as_ref()
+                        .is_some_and(|p| p.reason == crate::publish::REPO_PR_RATE_LIMIT_REASON && p.at.date_naive() < today);
+                if due {
+                    x.status = SessionStatus::Queued;
+                    x.error = None;
+                    x.attention = None;
+                    // The park record had its say; a requeue is a resume, so it goes (issue #213).
+                    x.parked = None;
+                    x.updated_at = Utc::now();
+                }
+                due
+            })
+            .await
+            .is_some_and(|(_, flipped)| flipped);
+        if flipped {
+            let s = app.session(&id).await;
+            if let Some(s) = s {
+                app.persist_and_broadcast(&s).await;
+            }
+            app.session_log(
+                &id,
+                "info",
+                "a new UTC day, so the repo's daily PR cap is fresh again; queued to resume".into(),
+            )
+            .await;
+        }
+    }
+    for id in kept {
+        // The handler re-checks everything under its own locks — status, live link, running
+        // microVM, the discard setting, admission — so a colony an operator just touched is not
+        // doubled. A refusal (409, 404) means the park is no longer this tick's to recover.
+        let _ = crate::lifecycle::resume(State(app.clone()), Path(id), None).await;
+    }
+}
+
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
 pub(crate) fn start_tasks(app: &crate::Shared) {
     let queue = app.clone();
@@ -1830,36 +1904,41 @@ mod tests {
         }
     }
 
-    /// Issue #980: a colony parked by the provider-error retry resumes only once the backoff step for
-    /// the attempt it is on has elapsed — 2, 5, 10 then 20 minutes from the park — and no other park
-    /// or live colony is swept up by the retry resume.
+    /// Issue #980/#1093: a colony parked by the provider-error retry resumes only once the backoff
+    /// step for the attempt it is on has elapsed — 1, 5 then 15 minutes from the park by default,
+    /// the last step repeating — and no other park or live colony is swept up by the retry resume.
     #[test]
     fn a_provider_retry_park_is_due_only_after_its_backoff_step() {
         let now = Utc::now();
-        for (attempt, minutes) in [(1u32, 2i64), (2, 5), (3, 10), (4, 20)] {
+        let schedule = crate::orgs::DEFAULT_PROVIDER_RETRY_SCHEDULE;
+        for (attempt, minutes) in [(1u32, 1i64), (2, 5), (3, 15), (4, 15)] {
             let just_parked = provider_retry_parked_colony("abc", attempt, now);
             assert!(
-                !provider_retry_due(&just_parked, now),
+                !provider_retry_due(&just_parked, now, &schedule),
                 "attempt {attempt} is not due the moment it parks"
             );
             assert!(
-                !provider_retry_due(&just_parked, now + chrono::Duration::minutes(minutes - 1)),
-                "attempt {attempt} is not due a minute early"
+                !provider_retry_due(&just_parked, now + chrono::Duration::seconds(minutes * 60 - 30), &schedule),
+                "attempt {attempt} is not due early"
             );
             assert!(
-                provider_retry_due(&just_parked, now + chrono::Duration::minutes(minutes)),
+                provider_retry_due(&just_parked, now + chrono::Duration::minutes(minutes), &schedule),
                 "attempt {attempt} is due after {minutes} min"
             );
         }
+        // An operator's own schedule is the one read.
+        let parked = provider_retry_parked_colony("abc", 2, now);
+        assert!(!provider_retry_due(&parked, now + chrono::Duration::minutes(5), &[1, 30]));
+        assert!(provider_retry_due(&parked, now + chrono::Duration::minutes(30), &[1, 30]));
         let other = hold_parked_colony("abc", None, 0, now);
         assert!(
-            !provider_retry_due(&other, now + chrono::Duration::hours(1)),
+            !provider_retry_due(&other, now + chrono::Duration::hours(1), &schedule),
             "a hold park is not a retry park"
         );
         let mut idle = colony("acme", SessionStatus::Idle);
         idle.provider_retries = 1;
         assert!(
-            !provider_retry_due(&idle, now + chrono::Duration::hours(1)),
+            !provider_retry_due(&idle, now + chrono::Duration::hours(1), &schedule),
             "a live colony is never due"
         );
     }
@@ -2337,6 +2416,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_provider_pause_names_the_provider_by_its_display_name_never_claude() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-name-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let body = json!([{"id": "byteplus", "name": "BytePlus", "base_url": "http://127.0.0.1:1", "auth": "none"}]);
+        std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&body).unwrap()).unwrap();
+        let app = crate::tests::test_app(&root);
+        app.gateway
+            .mark_quota_exhausted("byteplus", Some("10-05 19:51:58".into()), Some(Utc::now().timestamp() + 3600));
+        let status = crate::providers::quota_status(&app).await;
+        assert!(status.paused);
+        assert_eq!(status.kind.as_deref(), Some("provider"));
+        assert_eq!(status.providers, vec!["byteplus".to_string()]);
+        let reason = status.reason.clone().unwrap_or_default();
+        assert!(reason.contains("BytePlus plan exhausted"), "{reason}");
+        assert!(
+            !reason.contains("Claude"),
+            "a non-Anthropic plan is never called Claude: {reason}"
+        );
+        assert_eq!(status.details.len(), 1);
+        assert_eq!(status.details[0].id, "byteplus");
+        assert_eq!(status.details[0].name, "BytePlus");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn a_draining_mothership_admits_nothing_until_the_drain_is_cleared() {
         let root = std::env::temp_dir().join(format!("colonizer-drain-hold-{}", crate::util::short_id()));
         let app = crate::tests::test_app(&root);
@@ -2369,6 +2473,64 @@ mod tests {
             SessionStatus::Queued,
             "the queue moves again once the drain is cleared"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony parked on its repository's daily PR cap (issue #910), parked `days` UTC days ago
+    /// and under `reason`.
+    fn repo_pr_parked(id: &str, reason: &str, days: i64) -> Session {
+        let mut s = stopped_colony_with_worktree("acme", id.into());
+        s.status = SessionStatus::Parked;
+        s.error = Some("acme/repo has already opened 5 pull requests today (UTC), its daily cap of 5".into());
+        s.parked = Some(crate::sessions::Park {
+            at: Utc::now() - chrono::Duration::days(days),
+            reason: reason.into(),
+            resets_at: Some("2026-09-28T00:00:00+00:00".into()),
+            vm_kept: false,
+            question_risk: None,
+        });
+        s.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
+        s
+    }
+
+    /// The repo's daily PR cap is counted in UTC days, so a new day is the whole reset: a colony
+    /// parked on it yesterday rejoins the queue, one parked today stays parked, and a park for any
+    /// other reason is not this pass's business.
+    #[tokio::test]
+    async fn a_repo_pr_rate_limited_colony_requeues_on_the_next_utc_day() {
+        let root = std::env::temp_dir().join(format!("colonizer-repo-pr-cap-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        *app.sessions.write().await = vec![
+            repo_pr_parked("capped-yesterday", crate::publish::REPO_PR_RATE_LIMIT_REASON, 1),
+            repo_pr_parked("capped-today", crate::publish::REPO_PR_RATE_LIMIT_REASON, 0),
+            repo_pr_parked("quota-yesterday", provider_quota::QUOTA_EXHAUSTED_REASON, 1),
+        ];
+        for id in ["capped-yesterday", "capped-today", "quota-yesterday"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        resume_repo_pr_rate_limit_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let resumed = sessions.iter().find(|s| s.id == "capped-yesterday").unwrap();
+        assert_eq!(resumed.status, SessionStatus::Queued, "a new UTC day requeues the colony");
+        assert!(
+            resumed.parked.is_none() && resumed.attention.is_none() && resumed.error.is_none(),
+            "the requeue reads like any other resume"
+        );
+        let today = sessions.iter().find(|s| s.id == "capped-today").unwrap();
+        assert_eq!(
+            today.status,
+            SessionStatus::Parked,
+            "the cap is still reached today, so the colony waits"
+        );
+        let quota = sessions.iter().find(|s| s.id == "quota-yesterday").unwrap();
+        assert_eq!(
+            quota.status,
+            SessionStatus::Parked,
+            "another park reason is the quota pass's to recover, not this one"
+        );
+        drop(sessions);
+        let log = std::fs::read_to_string(app.session_dir("capped-yesterday").join("harness.jsonl")).unwrap_or_default();
+        assert!(log.contains("a new UTC day"), "{log}");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2799,7 +2961,7 @@ mod tests {
         let due_at = Utc::now() - chrono::Duration::minutes(3);
         let mut sessions = vec![
             provider_retry_parked_colony("due", 1, due_at),
-            // Attempt 1's 2-minute step has not passed for this one.
+            // Attempt 1's 1-minute step has not passed for this one.
             provider_retry_parked_colony("pending", 1, Utc::now()),
         ];
         for i in 0..3 {

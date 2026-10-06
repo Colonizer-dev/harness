@@ -35,7 +35,7 @@ export function retentionSummary(plan: RetentionPlan): string {
   return `This would remove ${plan.count} ${plan.count === 1 ? "bundle" : "bundles"}, ${diskSize(plan.bytes)}`;
 }
 
-const ARCHIVE_FIELD = "w-16 rounded-md border border-border bg-transparent px-1.5 py-0.5 text-right font-mono text-[11px] text-text outline-none focus:border-border-strong";
+const ARCHIVE_FIELD = "w-16 rounded-md border border-border bg-transparent px-1.5 py-0.5 text-right font-mono text-meta text-text outline-none focus:border-border-strong";
 
 /** A field's number, or null when it is blank or not a usable non-negative number (the request sends null = unset). */
 const numeric = (value: string): number | null => {
@@ -95,7 +95,7 @@ function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) =
   };
 
   return (
-    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12.5px] text-muted">
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-small-lg text-muted">
       <span className="text-faint">Clean up now</span>
       <label className="flex items-center gap-1">
         keep
@@ -119,8 +119,8 @@ function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) =
       </Button>
       {stale && <span className="text-warn">The archive changed since the preview — preview again.</span>}
       {error && <span className="text-warn">{error}</span>}
-      {preview && !stale && <span className="font-mono text-[11px] text-faint">{retentionSummary(preview)}</span>}
-      <span className="w-full text-[11.5px] text-faint">
+      {preview && !stale && <span className="font-mono text-meta text-faint">{retentionSummary(preview)}</span>}
+      <span className="w-full text-meta-lg text-faint">
         Runs once, on request: Preview words the plan, Apply removes exactly what it listed. Automatic retention is the Disk cleanup loop's
         "Session archives" category (Loops).
       </span>
@@ -170,7 +170,7 @@ export function StoragePanelView({
   return (
     <section aria-label="Storage" className="flex flex-col overflow-hidden rounded-xl border border-border bg-panel">
       <div className="flex items-center justify-between border-b border-border px-3.5 py-2">
-        <span className="font-mono text-[10.5px] tracking-[0.12em] text-faint">STORAGE</span>
+        <span className="font-mono text-meta-sm tracking-[0.12em] text-faint">STORAGE</span>
         {onOpenSettings && (
           <button
             type="button"
@@ -183,7 +183,7 @@ export function StoragePanelView({
           </button>
         )}
       </div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3.5 py-2 font-mono text-[11px] text-faint">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3.5 py-2 font-mono text-meta text-faint">
         {categories.map((category) => (
           <span key={category.label} title={category.note ?? `bytes under ${category.label}`}>
             {category.label} {category.bytes != null ? diskSize(category.bytes) : "—"}
@@ -196,12 +196,12 @@ export function StoragePanelView({
         </span>
       </div>
       {summary.admission_paused && (
-        <div role="status" className="mx-3.5 mb-2 rounded-md border border-warn bg-warn-soft px-3 py-2 text-[12.5px] text-warn">
+        <div role="status" className="mx-3.5 mb-2 rounded-md border border-warn bg-warn-soft px-3 py-2 text-small-lg text-warn">
           Queue paused — low disk. Running colonies keep running; admission resumes when space
           returns. Unpushed work is never deleted.
         </div>
       )}
-      <div className="border-t border-border px-3.5 py-2 text-[12.5px] text-muted">
+      <div className="border-t border-border px-3.5 py-2 text-small-lg text-muted">
         {pr.colonies > 0 ? (
           <>
             {diskSize(pr.bytes)} reclaimable from {pr.colonies} {pr.colonies === 1 ? "colony" : "colonies"} that opened{" "}
@@ -218,28 +218,28 @@ export function StoragePanelView({
             type="button"
             onClick={() => onOpenColony(row.id)}
             title={`Open colony ${row.id}`}
-            className="cursor-pointer truncate font-mono text-[12px] font-semibold text-accent hover:underline"
+            className="cursor-pointer truncate font-mono text-small font-semibold text-accent hover:underline"
           >
             {row.id}
           </button>
-          <span className="font-mono text-[11px] text-faint">{SESSION_STATUS[row.status]?.label ?? row.status}</span>
-          {row.due && <span title="past the auto-reclaim retention window" className="font-mono text-[11px] text-warn">past retention</span>}
+          <span className="font-mono text-meta text-faint">{SESSION_STATUS[row.status]?.label ?? row.status}</span>
+          {row.due && <span title="past the auto-reclaim retention window" className="font-mono text-meta text-warn">past retention</span>}
           {row.pr_url && (
             <a
               href={row.pr_url}
               target="_blank"
               rel="noreferrer"
               title="the pull request this colony's work landed as"
-              className="inline-flex items-center gap-1 font-mono text-[11px] text-accent hover:underline"
+              className="inline-flex items-center gap-1 font-mono text-meta text-accent hover:underline"
             >
               PR <IconExternal size={11} />
             </a>
           )}
-          <span title={`last activity ${row.updated_at}`} className="font-mono text-[11px] text-faint">
+          <span title={`last activity ${row.updated_at}`} className="font-mono text-meta text-faint">
             {timeAgo(row.updated_at)}
           </span>
           <span className="ml-auto inline-flex items-center gap-2.5">
-            <span className="font-mono text-[11px] text-faint">{diskSize(row.bytes)}</span>
+            <span className="font-mono text-meta text-faint">{diskSize(row.bytes)}</span>
             <Button variant="danger" disabled={cleaningId !== null} onClick={() => onCleanup(row.id)}>
               {cleaningId === row.id ? <Spinner /> : <IconTrash size={13} />} Clean up
             </Button>
@@ -248,8 +248,8 @@ export function StoragePanelView({
       ))}
       {archive && (
         <div className="border-t border-border px-3.5 py-2">
-          <div className="flex flex-wrap items-center gap-x-3 font-mono text-[11px] text-faint">
-            <span className="text-[10.5px] tracking-[0.12em]">LOG ARCHIVE</span>
+          <div className="flex flex-wrap items-center gap-x-3 font-mono text-meta text-faint">
+            <span className="text-meta-sm tracking-[0.12em]">LOG ARCHIVE</span>
             <span title={`archived colony logs under ${archive.root}`}>
               {archive.count} {archive.count === 1 ? "bundle" : "bundles"} · {diskSize(archive.bytes)}
             </span>

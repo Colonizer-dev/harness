@@ -7,13 +7,20 @@
 // colonies" asks the mothership first (a dry run) how many colonies would restart, then restarts
 // them through the quota card's restart path. ⌘K's `/model` opens it too.
 //
+// Opening it also reads GET /api/models/plans — what is left on each plan in use, with a bar per
+// plan and a badge beside every role whose model's plan is out — and GET /api/models/profiles, the
+// saved role → model sets a "Use" loads into the draft for the chosen scope and Apply switches to.
+//
 // The words, the grouping and the request bodies are pure functions, so the tests (no DOM) pin them
 // directly and render the panel to static markup from given data.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, store, stored } from "../components/ui";
-import type { ModelAssignments, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, SwitchableModel } from "../types";
+import { untilWords } from "../resetTime";
+import type { ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
+import { PlanList } from "./ModelPlans";
+import { ProfileBar } from "./ModelProfiles";
 import { formatResetUtc } from "./ProviderQuotaCard";
 
 /** The window event that opens the switcher (⌘K's `/model`, or anything else that wants it). */
@@ -234,6 +241,58 @@ export function recentChoices(recent: readonly string[], currentMain: string): s
   return recent.filter((id) => id && id !== currentMain);
 }
 
+/**
+ * The scope's current selection as a profile's roles: each role's draft pick, else what it resolves
+ * to now. `""` is the module default (an inherited role with nothing set).
+ */
+export function selectionRoles(view: ScopeView, draft: ModelDraft): Record<string, string> {
+  const roles: Record<string, string> = {};
+  for (const row of view.rows) roles[row.role] = row.role in draft.roles ? (draft.roles[row.role] ?? "") : row.value;
+  return roles;
+}
+
+/**
+ * A profile loaded into the draft for a scope: each role the scope's module declares and the scope
+ * can set takes the profile's model (`""` clears it back to the inherited value); the rest are
+ * skipped and named, e.g. the install-wide roles under one org. Apply then switches as usual.
+ */
+export function profileDraft(
+  a: ModelAssignments,
+  scope: ModelScope,
+  draft: ModelDraft,
+  profile: Pick<ModelProfile, "roles">,
+): { draft: ModelDraft; applied: string[]; skipped: string[] } {
+  const view = scopeView(a, scope, draft.module);
+  let next: ModelDraft = { ...draft, roles: { ...draft.roles } };
+  const applied: string[] = [];
+  const skipped: string[] = [];
+  for (const [role, model] of Object.entries(profile.roles)) {
+    const row = view.rows.find((r) => r.role === role);
+    if (!row || !row.editable) {
+      skipped.push(row?.title ?? role);
+      continue;
+    }
+    next = pickRole(next, row, scope, model === "" ? INHERIT : model);
+    applied.push(role);
+  }
+  return { draft: next, applied, skipped };
+}
+
+/** The note after "Use": what loaded, what the scope could not take, and that Apply switches. */
+export function profileNote(name: string, applied: number, skipped: string[]): string {
+  const loaded = applied === 0 ? `Nothing in “${name}” applies here` : `Loaded “${name}” — Apply to switch`;
+  return skipped.length ? `${loaded}. Skipped (not settable here): ${skipped.join(", ")}.` : `${loaded}.`;
+}
+
+/** The badge beside a role whose model's plan is out: "BytePlus out · 2 h 10 min". */
+export function roleQuotaBadge(modelId: string, models: readonly SwitchableModel[], nowMs: number = Date.now()): { text: string; title: string } | null {
+  const m = models.find((x) => x.id === modelId);
+  if (!m?.out_of_quota) return null;
+  const name = m.provider === "anthropic" ? "Claude" : m.provider_name;
+  const left = m.reset_unix != null && m.reset_unix * 1000 > nowMs ? ` · ${untilWords(m.reset_unix, nowMs)}` : "";
+  return { text: `${name} out${left}`, title: `${name} plan exhausted: ${quotaUntil(m)}` };
+}
+
 type Stage = { step: "edit" } | { step: "counting" } | { step: "confirm"; affected: string[] } | { step: "applying" };
 
 export interface ModelSwitcherProps {
@@ -245,6 +304,8 @@ export interface ModelSwitcherProps {
   initialApply?: "new" | "running";
   initialStage?: Stage;
   initialRecent?: string[];
+  initialPlans?: PlanUsage[];
+  initialProfiles?: ModelProfile[];
   /** The cockpit's chosen workspace: the popover opens on it. */
   selectedOrg?: string | null;
 }
@@ -260,7 +321,24 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   const [stage, setStage] = useState<Stage>(props.initialStage ?? { step: "edit" });
   const [error, setError] = useState<string | null>(null);
   const [recent, setRecent] = useState<string[]>(() => props.initialRecent ?? loadRecent());
+  const [plans, setPlans] = useState<PlanUsage[] | null>(props.initialPlans ?? null);
+  const [plansError, setPlansError] = useState<string | null>(null);
+  const [profiles, setProfiles] = useState<ModelProfile[] | null>(props.initialProfiles ?? null);
+  const [profileMessage, setProfileMessage] = useState<{ text: string; tone: "info" | "err" } | null>(null);
+  const [profileBusy, setProfileBusy] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+
+  const loadExtras = useCallback(() => {
+    setPlansError(null);
+    api
+      .modelPlans()
+      .then((reply) => setPlans(reply.plans))
+      .catch((e: unknown) => setPlansError(errorMessage(e)));
+    api
+      .modelProfiles()
+      .then((reply) => setProfiles(reply.profiles))
+      .catch((e: unknown) => setProfileMessage({ text: errorMessage(e), tone: "err" }));
+  }, [api]);
 
   const load = useCallback(() => {
     api
@@ -271,14 +349,20 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
 
   useEffect(() => load(), [load]);
   useEffect(() => {
-    if (open) load();
-  }, [open, load]);
+    if (!open) return;
+    load();
+    loadExtras();
+    // The countdowns and balances move while the popover stays open: re-read them every 30 s.
+    const timer = window.setInterval(loadExtras, 30_000);
+    return () => window.clearInterval(timer);
+  }, [open, load, loadExtras]);
 
   const show = useCallback(() => {
     setOpen(true);
     setError(null);
     setStage({ step: "edit" });
     setDraft(EMPTY_DRAFT);
+    setProfileMessage(null);
     setScope(props.selectedOrg ? { kind: "org", org: props.selectedOrg } : INSTALL_SCOPE);
   }, [props.selectedOrg]);
 
@@ -340,6 +424,22 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
     }
   };
 
+  const profileAction = async (action: () => Promise<string>): Promise<boolean> => {
+    setProfileBusy(true);
+    try {
+      const said = await action();
+      setProfileMessage({ text: said, tone: "info" });
+      const reply = await api.modelProfiles();
+      setProfiles(reply.profiles);
+      return true;
+    } catch (e) {
+      setProfileMessage({ text: errorMessage(e), tone: "err" });
+      return false;
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
   if (!assignments) return null;
   const main = assignments.install.roles.find((r) => r.role === "model")?.value ?? "";
   const name = shortModelName(main, assignments.models);
@@ -354,11 +454,11 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
         aria-label={`Models · main model ${name}`}
         title="Switch models · /model in ⌘K"
         onClick={() => (open ? setOpen(false) : show())}
-        className="inline-flex h-8 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 text-[12.5px] font-medium text-text transition-colors hover:border-border-strong hover:bg-panel-2"
+        className="inline-flex h-8 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 text-small-lg font-medium text-text transition-colors hover:border-border-strong hover:bg-panel-2"
       >
         <span aria-hidden="true" data-health={tone} className={cx("size-1.5 shrink-0 rounded-full", TONE_DOT[tone])} />
         <span className="truncate">{name}</span>
-        <span aria-hidden="true" className="text-[10px] text-faint">▾</span>
+        <span aria-hidden="true" className="text-micro-lg text-faint">▾</span>
       </button>
       {open && (
         <ModelSwitcherPanel
@@ -385,6 +485,36 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onCancel={() => setStage({ step: "edit" })}
           onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, "new"))}
           onClose={() => setOpen(false)}
+          plans={plans}
+          plansError={plansError}
+          profiles={profiles}
+          profileNote={profileMessage}
+          profileBusy={profileBusy}
+          onUseProfile={(profile) => {
+            const loaded = profileDraft(assignments, scope, draft, profile);
+            setDraft(loaded.draft);
+            setStage({ step: "edit" });
+            setProfileMessage({ text: profileNote(profile.name, loaded.applied.length, loaded.skipped), tone: "info" });
+          }}
+          onSaveProfile={(name) =>
+            profileAction(async () => {
+              const view = scopeView(assignments, scope, draft.module);
+              const saved = await api.createModelProfile({ name, module: view.module, roles: selectionRoles(view, draft) });
+              return `Saved “${saved.name}” for every device.`;
+            })
+          }
+          onRenameProfile={(profile, name) =>
+            profileAction(async () => {
+              const renamed = await api.updateModelProfile(profile.id, { name });
+              return `Renamed to “${renamed.name}”.`;
+            })
+          }
+          onDeleteProfile={(profile) =>
+            profileAction(async () => {
+              await api.deleteModelProfile(profile.id);
+              return `Deleted “${profile.name}”.`;
+            })
+          }
         />
       )}
     </div>
@@ -407,6 +537,19 @@ export interface ModelSwitcherPanelProps {
   onCancel: () => void;
   onRecent: (id: string) => void;
   onClose: () => void;
+  /** Plan usage (GET /api/models/plans): null while loading. */
+  plans?: PlanUsage[] | null;
+  plansError?: string | null;
+  /** Saved profiles and starters (GET /api/models/profiles): null while loading. */
+  profiles?: ModelProfile[] | null;
+  profileNote?: { text: string; tone: "info" | "err" } | null;
+  profileBusy?: boolean;
+  onUseProfile?: (profile: ModelProfile) => void;
+  onSaveProfile?: (name: string) => Promise<boolean>;
+  onRenameProfile?: (profile: ModelProfile, name: string) => Promise<boolean>;
+  onDeleteProfile?: (profile: ModelProfile) => Promise<boolean>;
+  /** For the tests: the clock the countdowns read. */
+  nowMs?: number;
 }
 
 const SOURCE_TONE: Record<ModelSource, string> = {
@@ -423,7 +566,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
   const busy = stage.step === "counting" || stage.step === "applying";
   const mainNow = view.rows.find((r) => r.role === "model")?.value ?? "";
   const recent = recentChoices(p.recent, mainNow);
-  const select = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-[12.5px] text-text disabled:opacity-60";
+  const select = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-small-lg text-text disabled:opacity-60";
   const scopeValue = scope.kind === "org" ? `org:${scope.org}` : "install";
   const moduleValue = scope.kind === "org" && view.moduleSource === "install" ? "" : view.module;
   const blocked = a.modules.find((m) => m.id === view.module)?.blocked ?? null;
@@ -435,13 +578,15 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
       className="absolute right-0 top-10 z-50 flex max-h-[min(80vh,640px)] w-[380px] flex-col overflow-y-auto rounded-xl border border-border-strong bg-panel p-3 shadow-[0_16px_48px_rgb(0_0_0/0.35)] max-sm:fixed max-sm:inset-x-4 max-sm:top-14 max-sm:w-auto"
     >
       <div className="mb-2 flex items-center justify-between">
-        <h2 className="m-0 text-[13px] font-semibold text-text">Models</h2>
-        <button type="button" aria-label="Close" onClick={p.onClose} className="cursor-pointer border-0 bg-transparent text-[15px] text-faint hover:text-text">
+        <h2 className="m-0 text-body-sm font-semibold text-text">Models</h2>
+        <button type="button" aria-label="Close" onClick={p.onClose} className="cursor-pointer border-0 bg-transparent text-lead text-faint hover:text-text">
           ×
         </button>
       </div>
 
-      <label className="mb-2 block text-[11.5px] text-muted">
+      <PlanList plans={p.plans ?? null} error={p.plansError} nowMs={p.nowMs} />
+
+      <label className="mb-2 block text-meta-lg text-muted">
         Scope
         <select
           aria-label="scope"
@@ -459,7 +604,19 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
         </select>
       </label>
 
-      <label className="mb-1 block text-[11.5px] text-muted">
+      <ProfileBar
+        profiles={p.profiles ?? null}
+        note={p.profileNote?.text ?? null}
+        noteTone={p.profileNote?.tone}
+        busy={busy || p.profileBusy === true}
+        canSave={view.rows.length > 0}
+        onUse={(profile) => p.onUseProfile?.(profile)}
+        onSave={(name) => p.onSaveProfile?.(name) ?? Promise.resolve(false)}
+        onRename={(profile, name) => p.onRenameProfile?.(profile, name) ?? Promise.resolve(false)}
+        onDelete={(profile) => p.onDeleteProfile?.(profile) ?? Promise.resolve(false)}
+      />
+
+      <label className="mb-1 block text-meta-lg text-muted">
         Agent
         <select
           aria-label="agent module"
@@ -477,25 +634,34 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
           ))}
         </select>
       </label>
-      <p className="m-0 mb-2 text-[11px] text-faint">
+      <p className="m-0 mb-2 text-meta text-faint">
         {scope.kind === "org" ? (view.moduleSource === "org" ? "This org's own pick" : "From the install") : "The install's agent module"} · new colonies only
       </p>
-      {blocked && <p className="m-0 mb-2 text-[11.5px] text-warn">{blocked}</p>}
+      {blocked && <p className="m-0 mb-2 text-meta-lg text-warn">{blocked}</p>}
 
       <div role="group" aria-label="model roles" className="space-y-2">
         {view.rows.map((row) => {
           const value = rowSelectValue(row, scope, draft);
           const known = value === INHERIT || a.models.some((m) => m.id === value);
+          const effective = value === INHERIT ? row.value : value;
+          const badge = roleQuotaBadge(effective, a.models, p.nowMs);
           const inheritLabel =
             scope.kind === "org"
               ? `Use install default${row.source !== "org" && row.value ? ` (${shortModelName(row.value, a.models)})` : ""}`
               : "Module default";
           return (
             <div key={row.role} data-role={row.role}>
-              <div className="mb-0.5 flex items-center justify-between gap-2 text-[11.5px]">
-                <span className="text-muted">{row.title}</span>
-                <span className={cx("rounded-full px-1.5 py-px text-[10.5px]", SOURCE_TONE[row.source])}>
-                  {row.role in draft.roles ? "changed" : row.editable ? sourceLabel(row.source, scope) : "install-wide only"}
+              <div className="mb-0.5 flex items-center justify-between gap-2 text-meta-lg">
+                <span className="min-w-0 truncate text-muted">{row.title}</span>
+                <span className="flex shrink-0 items-center gap-1">
+                  {badge && (
+                    <span data-quota-badge title={badge.title} className="rounded-full bg-err-soft px-1.5 py-px text-meta-sm font-semibold text-err">
+                      {badge.text}
+                    </span>
+                  )}
+                  <span className={cx("rounded-full px-1.5 py-px text-meta-sm", SOURCE_TONE[row.source])}>
+                    {row.role in draft.roles ? "changed" : row.editable ? sourceLabel(row.source, scope) : "install-wide only"}
+                  </span>
                 </span>
               </div>
               <select
@@ -523,14 +689,14 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
       </div>
 
       <fieldset className="m-0 mt-3 border-0 p-0">
-        <legend className="mb-1 p-0 text-[11.5px] text-muted">Apply to</legend>
+        <legend className="mb-1 p-0 text-meta-lg text-muted">Apply to</legend>
         {(
           [
             ["new", "New colonies only"],
             ["running", "Also switch running colonies"],
           ] as const
         ).map(([mode, label]) => (
-          <label key={mode} className="mr-3 inline-flex items-center gap-1.5 text-[12.5px] text-text">
+          <label key={mode} className="mr-3 inline-flex items-center gap-1.5 text-small-lg text-text">
             <input type="radio" name="model-apply" value={mode} checked={p.apply === mode} disabled={busy} onChange={() => p.onApplyMode(mode)} />
             {label}
           </label>
@@ -538,19 +704,19 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
       </fieldset>
 
       {p.error && (
-        <p role="alert" className="m-0 mt-2 whitespace-pre-line text-[12px] text-err">
+        <p role="alert" className="m-0 mt-2 whitespace-pre-line text-small text-err">
           {p.error}
         </p>
       )}
 
       {stage.step === "confirm" ? (
         <div role="alertdialog" aria-label="confirm the switch" className="mt-3 rounded-lg border border-border bg-panel-2 p-2">
-          <p className="m-0 text-[12.5px] text-text">{confirmLine(stage.affected.length)}</p>
+          <p className="m-0 text-small-lg text-text">{confirmLine(stage.affected.length)}</p>
           <div className="mt-2 flex justify-end gap-2">
-            <button type="button" onClick={p.onCancel} className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:text-text">
+            <button type="button" onClick={p.onCancel} className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted hover:text-text">
               Cancel
             </button>
-            <button type="button" onClick={p.onConfirm} className="cursor-pointer rounded-md border-0 bg-accent px-2.5 py-1 text-[12.5px] font-semibold text-on-accent hover:brightness-110">
+            <button type="button" onClick={p.onConfirm} className="cursor-pointer rounded-md border-0 bg-accent px-2.5 py-1 text-small-lg font-semibold text-on-accent hover:brightness-110">
               {stage.affected.length ? `Switch and restart ${stage.affected.length}` : "Switch"}
             </button>
           </div>
@@ -561,7 +727,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
             type="button"
             disabled={!draftDirty(draft) || busy}
             onClick={p.onApply}
-            className="cursor-pointer rounded-md border-0 bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+            className="cursor-pointer rounded-md border-0 bg-accent px-3 py-1.5 text-small-lg font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {stage.step === "counting" ? "Counting colonies…" : stage.step === "applying" ? "Switching…" : "Apply"}
           </button>
@@ -570,7 +736,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
 
       {recent.length > 0 && (
         <div className="mt-3 border-t border-border pt-2">
-          <div className="mb-1 text-[11.5px] text-muted">Recent · main model, new colonies</div>
+          <div className="mb-1 text-meta-lg text-muted">Recent · main model, new colonies</div>
           <div className="flex flex-wrap gap-1.5">
             {recent.map((id) => {
               const m = a.models.find((x) => x.id === id);
@@ -581,7 +747,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
                   disabled={busy || m?.out_of_quota === true}
                   title={m?.out_of_quota ? quotaUntil(m) : `Switch the main model to ${id}`}
                   onClick={() => p.onRecent(id)}
-                  className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-[12px] text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-small text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span aria-hidden="true" className={cx("size-1.5 rounded-full", TONE_DOT[modelHealth(id, a.models)])} />
                   {shortModelName(id, a.models)}

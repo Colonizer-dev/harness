@@ -237,6 +237,34 @@ a maintainer's wishes. It is not an access control. Like the epic guard, it is b
 missing file or label is simply no signal, and only a config file that exists but cannot be read is
 logged and ignored.
 
+## A repo's daily PR cap
+
+Colonies open pull requests; a repository would rather be handed a few than be flooded. So a repo
+can have at most **5 pull requests opened per UTC day** — the cap every repo starts with, because
+most would rather colonies trickle changes in than have twenty land at once.
+
+The cap is checked when a pull request is about to be opened, not at launch, so a colony that runs
+out of room is the only thing delayed. The Create PR press and autopilot's verdict both go through
+the same check, so neither can outrun it, and a publish already in flight counts toward the cap —
+so two presses at once cannot both slip a sixth one through. A colony that hits the cap is
+**parked** with the reason `repo_pr_rate_limit`: it keeps its worktree, its branch and its work, the
+cockpit shows the park and when it resumes, and the queue requeues it on its own once the UTC day
+rolls over — nothing to press. A park releases the colony's slot and tears its microVM down, as
+every park does, unless your org sets `discard_vm = false` (or its worktree cannot be verified, in
+which case the machine is kept for the work in it).
+
+**How to change it.** Set `max_prs_per_day` under the `[colonizer]` table in `.colonizer/config.toml`
+at the repo's root, next to the `enabled` key above:
+
+```toml
+[colonizer]
+max_prs_per_day = 12   # a busier repo's own cap
+```
+
+`0` means uncapped, for a repo that wants none of this. A key that is missing means the default of
+5. Like the opt-out above, the lookup is best effort: if the config file cannot be read, the default
+applies.
+
 ## Exec policy: install, org and repo
 
 The exec policy is rules about the shell commands a colony's agent runs: deny, ask you, or allow
@@ -410,15 +438,27 @@ Some failures have no work behind them: a provider that blipped, a status that f
 parent that paused, a sign-in that expired. The mothership handles these itself rather than
 handing each one to you as a colony that needs you.
 
-- **A transient provider error is retried, not held** (issue #980). When an autopilot colony's turn
-  ends with an error the retry classifier calls transient — a gateway 5xx, 429 or 529, an
-  "unreachable" or overloaded provider, a timeout, a dropped or refused connection — the colony is
-  parked with reason `provider_retry` (worktree kept, parallel slot released) and continued
-  automatically after 2, 5, 10, then 20 minutes. Each attempt is a `provider_retry` line in the
-  colony log. Only when the attempts run out is the colony held as `autopilot_held`, and the message
-  then names the provider's own error. A turn that ends cleanly resets the count. The Watchdog
-  setting `provider_retry_max_attempts` (default 4, at most 4, `0` turns the retry off) sets the
-  budget. An error that is not transient still holds at once, as before.
+- **A transient provider error is retried, not held** (issues #980, #1093). When an autopilot
+  colony's turn ends with an error the retry classifier calls transient — a gateway 5xx, 429 or 529,
+  an "unreachable" or overloaded provider, a timeout, a dropped, reset or refused connection
+  (`UND_ERR_SOCKET`, `ECONNRESET`, the router's "the connection to Anthropic failed"), a gateway
+  restarting — the colony is parked with reason `provider_retry` (worktree kept, parallel slot
+  released) and continued automatically after 1, 5, then 15 minutes. Each attempt is a line in the
+  colony log. While a retry is pending the colony is not "waiting on you": its card reads "Stopped on
+  a model gateway error (502, connection to Anthropic): retrying in 4 min", with **Retry now**. Only
+  when the attempts run out is the colony held as `autopilot_held`, and the card then reads "Stopped
+  on repeated gateway errors", with **Retry** (which sends the agent on again) and **Open colony**. A
+  turn that ends cleanly resets the count. Two Watchdog settings shape it:
+  `provider_retry_max_attempts` (default 3, at most 10, `0` turns the retry off) and
+  `provider_retry_schedule_minutes` (default `1, 5, 15`; retries past the end of the list wait its
+  last entry). An error a retry cannot fix — a refused sign-in, permission or policy — still holds
+  at once, and the card names that error instead of saying the watchdog flagged the colony.
+- **A turn the mothership's own restart cut off is continued once** (issue #1093). A colony that
+  keeps running through a mothership restart loses its gateway socket, so its turn can end on a
+  gateway error while the mothership is down. When the restarted mothership reconnects, the first
+  turn end within 15 minutes that is such an error is continued once, straight away, without
+  parking the colony or spending a retry; the colony log says so. A later failure takes the
+  ordinary retry path.
 - **A stale "waiting for an answer" is reconciled** (issue #981). On every watchdog tick, a colony
   whose status is `waiting_for_answer` but which has no question actually pending is set back to
   `idle`, and the colony log says why. This runs even with the Watchdog module off. An answer to one

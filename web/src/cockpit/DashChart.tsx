@@ -37,8 +37,8 @@ export function Section({
     <section id={id} className="min-w-0">
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-5 gap-y-2">
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-2.5">
-          <h2 className="m-0 text-[14px] font-medium text-text">{title}</h2>
-          {meta != null && meta !== "" && <span className="text-[13px] text-faint">{meta}</span>}
+          <h2 className="m-0 text-body-lg font-medium text-text">{title}</h2>
+          {meta != null && meta !== "" && <span className="text-body-sm text-faint">{meta}</span>}
         </div>
         {right}
       </div>
@@ -59,7 +59,7 @@ export function Rules({ children, className, spill = false }: { children: ReactN
 /** Legend entries for a section heading: a small square per series. */
 export function DashLegend({ items }: { items: Array<{ label: string; color: string; icon?: ReactNode; dashed?: boolean }> }): ReactElement {
   return (
-    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[12.5px] text-muted">
+    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-small-lg text-muted">
       {items.map((item) => (
         <span key={item.label} className="inline-flex items-center gap-1.5">
           {item.icon ??
@@ -104,15 +104,15 @@ export function KpiTile({ label, value, valueNum, formatNum, delta, deltaTone, s
   const stroke = deltaTone === "bad" ? "var(--err)" : "var(--chart-1)";
   return (
     <div title={hint} className="flex min-w-0 flex-col gap-1.5 px-5 pb-4 pt-5 shadow-[-1px_0_0_var(--border),0_-1px_0_var(--border)]">
-      <div className="truncate text-[13px] text-muted">{label}</div>
+      <div className="truncate text-body-sm text-muted">{label}</div>
       <div className="flex min-w-0 items-baseline gap-2">
-        <span className="whitespace-nowrap text-[28px] font-semibold tabular-nums tracking-[-0.03em]">
+        <span className="whitespace-nowrap text-display-lg font-semibold tabular-nums tracking-[-0.03em]">
           {emptyNote != null ? "—" : valueNum != null ? <TweenedValue value={valueNum} format={formatNum} /> : value}
         </span>
-        {delta && emptyNote == null && <span className={`whitespace-nowrap text-[12.5px] ${DELTA_CLASS[deltaTone ?? "flat"]}`}>{delta}</span>}
+        {delta && emptyNote == null && <span className={`whitespace-nowrap text-small-lg ${DELTA_CLASS[deltaTone ?? "flat"]}`}>{delta}</span>}
       </div>
       {spark && emptyNote == null ? <Sparkline points={spark} color={stroke} /> : <div aria-hidden="true" className="mt-1 h-6" />}
-      <div className="line-clamp-2 text-[12.5px] text-faint [overflow-wrap:anywhere]">{emptyNote ?? sub ?? ""}</div>
+      <div className="line-clamp-2 text-small-lg text-faint [overflow-wrap:anywhere]">{emptyNote ?? sub ?? ""}</div>
     </div>
   );
 }
@@ -133,7 +133,7 @@ export function KpiStrip({ items, note }: { items: KpiDef[]; note?: string }): R
           ))}
         </div>
       </Rules>
-      {footnote && <div className="mt-2.5 text-[12.5px] text-faint [text-wrap:pretty]">{footnote}</div>}
+      {footnote && <div className="mt-2.5 text-small-lg text-faint [text-wrap:pretty]">{footnote}</div>}
     </div>
   );
 }
@@ -263,7 +263,7 @@ export function AreaChart({
   const totals = Array.from({ length: n }, (_, i) => series.reduce((t, s) => t + (s.values[i] ?? 0), 0));
   const top = Math.max(0, ...totals, ...(ghost ?? []).map((v) => v ?? 0));
   if (n === 0 || top <= 0) {
-    return <div className="py-10 text-center text-[12.5px] text-faint">{emptyNote}</div>;
+    return <div className="py-10 text-center text-small-lg text-faint">{emptyNote}</div>;
   }
   const step = niceStep(top / 4);
   const max = step * 4;
@@ -292,7 +292,7 @@ export function AreaChart({
 
   return (
     <div>
-      <div className="flex min-h-5 flex-wrap items-baseline gap-x-4 gap-y-1 text-[13px] tabular-nums text-muted">
+      <div className="flex min-h-5 flex-wrap items-baseline gap-x-4 gap-y-1 text-body-sm tabular-nums text-muted">
         <span className="font-medium text-text">{hv != null ? labels[hv] : readTitle}</span>
         {read.map((r) => (
           <span key={r.label} className="inline-flex items-center gap-1.5">
@@ -302,7 +302,7 @@ export function AreaChart({
         ))}
       </div>
       <div className="mt-4 flex gap-2.5">
-        <div aria-hidden="true" className="flex h-[var(--chart-h,200px)] w-[34px] shrink-0 flex-col justify-between text-right font-mono text-[11px] leading-none text-faint">
+        <div aria-hidden="true" className="flex h-[var(--chart-h,200px)] w-[34px] shrink-0 flex-col justify-between text-right font-mono text-meta leading-none text-faint">
           {[4, 3, 2, 1, 0].map((k) => (
             <span key={k}>{fmtY(step * k)}</span>
           ))}
@@ -390,7 +390,7 @@ export function AreaChart({
                   />
                 ))}
                 <div
-                  className="v3-pop pointer-events-none absolute top-0 z-[5] min-w-[160px] rounded-[10px] border border-border-strong px-[11px] py-[9px] text-[12.5px] shadow-[0_10px_30px_rgb(0_0_0/0.3)]"
+                  className="v3-pop pointer-events-none absolute top-0 z-[5] min-w-[160px] rounded-[10px] border border-border-strong px-[11px] py-[9px] text-small-lg shadow-[0_10px_30px_rgb(0_0_0/0.3)]"
                   style={{ left: `${X(hv)}%`, transform: X(hv) > 62 ? "translateX(calc(-100% - 14px))" : "translateX(14px)" }}
                 >
                   <div className="mb-1.5 font-medium">{labels[hv]}</div>
@@ -407,7 +407,7 @@ export function AreaChart({
               </>
             )}
           </div>
-          <div aria-hidden="true" className="relative mt-2 h-[18px] font-mono text-[11px] text-faint">
+          <div aria-hidden="true" className="relative mt-2 h-[18px] font-mono text-meta text-faint">
             {axis.map((label, i) =>
               i % every === 0 ? (
                 <span
@@ -493,19 +493,19 @@ export function ChartSection({
       <Rules spill className="flex flex-wrap">
         <div className="min-w-0 flex-[2_1_460px] py-5 pr-6">
           {typeof chart === "function" ? chart(hot) : chart}
-          {foot && <div className="mt-3 text-[12.5px] text-faint">{foot}</div>}
+          {foot && <div className="mt-3 text-small-lg text-faint">{foot}</div>}
         </div>
         <div className="flex min-w-0 flex-[1_1_240px] flex-col gap-0.5 py-5 pl-6 shadow-[-1px_0_0_var(--border)] @min-[1400px]:max-w-[480px]">
-          <div className="mb-2 text-[13px] text-muted">{sideTitle}</div>
+          <div className="mb-2 text-body-sm text-muted">{sideTitle}</div>
           {rows.map((row) => {
             const body = (
               <>
                 <span className="flex w-full items-center justify-between gap-3">
                   <span className="flex min-w-0 items-center gap-2">
                     {row.icon}
-                    <span className="min-w-0 truncate text-[13.5px]">{row.label}</span>
+                    <span className="min-w-0 truncate text-body">{row.label}</span>
                   </span>
-                  <span className="whitespace-nowrap text-[13px] tabular-nums">
+                  <span className="whitespace-nowrap text-body-sm tabular-nums">
                     {row.value} {row.note && <span className="text-faint">{row.note}</span>}
                   </span>
                 </span>
@@ -551,13 +551,13 @@ export function ChartSection({
             );
           })}
           {(limited || sideFoot) && (
-            <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-3 text-[12.5px] text-faint">
+            <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-3 text-small-lg text-faint">
               {limited && (
                 <button
                   type="button"
                   aria-expanded={all}
                   onClick={() => setAll((a) => !a)}
-                  className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:border-border-strong hover:text-text"
+                  className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted hover:border-border-strong hover:text-text"
                 >
                   {all ? "Show less" : `Show all ${side.length} workspaces`}
                 </button>
@@ -633,7 +633,7 @@ export function ShareBar({
 }): ReactElement {
   const total = segments.reduce((t, s) => t + s.value, 0);
   if (!(total > 0)) {
-    return <div className="py-2 text-center text-[12.5px] text-faint">no data in range</div>;
+    return <div className="py-2 text-center text-small-lg text-faint">no data in range</div>;
   }
   return (
     <div className="flex h-1 overflow-hidden rounded-sm bg-panel-3" role="img" aria-label={label}>
@@ -653,7 +653,7 @@ export function ShareBar({
 /** A small status note ("queued · stalled"): tone-coloured text, no pill. */
 export function StatusChip({ tone = "neutral", children }: { tone?: Tone; children: ReactNode }): ReactElement {
   return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[12.5px]" style={{ color: TONE_COLOR[tone] }}>
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-small-lg" style={{ color: TONE_COLOR[tone] }}>
       {children}
     </span>
   );
@@ -691,7 +691,7 @@ export function SegTabs({ items, label }: { items: SegTab[]; label: string }): R
           aria-pressed={t.active}
           title={t.title}
           onClick={t.onClick}
-          className={`cursor-pointer whitespace-nowrap rounded-md border-0 px-2.5 py-1 text-[12.5px] ${t.active ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+          className={`cursor-pointer whitespace-nowrap rounded-md border-0 px-2.5 py-1 text-small-lg ${t.active ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
         >
           {t.label}
           {t.count != null && <span className={t.urgent && t.count > 0 ? "text-warn" : "text-faint"}> {t.count}</span>}
@@ -709,7 +709,7 @@ export function PillTab({ active, label, count, title, onClick }: { active: bool
       aria-pressed={active}
       title={title}
       onClick={onClick}
-      className={`cursor-pointer whitespace-nowrap rounded-full border px-3 py-[5px] text-[13px] ${active ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text"}`}
+      className={`cursor-pointer whitespace-nowrap rounded-full border px-3 py-[5px] text-body-sm ${active ? "border-text bg-panel-3 text-text" : "border-border bg-transparent text-muted hover:text-text"}`}
     >
       {label} <span className="text-faint">{count}</span>
     </button>
@@ -740,7 +740,7 @@ export function RangePicker({
             type="button"
             aria-pressed={range === v}
             onClick={() => onRange(v)}
-            className={`cursor-pointer rounded-md border-0 px-3 py-[5px] text-[13px] ${range === v ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+            className={`cursor-pointer rounded-md border-0 px-3 py-[5px] text-body-sm ${range === v ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
           >
             {v}d
           </button>
@@ -752,7 +752,7 @@ export function RangePicker({
         aria-checked={compare}
         title={emptyPrevious ? `No activity in the previous ${range}d yet` : `compare to the previous ${range}d`}
         onClick={onCompare}
-        className={`relative z-[1] flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-transparent px-3 py-[7px] text-[13px] hover:border-border-strong ${compare ? "text-text" : "text-muted"}`}
+        className={`relative z-[1] flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-transparent px-3 py-[7px] text-body-sm hover:border-border-strong ${compare ? "text-text" : "text-muted"}`}
       >
         <Switch on={compare} />
         Compare
@@ -827,12 +827,12 @@ export function ColonyRow({
         type="button"
         onClick={() => onOpen?.(session.id)}
         title={session.issue_title || short}
-        className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-[13.5px] text-text hover:opacity-80"
+        className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-body text-text hover:opacity-80"
       >
-        {taskLine(session, short)} <span className="font-mono text-[12px] text-faint">{short}</span>
+        {taskLine(session, short)} <span className="font-mono text-small text-faint">{short}</span>
         <LoopBadge session={session} />
       </button>
-      <span className="flex min-w-0 items-center gap-1.5 text-[13px] text-faint">
+      <span className="flex min-w-0 items-center gap-1.5 text-body-sm text-faint">
         {showOrg && (
           <>
             <OrgTile org={orgOf(session)} avatar={orgAvatar} size={16} />
@@ -840,12 +840,12 @@ export function ColonyRow({
           </>
         )}
       </span>
-      <span className="flex min-w-0 flex-col items-start gap-1 text-[13px]">
+      <span className="flex min-w-0 flex-col items-start gap-1 text-body-sm">
         <span className="truncate" style={{ color: TONE_COLOR[meta.tone] }} title={parkLine ?? undefined}>
           {meta.label}
         </span>
         {session.placement && (
-          <span className="max-w-full truncate text-[11.5px] leading-tight text-faint" title={session.placement}>
+          <span className="max-w-full truncate text-meta-lg leading-tight text-faint" title={session.placement}>
             {session.placement}
           </span>
         )}
@@ -855,12 +855,12 @@ export function ColonyRow({
             target="_blank"
             rel="noopener"
             title={`Open the dev-server preview on guest port ${session.preview_port}`}
-            className="text-[11.5px] text-accent hover:underline"
+            className="text-meta-lg text-accent hover:underline"
           >
             preview
           </a>
         )}
-        {parkLine != null && <span className="text-[11.5px] leading-tight text-faint">{parkLine}</span>}
+        {parkLine != null && <span className="text-meta-lg leading-tight text-faint">{parkLine}</span>}
         {parkLine != null && onResume && (
           <button
             type="button"
@@ -872,14 +872,14 @@ export function ColonyRow({
               setResuming(true);
               void Promise.resolve(onResume(session.id)).finally(() => setResuming(false));
             }}
-            className="cursor-pointer rounded-md border border-border bg-panel px-2 py-0.5 text-[11.5px] font-medium text-text hover:border-border-strong hover:bg-panel-2 disabled:cursor-default disabled:opacity-50"
+            className="cursor-pointer rounded-md border border-border bg-panel px-2 py-0.5 text-meta-lg font-medium text-text hover:border-border-strong hover:bg-panel-2 disabled:cursor-default disabled:opacity-50"
           >
             {resuming ? "Resuming…" : "Resume"}
           </button>
         )}
       </span>
-      <span className="text-right text-[12.5px] text-faint">{age}</span>
-      <span className={`text-right text-[13px] tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-text"}`}>
+      <span className="text-right text-small-lg text-faint">{age}</span>
+      <span className={`text-right text-body-sm tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-text"}`}>
         <LiveCost value={sessionCost(session)} />
       </span>
     </div>

@@ -209,10 +209,10 @@ export function SecretsView({
   return (
     <Page width="readable" frameClassName="flex flex-col gap-8">
       <div>
-        <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
+        <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">
           Secrets
         </h1>
-        <p className="mt-2 text-[14px] text-muted">
+        <p className="mt-2 text-body-lg text-muted">
           {listing
             ? `${saved} saved · ${onFile.length} on file · values are never shown`
             : "Reading what this mothership holds…"}
@@ -251,7 +251,7 @@ export function SecretsView({
       {keychain && !keychain.available && (
         <div
           role="status"
-          className="rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-[13px] text-text"
+          className="rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-body-sm text-text"
         >
           <div className="font-medium">
             The keychain is not available on this host, so secrets are saved
@@ -269,7 +269,7 @@ export function SecretsView({
       {keychain?.available && onFile.length > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-panel-2 px-4 py-3">
           <GuideIcon name="lock" size={16} className="text-accent" />
-          <span className="min-w-0 flex-1 text-[13px]">
+          <span className="min-w-0 flex-1 text-body-sm">
             {onFile.length}{" "}
             {onFile.length === 1 ? "secret is" : "secrets are"} still saved as
             a plain file. Moving keeps the value and deletes the file.
@@ -284,9 +284,9 @@ export function SecretsView({
         </div>
       )}
 
-      {error && <p className="text-[13px] text-err">{error}</p>}
+      {error && <p className="text-body-sm text-err">{error}</p>}
       {!listing && !error && (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       )}
@@ -301,11 +301,11 @@ export function SecretsView({
               <div className="mb-2 flex items-baseline gap-2">
                 <h2
                   id={`secrets-${group.id}`}
-                  className="m-0 text-[15px] font-semibold"
+                  className="m-0 text-lead font-semibold"
                 >
                   {group.title}
                 </h2>
-                <span className="text-[12.5px] text-faint">{group.hint}</span>
+                <span className="text-small-lg text-faint">{group.hint}</span>
               </div>
               {group.id === "colonies" && (
                 <ColonySecretForm
@@ -403,10 +403,10 @@ function SecretItem({
           <GuideIcon name={ICON[row.icon] ?? "lock"} size={17} />
         </span>
         <div className="min-w-0 flex-1 basis-48">
-          <div className="truncate text-[13.5px] font-medium text-text">
+          <div className="truncate text-body font-medium text-text">
             {row.label}
           </div>
-          <div className="truncate text-[12px] text-muted">
+          <div className="truncate text-small text-muted">
             {row.used_by}
             {row.env && (
               <span className="text-faint">
@@ -419,7 +419,7 @@ function SecretItem({
         </div>
         <span
           className={cx(
-            "inline-flex max-w-[260px] shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11.5px]",
+            "inline-flex max-w-[260px] shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-meta-lg",
             access.tone,
           )}
           title="What colonies get of this secret"
@@ -429,13 +429,13 @@ function SecretItem({
         </span>
         <span
           className={cx(
-            "shrink-0 rounded-full border px-2 py-0.5 text-[11.5px]",
+            "shrink-0 rounded-full border px-2 py-0.5 text-meta-lg",
             loc.tone,
           )}
         >
           {loc.label}
         </span>
-        <span className="w-24 shrink-0 text-right text-[12px] tabular-nums text-faint">
+        <span className="w-24 shrink-0 text-right text-small tabular-nums text-faint">
           {row.updated_at ? timeAgo(row.updated_at) : "—"}
         </span>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -488,7 +488,7 @@ function SecretItem({
               Remove
             </Button>
           ) : (
-            <span className="text-[12px] text-faint">
+            <span className="text-small text-faint">
               {row.env
                 ? `Set ${row.env} on the mothership`
                 : "Managed by the CLI"}
@@ -602,7 +602,7 @@ function ColonySecretForm({
         }
       }}
     >
-      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+      <label className="flex flex-col gap-1 text-small-lg text-muted">
         Variable name
         <input
           value={env}
@@ -613,7 +613,7 @@ function ColonySecretForm({
           aria-invalid={env !== "" && !envOk}
         />
       </label>
-      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+      <label className="flex flex-col gap-1 text-small-lg text-muted">
         Allowed hosts
         <input
           value={hosts}
@@ -623,7 +623,7 @@ function ColonySecretForm({
           className={cx(inputClass, "font-mono")}
         />
       </label>
-      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+      <label className="flex flex-col gap-1 text-small-lg text-muted">
         Given to
         <span className="flex gap-2">
           <select
@@ -647,7 +647,7 @@ function ColonySecretForm({
           )}
         </span>
       </label>
-      <label className="flex flex-col gap-1 text-[12.5px] text-muted">
+      <label className="flex flex-col gap-1 text-small-lg text-muted">
         Value
         <input
           type="password"
@@ -658,7 +658,7 @@ function ColonySecretForm({
           className={cx(inputClass, "font-mono")}
         />
       </label>
-      <p className="m-0 text-[12px] text-muted sm:col-span-2">
+      <p className="m-0 text-small text-muted sm:col-span-2">
         The colony sees the variable name and a placeholder. The real value is sent only on TLS
         requests to the hosts above, and the colony is told not to print or store it.
       </p>

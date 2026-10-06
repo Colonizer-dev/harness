@@ -96,7 +96,8 @@ Commands the agent asks permission for (ACP `tool_call` `kind` `execute`) meet t
 policy as Claude Code's Bash commands
 ([#471](https://github.com/Colonizer-dev/harness/issues/471)): the built-in default layer, the
 `exec_policy` setting (`COLONIZER_EXEC_POLICY`; when it is empty, the install's `exec_policy`
-setting is carried over here) and `.colonizer/exec-policy.json` in the worktree.
+setting is carried over here), the org's own layer (`COLONIZER_EXEC_POLICY_ORG`, the org's
+`exec_policy` setting) and `.colonizer/exec-policy.json` in the worktree.
 `execpolicy.mjs` is a byte-for-byte copy of Claude Code's, kept identical by a test. A
 `deny` answers the request with the agent's `reject_once` option (any other `reject*` kind, else
 `cancelled`) and no question is shown; an `allow` answers with `allow_once` (any other `allow*`

@@ -80,7 +80,7 @@ export function ImageThumbs({ notes, imageUrl, onOpen }: { notes: readonly ChatA
 
 export function AttachmentPill({ note, onRemove, preview, detail }: { note: ChatAttachmentNote; onRemove?: () => void; preview?: string; detail?: string }): ReactElement {
   return (
-    <span className="inline-flex max-w-[260px] items-center gap-1.5 rounded-lg border border-border bg-panel-2/70 py-0.5 pl-1.5 pr-1 text-[11.5px] text-muted">
+    <span className="inline-flex max-w-[260px] items-center gap-1.5 rounded-lg border border-border bg-panel-2/70 py-0.5 pl-1.5 pr-1 text-meta-lg text-muted">
       {preview ? <img src={preview} alt="" className="size-5 rounded object-cover" /> : <span className="text-faint">{KIND_ICON[note.kind] ?? <IconFile size={12} />}</span>}
       <span className="truncate" title={note.label}>
         {note.label}
@@ -175,7 +175,7 @@ export const MessageRow = memo(function MessageRow({
     >
       <div className="pt-0.5">
         {user ? (
-          <span aria-hidden="true" className="grid size-7 place-items-center rounded-full bg-accent-soft text-[11px] font-semibold text-accent">
+          <span aria-hidden="true" className="grid size-7 place-items-center rounded-full bg-accent-soft text-meta font-semibold text-accent">
             You
           </span>
         ) : ant ? (
@@ -187,7 +187,7 @@ export const MessageRow = memo(function MessageRow({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="mb-0.5 flex items-center gap-2 text-[12px]">
+        <div className="mb-0.5 flex items-center gap-2 text-small">
           {!user && ant && (
             <span className="font-semibold" style={{ color: ANT_COLORS[ant.kind].body }}>
               {ant.ant}
@@ -221,10 +221,10 @@ export const MessageRow = memo(function MessageRow({
               }}
               rows={Math.min(12, Math.max(3, editing.split("\n").length))}
               aria-label="edit message"
-              className="scroll-thin w-full resize-y rounded-xl border border-accent bg-panel px-3 py-2 text-[14px] text-text outline-none"
+              className="scroll-thin w-full resize-y rounded-xl border border-accent bg-panel px-3 py-2 text-body-lg text-text outline-none"
             />
             <div className="flex items-center gap-2">
-              <span className="flex-1 text-[11.5px] text-faint">Sends in a new branch; this conversation stays as it is.</span>
+              <span className="flex-1 text-meta-lg text-faint">Sends in a new branch; this conversation stays as it is.</span>
               <Button size="sm" onClick={() => setEditing(null)}>
                 Cancel
               </Button>
@@ -242,15 +242,15 @@ export const MessageRow = memo(function MessageRow({
             </div>
           </div>
         ) : user ? (
-          <p className="m-0 whitespace-pre-wrap break-words text-[14.5px] leading-[1.65] text-text">{m.content}</p>
+          <p className="m-0 whitespace-pre-wrap break-words text-lead-sm leading-[1.65] text-text">{m.content}</p>
         ) : (
           <ChatMarkdown text={m.content || (m.error ? "" : "…")} onOpenFile={onOpenFile} />
         )}
-        {m.error && <p className="m-0 mt-1.5 rounded-lg border border-err/30 bg-err/5 px-2.5 py-1.5 text-[12.5px] text-err">{m.error}</p>}
-        {note && <p className="m-0 mt-1.5 text-[12px] italic text-warn">Your note: {note}</p>}
+        {m.error && <p className="m-0 mt-1.5 rounded-lg border border-err/30 bg-err/5 px-2.5 py-1.5 text-small-lg text-err">{m.error}</p>}
+        {note && <p className="m-0 mt-1.5 text-small italic text-warn">Your note: {note}</p>}
 
         {editing === null && (
-          <div className="mt-1 flex min-h-7 items-center gap-0.5 text-[11.5px] text-faint">
+          <div className="mt-1 flex min-h-7 items-center gap-0.5 text-meta-lg text-faint">
             {m.candidate ? (
               <Button size="sm" variant="primary" onClick={() => onAction(m, { kind: "pick" })}>
                 Use this reply
@@ -274,7 +274,7 @@ export const MessageRow = memo(function MessageRow({
                       aria-label="Regenerate with another model"
                       title="Regenerate with another model"
                       onClick={() => setRegenOpen(true)}
-                      className="cursor-pointer rounded-md border-0 bg-transparent px-1 text-[11px] text-faint hover:bg-panel-2 hover:text-text"
+                      className="cursor-pointer rounded-md border-0 bg-transparent px-1 text-meta text-faint hover:bg-panel-2 hover:text-text"
                     >
                       ▾
                     </button>
@@ -318,14 +318,14 @@ export const MessageRow = memo(function MessageRow({
                     </ActionButton>
                     <Popover open={noteOpen} onClose={() => setNoteOpen(false)} anchor={noteButton} width={320} label="Note on this reply">
                       <div className="flex flex-col gap-2 p-3">
-                        <span className="text-[12.5px] text-muted">What was wrong? Kept on this mothership, for you.</span>
+                        <span className="text-small-lg text-muted">What was wrong? Kept on this mothership, for you.</span>
                         <textarea
                           value={noteDraft}
                           autoFocus
                           onChange={(e) => setNoteDraft(e.target.value)}
                           rows={3}
                           aria-label="note"
-                          className="resize-y rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none focus:border-accent"
+                          className="resize-y rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none focus:border-accent"
                         />
                         <div className="flex justify-end gap-2">
                           {note && (
@@ -393,7 +393,7 @@ export function StreamingRow({ model, text, models, ant = null }: { model: strin
         {ant ? <AntMark ant={ant} motion="active" mark={mark} model={model} /> : <ProviderMark preset={mark.preset} name={mark.name} size="row" />}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="mb-0.5 text-[12px] font-semibold text-text">
+        <div className="mb-0.5 text-small font-semibold text-text">
           {ant && <span style={{ color: ANT_COLORS[ant.kind].body }}>{ant.ant} </span>}
           <span className={ant ? "font-normal text-muted" : undefined}>{shortModel(model)}</span>
         </div>

@@ -113,8 +113,8 @@ export function Sidebar({
       <div className="flex items-center gap-2.5 px-4 pb-2 pt-3.5">
         <LogoMark />
         <div className="min-w-0 flex-1 leading-tight">
-          <div className="truncate text-[15px] font-semibold">Colonizer</div>
-          <div className="truncate text-[11.5px] text-faint">Colonize your backlog.</div>
+          <div className="truncate text-lead font-semibold">Colonizer</div>
+          <div className="truncate text-meta-lg text-faint">Colonize your backlog.</div>
         </div>
         {api.mock && <Badge tone="warn">Mock data</Badge>}
         <button
@@ -201,7 +201,7 @@ export function Sidebar({
           onClick={onOpenMemory}
           aria-current={view === "memory" ? "page" : undefined}
           className={cx(
-            "flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13.5px] font-medium transition-colors",
+            "flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body font-medium transition-colors",
             view === "memory" ? "bg-accent-soft text-text" : "text-muted hover:bg-panel-2 hover:text-text",
           )}
         >
@@ -209,7 +209,7 @@ export function Sidebar({
           <span className="min-w-0 flex-1">Memory</span>
           {pendingMemory > 0 && (
             <span
-              className="rounded-full bg-accent px-1.5 text-[11.5px] font-semibold leading-5 text-on-accent"
+              className="rounded-full bg-accent px-1.5 text-meta-lg font-semibold leading-5 text-on-accent"
               aria-label={`${pendingMemory} waiting for review`}
             >
               {pendingMemory}
@@ -229,7 +229,7 @@ function SidebarTab({ active, onClick, children }: { active: boolean; onClick: (
       aria-selected={active}
       onClick={onClick}
       className={cx(
-        "flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors",
+        "flex cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-body-sm font-medium transition-colors",
         active ? "bg-panel text-text shadow-sm" : "text-muted hover:text-text",
       )}
     >
@@ -311,8 +311,8 @@ function OrgSwitcher({
             <IconOrg size={12} />
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{current?.org ?? selected ?? "All orgs"}</span>
-        {counts && <span className="shrink-0 text-[11.5px] text-info">{counts}</span>}
+        <span className="min-w-0 flex-1 truncate text-body font-medium">{current?.org ?? selected ?? "All orgs"}</span>
+        {counts && <span className="shrink-0 text-meta-lg text-info">{counts}</span>}
         <IconChevronDown size={14} className={cx("shrink-0 text-faint transition-transform", open && "rotate-180")} />
       </button>
       {open && (
@@ -353,7 +353,7 @@ function OrgSwitcher({
                 type="button"
                 onClick={() => setShowHidden((v) => !v)}
                 aria-expanded={showHidden}
-                className="flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-muted hover:bg-panel-2 hover:text-text"
+                className="flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-small text-muted hover:bg-panel-2 hover:text-text"
               >
                 <IconChevron size={12} className={cx("shrink-0 transition-transform", showHidden && "rotate-90")} />
                 Hidden ({hidden.length})
@@ -363,7 +363,7 @@ function OrgSwitcher({
                   {hidden.map((e) => (
                     <li key={e.org} className="flex items-center gap-2 rounded-lg px-2.5 py-1.5">
                       <Avatar name={e.org} src={e.avatar} size={20} rounded="md" />
-                      <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{e.org}</span>
+                      <span className="min-w-0 flex-1 truncate text-body-sm text-muted">{e.org}</span>
                       <Badge tone="neutral">Off</Badge>
                       <button
                         type="button"
@@ -379,7 +379,7 @@ function OrgSwitcher({
                       </button>
                     </li>
                   ))}
-                  <li className="px-2.5 pt-0.5 text-[11.5px] text-faint">Switched off in their settings; their colonies stay listed.</li>
+                  <li className="px-2.5 pt-0.5 text-meta-lg text-faint">Switched off in their settings; their colonies stay listed.</li>
                 </ul>
               )}
             </div>
@@ -422,8 +422,8 @@ function OrgOption({
       >
         {icon ?? <Avatar name={label} src={avatar} size={20} rounded="md" />}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13.5px] font-medium">{label}</span>
-          <span className="block text-[11.5px] text-faint">
+          <span className="block truncate text-body font-medium">{label}</span>
+          <span className="block text-meta-lg text-faint">
             {meta}
             {pending > 0 && ` · ${pending} to review`}
           </span>
@@ -455,7 +455,7 @@ export function storageDot(
 function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | null; error: boolean; onOpenSettings: () => void }) {
   if (!status) {
     return (
-      <div className="mx-4 flex items-center gap-2 py-1 text-[12px] text-muted">
+      <div className="mx-4 flex items-center gap-2 py-1 text-small text-muted">
         {error ? (
           <>
             <span className="size-1.5 rounded-full bg-err" /> Mothership unreachable
@@ -487,7 +487,7 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
       type="button"
       onClick={onOpenSettings}
       title="Connections and modules"
-      className="mx-3 flex cursor-pointer flex-wrap gap-x-3 gap-y-1 rounded-lg px-1 py-1 text-left text-[12px] text-muted hover:text-text"
+      className="mx-3 flex cursor-pointer flex-wrap gap-x-3 gap-y-1 rounded-lg px-1 py-1 text-left text-small text-muted hover:text-text"
     >
       {items.map((item) => (
         <span key={item.label} className="inline-flex items-center gap-1.5">
@@ -513,7 +513,7 @@ function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpe
   if (needing.length === 0) return null;
   return (
     <div role="region" aria-label={needsYouLabel(needing.length)} className="mx-3 mt-2 rounded-xl border border-warn/40 bg-warn-soft px-2 py-2">
-      <p className="px-1.5 text-[11.5px] font-semibold text-warn">{needsYouLabel(needing.length)}</p>
+      <p className="px-1.5 text-meta-lg font-semibold text-warn">{needsYouLabel(needing.length)}</p>
       <ul className="mt-0.5">
         {needing.map((session) => (
           <li key={session.id}>
@@ -522,7 +522,7 @@ function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpe
               onClick={() => onOpenColony(session)}
               className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left hover:bg-panel-2"
             >
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted">{colonyLabel(session.repo, session.issue)}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-small text-muted">{colonyLabel(session.repo, session.issue)}</span>
               <StatusBadge session={session} />
             </button>
           </li>
@@ -550,7 +550,7 @@ function PullIndicator({ pull }: { pull: ImagePull }) {
       <button
         type="button"
         onClick={() => void pull.start()}
-        className="mx-4 flex w-[calc(100%-2rem)] cursor-pointer items-center gap-2 py-1 text-left text-[12px] text-err [overflow-wrap:anywhere]"
+        className="mx-4 flex w-[calc(100%-2rem)] cursor-pointer items-center gap-2 py-1 text-left text-small text-err [overflow-wrap:anywhere]"
       >
         <span className="size-1.5 shrink-0 rounded-full bg-err" />
         <span className="min-w-0 flex-1">
@@ -561,7 +561,7 @@ function PullIndicator({ pull }: { pull: ImagePull }) {
   }
   if (status?.state !== "pulling") return null;
   return (
-    <div className="mx-4 flex items-center gap-2 py-1 text-[12px] text-muted" role="status">
+    <div className="mx-4 flex items-center gap-2 py-1 text-small text-muted" role="status">
       <Spinner className="size-3" />
       <span className="min-w-0 truncate">
         Downloading <span className="font-mono">{status.image}</span> · {seconds(status.started_at)}s
@@ -594,7 +594,7 @@ function SessionList({
   }
   if (sessions.length === 0) {
     return (
-      <div className="px-3 py-10 text-center text-[13px] text-muted">
+      <div className="px-3 py-10 text-center text-body-sm text-muted">
         {org ? `No colonies in ${org} yet.` : "No colonies yet."}
         <div className="mt-3">
           <Button size="sm" onClick={onNew}>
@@ -621,18 +621,18 @@ function SessionList({
               )}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="min-w-0 truncate font-mono text-[12px] text-muted">
+                <span className="min-w-0 truncate font-mono text-small text-muted">
                   {session.repo}
                   {session.issue != null && `#${session.issue}`}
                 </span>
                 <StatusBadge session={session} />
               </div>
-              <div className="mt-1 line-clamp-2 text-[13.5px] font-medium leading-snug">
+              <div className="mt-1 line-clamp-2 text-body font-medium leading-snug">
                 {session.issue_title || (session.issue != null ? `Issue #${session.issue}` : "Open colony")}
               </div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-faint">
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-small text-faint">
                 {!org && (
-                  <span className="rounded-md bg-panel-3 px-1.5 text-[11px] font-medium leading-[18px] text-muted">{orgOf(session)}</span>
+                  <span className="rounded-md bg-panel-3 px-1.5 text-meta font-medium leading-[18px] text-muted">{orgOf(session)}</span>
                 )}
                 <span>{timeAgo(session.updated_at)}</span>
                 {sessionSpend != null && <span>· {formatCost(sessionSpend)}</span>}
@@ -650,7 +650,7 @@ function SessionList({
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
-  return <div className="px-1 text-[11.5px] font-semibold uppercase tracking-wide text-faint">{children}</div>;
+  return <div className="px-1 text-meta-lg font-semibold uppercase tracking-wide text-faint">{children}</div>;
 }
 
 /** The colony launcher: pick a repository, pick issues, send them out. The cockpit's launch view renders it too. */
@@ -764,7 +764,7 @@ export function NewSession({
   }
   if (!githubConnected) {
     return (
-      <div className="px-3 py-10 text-center text-[13px] text-muted">
+      <div className="px-3 py-10 text-center text-body-sm text-muted">
         Connect GitHub to browse issues.
         <div className="mt-3">
           <Button size="sm" onClick={onOpenSettings}>
@@ -881,7 +881,7 @@ export function NewSession({
       <SectionLabel>{org ? `Repository in ${org}` : "Repository"}</SectionLabel>
       {!showPicker && activeRepo ? (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-panel py-1.5 pl-3 pr-1.5">
-          <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{activeRepo}</span>
+          <span className="min-w-0 flex-1 truncate text-body font-medium">{activeRepo}</span>
           <Button size="sm" variant="ghost" onClick={() => setPicking(true)}>
             Change
           </Button>
@@ -899,9 +899,9 @@ export function NewSession({
             />
           </div>
           <div className="scroll-thin max-h-80 overflow-y-auto rounded-lg border border-border bg-panel">
-            {reposError && <p className="px-3 py-3 text-[13px] text-err">{reposError}</p>}
+            {reposError && <p className="px-3 py-3 text-body-sm text-err">{reposError}</p>}
             {!repos && !reposError && (
-              <div className="flex items-center gap-2 px-3 py-3 text-[13px] text-muted">
+              <div className="flex items-center gap-2 px-3 py-3 text-body-sm text-muted">
                 <Spinner /> Loading repositories…
               </div>
             )}
@@ -917,13 +917,13 @@ export function NewSession({
               />
             ))}
             {repos && matchingRepos.length === 0 && !typedRepo && (
-              <p className="px-3 py-3 text-[13px] text-muted">
+              <p className="px-3 py-3 text-body-sm text-muted">
                 {org && orgRepos.length === 0 ? `No repositories in ${org}` : "No matching repositories"}
               </p>
             )}
           </div>
           {activeRepo && (
-            <button type="button" className="cursor-pointer px-1 text-[12.5px] text-muted hover:text-text" onClick={() => setPicking(false)}>
+            <button type="button" className="cursor-pointer px-1 text-small-lg text-muted hover:text-text" onClick={() => setPicking(false)}>
               Keep {activeRepo}
             </button>
           )}
@@ -935,21 +935,21 @@ export function NewSession({
           <OpenSessionRow repo={activeRepo} autopilotDefault={autopilotDefault} onCreated={onCreated} />
           <div className="flex items-center justify-between px-1 pt-3">
             <SectionLabel>Open issues</SectionLabel>
-            {issues && <span className="text-[11.5px] text-faint">{issues.length}</span>}
+            {issues && <span className="text-meta-lg text-faint">{issues.length}</span>}
           </div>
           {selected.size > 0 && (
             <div className="space-y-1.5 rounded-xl border border-border bg-panel px-2.5 py-2 shadow-[var(--shadow)]">
               <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 text-[12.5px]">
+                <span className="min-w-0 flex-1 text-small-lg">
                   {selected.size} selected
-                  <span className="block text-[11.5px] text-faint">one colony each, queued past the limit</span>
+                  <span className="block text-meta-lg text-faint">one colony each, queued past the limit</span>
                   {heldSelected.length > 0 && (
-                    <span className="block text-[11.5px] text-warn">
+                    <span className="block text-meta-lg text-warn">
                       {heldSelected.length} already held — skipped unless Allow duplicate or Wait behind the holder
                     </span>
                   )}
                   {epicSelected.length > 0 && (
-                    <span className="block text-[11.5px] text-warn">
+                    <span className="block text-meta-lg text-warn">
                       {epicSelected.length} {epicSelected.length === 1 ? "epic" : "epics"} — skipped; launch its sub-issues instead
                     </span>
                   )}
@@ -961,7 +961,7 @@ export function NewSession({
                   {launching ? <Spinner /> : <IconPlus size={14} />} Launch {launchCount}
                 </Button>
               </div>
-              <label className="flex cursor-pointer items-center gap-2 px-0.5 text-[12px] text-muted">
+              <label className="flex cursor-pointer items-center gap-2 px-0.5 text-small text-muted">
                 <input
                   type="checkbox"
                   checked={allowDuplicate}
@@ -971,7 +971,7 @@ export function NewSession({
                 />
                 Allow duplicate — start even where another colony already holds the issue
               </label>
-              <label className="flex cursor-pointer items-center gap-2 px-0.5 text-[12px] text-muted">
+              <label className="flex cursor-pointer items-center gap-2 px-0.5 text-small text-muted">
                 <input
                   type="checkbox"
                   checked={queueBehind}
@@ -982,7 +982,7 @@ export function NewSession({
                 Wait behind the holder — queue for the issue and start when it frees up
               </label>
               {blockedByDuplicate && !allowDuplicate && (
-                <p className="px-0.5 text-[12px] text-warn">
+                <p className="px-0.5 text-small text-warn">
                   A colony already holds one of these issues — check Allow duplicate to launch anyway.
                 </p>
               )}
@@ -1000,13 +1000,13 @@ export function NewSession({
               className={inputClass}
             />
           )}
-          {issuesError && <p className="px-2 text-[13px] text-err">{issuesError}</p>}
+          {issuesError && <p className="px-2 text-body-sm text-err">{issuesError}</p>}
           {!issues && !issuesError && (
-            <div className="flex items-center gap-2 px-2 py-3 text-[13px] text-muted">
+            <div className="flex items-center gap-2 px-2 py-3 text-body-sm text-muted">
               <Spinner /> Loading issues…
             </div>
           )}
-          {issues && issues.length === 0 && <p className="px-2 py-6 text-center text-[13px] text-muted">No open issues</p>}
+          {issues && issues.length === 0 && <p className="px-2 py-6 text-center text-body-sm text-muted">No open issues</p>}
           <ul className="space-y-1">
             {matchingIssues.map((issue) => (
               <IssueRow
@@ -1074,8 +1074,8 @@ function OpenSessionRow({
       >
         <IconPlus size={15} className="shrink-0" />
         <span className="min-w-0 flex-1">
-          <span className="block text-[13.5px] font-medium text-text">Launch colony</span>
-          <span className="block text-[12px]">A microVM on this repository — no issue needed</span>
+          <span className="block text-body font-medium text-text">Launch colony</span>
+          <span className="block text-small">A microVM on this repository — no issue needed</span>
         </span>
       </button>
     );
@@ -1084,7 +1084,7 @@ function OpenSessionRow({
   return (
     <div className="space-y-2.5 rounded-xl border border-border bg-panel p-3 shadow-[var(--shadow)]">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[13.5px] font-medium">New colony on this repository</span>
+        <span className="text-body font-medium">New colony on this repository</span>
         <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
           Cancel
         </Button>
@@ -1096,7 +1096,7 @@ function OpenSessionRow({
         autoFocus
         placeholder="What should the agent work on? Optional — you can also just chat."
         aria-label="Colony instructions"
-        className={cx(inputClass, "resize-y text-[13px]")}
+        className={cx(inputClass, "resize-y text-body-sm")}
       />
       <AutopilotSwitch checked={autopilot ?? autopilotDefault} onChange={setAutopilot} />
       <Button variant="primary" className="w-full" disabled={starting} onClick={start}>
@@ -1113,8 +1113,8 @@ function RepoRow({ name, meta, onClick }: { name: string; meta: string; onClick:
       onClick={onClick}
       className="block w-full cursor-pointer border-b border-border px-3 py-2 text-left last:border-b-0 hover:bg-panel-2"
     >
-      <span className="block truncate text-[13.5px] font-medium">{name}</span>
-      <span className="block text-[12px] text-faint">{meta}</span>
+      <span className="block truncate text-body font-medium">{name}</span>
+      <span className="block text-small text-faint">{meta}</span>
     </button>
   );
 }
@@ -1220,10 +1220,10 @@ function IssueRow({
           aria-expanded={open}
           className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 py-2.5 pl-2 pr-3 text-left"
         >
-          <span className="mt-px shrink-0 font-mono text-[12px] text-faint">#{issue.number}</span>
+          <span className="mt-px shrink-0 font-mono text-small text-faint">#{issue.number}</span>
           <span className="min-w-0 flex-1">
-            <span className="block text-[13.5px] font-medium leading-snug">{issue.title}</span>
-            <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-faint">
+            <span className="block text-body font-medium leading-snug">{issue.title}</span>
+            <span className="mt-1 flex flex-wrap items-center gap-1.5 text-meta-lg text-faint">
               {issue.labels.slice(0, 3).map((label) => (
                 <span key={label.name} className="inline-flex items-center gap-1 rounded-full border border-border px-1.5 leading-4 text-muted">
                   <span
@@ -1252,13 +1252,13 @@ function IssueRow({
       {open && (
         <div className="space-y-3 border-t border-border px-3 pb-3 pt-2.5">
           {issue.body?.trim() && (
-            <p className="line-clamp-6 whitespace-pre-wrap text-[13px] text-muted [overflow-wrap:anywhere]">{issue.body.trim()}</p>
+            <p className="line-clamp-6 whitespace-pre-wrap text-body-sm text-muted [overflow-wrap:anywhere]">{issue.body.trim()}</p>
           )}
-          <a href={issue.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[12.5px] text-accent hover:underline">
+          <a href={issue.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-small-lg text-accent hover:underline">
             View on GitHub <IconExternal size={12} />
           </a>
           {holder && (
-            <p className="rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-2 text-[12.5px] text-muted">
+            <p className="rounded-lg border border-warn/40 bg-warn-soft px-2.5 py-2 text-small-lg text-muted">
               Already held by{" "}
               {onOpenColony ? (
                 <button
@@ -1290,7 +1290,7 @@ function IssueRow({
           )}
           {(holder || launchError || refusal) && (
             <>
-              <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+              <label className="flex cursor-pointer items-center gap-2 text-small-lg text-muted">
                 <input
                   type="checkbox"
                   checked={allowDuplicate}
@@ -1301,7 +1301,7 @@ function IssueRow({
                 Allow duplicate on #{issue.number}
               </label>
               {holder && (
-                <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+                <label className="flex cursor-pointer items-center gap-2 text-small-lg text-muted">
                   <input
                     type="checkbox"
                     checked={queueBehind}
@@ -1315,7 +1315,7 @@ function IssueRow({
             </>
           )}
           {epic && (
-            <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
+            <label className="flex cursor-pointer items-center gap-2 text-small-lg text-muted">
               <input
                 type="checkbox"
                 checked={allowEpic}
@@ -1326,14 +1326,14 @@ function IssueRow({
               Start on the epic anyway — its sub-issues are usually the work
             </label>
           )}
-          {launchError && <p className="text-[12.5px] text-err [overflow-wrap:anywhere]">{launchError}</p>}
+          {launchError && <p className="text-small-lg text-err [overflow-wrap:anywhere]">{launchError}</p>}
           <textarea
             value={instructions}
             onChange={(e) => setInstructions(e.target.value)}
             rows={3}
             placeholder="Extra instructions for the agent (optional)"
             aria-label="Extra instructions"
-            className={cx(inputClass, "resize-y text-[13px]")}
+            className={cx(inputClass, "resize-y text-body-sm")}
           />
           <AutopilotSwitch checked={autopilot ?? autopilotDefault} onChange={setAutopilot} />
           <Button variant="primary" className="w-full" disabled={starting} onClick={start}>
@@ -1349,7 +1349,7 @@ function AutopilotSwitch({ checked, onChange }: { checked: boolean; onChange: (c
   return (
     <div className="flex items-start gap-2.5">
       <Switch checked={checked} onChange={onChange} label="Autopilot" />
-      <span className="text-[12.5px] leading-snug">
+      <span className="text-small-lg leading-snug">
         <span className="font-medium text-text">Autopilot</span>
         <span className="block text-muted">Open the PR automatically when the agent finishes and writes its PR description.</span>
       </span>

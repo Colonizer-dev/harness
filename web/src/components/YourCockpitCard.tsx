@@ -88,19 +88,19 @@ export function YourCockpitCard({
 
   return (
     <div className="space-y-4">
-      <p className="text-[12.5px] text-muted">
+      <p className="text-small-lg text-muted">
         The sign-in link in your terminal works once; this address doesn&rsquo;t change and has no password in it, so bookmark it.
       </p>
       {addresses.length === 0 ? (
-        <p className="text-[12.5px] text-muted">This cockpit has no address to offer yet.</p>
+        <p className="text-small-lg text-muted">This cockpit has no address to offer yet.</p>
       ) : (
         <ul className="space-y-3">
           {addresses.map((one) => (
             <li key={one.kind} className="rounded-xl border border-border px-3.5 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className="text-[12.5px] font-semibold">{one.label}</div>
-                  <code className="block break-all font-mono text-[12.5px] text-muted select-all" aria-label={`${one.label} address`}>
+                  <div className="text-small-lg font-semibold">{one.label}</div>
+                  <code className="block break-all font-mono text-small-lg text-muted select-all" aria-label={`${one.label} address`}>
                     {one.url}
                   </code>
                 </div>
@@ -112,14 +112,14 @@ export function YourCockpitCard({
                 </Button>
               </div>
               {one.note && (
-                <p role="note" className="mt-2 text-[12px] text-warn">
+                <p role="note" className="mt-2 text-small text-warn">
                   {one.note}
                 </p>
               )}
               {showQr === one.kind && (
                 <div className="mt-3">
                   <QrCode text={one.url} />
-                  <p className="mt-1.5 text-[12px] text-faint">Point another device&rsquo;s camera here to open this address.</p>
+                  <p className="mt-1.5 text-small text-faint">Point another device&rsquo;s camera here to open this address.</p>
                 </div>
               )}
             </li>
@@ -127,7 +127,7 @@ export function YourCockpitCard({
         </ul>
       )}
       {gap && (
-        <p role="note" className="rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-[12.5px] text-warn">
+        <p role="note" className="rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-small-lg text-warn">
           {gap}
         </p>
       )}

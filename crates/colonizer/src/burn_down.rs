@@ -2,8 +2,11 @@
 //! bug-hunt colonies — paced across the window, not burst — until the estimated allowance is down
 //! to whatever reserve the operator set, then stops. Every auto-launched colony is tagged
 //! `origin: "burn_down"`, and `POST /api/burn-down/stop` kills the scheduler and every colony it
-//! launched. The decision is a pure function so it can be tested with a fixed clock; the loop
-//! around it runs once a minute, in the watchdog's shape.
+//! launched. Each colony's built-in prompt names one of red-team's eight general focus areas
+//! ([#212](https://github.com/Colonizer-dev/harness/issues/212), §6.7), rotating per repository as
+//! it accumulates hunts so the areas are covered across windows; no red-team run is started. The
+//! decision is a pure function so it can be tested with a fixed clock; the loop around it runs once
+//! a minute, in the watchdog's shape.
 //!
 //! The budget is a *measured* window, not a quota the login exposes: `claude_login.rs` only ever
 //! surfaces the subscription's identity, never its usage limits or reset schedules, so the only
@@ -15,6 +18,7 @@ use crate::{
     config::{ModuleChoice, ModulesConfig, setting, setting_f64, setting_str, setting_u64},
     lifecycle, modules,
     protocol::Origin,
+    redteam,
     sessions::{self, Session, SessionStatus},
 };
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -70,8 +74,9 @@ impl Cfg {
     }
 }
 
-/// What the scheduler measures off the session list, pure and cheap.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What the scheduler measures off the session list, pure and cheap: a few passes over the sessions
+/// and a scan of the configured repositories, no IO.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Observed {
     /// Sum of `total_cost_usd` over sessions created since the last reset anchor.
     pub spent: f64,
@@ -79,6 +84,11 @@ pub struct Observed {
     pub launches_done: usize,
     /// Of those, how many are currently live (holding slots).
     pub live: usize,
+    /// How many hunt colonies each configured repository has had *ever* — every `burn_down` session
+    /// on it still in the session list, not just this window's. Indexed like `Cfg::repos`; a
+    /// repository with no entry has had none. This is what the focus rotates over, so the cycle
+    /// carries across windows instead of restarting at the first area every week.
+    pub repo_hunts: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +102,8 @@ pub enum Decision {
     Hold,
     Launch {
         repo_index: usize,
+        /// Index into [`redteam::FOCUSES`]: the one focus area this colony's built-in prompt covers.
+        focus_index: usize,
     },
 }
 
@@ -166,7 +178,10 @@ fn launches_needed(cfg: &Cfg, spent: f64) -> u64 {
 /// Pace rule: over the whole window the operator wants `ceiling(remaining / spend_per_colony)`
 /// launches. By fraction `f` of the window, `floor(f × needed)` should have gone out already; a
 /// tick that has fallen behind launches another (round-robining over the repositories), one that
-/// is on pace or ahead holds. `max_live` caps how many may be out at once on top of that.
+/// is on pace or ahead holds. `max_live` caps how many may be out at once on top of that. The focus
+/// is the launch's turn in [`redteam::FOCUSES`], counted from how many hunts that repository has
+/// already had across every window, so each repository cycles through all eight areas week after
+/// week instead of every colony hunting the same thing.
 pub fn decide(cfg: &Cfg, now: DateTime<Utc>, obs: &Observed) -> Decision {
     if !cfg.enabled {
         return Decision::Disabled;
@@ -207,22 +222,38 @@ pub fn decide(cfg: &Cfg, now: DateTime<Utc>, obs: &Observed) -> Decision {
     if obs.live >= cfg.max_live {
         return Decision::Hold;
     }
+    let repo_index = obs.launches_done % cfg.repos.len();
     Decision::Launch {
-        repo_index: obs.launches_done % cfg.repos.len(),
+        repo_index,
+        // How many hunts this repository has already had, so the next one works a different area.
+        // A repository with no entry has had none, which is focus zero.
+        focus_index: obs.repo_hunts.get(repo_index).copied().unwrap_or(0) % redteam::FOCUSES.len(),
     }
 }
 
 /// The measured state the scheduler and `status` both work from.
 fn observed(cfg: &Cfg, now: DateTime<Utc>, sessions: &[Session]) -> Observed {
+    // Every burn-down colony the session list still remembers, whatever window it was launched in,
+    // bucketed onto the configured repositories in one pass — a session on a repository burn-down no
+    // longer hunts is not counted, and a repository repeated in `repos` is counted in each of its
+    // places, exactly as the round robin visits it twice.
+    let is_hunt = |s: &Session| s.origin.as_deref() == Some("burn_down");
+    let mut repo_hunts = vec![0usize; cfg.repos.len()];
+    for s in sessions.iter().filter(|s| is_hunt(s)) {
+        for (n, repo) in cfg.repos.iter().enumerate() {
+            if &s.repo == repo {
+                repo_hunts[n] += 1;
+            }
+        }
+    }
     let Some((next_reset, prev_reset)) = resets(cfg, now) else {
         return Observed {
-            spent: 0.0,
-            launches_done: 0,
-            live: 0,
+            repo_hunts,
+            ..Observed::default()
         };
     };
     let window_start = next_reset - Duration::hours(cfg.lead_hours as i64);
-    let launched = |s: &Session| s.origin.as_deref() == Some("burn_down") && s.created_at >= window_start;
+    let launched = |s: &Session| is_hunt(s) && s.created_at >= window_start;
     Observed {
         spent: sessions
             .iter()
@@ -231,6 +262,7 @@ fn observed(cfg: &Cfg, now: DateTime<Utc>, sessions: &[Session]) -> Observed {
             .sum(),
         launches_done: sessions.iter().filter(|s| launched(s)).count(),
         live: sessions.iter().filter(|s| launched(s) && s.status.is_live()).count(),
+        repo_hunts,
     }
 }
 
@@ -304,8 +336,8 @@ fn cfg_and_instructions(modules: &ModulesConfig, agents: &[modules::AgentModule]
 }
 
 /// The prompt a burn-down colony runs on when `instructions` is empty: find real bugs, verify
-/// them before filing, keep pull requests small. It is generic on purpose — the dedicated
-/// red-team runs of issue #212 are still being built; hunter colonies adopt those when they land.
+/// them before filing, keep pull requests small. The generic half is this; [`builtin_hunt_prompt`]
+/// appends the launch's focus area.
 const BUILTIN_HUNT_PROMPT: &str = "\
 This colony is on a burn-down run: find real bugs in this repository and fix them, one small \
 pull request per verified bug. Look for correctness defects, security gaps, crashes, data loss, \
@@ -315,20 +347,35 @@ pass. Do not file style preferences or hypothetical issues as defects. Keep ever
 small and focused on one confirmed bug, with a pull request description stating what is wrong, \
 how you verified it, and what you changed.";
 
+/// What a burn-down colony is called, and what the built-in one appends its focus to. The focus
+/// rides on the title only when the built-in prompt is the one running: a colony on the operator's
+/// own instructions is not hunting a listed area, so the title stays plain.
+const HUNT_TITLE: &str = "Burn-down hunt";
+
+/// The built-in prompt plus the one area this launch concentrates on. The focus comes from
+/// [`redteam::FOCUSES`], so a run of burn-down colonies divides the same eight areas a red-team
+/// swarm (§6.7) would; nothing but the vocabulary is shared — a burn-down launch never starts a
+/// red-team run.
+fn builtin_hunt_prompt(focus: &str) -> String {
+    format!("{BUILTIN_HUNT_PROMPT}\n\nConcentrate this hunt on {focus}; other burn-down colonies cover the other areas.")
+}
+
 /// The launch body the scheduler submits to the ordinary admission path. Pure so a test can pin the
 /// contract: `origin: "burn_down"` marks the colony for the group stop, `autopilot` lets it run by
 /// itself, `allow_duplicate` lets it land on a repository issue another colony is already on, and an
-/// empty `instructions` falls back to the built-in hunt prompt. Built as JSON because `NewSession`'s
-/// fields are private to the sessions module; only the scheduler fills in `origin`.
-fn launch_body(repo: &str, instructions: &str) -> Value {
-    let prompt = if instructions.trim().is_empty() {
-        BUILTIN_HUNT_PROMPT.to_string()
+/// empty `instructions` falls back to the built-in hunt prompt narrowed to `focus` (custom
+/// instructions replace it whole — the operator's words, and no focus named anywhere, since the
+/// colony is not hunting the built-in one). Built as JSON because `NewSession`'s fields are private
+/// to the sessions module; only the scheduler fills in `origin`.
+fn launch_body(repo: &str, instructions: &str, focus: &str) -> Value {
+    let (prompt, title) = if instructions.trim().is_empty() {
+        (builtin_hunt_prompt(focus), format!("{HUNT_TITLE}: {focus}"))
     } else {
-        instructions.to_string()
+        (instructions.to_string(), HUNT_TITLE.to_string())
     };
     json!({
         "repo": repo,
-        "title": "Burn-down hunt",
+        "title": title,
         "instructions": prompt,
         "autopilot": true,
         "allow_duplicate": true,
@@ -338,13 +385,21 @@ fn launch_body(repo: &str, instructions: &str) -> Value {
 
 /// Runs the launch body through the ordinary `sessions::create` admission path, so a burn-down
 /// colony queues like any other past the parallel limit and needs nothing special to boot.
-async fn launch(app: &Shared, repo: &str, instructions: &str) {
-    let new_session = match serde_json::from_value::<sessions::NewSession>(launch_body(repo, instructions)) {
+async fn launch(app: &Shared, repo: &str, instructions: &str, focus: &str) {
+    let body = launch_body(repo, instructions, focus);
+    let new_session = match serde_json::from_value::<sessions::NewSession>(body) {
         Ok(n) => n,
         Err(e) => {
             eprintln!("burn_down: could not build a launch body: {e:#}");
             return;
         }
+    };
+    // The focus is only worth saying when the built-in prompt is the one running; a colony on the
+    // operator's own instructions is hunting whatever those say, and the log says what it is.
+    let area = if instructions.trim().is_empty() {
+        format!(" for {focus}")
+    } else {
+        String::new()
     };
     match sessions::create(State(app.clone()), None, Json(new_session)).await {
         Ok(Json(session)) => {
@@ -352,7 +407,7 @@ async fn launch(app: &Shared, repo: &str, instructions: &str) {
                 Origin::BurnDown,
                 &session.id,
                 "info",
-                format!("burn-down: launched a bug-hunt colony on {repo}"),
+                format!("burn-down: launched a bug-hunt colony on {repo}{area}"),
             )
             .await;
         }
@@ -372,9 +427,9 @@ async fn tick_once(app: &Shared) {
     let now = Utc::now();
     let obs = observed(&cfg, now, &sessions);
     match decide(&cfg, now, &obs) {
-        Decision::Launch { repo_index } => {
+        Decision::Launch { repo_index, focus_index } => {
             if let Some(repo) = cfg.repos.get(repo_index).cloned() {
-                launch(app, &repo, &instructions).await;
+                launch(app, &repo, &instructions, redteam::FOCUSES[focus_index]).await;
             }
         }
         Decision::Disabled
@@ -480,11 +535,10 @@ mod tests {
     use crate::sessions::tests::colony;
     use axum::response::IntoResponse;
 
-    const NO_OBS: Observed = Observed {
-        spent: 0.0,
-        launches_done: 0,
-        live: 0,
-    };
+    /// Nothing measured yet: a fresh window, and no repository with any history.
+    fn no_obs() -> Observed {
+        Observed::default()
+    }
 
     /// The weekly reset in the tests: Monday 00:00 UTC (`2026-08-31` is a Monday).
     fn cfg() -> Cfg {
@@ -514,14 +568,14 @@ mod tests {
     fn a_disabled_module_never_launches() {
         let mut c = cfg();
         c.enabled = false;
-        assert_eq!(decide(&c, monday(12, 0), &NO_OBS), Decision::Disabled);
+        assert_eq!(decide(&c, monday(12, 0), &no_obs()), Decision::Disabled);
     }
 
     #[test]
     fn empty_repos_means_unconfigured() {
         let mut c = cfg();
         c.repos = Vec::new();
-        assert_eq!(decide(&c, monday(12, 0), &NO_OBS), Decision::Unconfigured);
+        assert_eq!(decide(&c, monday(12, 0), &no_obs()), Decision::Unconfigured);
     }
 
     #[test]
@@ -529,7 +583,7 @@ mod tests {
         let mut c = cfg();
         c.allowance_usd = None;
         let inside = monday(0, 0) - Duration::days(1); // Sunday: inside the window
-        let d = decide(&c, inside, &NO_OBS);
+        let d = decide(&c, inside, &no_obs());
         assert_eq!(d, Decision::UnknownAllowance);
     }
 
@@ -537,17 +591,17 @@ mod tests {
     fn the_window_arithmetic_is_exclusive_at_both_edges() {
         // Friday, before the window opens (Saturday 00:00) → outside.
         let friday = monday(0, 0) - Duration::days(3) + Duration::hours(12);
-        assert_eq!(decide(&cfg(), friday, &NO_OBS), Decision::OutsideWindow);
+        assert_eq!(decide(&cfg(), friday, &no_obs()), Decision::OutsideWindow);
         // The day after the reset → outside.
         let tuesday = monday(0, 0) + Duration::days(1) + Duration::hours(6);
-        assert_eq!(decide(&cfg(), tuesday, &NO_OBS), Decision::OutsideWindow);
+        assert_eq!(decide(&cfg(), tuesday, &no_obs()), Decision::OutsideWindow);
         // Saturday noon is inside, and not excused from the pace rule.
         let saturday = monday(0, 0) - Duration::days(2);
-        assert!(matches!(decide(&cfg(), saturday, &NO_OBS), Decision::Hold));
+        assert!(matches!(decide(&cfg(), saturday, &no_obs()), Decision::Hold));
         // A schedule that never resolves opens no window at all.
         let mut c = cfg();
         c.reset_time = (u32::MAX, u32::MAX);
-        assert_eq!(decide(&c, monday(12, 0), &NO_OBS), Decision::OutsideWindow);
+        assert_eq!(decide(&c, monday(12, 0), &no_obs()), Decision::OutsideWindow);
     }
 
     /// A hand-edited or restored modules.json is read as-is — `validate_settings` only guards the
@@ -605,7 +659,7 @@ mod tests {
         );
         // The instant the reset lands: the window has closed, but the *next* reset is still known.
         assert_eq!(
-            decide(&cfg(), monday(0, 0), &NO_OBS),
+            decide(&cfg(), monday(0, 0), &no_obs()),
             Decision::OutsideWindow,
             "now == reset closes the window"
         );
@@ -626,12 +680,14 @@ mod tests {
             spent: 95.0,
             launches_done: 0,
             live: 0,
+            ..Observed::default()
         };
         assert_eq!(decide(&cfg(), now, &at_reserve), Decision::AtReserve);
         let below = Observed {
             spent: 96.0,
             launches_done: 0,
             live: 0,
+            ..Observed::default()
         };
         assert_eq!(decide(&cfg(), now, &below), Decision::AtReserve);
     }
@@ -641,7 +697,7 @@ mod tests {
         // Window Sat 00:00 → Mon 00:00 (48 h). With allowance 100, reserve 5, $25 per colony,
         // 4 launches are needed; at the exact start the pace says hold so the window opens calm.
         let start = monday(0, 0) - Duration::days(2);
-        assert_eq!(decide(&cfg(), start, &NO_OBS), Decision::Hold);
+        assert_eq!(decide(&cfg(), start, &no_obs()), Decision::Hold);
         // A quarter in, one launch should have gone out: none is behind, one is on pace.
         let quarter = start + Duration::hours(12);
         assert!(matches!(
@@ -651,10 +707,11 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 0,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
-            Decision::Launch { repo_index: 0 }
+            Decision::Launch { repo_index: 0, .. }
         ));
         assert_eq!(
             decide(
@@ -663,7 +720,8 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 1,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
             Decision::Hold
@@ -677,10 +735,11 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 0,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
-            Decision::Launch { repo_index: 0 }
+            Decision::Launch { repo_index: 0, .. }
         ));
         assert!(matches!(
             decide(
@@ -689,10 +748,11 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 1,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
-            Decision::Launch { repo_index: 1 }
+            Decision::Launch { repo_index: 1, .. }
         ));
         assert_eq!(
             decide(
@@ -701,7 +761,8 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 2,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
             Decision::Hold
@@ -719,7 +780,8 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 0,
-                    live: 2
+                    live: 2,
+                    ..Observed::default()
                 }
             ),
             Decision::Hold
@@ -731,7 +793,8 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 0,
-                    live: 1
+                    live: 1,
+                    ..Observed::default()
                 }
             ),
             Decision::Launch { .. }
@@ -748,10 +811,11 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 0,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
-            Decision::Launch { repo_index: 0 }
+            Decision::Launch { repo_index: 0, .. }
         ));
         assert!(matches!(
             decide(
@@ -760,10 +824,11 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 1,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
-            Decision::Launch { repo_index: 1 }
+            Decision::Launch { repo_index: 1, .. }
         ));
         let mut three = cfg();
         three.repos = vec!["a/x".into(), "b/y".into(), "c/z".into()];
@@ -776,10 +841,11 @@ mod tests {
                 &Observed {
                     spent: 0.0,
                     launches_done: 2,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
-            Decision::Launch { repo_index: 2 }
+            Decision::Launch { repo_index: 2, .. }
         ));
     }
 
@@ -788,7 +854,7 @@ mod tests {
         let mut c = cfg();
         c.spend_usd_per_colony = 0.0;
         let halfway = monday(0, 0) - Duration::days(1);
-        assert_eq!(decide(&c, halfway, &NO_OBS), Decision::Hold);
+        assert_eq!(decide(&c, halfway, &no_obs()), Decision::Hold);
     }
 
     #[test]
@@ -796,23 +862,25 @@ mod tests {
         // The repo is the round-robin pick `decide` hands the launcher: at three quarters of the
         // window with two of four launches out, the next goes to repo index 2.
         let halfway = monday(0, 0) - Duration::days(1);
-        let Decision::Launch { repo_index } = decide(
+        let Decision::Launch { repo_index, focus_index } = decide(
             &cfg(),
             halfway,
             &Observed {
                 spent: 0.0,
                 launches_done: 1,
                 live: 0,
+                ..Observed::default()
             },
         ) else {
             panic!("the tick must be launching");
         };
         let repo = &cfg().repos[repo_index];
         assert_eq!(repo_index, 1);
+        let focus = redteam::FOCUSES[focus_index];
 
-        let plain = launch_body(repo, "");
+        let plain = launch_body(repo, "", focus);
         assert_eq!(plain["repo"], "acme/lib");
-        assert_eq!(plain["title"], "Burn-down hunt");
+        assert_eq!(plain["title"], format!("Burn-down hunt: {focus}"));
         assert_eq!(plain["autopilot"], true, "a scheduler-launched colony runs by itself");
         assert_eq!(
             plain["allow_duplicate"], true,
@@ -820,18 +888,93 @@ mod tests {
         );
         assert_eq!(plain["origin"], "burn_down", "the group stop and the UI label rely on this");
         assert_eq!(
-            plain["instructions"], BUILTIN_HUNT_PROMPT,
-            "empty instructions get the built-in bug-hunt prompt"
+            plain["instructions"],
+            builtin_hunt_prompt(focus),
+            "empty instructions get the built-in hunt prompt, narrowed to this launch's focus"
+        );
+        assert!(
+            plain["instructions"].as_str().unwrap().starts_with(BUILTIN_HUNT_PROMPT),
+            "the generic hunt guidance is still the whole first half of the prompt"
         );
         assert!(
             serde_json::from_value::<sessions::NewSession>(plain).is_ok(),
             "the body must round-trip through the admission shape"
         );
 
-        let custom = launch_body("acme/app", "Hunt for memory leaks only");
+        // Custom instructions replace the prompt whole: the operator's words, and no focus named
+        // anywhere — the title is plain, because the colony is not hunting a listed area.
+        let custom = launch_body("acme/app", "Hunt for memory leaks only", focus);
         assert_eq!(custom["instructions"], "Hunt for memory leaks only");
-        // A whitespace-only prompt counts as unset.
-        assert_eq!(launch_body("acme/app", "  \n")["instructions"], BUILTIN_HUNT_PROMPT);
+        assert_eq!(custom["title"], HUNT_TITLE, "a custom hunt is not narrowed to an area");
+        // A whitespace-only prompt counts as unset, focus and all.
+        let blank = launch_body("acme/app", "  \n", focus);
+        assert_eq!(blank["instructions"], builtin_hunt_prompt(focus));
+        assert_eq!(blank["title"], format!("{HUNT_TITLE}: {focus}"));
+    }
+
+    /// The focus a built-in prompt names, read back out of the prompt rather than off the decision,
+    /// so the test pins what the colony is actually told.
+    fn focus_of(body: &Value) -> &'static str {
+        let prompt = body["instructions"].as_str().expect("a string prompt");
+        redteam::FOCUSES
+            .iter()
+            .copied()
+            .find(|f| prompt.contains(&format!("hunt on {f};")))
+            .expect("the built-in prompt names one of the focus areas")
+    }
+
+    /// The focus is a repository's own count of hunts, not the window's, so the cycle carries over
+    /// from one week to the next instead of restarting at the first area every time.
+    #[test]
+    fn the_focus_rotates_per_repository_and_keeps_going_across_windows() {
+        // A plan big enough that the pace never blocks a launch, so what is measured is the focus
+        // and not the burner.
+        let mut c = cfg();
+        c.allowance_usd = Some(1000.0);
+        c.reserve_pct = 0.0;
+        c.spend_usd_per_colony = 1.0;
+        let mut history: Vec<Session> = Vec::new();
+        let mut per_repo: Vec<Vec<&str>> = (0..c.repos.len()).map(|_| Vec::new()).collect();
+        // Two consecutive windows, the earlier one first: `week` 0 opens nine days before the
+        // reset, week 1 the window that is closing.
+        for week in 0..2u64 {
+            let window_start = monday(0, 0) - Duration::days(2 + 7 * (1 - week as i64));
+            let now = window_start + Duration::hours(6);
+            for nth in 0..redteam::FOCUSES.len() {
+                let obs = observed(&c, now, &history);
+                let Decision::Launch { repo_index, focus_index } = decide(&c, now, &obs) else {
+                    panic!("week {week} launch {nth} must be launching: the plan still owes hundreds");
+                };
+                // Week 1's round robin starts over at the first repository, and its focus does not:
+                // it carries on from where the last window's last launch left that repository.
+                if week == 1 && nth == 0 {
+                    assert_eq!(repo_index, 0, "the repo rotation restarts every window");
+                    assert_eq!(
+                        focus_index,
+                        redteam::FOCUSES.len() / 2,
+                        "the focus does not: the new window picks up the cycle, not the first area"
+                    );
+                }
+                let body = launch_body(&c.repos[repo_index], "", redteam::FOCUSES[focus_index]);
+                per_repo[repo_index].push(focus_of(&body));
+                // The colony the launch just queued: counted from now on, in this window and every
+                // later one, which is what makes the next launch step along.
+                history.push({
+                    let mut s = colony("acme", SessionStatus::Stopped);
+                    s.repo = c.repos[repo_index].clone();
+                    s.origin = Some("burn_down".into());
+                    s.created_at = now;
+                    s
+                });
+            }
+        }
+        for (repo, focuses) in c.repos.iter().zip(&per_repo) {
+            assert_eq!(
+                focuses.as_slice(),
+                redteam::FOCUSES,
+                "{repo} works the areas in turn, and the cycle carries over the reset"
+            );
+        }
     }
 
     #[test]
@@ -853,7 +996,8 @@ mod tests {
                 &Observed {
                     spent: 95.0,
                     launches_done: 0,
-                    live: 0
+                    live: 0,
+                    ..Observed::default()
                 }
             ),
             Decision::AtReserve,

@@ -1,0 +1,25 @@
+[package]
+name = "colonizer-billing"
+# The billing core for paid plans (issue #941): plain state, serde to persist it, no other
+# dependency. Nothing depends on it yet, and release.yml publishes an explicit crate list, so it
+# stays unpublished until the Polar port is wired in.
+version = "0.2.7"
+edition = "2024"
+description = "Plan and dispute state for a hosted Colonizer account, driven by normalized Polar webhook events"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
+homepage = "https://colonizer.dev"
+publish = false
+
+[lib]
+name = "colonizer_billing"
+
+[dependencies]
+# The account's state, so the wiring can persist it and keep idempotency across restarts. The
+# webhook signature check and the Polar calls arrive with cratefield-adapter-polar's `PolarEvent`
+# when that port lands; nothing here does IO.
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+# The round-trip test only needs to hand the state through JSON, as the wiring will.
+serde_json = "1.0.151"

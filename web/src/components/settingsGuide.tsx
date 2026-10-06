@@ -157,7 +157,7 @@ const PATHS: Record<string, ReactNode> = {
 /** A provider as its mark and its name, e.g. the GitHub mark beside "GitHub". */
 export function ModuleProviderMark({ id, name }: { id: string; name: string }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-2 text-[13.5px] font-medium text-text">
+    <span className="inline-flex min-w-0 items-center gap-2 text-body font-medium text-text">
       <span className="grid size-6 shrink-0 place-items-center rounded-md border border-border bg-panel-2">
         <GuideIcon name={id in PATHS ? id : "plug"} size={14} />
       </span>
@@ -312,6 +312,15 @@ const GUIDES: Record<string, Guide> = {
       { icon: "user", label: "Login" },
       { icon: "mothership", label: "Mothership" },
       { icon: "ant", label: "Colonies" },
+    ],
+  },
+  "built-with": {
+    icon: "box",
+    blurb: "What this venture is built with, each product linked — and the page that says so.",
+    flow: [
+      { icon: "box", label: "Stack" },
+      { icon: "eye", label: "Live today" },
+      { icon: "globe", label: "Published" },
     ],
   },
   notifications: {
@@ -485,7 +494,7 @@ export function SectionHero({
         <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
           <GuideIcon name={guide.icon} size={24} />
         </span>
-        <p className="min-w-0 text-[14px] font-medium leading-snug text-text">
+        <p className="min-w-0 text-body-lg font-medium leading-snug text-text">
           {guide.blurb}
         </p>
       </div>
@@ -499,7 +508,7 @@ export function SectionHero({
           {stats.map((s) => (
             <span
               key={s.label}
-              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-panel px-2.5 py-1 text-[12px]"
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-panel px-2.5 py-1 text-small"
             >
               {s.tone && (
                 <span
@@ -583,9 +592,9 @@ function FlowStep({ node }: { node: FlowNode }) {
           </span>
         )}
       </span>
-      <span className="text-[12px] font-medium leading-tight text-text">{node.label}</span>
+      <span className="text-small font-medium leading-tight text-text">{node.label}</span>
       {node.metric && (
-        <span className={cx("text-[11.5px] leading-tight tabular-nums", node.active ? "text-accent" : "text-muted")}>
+        <span className={cx("text-meta-lg leading-tight tabular-nums", node.active ? "text-accent" : "text-muted")}>
           {node.metric}
         </span>
       )}
@@ -595,7 +604,7 @@ function FlowStep({ node }: { node: FlowNode }) {
             <span
               key={`${chip.kind}:${chip.text}`}
               className={cx(
-                "rounded-full border px-1.5 py-px text-[10.5px] leading-4",
+                "rounded-full border px-1.5 py-px text-meta-sm leading-4",
                 chip.kind === "in" && "border-ok/40 bg-ok/10 text-ok",
                 chip.kind === "out" && "border-err/40 bg-err/10 text-err line-through decoration-err/60",
                 chip.kind === "note" && "border-border text-muted",

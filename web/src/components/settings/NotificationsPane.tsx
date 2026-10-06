@@ -149,25 +149,25 @@ export function NotificationsPane({
           />
         </Row>
         {permission === "unsupported" && (
-          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
             This browser does not offer notifications — the API is missing, or the page is not on a secure origin.
           </p>
         )}
         {permission === "denied" && (
-          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
             The browser is blocking notifications for this site. Allow Colonizer in the browser’s own site settings, then switch this on
             here — this switch cannot lift a block the browser set.
           </p>
         )}
         {asked && permission === "default" && !prefs.browser && (
-          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+          <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
             The permission prompt was dismissed without an answer. Switch it on again to ask once more.
           </p>
         )}
 
         <div>
-          <h4 className="mb-1 text-[12.5px] font-semibold">Push to this device</h4>
-          <p className="mb-1 text-[12.5px] text-muted">
+          <h4 className="mb-1 text-small-lg font-semibold">Push to this device</h4>
+          <p className="mb-1 text-small-lg text-muted">
             Web push reaches this browser with Colonizer closed — a phone that never has the tab open. A notification tap opens the colony it
             names. The same short-and-dull rules apply as above.
           </p>
@@ -188,7 +188,7 @@ export function NotificationsPane({
             </Button>
           </Row>
           {!pushable && !showIosInstallHint() && (
-            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
               This browser cannot join web push. On iPhone and iPad it needs iOS 16.4 or newer with Colonizer added to the Home Screen;
               everywhere else it needs a secure origin and a browser with push support.
             </p>
@@ -206,8 +206,8 @@ export function NotificationsPane({
         </div>
 
         <div>
-          <h4 className="mb-1 text-[12.5px] font-semibold">Which events interrupt</h4>
-          <p className="mb-1 text-[12.5px] text-muted">
+          <h4 className="mb-1 text-small-lg font-semibold">Which events interrupt</h4>
+          <p className="mb-1 text-small-lg text-muted">
             These gate the sound and the browser notifications. The tab title, the favicon and the strip always show every colony that needs
             you, whatever these say.
           </p>

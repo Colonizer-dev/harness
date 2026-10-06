@@ -11,7 +11,9 @@ import {
   QuotaBanner,
   dismissQuotaBanner,
   quotaBannerKey,
+  quotaBannerPlans,
   quotaBannerText,
+  quotaBannerTitle,
   quotaParkedSessions,
   quotaPauseKind,
   resumeQuotaParkedSessions,
@@ -47,18 +49,30 @@ function session(overrides: Partial<Session> = {}): Session {
   };
 }
 
+/** 2026-10-05 19:51:58 UTC: the reset in the operator's screenshot. */
+const RESET = Date.UTC(2026, 9, 5, 19, 51, 58) / 1000;
+/** Two hours and ten minutes before it. */
+const NOW = (RESET - (2 * 3600 + 10 * 60)) * 1000;
+
 const quota = (overrides: Partial<StatusQuota> = {}): StatusQuota => ({
   paused: true,
-  reason: "Claude session limit reached",
-  reset_at: "09-23 07:54 UTC",
-  reset_unix: 1_789_000_000,
-  providers: ["anthropic"],
+  reason: "queue paused — BytePlus plan exhausted, resets 10-05 19:51:58 (3 waiting)",
+  reset_at: "10-05 19:51:58",
+  reset_unix: RESET,
+  providers: ["byteplus"],
+  kind: "provider",
+  provider_details: [{ id: "byteplus", name: "BytePlus", used_by: ["subagents", "background"] }],
   ...overrides,
 });
 
 /** An account-level pause: no exhausted provider is named, so no provider name may show. */
 const accountQuota = (overrides: Partial<StatusQuota> = {}): StatusQuota =>
-  quota({ providers: [], ...overrides });
+  quota({
+    providers: [],
+    kind: undefined,
+    provider_details: [{ id: "anthropic", name: "Claude", used_by: ["orchestrator"] }],
+    ...overrides,
+  });
 
 const parked = (id: string, overrides: Partial<Session> = {}) =>
   session({
@@ -110,42 +124,79 @@ describe("quotaPauseKind", () => {
   });
 });
 
-describe("QuotaBanner", () => {
-  it("banners a provider pause with its reset words, provider names, and parked-colony count", () => {
-    const out = markup(quota(), [parked("a"), parked("b"), session({ id: "live" })]);
-    expect(out).toContain('role="status"');
-    expect(out).toContain("Claude session limit reached on anthropic — resets 09-23 07:54 UTC. 2 paused colonies.");
-    expect(out).toContain("Resume all (2)");
-    expect(out).toContain("Dismiss");
+describe("quotaBannerText", () => {
+  const text = (q: StatusQuota, parkedCount: number) => quotaBannerText(q, parkedCount, NOW, "UTC");
+
+  it("names a non-Claude provider by its display name, never as Claude", () => {
+    const out = text(quota(), 0);
+    expect(out).toBe(
+      "BytePlus plan limit reached. Used by subagents and background. Resets at 19:51 · in 2 h 10 min. " +
+        "Colonies on other providers keep running; new colonies wait in the queue until it resets.",
+    );
+    expect(out).not.toContain("Claude");
+    expect(out).not.toContain("byteplus");
+  });
+
+  it("says nothing about paused colonies when none are, and counts them when some are", () => {
+    expect(text(quota(), 0)).not.toMatch(/paused colon|0 colonies/);
+    expect(text(quota(), 1)).toMatch(/ 1 colony paused\.$/);
+    expect(text(quota(), 3)).toMatch(/ 3 colonies paused\.$/);
+  });
+
+  it("falls back to the provider catalog's name when an older mothership sends ids only", () => {
+    const old = quota({ provider_details: undefined, providers: ["byteplus", "my-proxy"] });
+    expect(quotaBannerTitle(old)).toBe("BytePlus and my-proxy plan limits reached");
+    expect(text(old, 0)).not.toContain("Used by");
+    expect(text(old, 0)).toContain("until they reset");
+  });
+
+  it("does not double a name that already says plan", () => {
+    const q = quota({ providers: ["qf"], provider_details: [{ id: "qf", name: "Baidu Qianfan Coding Plan", used_by: [] }] });
+    expect(quotaBannerTitle(q)).toBe("Baidu Qianfan Coding Plan limit reached");
+  });
+
+  it("calls the Claude account's own cap a Claude session limit, with the roles on Claude", () => {
+    expect(text(accountQuota(), 2)).toBe(
+      "Claude session limit reached. Used by orchestrator. Resets at 19:51 · in 2 h 10 min. " +
+        "Colonies on other providers keep running; new colonies wait in the queue until it resets. 2 colonies paused.",
+    );
+    expect(quotaBannerPlans(accountQuota({ provider_details: undefined }))).toEqual([{ name: "Claude", usedBy: [] }]);
+  });
+
+  it("quotes the provider's own reset words without a timestamp, and says when there are none", () => {
+    expect(text(quota({ reset_unix: null }), 0)).toContain("Resets 10-05 19:51:58.");
+    expect(text(quota({ reset_unix: null, reset_at: null }), 0)).toContain("No reset time given.");
   });
 
   it("builds the text from structured fields, never from the backend reason string", () => {
-    // The reason carries the live waiting count and backend phrasing: neither may leak in.
-    expect(quotaBannerText(quota({ reason: "every provider's quota is exhausted (3 waiting)" }), 1)).toBe(
-      "Claude session limit reached on anthropic — resets 09-23 07:54 UTC. 1 paused colony.",
-    );
-    const out = markup(quota({ reason: "Claude session limit reached (3 waiting)" }), []);
-    expect(out).not.toContain("(3 waiting)");
-    expect(out).not.toContain("every provider's quota is exhausted");
+    expect(text(quota({ reason: "every provider's quota is exhausted (3 waiting)" }), 1)).not.toContain("waiting)");
+  });
+});
+
+describe("QuotaBanner", () => {
+  it("banners a provider pause with Resume all when colonies are parked", () => {
+    const out = markup(quota(), [parked("a"), nativelyParked("b"), session({ id: "live" })]);
+    expect(out).toContain('role="status"');
+    expect(out).toContain("BytePlus plan limit reached");
+    expect(out).toContain("2 colonies paused.");
+    expect(out).toContain("Resume all (2)");
+    expect(out).toContain("Dismiss");
+    expect(out).not.toContain("Claude");
   });
 
-  it("names no providers for an account pause, and defaults the reset when none is named", () => {
-    expect(quotaBannerText(accountQuota({ reset_at: null, reset_unix: null }), 0)).toBe(
-      "Claude session limit reached — resets soon. 0 paused colonies.",
-    );
-    const out = markup(accountQuota({ reason: null, reset_at: null, reset_unix: null }), []);
-    expect(out).toContain("Claude session limit reached — resets soon. 0 paused colonies.");
-    expect(out).not.toContain("anthropic");
+  it("drops Resume all and the count with nothing parked", () => {
+    const out = markup(quota(), [session({ id: "live" })]);
+    expect(out).toContain("BytePlus plan limit reached");
+    expect(out).not.toContain("Resume all");
+    expect(out).not.toContain("paused colonies");
+    expect(out).not.toContain("0 colonies");
+    expect(out).toContain("Dismiss");
   });
 
-  it("renders nothing without a paused quota, and disables resume-all with nothing parked", () => {
+  it("renders nothing without a paused quota", () => {
     expect(markup(null, [])).toBe("");
     expect(markup(quota({ paused: false }), [])).toBe("");
     expect(markup(undefined, [])).toBe("");
-    const out = markup(quota(), [session({ id: "live" })]);
-    expect(out).toContain("0 paused colonies.");
-    expect(out).toContain("disabled");
-    expect(out).not.toContain("Resume all (");
   });
 });
 

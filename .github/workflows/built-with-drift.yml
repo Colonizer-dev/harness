@@ -1,0 +1,48 @@
+# Checks the vendored "Built with" entry (crates/colonizer/built-with.json) against the Factory Zero
+# registry it was copied from, and fails when the two disagree.
+#
+# The vendored copy is a snapshot of https://factory0.ventures/stack.json, and a stale snapshot is
+# worse than none: a venture whose dependency has since gone live would still be described as planned,
+# and `colonizer about`, the Settings pane and the venture page would keep claiming less than the
+# product ships. The change lands in the registry first and here second, so nothing in this repository
+# can tell that a registry entry moved — until this workflow runs.
+#
+# It never writes and never opens a pull request. Refreshing the copy is a deliberate act: the run
+# prints every difference, and a person reads them and runs
+#
+#   node scripts/sync-built-with.mjs --write
+#
+# then commits crates/colonizer/built-with.json. The difference report in the job log is the whole
+# output; the script has no --summary, so there is nothing else to read.
+name: Built with drift
+
+on:
+  schedule:
+    # Off the hour and clear of the other scheduled workflows (37 6, 23 6, 41 7, 37 4), so four runners
+    # don't all wake at :00 and start a build on the same tick.
+    - cron: "13 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: built-with-drift
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # The whole point of the run: --check exits 1 on drift, and a step that exits 1 fails the job.
+      # It reads the registry over the network and never writes, so it needs no token and no
+      # permissions beyond reading the checkout.
+      - name: Check the vendored entry against the registry
+        run: node scripts/sync-built-with.mjs --check

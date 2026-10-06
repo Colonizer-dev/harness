@@ -2,9 +2,9 @@
 # name       version   platform      kind    sha256                                                            url
 headscale    0.29.3    linux-x86_64  binary  8dc183758024ed7095cf610fedea0790233613c71353bc8be2715d82ba29b92c  https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_linux_amd64
 tailscale    1.102.4   linux-x86_64  tgz     50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9  https://pkgs.tailscale.com/stable/tailscale_1.102.4_amd64.tgz
-microsandbox 0.7.3     linux-x86_64  msb     2d5da7de187246c804dce2a1a23f06626b6f7cb892d9a0c7c5c620784ba412ea  https://github.com/superradcompany/microsandbox/releases/download/v0.7.3/microsandbox-linux-x86_64.tar.gz
-microsandbox 0.7.3     linux-aarch64 msb     6c1bfde0a86919bdb04fa33bbe10e76b27d65f6afb25d17e6c5ffc9c53060c47  https://github.com/superradcompany/microsandbox/releases/download/v0.7.3/microsandbox-linux-aarch64.tar.gz
-microsandbox 0.7.3     darwin-arm64  msb     4c1c4ec07bedb9eddbbdbfe93fe45d57c5fddc1ddcee87d00c17dace185a45c1  https://github.com/superradcompany/microsandbox/releases/download/v0.7.3/microsandbox-darwin-aarch64.tar.gz
+microsandbox 0.7.6     linux-x86_64  msb     daa69c6a644289bbb7ef889bd862ffba7acddf934d45e724fa160edcd9a540e0  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-linux-x86_64.tar.gz
+microsandbox 0.7.6     linux-aarch64 msb     47e4787423b12f56f24119f657c54974b1869c0853b3d7a0873157668d29aa03  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-linux-aarch64.tar.gz
+microsandbox 0.7.6     darwin-arm64  msb     a4f1722fee6460d4e2813e62b60dae4c092021d8120b7aaa9c2f4b5679d97d89  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-darwin-aarch64.tar.gz
 
 # The mesh on a Mac. headscale ships a darwin-arm64 binary just as it does for Linux. Tailscale
 # publishes no macOS tailscaled anywhere, so the darwin row pins the same v1.102.4 tag as the Linux
@@ -57,6 +57,19 @@ google-skills 2026.10.02-1d77046 any       plugin  6af0ed4e318866f9c6086e5dd117c
 # node CLI (validate/deliver), which mapping colonies run against the worktree (crates/colonizer/src/maps.rs).
 # Not staged: test/ and scripts/check-update.mjs, the skill's network update check.
 archify      2026.10.04-3a5e785 any       plugin  a416e6238cec4ddc36c225e9aa01a0915ec93cd93a17f1748dbed6adc6330b73  https://codeload.github.com/tt-a1i/archify/tar.gz/3a5e785d68ab45ee43cc3ae7b5a4e2e5188d1e31
+
+# ponytail is github.com/DietrichGebert/ponytail at tag v4.12.0. MIT (LICENSE is staged with it). Pinned by
+# tag, so the daily updater follows the repo's latest release like ECC's and superpowers' pins. Staged as a
+# six-skill plugin (skills/ponytail, -review, -audit, -debt, -gain, -help), each a single SKILL.md. Neither
+# upstream manifest is copied: the root plugin.json is a bare {"name": "ponytail"} with no version,
+# description or skills (validate-plugins.mjs rejects it), and .claude-plugin/plugin.json declares a hooks
+# path to a hooks/ nothing stages, so both are generated instead. Not staged — hooks/, ponytail-mcp/,
+# commands/ and the per-agent folders (.codex-plugin, .cursor, .opencode, .clinerules, .kiro, .qoder,
+# .windsurf, .openclaw, .devin-plugin, .grok-plugin, .agents) plus the benchmark assets — because no
+# third-party code ever runs in a colony, and the skills are instructions an agent reads. The skill list
+# above is an allowlist: a new upstream skill fails staging until it is added to this arm of
+# scripts/fetch-vendor.sh and to this comment.
+ponytail     4.12.0     any           plugin  b85f6049059b819a68a551a60e529bc64f704f3935aec460a34a6dc77a1c14e5  https://codeload.github.com/DietrichGebert/ponytail/tar.gz/refs/tags/v4.12.0
 
 # fast-jev-compaction is github.com/tamaratran/fast-jev-compaction at commit e3f262a: Jev-scored
 # deletion of stale tool calls for colonies that switch compaction on. Pinned as a commit tarball,

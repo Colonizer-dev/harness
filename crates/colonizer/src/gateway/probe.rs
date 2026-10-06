@@ -115,14 +115,15 @@ async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
     if let Some((name, value)) = credential_header(app, provider) {
         request = request.header(name, value);
     }
-    let (error, remaining) = match request.send().await {
+    let (error, remaining, limit) = match request.send().await {
         Ok(response) => {
             let status = response.status();
             let body: Value = response.json().await.unwrap_or(Value::Null);
             if status.is_success() {
-                (None, quota_remaining(&body, &quota.pointer))
+                let limit = quota.limit_pointer.as_deref().and_then(|p| quota_remaining(&body, p));
+                (None, quota_remaining(&body, &quota.pointer), limit)
             } else {
-                (Some(format!("quota endpoint answered HTTP {}", status.as_u16())), None)
+                (Some(format!("quota endpoint answered HTTP {}", status.as_u16())), None, None)
             }
         }
         Err(e) => {
@@ -133,12 +134,17 @@ async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
             } else {
                 e.without_url().to_string()
             };
-            (Some(error), None)
+            (Some(error), None, None)
         }
     };
     // A success with nothing readable at the pointer is the usual typo, so it gets its own words.
     let error = error.or_else(|| remaining.is_none().then(|| format!("no number at {}", quota.pointer)));
-    Some(json!({"remaining": remaining, "error": error}))
+    let mut answer = json!({"remaining": remaining, "error": error});
+    // The plan's total only when a limit pointer is configured, so older readers see the same shape.
+    if quota.limit_pointer.is_some() {
+        answer["limit"] = limit.unwrap_or(Value::Null);
+    }
+    Some(answer)
 }
 
 /// The number a quota pointer points at: a JSON number, or a numeric string — some plans quote the

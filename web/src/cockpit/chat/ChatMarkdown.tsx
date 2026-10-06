@@ -33,7 +33,7 @@ export function CopyButton({ text, label = "Copy", className }: { text: string; 
           () => toast("Could not copy", "error"),
         );
       }}
-      className={cx("inline-flex cursor-pointer items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-0.5 text-[11.5px] text-faint hover:bg-panel-2 hover:text-text", className)}
+      className={cx("inline-flex cursor-pointer items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-0.5 text-meta-lg text-faint hover:bg-panel-2 hover:text-text", className)}
     >
       {done ? <IconCheck size={13} className="text-ok" /> : <IconCopy size={13} />}
       {label === "Copy" && <span>{done ? "Copied" : "Copy"}</span>}
@@ -61,10 +61,10 @@ function CodeBlock({ code, lang, live }: { code: string; lang: string | undefine
   return (
     <div className="my-3 overflow-hidden rounded-xl border border-border bg-panel-2">
       <div className="flex items-center gap-2 border-b border-border px-3 py-1">
-        <span className="flex-1 font-mono text-[11px] text-faint">{language ?? "text"}</span>
+        <span className="flex-1 font-mono text-meta text-faint">{language ?? "text"}</span>
         <CopyButton text={code} />
       </div>
-      <pre className="scroll-thin m-0 overflow-x-auto p-3 font-mono text-[12.5px] leading-relaxed">
+      <pre className="scroll-thin m-0 overflow-x-auto p-3 font-mono text-small-lg leading-relaxed">
         {shown ? <code className="hljs" dangerouslySetInnerHTML={{ __html: shown.html }} /> : <code>{code}</code>}
       </pre>
     </div>
@@ -82,7 +82,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({
   onOpenFile?: (path: string) => void;
 }): ReactElement {
   return (
-    <div className="md chat-md break-words text-[14.5px] leading-[1.65] [overflow-wrap:anywhere]">
+    <div className="md chat-md break-words text-lead-sm leading-[1.65] [overflow-wrap:anywhere]">
       <ReactMarkdown
         components={{
           pre: ({ children }) => {

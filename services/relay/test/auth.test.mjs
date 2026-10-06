@@ -38,9 +38,11 @@ function setup() {
   return { db, env, forwarded };
 }
 
+// These are the GitHub gate's own tests (#534), so every install here asks for it at registration; the
+// pair-code mode that is the default since #1086 is pairing.test.mjs's.
 async function register(env, publicKey = b64encode(crypto.getRandomValues(new Uint8Array(32)))) {
   const response = await worker.fetch(
-    new Request(`https://${DOMAIN}/api/installs`, { method: 'POST', body: JSON.stringify({ public_key: publicKey }) }),
+    new Request(`https://${DOMAIN}/api/installs`, { method: 'POST', body: JSON.stringify({ public_key: publicKey, require_github: true }) }),
     env,
     NO_CTX,
   );

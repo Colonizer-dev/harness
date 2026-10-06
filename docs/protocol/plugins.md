@@ -9,7 +9,7 @@ and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
 
 `scripts/fetch-vendor.sh` stages vendored plugins at `dist/plugins/<name>`, which `install.sh` copies to
 `<COLONIZER_HOME>/plugins/<name>`, and `install.sh` fails if a `plugin` entry in `vendor/vendor.lock` didn't
-land there. It stages four vendored plugins today:
+land there. It stages five vendored plugins today:
 
 | Plugin | Source | Staged |
 | :--- | :--- | :--- |
@@ -17,6 +17,7 @@ land there. It stages four vendored plugins today:
 | `superpowers` | [obra/superpowers](https://github.com/obra/superpowers) v6.4.2, MIT, pinned by sha256 in `vendor/vendor.lock` | `.claude-plugin/`, `skills/` (13 of 15), `LICENSE`. 596 KB of the 2.4 MB source |
 | `archify` | [tt-a1i/archify](https://github.com/tt-a1i/archify) at a commit, MIT, pinned by sha256 in `vendor/vendor.lock` | `skills/archify/` (upstream's `archify/` skill: `SKILL.md`, schemas, examples, renderers, the dependency-free `bin/archify.mjs`) minus `test/` and `scripts/check-update.mjs`, generated root and `.claude-plugin/` manifests, `LICENSE`, `THIRD_PARTY_NOTICES.md`. 6.4 MB. Loaded by mapping colonies (see "Architecture maps") |
 | `google-skills` | [google/skills](https://github.com/google/skills) at a commit (no upstream tags), Apache-2.0, pinned by sha256 in `vendor/vendor.lock` | `skills/finding-google-skills/` (Colonizer's copy), `catalog/` (149 skills), `index.json`, a generated `.claude-plugin/plugin.json`, `LICENSE`. 7.0 MB |
+| `ponytail` | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) v4.12.0, MIT, pinned by sha256 in `vendor/vendor.lock` | Six skill directories (`ponytail`, `-review`, `-audit`, `-debt`, `-gain`, `-help`, each one `SKILL.md`), generated root and `.claude-plugin/` manifests, `LICENSE`. ≈46 KiB of upstream's `skills/`; the staged size is not stated here because staging writes to the gitignored `dist/`, where nothing measures it |
 
 **Canonical layout.** `superpowers` is staged in the Agent Plugins folder layout in
 [docs/skill-packs.md](../skill-packs.md): a root `plugin.json` (and `mcp.json` only when a
@@ -58,6 +59,15 @@ upstream's 604-character one as a bare name. Not staged: upstream's `plugins/` (
 submodules a codeload archive doesn't include). `fetch-vendor.sh` fails on any catalog entry it can't map
 to a staged file, on a hook or MCP configuration anywhere in the plugin, on a `raw.githubusercontent.com`
 URL left in the catalog or the finder, and on any second skill under `skills/`.
+
+**Ponytail's non-skill directories are not staged.** The pack's six skills are staged and nothing
+else is. `hooks/`, `ponytail-mcp/`, `commands/`, the per-agent folders upstream ships for other
+harnesses and the benchmark assets are all dropped; staging is an allowlist, and `fetch-vendor.sh`
+fails if any of them survives: the rule everywhere in a colony is that no third-party code runs.
+Neither upstream manifest is copied either — the root `plugin.json` is a bare `{"name": "ponytail"}`
+that fails validation for want of a version and a description, and `.claude-plugin/plugin.json`
+declares a hooks path to a `hooks/` nothing stages — so both are generated. A seventh upstream skill
+fails staging too, until a maintainer adds it to the pack.
 
 **Architecture maps.** `POST /api/maps/{owner}/{repo}` launches a mapping colony: an ordinary colony
 with `origin: "map"` and autopilot on, whose boot adds the `archify` skillset to its plugins and whose
@@ -113,5 +123,7 @@ digest lands, that preset boots its stock upstream image.
 `GET /api/plugins` (plus the downloadable graft skillset, listed under `downloadable`), and writes the
 same comma-separated list of names. A saved name that no longer resolves is shown as missing, since a
 colony loading it fails to boot. The default is `archify`, so any colony can draw a map; an empty list
-loads nothing. An org workspace
+loads nothing. `ponytail` is available and off by default, like every other pack: switching it on is
+the operator's decision, and it is a prompt-only change that has to earn the switch (see
+[skill-packs.md](../skill-packs.md#ponytail)). An org workspace
 can switch single skillsets on or off over that list with `agent.skillsets` (see Org workspaces).

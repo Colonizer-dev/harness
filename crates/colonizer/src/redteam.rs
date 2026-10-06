@@ -60,8 +60,9 @@ const SHANNON_REPORT_CAP: u64 = 8 * 1024 * 1024;
 const MAX_SHANNON_FINDINGS: usize = findings::MAX_PER_COLONY * 2;
 
 /// The eight focus areas a run's hunters are drawn from, cycled as `i % 8`. Each brief names its own
-/// focus and lists the others, so the swarm keeps out of one another's way.
-const FOCUSES: [&str; 8] = [
+/// focus and lists the others, so the swarm keeps out of one another's way. Burn-down hunt colonies
+/// cycle the same list (`burn_down::decide`) so their prompts have one area each to work on.
+pub(crate) const FOCUSES: [&str; 8] = [
     "error handling and edge cases",
     "concurrency and race conditions",
     "input validation and injection",

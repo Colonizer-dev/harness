@@ -8,4 +8,5 @@
 /api/remote/pairing                                  GET    unauth=401    token=owner            activity=-
 /api/remote/pairing/confirm                          POST   unauth=401    token=owner            activity=-
 /api/remote/pairing/reject                           POST   unauth=401    token=owner            activity=-
+/api/remote/require-github                           PUT    unauth=401    token=owner            activity=-
 /api/remote/reset                                    POST   unauth=401    token=owner            activity=-

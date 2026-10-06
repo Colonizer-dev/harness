@@ -11,16 +11,20 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  NOTICES_MARKER,
   REPO_URL,
   assemble,
   compareFragments,
   convert,
   lintChangelog,
   lintFragment,
+  knownProbes,
   mergeLinks,
+  noticesBlock,
   parseArgs,
   parseFragment,
   parseName,
+  releaseNotices,
   splitLinks,
 } from '../changelog.mjs';
 
@@ -462,4 +466,92 @@ test('arguments: unknown commands and options, and valued options without a valu
     flags: { version: 'v1.0.0', 'dry-run': true },
   });
   assert.equal(run(repo(), 'assemble').status, 2);
+});
+
+// ---------------------------------------------------------------------------------------------- notices (#1097)
+
+const NOTICE_FRAGMENT = `<!-- template -->
+critical: Fixes colonies failing with UND_ERR_SOCKET (sandbox credential scanner) -->
+probe: msb-body-secret-violation
+
+**Bump msb to 0.7.6.** The scanner no longer blocks bodies. ([#1096])
+`;
+
+test('a fragment opens with its notice, which is not part of the entry', () => {
+  const parsed = parseFragment(NOTICE_FRAGMENT);
+  assert.equal(parsed.body, '**Bump msb to 0.7.6.** The scanner no longer blocks bodies. ([#1096])');
+  assert.equal(parsed.notice.severity, 'critical');
+  assert.equal(parsed.notice.line, 'Fixes colonies failing with UND_ERR_SOCKET (sandbox credential scanner) -->');
+  assert.equal(parsed.notice.probe, 'msb-body-secret-violation');
+  assert.deepEqual(lintFragment('1096.fixed.md', NOTICE_FRAGMENT), []);
+  assert.equal(parseFragment('**Plain.** ([#1])').notice, null);
+  // The severity is case-insensitive and fixes-running is the other one.
+  assert.equal(parseFragment('Fixes-Running: a line\n\n**X.** y').notice.severity, 'fixes-running');
+});
+
+test('lint refuses a notice with no line, a probe alone, a bad probe id and two notices', () => {
+  assert.match(lintFragment('1.fixed.md', 'critical:\n\n**X.** y').join(), /needs the one line/);
+  assert.match(lintFragment('1.fixed.md', 'probe: msb-x\n\n**X.** y').join(), /needs a "critical/);
+  assert.match(lintFragment('1.fixed.md', 'critical: a\nprobe: ../etc\n\n**X.** y').join(), /not a probe id/);
+  assert.match(lintFragment('1.fixed.md', 'critical: a\nfixes-running: b\n\n**X.** y').join(), /one notice per fragment/);
+  assert.match(lintFragment('1.fixed.md', 'critical: a\n').join(), /empty/);
+});
+
+test('assemble keeps the notice on its entry, and the release block carries it with the releases before', () => {
+  const v020 = assemble(HEAD, [frag('1096.fixed.md', NOTICE_FRAGMENT), frag('5.added.md', '**Five.** ([#5])')], {
+    version: 'v0.2.0',
+    date: '2026-10-01',
+  });
+  assert.match(v020, /- \*\*Bump msb to 0\.7\.6\.\*\* The scanner no longer blocks bodies\. \(\[#1096\]\)\n  <!-- colonizer-notice \{/);
+  // The comment cannot be closed early by the line it carries.
+  const comment = /<!-- colonizer-notice (.*) -->/.exec(v020)[1];
+  assert.ok(!comment.includes('>'), comment);
+  const v021 = assemble(v020, [frag('7.fixed.md', 'fixes-running: Fixes stuck merges\n\n**Seven.** ([#7])')], {
+    version: 'v0.2.1',
+    date: '2026-10-02',
+  });
+  assert.deepEqual(releaseNotices(v021), [
+    { version: 'v0.2.1', severity: 'fixes-running', line: 'Fixes stuck merges', issue: 7 },
+    {
+      version: 'v0.2.0',
+      severity: 'critical',
+      line: 'Fixes colonies failing with UND_ERR_SOCKET (sandbox credential scanner) -->',
+      probe: 'msb-body-secret-violation',
+      issue: 1096,
+    },
+  ]);
+
+  const block = noticesBlock(v021, 'v0.2.1');
+  assert.match(block, /^### Before you update\n\n- \*\*Fixes running colonies:\*\* Fixes stuck merges \(#7\)\n/);
+  assert.ok(!block.includes('UND_ERR_SOCKET (sandbox credential scanner) -->'), 'only this release is listed visibly');
+  const json = block.slice(block.indexOf(NOTICES_MARKER) + NOTICES_MARKER.length, block.lastIndexOf('-->'));
+  assert.equal(JSON.parse(json).length, 2, 'the block carries the release before too');
+  assert.equal(JSON.parse(noticesBlock(v021, 'v0.2.1', 1).split('\n').at(-3)).length, 1, '--last 1 is this release alone');
+  assert.equal(noticesBlock(v021, 'v0.1.0'), '', 'a release with no notices in its window has no block');
+  assert.throws(() => noticesBlock(v021, 'v9.9.9'), /no "## \[v9\.9\.9\]/);
+});
+
+test('the notices CLI prints the block, and check refuses a probe the harness does not have', () => {
+  const root = repo({ fragments: { '1096.fixed.md': NOTICE_FRAGMENT }, version: '0.2.0' });
+  mkdirSync(join(root, 'crates/colonizer/src'), { recursive: true });
+  writeFileSync(
+    join(root, 'crates/colonizer/src/update_notices.rs'),
+    'pub const ONE: &str = "msb-body-secret-violation";\npub const PROBES: &[&str] = &[ONE];\n',
+  );
+  assert.deepEqual(knownProbes(root), ['msb-body-secret-violation']);
+  assert.equal(run(root, 'check').status, 0);
+  writeFileSync(join(root, 'changelog.d/9.fixed.md'), 'critical: x\nprobe: no-such-probe\n\n**Nine.** ([#9])\n');
+  const refused = run(root, 'check');
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /probe "no-such-probe" is not one the harness has/);
+  rmSync(join(root, 'changelog.d/9.fixed.md'));
+
+  assert.equal(run(root, 'assemble', '--version', 'v0.2.0', '--date', '2026-10-01').status, 0);
+  const printed = run(root, 'notices', '--release', 'v0.2.0');
+  assert.equal(printed.status, 0, printed.stderr);
+  assert.match(printed.stdout, /\*\*Critical:\*\* Fixes colonies failing/);
+  assert.ok(printed.stdout.includes(NOTICES_MARKER));
+  assert.equal(run(root, 'notices', '--release', 'v0.1.0').stdout, '');
+  assert.equal(run(root, 'notices').status, 2);
+  assert.equal(run(root, 'notices', '--release', 'v0.2.0', '--last', '0').status, 2);
 });

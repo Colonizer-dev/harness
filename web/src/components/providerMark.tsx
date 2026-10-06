@@ -62,7 +62,7 @@ export function ProviderMark({ preset, name, size = "row" }: { preset?: Provider
   const box = { tile: "size-11 rounded-xl", row: "size-8 rounded-lg", button: "size-[18px] rounded-[5px]" }[size];
   const glyph = { tile: 24, row: 18, button: 12 }[size];
   // Initials carry the whole tile when a vendor has no mark, so they scale with it.
-  const initials = { tile: "text-[15px] font-semibold tracking-tight", row: "text-[11.5px] font-semibold tracking-tight", button: "text-[8.5px] font-bold" }[size];
+  const initials = { tile: "text-lead font-semibold tracking-tight", row: "text-meta-lg font-semibold tracking-tight", button: "text-micro-xs font-bold" }[size];
   return (
     <span aria-hidden="true" className={cx("grid shrink-0 select-none place-items-center bg-panel-2 text-text", box, !Mark && initials)}>
       {Mark ? <Mark size={glyph} strokeWidth={size === "button" ? 2 : 1.75} /> : initialsOf(name)}

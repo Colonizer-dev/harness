@@ -30,7 +30,7 @@ export function isLoopColony(session: Pick<Session, "origin">): boolean {
 export function LoopBadge({ session }: { session: Pick<Session, "origin"> }): ReactElement | null {
   if (!isLoopColony(session)) return null;
   return (
-    <span title="launched by a loop" className="ml-1.5 inline-flex shrink-0 items-center rounded-full border border-border px-1.5 text-[10.5px] leading-4 text-muted">
+    <span title="launched by a loop" className="ml-1.5 inline-flex shrink-0 items-center rounded-full border border-border px-1.5 text-meta-sm leading-4 text-muted">
       ↻ loop
     </span>
   );
@@ -148,10 +148,10 @@ export function LoopsView({
     <Page>
         <div className="flex flex-wrap items-end gap-4">
           <div className="min-w-0 flex-1">
-            <h1 className="m-0 text-[30px] font-semibold tracking-[-0.035em] text-text">Loops</h1>
-            <p className="mt-2 text-[14px] text-muted">
+            <h1 className="m-0 text-display-xl font-semibold tracking-[-0.035em] text-text">Loops</h1>
+            <p className="mt-2 text-body-lg text-muted">
               A prompt on a repository that launches a colony on a schedule — or lets each run pick the next. One run at a time. Tip: type{" "}
-              <code className="rounded bg-panel-3 px-1 font-mono text-[12.5px]">/loop 1h check CI and fix flakes</code> in the composer (⌘K).
+              <code className="rounded bg-panel-3 px-1 font-mono text-small-lg">/loop 1h check CI and fix flakes</code> in the composer (⌘K).
             </p>
           </div>
           <Button variant="primary" onClick={() => setEditing("new")}>
@@ -171,11 +171,11 @@ export function LoopsView({
 
         <div className="mt-6 overflow-hidden rounded-xl border border-border">
           {loops === null ? (
-            <p className="flex items-center gap-2 px-4 py-6 text-[13px] text-muted">
+            <p className="flex items-center gap-2 px-4 py-6 text-body-sm text-muted">
               <Spinner /> Loading loops…
             </p>
           ) : shown.length === 0 ? (
-            <div className="px-4 py-10 text-center text-[13.5px] text-muted">
+            <div className="px-4 py-10 text-center text-body text-muted">
               No loops{org ? ` in ${org}` : ""} yet. Start with a template: triage new issues, keep dependencies current, fix last night's flaky tests.
             </div>
           ) : (
@@ -187,16 +187,16 @@ export function LoopsView({
                     <Avatar name={l.org} src={avatarFor(l.org) ?? undefined} size={28} rounded="full" />
                     <div className="min-w-0 flex-1 basis-64">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-[14px] font-medium text-text">{l.name}</span>
-                        <span className="truncate font-mono text-[11.5px] text-faint">{l.repo}</span>
+                        <span className="truncate text-body-lg font-medium text-text">{l.name}</span>
+                        <span className="truncate font-mono text-meta-lg text-faint">{l.repo}</span>
                       </div>
-                      <div className="mt-0.5 truncate text-[12.5px] text-muted" title={l.last_note ?? undefined}>
+                      <div className="mt-0.5 truncate text-small-lg text-muted" title={l.last_note ?? undefined}>
                         {describeLoop(l)}
                         {l.enabled && l.next_run_at ? ` · next ${relative(l.next_run_at, now)}` : l.ended_reason ? ` · ${l.ended_reason}` : " · paused"}
                         {l.last_note && !l.ended_reason ? ` · ${l.last_note}` : ""}
                       </div>
                     </div>
-                    <div className="w-[170px] shrink-0 text-[12.5px]">
+                    <div className="w-[170px] shrink-0 text-small-lg">
                       {l.last_run ? (
                         <button type="button" onClick={() => onOpenColony(l.last_run!.session)} className="cursor-pointer border-0 bg-transparent p-0 text-left text-muted hover:text-text">
                           run {l.runs} · {last ? SESSION_STATUS[last.status]?.label.toLowerCase() : "…"} · {relative(l.last_run.at, now)}
@@ -342,7 +342,7 @@ export function LoopDialog({
     }
   };
 
-  const field = "w-full rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none focus:border-border-strong";
+  const field = "w-full rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none focus:border-border-strong";
   // An `owner/*` loop edits with the org alone in the repository picker; leaving it for a loop on
   // one repository needs a real repository of that org to name.
   const firstInOrg = (owner: string) =>
@@ -355,14 +355,14 @@ export function LoopDialog({
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="loop-dialog-title" className="m-auto w-[min(640px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="loop-dialog-title" className="min-w-0 flex-1 text-[16px] font-semibold">
+        <h2 id="loop-dialog-title" className="min-w-0 flex-1 text-title-sm font-semibold">
           {loop ? `Edit "${loop.name}"` : "New loop"}
         </h2>
         <button type="button" onClick={() => ref.current?.close()} aria-label="Close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
           ✕
         </button>
       </div>
-      <div className="scroll-thin max-h-[70vh] space-y-4 overflow-y-auto px-5 py-4 text-[13px]">
+      <div className="scroll-thin max-h-[70vh] space-y-4 overflow-y-auto px-5 py-4 text-body-sm">
         {!loop && (
           <div className="flex flex-wrap gap-1.5">
             {LOOP_TEMPLATES.map((t) => (
@@ -376,7 +376,7 @@ export function LoopDialog({
                   setKind("colony");
                   setNeedsGithub(t.needsGithub);
                 }}
-                className="cursor-pointer rounded-full border border-border bg-transparent px-2.5 py-1 text-[12px] text-muted hover:border-border-strong hover:text-text"
+                className="cursor-pointer rounded-full border border-border bg-transparent px-2.5 py-1 text-small text-muted hover:border-border-strong hover:text-text"
               >
                 {t.label}
               </button>
@@ -402,7 +402,7 @@ export function LoopDialog({
                   // A map refresh reads the repository, not GitHub; the need is colony-only.
                   if (k === "map") setNeedsGithub(false);
                 }}
-                className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-[12.5px]", kind === k ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
+                className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-small-lg", kind === k ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
               >
                 {label}
               </button>
@@ -441,7 +441,7 @@ export function LoopDialog({
           </select>
         </label>
         {kind === "map" ? (
-          <p className="text-[12.5px] text-muted">Each run redraws the architecture map the way the Map view's "Redraw map" does — no prompt needed.</p>
+          <p className="text-small-lg text-muted">Each run redraws the architecture map the way the Map view's "Redraw map" does — no prompt needed.</p>
         ) : (
           <label className="block">
             <span className="mb-1 block text-muted">What each run does</span>
@@ -489,7 +489,7 @@ export function LoopDialog({
                               : { every },
                   )
                 }
-                className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-[12.5px]", choice.every === every ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
+                className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-small-lg", choice.every === every ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
               >
                 {label}
               </button>
@@ -550,7 +550,7 @@ export function LoopDialog({
             </div>
           )}
           {choice.every === "self_paced" && kind === "colony" && (pacingWarning ? (
-            <p className="text-[12.5px] text-warn">{pacingWarning}</p>
+            <p className="text-small-lg text-warn">{pacingWarning}</p>
           ) : (
             <p className="text-faint">Each run chooses when the next starts (15 minutes to 24 hours) with loop_next; without a choice it runs again in 24 hours.</p>
           ))}
@@ -595,11 +595,11 @@ export function LoopDialog({
           </label>
         </div>
         {endAtProblem && (
-          <p role="alert" className="m-0 text-[12.5px] text-err">
+          <p role="alert" className="m-0 text-small-lg text-err">
             {endAtProblem}
           </p>
         )}
-        <p className="rounded-lg border border-border bg-panel-2 px-3 py-2 text-[12.5px] text-muted">
+        <p className="rounded-lg border border-border bg-panel-2 px-3 py-2 text-small-lg text-muted">
           Each run is a full colony with its own microVM and model spend. A frequent loop on a large repository adds up — start daily, and let the loop stop itself (loop_stop) when its goal is met.
         </p>
       </div>
@@ -625,28 +625,28 @@ function LoopHistory({ loop, onOpenColony, onClose }: { loop: Loop; onOpenColony
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="loop-history-title" className="m-auto w-[min(720px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="loop-history-title" className="min-w-0 flex-1 truncate text-[16px] font-semibold">
+        <h2 id="loop-history-title" className="min-w-0 flex-1 truncate text-title-sm font-semibold">
           {loop.name} · history
         </h2>
         <button type="button" onClick={() => ref.current?.close()} aria-label="Close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
           ✕
         </button>
       </div>
-      <div className="px-5 py-3 text-[12.5px] text-muted">
+      <div className="px-5 py-3 text-small-lg text-muted">
         {describeLoopCadence(loop.cadence)} · {loop.runs} {loop.runs === 1 ? "run" : "runs"}
         {loop.last_note ? ` · ${loop.last_note}` : ""}
       </div>
       <div className="scroll-thin max-h-[60vh] overflow-y-auto border-t border-border">
         {runs === null ? (
-          <p className="flex items-center gap-2 px-5 py-4 text-[13px] text-muted">
+          <p className="flex items-center gap-2 px-5 py-4 text-body-sm text-muted">
             <Spinner /> Loading runs…
           </p>
         ) : runs.length === 0 ? (
-          <p className="px-5 py-6 text-[13px] text-faint">No runs yet.</p>
+          <p className="px-5 py-6 text-body-sm text-faint">No runs yet.</p>
         ) : (
           <ul className="m-0 list-none divide-y divide-border p-0">
             {runs.map((s) => (
-              <li key={s.id} className="flex items-center gap-3 px-5 py-2.5 text-[13px]">
+              <li key={s.id} className="flex items-center gap-3 px-5 py-2.5 text-body-sm">
                 <button type="button" onClick={() => onOpenColony(s.id)} className="min-w-0 flex-1 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-text hover:underline">
                   {s.summary || s.issue_title || s.id}
                 </button>

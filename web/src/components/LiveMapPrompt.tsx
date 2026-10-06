@@ -44,8 +44,8 @@ export function LiveMapPrompt({
       data-placement={inline ? "inline" : "fixed"}
       className={cx("rounded-2xl border border-border bg-panel", inline ? "p-3.5" : "p-4 shadow-[var(--shadow)]")}
     >
-      <p className="text-[14px] font-semibold">Put this mothership on the live map?</p>
-      <p className="mt-1.5 text-[12.5px] text-muted">
+      <p className="text-body-lg font-semibold">Put this mothership on the live map?</p>
+      <p className="mt-1.5 text-small-lg text-muted">
         colonizer.dev/live shows where colonies are running, to within about 25 km. If yours is the only mothership in its area,
         that dot is you. It gets a heartbeat every 5 minutes: a random id, the version, the platform and how many colonies run.
         Nothing about your code. Off unless you say yes.
@@ -57,7 +57,7 @@ export function LiveMapPrompt({
         <Button size="sm" disabled={busy} onClick={() => void answer(false)}>
           No thanks
         </Button>
-        <button type="button" onClick={onDetails} className="ml-auto cursor-pointer text-[12.5px] text-accent hover:underline">
+        <button type="button" onClick={onDetails} className="ml-auto cursor-pointer text-small-lg text-accent hover:underline">
           What is sent
         </button>
       </div>

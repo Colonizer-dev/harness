@@ -51,7 +51,7 @@ export function LiveMapPane({
   return (
     <Pane title="Live map" subtitle="This mothership as a dot on colonizer.dev/live" info={info} back={back}>
       {!telemetry ? (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       ) : (
@@ -67,33 +67,33 @@ export function LiveMapPane({
             />
           </Row>
           {telemetry.blocked_by && (
-            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
               Kept off by <Code>{telemetry.blocked_by}</Code> in the Mothership’s environment.
             </p>
           )}
           <div>
-            <h4 className="mb-1.5 text-[12.5px] font-semibold">What is sent</h4>
-            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-[12px] leading-5">
+            <h4 className="mb-1.5 text-small-lg font-semibold">What is sent</h4>
+            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-small leading-5">
               {JSON.stringify(
                 { ...telemetry.heartbeat, install_id: telemetry.heartbeat.install_id ?? "(random, created when you switch it on)" },
                 null,
                 2,
               )}
             </pre>
-            <p className="mt-2 text-[12.5px] text-muted">
+            <p className="mt-2 text-small-lg text-muted">
               Nothing else: no repositories, issues, code, names or paths. The service sees this machine’s IP address, as any website
               would, turns it into a 25 km area and doesn’t store it. A heartbeat stops counting 12 minutes after it arrives, and
               its row is deleted about an hour after arrival, once anything else reaches the service. If this is the only mothership in its area, that dot is this one.
             </p>
           </div>
           {telemetry.enabled && (telemetry.last_sent_at || telemetry.last_error) && (
-            <p className={cx("text-[12.5px] [overflow-wrap:anywhere]", telemetry.last_error ? "text-err" : "text-muted")}>
+            <p className={cx("text-small-lg [overflow-wrap:anywhere]", telemetry.last_error ? "text-err" : "text-muted")}>
               {telemetry.last_error
                 ? `Last heartbeat failed: ${telemetry.last_error}`
                 : `Last heartbeat ${new Date(telemetry.last_sent_at!).toLocaleTimeString()}`}
             </p>
           )}
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12.5px]">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-small-lg">
             <a className="inline-flex items-center gap-1 text-accent hover:underline" href={telemetry.map_url} target="_blank" rel="noreferrer">
               Open the live map <IconExternal size={12} />
             </a>

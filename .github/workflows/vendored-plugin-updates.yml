@@ -1,7 +1,7 @@
-# Proposes new pins for the vendored Claude Code plugins (ECC, superpowers, Google's skills) and caveman's
-# ruleset when their
-# upstreams move, with the change described in skills added, removed and changed. It never merges
-# anything: the skills are instructions to an agent that can push, so a person reads and merges.
+# Proposes new pins for the vendored Claude Code plugins (ECC, superpowers, Google's skills, archify and
+# ponytail) and caveman's ruleset when their upstreams move, with the change described in skills added,
+# removed and changed. It never merges anything: the skills are instructions to an agent that can push, so
+# a person reads and merges.
 #
 # The update lands on the vendor/plugin-updates branch. The workflow then opens a pull request, or,
 # while the repository doesn't allow GitHub Actions to create pull requests (Settings → Actions →

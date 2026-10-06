@@ -1,2 +1,7 @@
 /api/models/assignments                              GET    unauth=401    token=owner            activity=-
+/api/models/plans                                    GET    unauth=401    token=owner            activity=-
+/api/models/profiles                                 GET    unauth=401    token=owner            activity=-
+/api/models/profiles                                 POST   unauth=401    token=owner            activity=settings.save
+/api/models/profiles/{id}                            DELETE unauth=401    token=owner            activity=settings.remove
+/api/models/profiles/{id}                            PUT    unauth=401    token=owner            activity=settings.save
 /api/models/switch                                   POST   unauth=401    token=owner            activity=settings.save

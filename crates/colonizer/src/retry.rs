@@ -117,6 +117,119 @@ pub fn classify(message: &str) -> FailureClass {
     FailureClass::Permanent
 }
 
+/// Classifies the error a colony's turn ended with (issue #1093), read off the runner's free-text
+/// result ("API Error: 502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)").
+///
+/// The boot classifier ([`classify`]) is the fallback, but a turn's error has shapes a boot's never
+/// does, so three rules run first. A refusal of the request itself — sign-in, permission, policy —
+/// is permanent: retrying only fails the same way. A model gateway status from the 5xx family (529
+/// is Anthropic's "overloaded") is transient. And a connection that was reset or closed under the
+/// request (undici's `UND_ERR_SOCKET`, `ECONNRESET`, a gateway that restarted) is transient whatever
+/// status it came on, since the router names a reset "the connection to <provider> failed".
+pub fn classify_turn_error(message: &str) -> FailureClass {
+    let text = message.to_ascii_lowercase();
+    // A connection that was refused is a gateway that is not listening (yet); a request that was
+    // refused is a verdict. Everything else carrying these words is a refusal of the request.
+    const REFUSED: &[&str] = &[
+        "authentication",
+        "unauthorized",
+        "not authorized",
+        "forbidden",
+        "permission",
+        "policy",
+        "invalid api key",
+        "invalid x-api-key",
+        "oauth token",
+    ];
+    let request_refused = text.contains("refused") && !text.contains("connection refused") && !text.contains("econnrefused");
+    if request_refused || REFUSED.iter().any(|m| text.contains(m)) {
+        return FailureClass::Permanent;
+    }
+    match turn_error_status(&text) {
+        Some(500 | 502 | 503 | 504 | 529) => return FailureClass::TransientInfra,
+        Some(400..=499) => return classify(message),
+        _ => {}
+    }
+    const RESET: &[&str] = &[
+        "und_err_socket",
+        "und_err_closed",
+        "econnreset",
+        "econnrefused",
+        "epipe",
+        "socket hang up",
+        "other side closed",
+        "the connection to",
+        "fetch failed",
+        "gateway restart",
+    ];
+    if RESET.iter().any(|m| text.contains(m)) {
+        return FailureClass::TransientInfra;
+    }
+    classify(message)
+}
+
+/// The HTTP status a turn's error names, if it names one where the runner puts it: right after
+/// "API Error:", or as the message's first word ("502 model router: ..."). A number elsewhere — a
+/// timeout's seconds, a token count — is not a status.
+fn turn_error_status(lowercase: &str) -> Option<u16> {
+    let rest = lowercase
+        .find("api error:")
+        .map(|at| &lowercase[at + "api error:".len()..])
+        .unwrap_or(lowercase)
+        .trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let next = rest[digits.len()..].chars().next();
+    if digits.len() != 3 || next.is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    digits.parse().ok().filter(|code| (100..600).contains(code))
+}
+
+/// A short name for what a transient turn error was, for the colony's attention card and log
+/// (issue #1093): the status and the failure, e.g. "502, connection to Anthropic" for the router's
+/// "502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)". Empty when the message
+/// names neither, and the card then says only "a model gateway error".
+pub fn turn_error_cause(message: &str) -> String {
+    let text = message.to_ascii_lowercase();
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(status) = turn_error_status(&text) {
+        parts.push(status.to_string());
+    }
+    // The provider's name as the message spells it, so "Anthropic" keeps its capital.
+    let named = |prefix: &str, suffix: &str| -> Option<String> {
+        let start = text.find(prefix)? + prefix.len();
+        let len = text[start..].find(suffix)?;
+        let name = message.get(start..start + len)?.trim();
+        (!name.is_empty() && name.len() <= 40).then(|| name.to_string())
+    };
+    let what = if let Some(provider) = named("the connection to ", " failed") {
+        Some(format!("connection to {provider}"))
+    } else if let Some(provider) = named("model router: ", " is unreachable") {
+        Some(format!("{provider} unreachable"))
+    } else if text.contains("overloaded") || text.contains("529") {
+        Some("overloaded".to_string())
+    } else if text.contains("timed out") || text.contains("timeout") {
+        Some("timed out".to_string())
+    } else if [
+        "und_err_socket",
+        "econnreset",
+        "socket hang up",
+        "other side closed",
+        "connection reset",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
+    {
+        Some("connection reset".to_string())
+    } else if text.contains("connection refused") || text.contains("econnrefused") {
+        Some("connection refused".to_string())
+    } else {
+        None
+    };
+    parts.extend(what);
+    parts.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +329,57 @@ mod tests {
         for class in [FailureClass::TransientInfra, FailureClass::Permanent] {
             assert_eq!(serde_json::to_value(class).unwrap().as_str(), Some(class.as_str()));
         }
+    }
+
+    /// Issue #1093: the gateway errors a turn dies on are transient — the router's reset wording
+    /// (which carries no "unreachable"), a bare 5xx after "API Error:", 529 overloaded, and a socket
+    /// that a restarting gateway dropped.
+    #[test]
+    fn a_turn_that_died_on_the_gateway_is_transient() {
+        for message in [
+            "API Error: 502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)",
+            "API Error: 502 model router: Anthropic is unreachable (connection failed: ECONNREFUSED)",
+            "API Error: 503 service temporarily down",
+            "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}",
+            "API Error: 500 internal error",
+            "request failed: read ECONNRESET",
+            "socket hang up",
+            "UND_ERR_SOCKET other side closed",
+        ] {
+            assert_eq!(classify_turn_error(message), FailureClass::TransientInfra, "{message:?}");
+        }
+    }
+
+    /// Issue #1093: a turn refused for who is asking or what is asked holds at once.
+    #[test]
+    fn a_turn_refused_for_auth_or_policy_is_permanent() {
+        for message in [
+            "API Error: 401 {\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}",
+            "API Error: 403 forbidden",
+            "API Error: 400 the request was refused by the usage policy",
+            "API Error: 502 model router: request refused",
+            "OAuth token has expired",
+            "some failure nobody has seen before",
+        ] {
+            assert_eq!(classify_turn_error(message), FailureClass::Permanent, "{message:?}");
+        }
+    }
+
+    /// The cause the card names: the status and the failure, the provider spelled as the message
+    /// spells it, and nothing invented for a message that names neither.
+    #[test]
+    fn the_turn_error_cause_names_the_status_and_the_failure() {
+        assert_eq!(
+            turn_error_cause("API Error: 502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)"),
+            "502, connection to Anthropic"
+        );
+        assert_eq!(
+            turn_error_cause("API Error: 502 model router: Anthropic is unreachable (DNS lookup failed: ENOTFOUND)"),
+            "502, Anthropic unreachable"
+        );
+        assert_eq!(turn_error_cause("API Error: 529 overloaded_error"), "529, overloaded");
+        assert_eq!(turn_error_cause("read ECONNRESET"), "connection reset");
+        assert_eq!(turn_error_cause("model timed out after 600 s"), "timed out");
+        assert_eq!(turn_error_cause("something else"), "");
     }
 }

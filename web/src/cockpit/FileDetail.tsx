@@ -57,7 +57,7 @@ const TOOL_ICON: Record<string, string> = { Read: "👁", Edit: "✎", MultiEdit
 export function DiffView({ diff, truncated }: { diff: string; truncated: boolean }): ReactElement {
   const lines = parseDiff(diff);
   return (
-    <div className="scroll-thin overflow-x-auto rounded-md border border-border font-mono text-[11.5px] leading-[18px]">
+    <div className="scroll-thin overflow-x-auto rounded-md border border-border font-mono text-meta-lg leading-[18px]">
       <table className="w-full border-collapse">
         <tbody>
           {lines
@@ -84,7 +84,7 @@ export function DiffView({ diff, truncated }: { diff: string; truncated: boolean
             )}
         </tbody>
       </table>
-      {truncated && <p className="m-0 border-t border-border px-2 py-1 font-sans text-[11px] text-faint">Diff cut at 200 KB.</p>}
+      {truncated && <p className="m-0 border-t border-border px-2 py-1 font-sans text-meta text-faint">Diff cut at 200 KB.</p>}
     </div>
   );
 }
@@ -97,22 +97,22 @@ function ColonyCard({ colony, onOpen }: { colony: MapFileColony; onOpen: (id: st
       <header className="flex items-start gap-2">
         <AntAvatar state={colony.status === "waiting_for_answer" || colony.status === "idle" ? "thinking" : "working"} size={26} ground={false} framed={false} />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-semibold text-text" title={colony.title}>
+          <div className="truncate text-body-sm font-semibold text-text" title={colony.title}>
             {colony.title}
-            {colony.issue != null && <span className="ml-1 font-mono text-[11px] font-normal text-faint">#{colony.issue}</span>}
+            {colony.issue != null && <span className="ml-1 font-mono text-meta font-normal text-faint">#{colony.issue}</span>}
           </div>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[11px]">
+          <div className="mt-0.5 flex items-center gap-1.5 text-meta">
             <span className="text-muted">{SESSION_STATUS[colony.status]?.label ?? colony.status}</span>
             <span
               className={cx(
-                "rounded-full px-1.5 py-px text-[10.5px] font-medium",
+                "rounded-full px-1.5 py-px text-meta-sm font-medium",
                 colony.mode === "changing" ? "bg-warn/15 text-warn" : "border border-dashed border-border text-muted",
               )}
             >
               {colony.mode === "changing" ? "changing" : "reading"}
             </span>
             {stats && (
-              <span className="font-mono text-[10.5px]">
+              <span className="font-mono text-meta-sm">
                 <span className="text-ok">+{stats.add}</span> <span className="text-err">−{stats.del}</span>
               </span>
             )}
@@ -121,7 +121,7 @@ function ColonyCard({ colony, onOpen }: { colony: MapFileColony; onOpen: (id: st
         <button
           type="button"
           onClick={() => onOpen(colony.id)}
-          className="shrink-0 cursor-pointer rounded-md border border-border bg-panel px-2 py-1 text-[11.5px] text-muted hover:border-border-strong hover:text-text"
+          className="shrink-0 cursor-pointer rounded-md border border-border bg-panel px-2 py-1 text-meta-lg text-muted hover:border-border-strong hover:text-text"
         >
           Open colony
         </button>
@@ -129,9 +129,9 @@ function ColonyCard({ colony, onOpen }: { colony: MapFileColony; onOpen: (id: st
       {colony.activity.length > 0 && (
         <ol className="m-0 mt-2.5 list-none space-y-1 border-l border-border p-0 pl-2.5">
           {colony.activity.map((a, i) => (
-            <li key={`${a.ts}-${i}`} className="flex items-baseline gap-1.5 text-[11.5px]">
+            <li key={`${a.ts}-${i}`} className="flex items-baseline gap-1.5 text-meta-lg">
               <span className="w-12 shrink-0 text-right text-faint tabular-nums">{timeAgo(a.ts)}</span>
-              <span aria-hidden="true" className="w-4 shrink-0 text-center font-mono text-[10.5px] text-faint">
+              <span aria-hidden="true" className="w-4 shrink-0 text-center font-mono text-meta-sm text-faint">
                 {TOOL_ICON[a.tool] ?? "•"}
               </span>
               <span className="min-w-0 truncate font-mono text-muted" title={a.agent ? `${a.summary} · ${a.agent}` : a.summary}>
@@ -148,7 +148,7 @@ function ColonyCard({ colony, onOpen }: { colony: MapFileColony; onOpen: (id: st
             type="button"
             aria-expanded={showDiff}
             onClick={() => setShowDiff((v) => !v)}
-            className="mb-1.5 cursor-pointer border-0 bg-transparent p-0 text-[11.5px] text-muted hover:text-text"
+            className="mb-1.5 cursor-pointer border-0 bg-transparent p-0 text-meta-lg text-muted hover:text-text"
           >
             {showDiff ? "▾" : "▸"} Diff
           </button>
@@ -207,10 +207,10 @@ export function FileDetail({
           ←
         </button>
         <div className="min-w-0 flex-1">
-          <div className="truncate font-mono text-[12.5px] font-semibold text-text" title={path}>
+          <div className="truncate font-mono text-small-lg font-semibold text-text" title={path}>
             {name}
           </div>
-          <div className="truncate font-mono text-[10.5px] text-faint" title={path}>
+          <div className="truncate font-mono text-meta-sm text-faint" title={path}>
             {path}
             {component ? ` · ${component}` : ""}
           </div>
@@ -218,13 +218,13 @@ export function FileDetail({
       </div>
       <div className="scroll-thin min-h-0 flex-1 space-y-2.5 overflow-auto p-3">
         {error && !shown ? (
-          <p className="m-0 text-[12.5px] text-err">{error}</p>
+          <p className="m-0 text-small-lg text-err">{error}</p>
         ) : !shown ? (
-          <p className="m-0 text-[12.5px] text-faint">Loading…</p>
+          <p className="m-0 text-small-lg text-faint">Loading…</p>
         ) : shown.colonies.length === 0 ? (
           <div className="rounded-xl border border-dashed border-border p-4 text-center">
-            <p className="m-0 text-[13px] text-muted">No colony is on this file right now.</p>
-            {component && <p className="m-0 mt-1 text-[11.5px] text-faint">It belongs to {component}.</p>}
+            <p className="m-0 text-body-sm text-muted">No colony is on this file right now.</p>
+            {component && <p className="m-0 mt-1 text-meta-lg text-faint">It belongs to {component}.</p>}
           </div>
         ) : (
           shown.colonies.map((c) => <ColonyCard key={c.id} colony={c} onOpen={onOpenColony} />)

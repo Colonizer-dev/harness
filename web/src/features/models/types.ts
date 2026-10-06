@@ -91,3 +91,59 @@ export interface ModelSwitchReply {
   colonies: string[];
   failed: { id: string; ok: false; error?: string }[];
 }
+
+/** What the mothership knows about one plan in use: GET /api/models/plans. Nothing is estimated. */
+export interface PlanUsage {
+  /** `anthropic` for the Claude account, else the provider id. */
+  id: string;
+  name: string;
+  kind: "claude" | "provider";
+  /** Plain-word roles routed here: `orchestrator`, `subagents`, `background`, `small tasks`, … */
+  used_by: string[];
+  /** Out right now: a limit was hit and its reset is still ahead. */
+  exhausted: boolean;
+  reset_at: string | null;
+  reset_unix: number | null;
+  /** The last limit the gateway saw, current or lapsed: when it hit and the reset it named. */
+  last_limit: { at: string; reset_at: string | null; reset_unix: number | null } | null;
+  /** Requests through the gateway since `since`; null for the Claude account, which it does not proxy. */
+  requests: number | null;
+  failures: number | null;
+  last_request_at: string | null;
+  since: string | null;
+  /** The provider's plan-balance probe (issue #199); null when none is configured. */
+  balance: {
+    remaining: number | null;
+    /** The plan's total, when the probe names one (`quota.limit_pointer`). */
+    limit: number | null;
+    /** Derived only when both `remaining` and `limit` are known. */
+    pct_left: number | null;
+    error: string | null;
+    checked_at: string | null;
+  } | null;
+}
+
+export interface ModelPlans {
+  plans: PlanUsage[];
+  checked_at: string;
+}
+
+/** A saved model profile, or a starter derived from what the install has configured. */
+export interface ModelProfile {
+  id: string;
+  name: string;
+  /** The agent module it was saved from: a hint only, applying never changes a scope's module. */
+  module: string | null;
+  /** Role → model id; `""` is the module's own default. */
+  roles: Record<string, string>;
+  /** A starter: derived, never stored, not renamed or deleted. */
+  builtin: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ModelProfileBody {
+  name?: string;
+  module?: string | null;
+  roles?: Record<string, string>;
+}

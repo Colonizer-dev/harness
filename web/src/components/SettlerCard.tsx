@@ -93,22 +93,22 @@ export function SettlerCard({
         </span>
         <span className="flex min-w-0 flex-1 flex-col gap-px">
           <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-            <span className="whitespace-nowrap text-[13px] font-semibold text-accent">{name}</span>
-            {task && <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted">{task}</span>}
+            <span className="whitespace-nowrap text-body-sm font-semibold text-accent">{name}</span>
+            {task && <span className="min-w-0 flex-1 truncate text-small-lg text-muted">{task}</span>}
           </span>
           {/* Re-keyed on the text so a new status eases in. */}
-          <span className="block min-h-[19px] truncate font-mono text-[12px] text-muted">
+          <span className="block min-h-[19px] truncate font-mono text-small text-muted">
             <span key={status} className="status-in inline-block max-w-full truncate align-top">
               {status}
             </span>
           </span>
-          {!open && summary && <span className="mt-0.5 block truncate text-[13px] text-text">{summary}</span>}
+          {!open && summary && <span className="mt-0.5 block truncate text-body-sm text-text">{summary}</span>}
         </span>
         <span className="mt-0.5 flex shrink-0 items-center gap-2">
           {steps > 0 && (
-            <span className="rounded border border-border bg-panel-2 px-1.5 font-mono text-[11.5px] text-muted">{stepsLabel}</span>
+            <span className="rounded border border-border bg-panel-2 px-1.5 font-mono text-meta-lg text-muted">{stepsLabel}</span>
           )}
-          <span className="flex items-center gap-1 text-[12px] text-muted">
+          <span className="flex items-center gap-1 text-small text-muted">
             {open ? "Hide work" : "Show work"}
             <IconChevron size={13} className={cx("transition-transform", open && "rotate-90")} />
           </span>
@@ -122,10 +122,10 @@ export function SettlerCard({
           {report && (
             <div className="rounded-lg border border-border bg-panel-2 px-3.5 py-3">
               <div className="mb-1.5 flex items-center gap-2">
-                <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                <span className="font-mono text-meta font-semibold uppercase tracking-[0.08em] text-muted">
                   {state === "done" ? "Report" : "Report so far"}
                 </span>
-                {state === "writing" && <span className="font-mono text-[11px] text-accent">streaming…</span>}
+                {state === "writing" && <span className="font-mono text-meta text-accent">streaming…</span>}
               </div>
               <MarkdownBlock className="leading-[1.55] text-text [text-wrap:pretty]">{report}</MarkdownBlock>
             </div>
@@ -136,7 +136,7 @@ export function SettlerCard({
                 type="button"
                 onClick={() => setStepsOpen((o) => !o)}
                 aria-expanded={stepsOpen}
-                className="flex cursor-pointer items-center gap-1.5 font-mono text-[12px] text-muted hover:text-text"
+                className="flex cursor-pointer items-center gap-1.5 font-mono text-small text-muted hover:text-text"
               >
                 <IconChevron size={12} className={cx("transition-transform", stepsOpen && "rotate-90")} />
                 {stepsOpen ? "Hide" : "Show"} {stepsLabel}
@@ -144,7 +144,7 @@ export function SettlerCard({
               {stepsOpen && stepList.length > 0 && (
                 <ol className="ml-[5px] mt-2 flex flex-col gap-1.5 border-l border-border pl-3.5">
                   {stepList.map((s, i) => (
-                    <li key={i} className="relative flex min-w-0 items-baseline gap-2 text-[12.5px]">
+                    <li key={i} className="relative flex min-w-0 items-baseline gap-2 text-small-lg">
                       <span
                         className={cx(
                           "absolute -left-[17.5px] top-1.5 size-1.5 rounded-full",
@@ -152,8 +152,8 @@ export function SettlerCard({
                         )}
                       />
                       <span className="whitespace-nowrap text-text">{s.label}</span>
-                      {s.detail && <span className="min-w-0 truncate font-mono text-[11.5px] text-muted">{s.detail}</span>}
-                      {s.failed && <span className="whitespace-nowrap text-[11.5px] text-warn">didn't work</span>}
+                      {s.detail && <span className="min-w-0 truncate font-mono text-meta-lg text-muted">{s.detail}</span>}
+                      {s.failed && <span className="whitespace-nowrap text-meta-lg text-warn">didn't work</span>}
                     </li>
                   ))}
                 </ol>

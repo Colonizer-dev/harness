@@ -8,7 +8,7 @@ import { needsYou } from "../notifications";
 import type { Session } from "../types";
 import { feedEntries } from "./feed";
 import { KIND_DOT, READ_AT, relative } from "./InboxView";
-import { useOpenQuestions, watchdogFlagged } from "./questions";
+import { expectsAnswer, needsYouLine, useOpenQuestions } from "./questions";
 import { taskLine, taskTooltip } from "../summary";
 
 /** How many notification lines the panel lists before "Open inbox" takes over. */
@@ -94,7 +94,7 @@ export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenN
         {waiting > 0 ? (
           <span
             aria-hidden="true"
-            className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full border-2 border-bg bg-warn px-0.5 font-mono text-[9px] font-semibold leading-none text-bg tabular-nums"
+            className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full border-2 border-bg bg-warn px-0.5 font-mono text-micro-sm font-semibold leading-none text-bg tabular-nums"
           >
             {waiting > 99 ? "99+" : waiting}
           </span>
@@ -162,10 +162,10 @@ function InboxPanel({
       className="absolute right-0 top-full z-50 mt-2 flex max-h-[min(560px,calc(100dvh-80px))] w-[min(420px,calc(100vw-24px))] animate-[ck-in_160ms_ease-out_both] flex-col overflow-hidden rounded-xl border border-border-strong bg-panel text-text shadow-[0_16px_48px_rgb(0_0_0/0.4)] focus-visible:outline-none"
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
-        <h2 className="m-0 text-[14px] font-semibold">Notifications</h2>
-        <span className={`text-[12.5px] tabular-nums ${waiting.length > 0 ? "text-warn" : "text-faint"}`}>{waiting.length} need you</span>
+        <h2 className="m-0 text-body-lg font-semibold">Notifications</h2>
+        <span className={`text-small-lg tabular-nums ${waiting.length > 0 ? "text-warn" : "text-faint"}`}>{waiting.length} need you</span>
         <div className="flex-1" />
-        <button type="button" onClick={onMarkAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-muted hover:text-text">
+        <button type="button" onClick={onMarkAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-small-lg text-muted hover:text-text">
           mark all read
         </button>
       </div>
@@ -175,7 +175,7 @@ function InboxPanel({
           <section aria-label="needs you" className="border-b border-border">
             {waiting.map((session) => (
               <div key={session.id} className="border-t border-border px-4 py-3 first:border-t-0">
-                <div className="flex items-center gap-2 font-mono text-[11px] text-muted">
+                <div className="flex items-center gap-2 font-mono text-meta text-muted">
                   <span aria-hidden="true" className="h-[7px] w-[7px] shrink-0 rounded-full bg-warn" />
                   <span className="min-w-0 truncate">
                     {session.repo}
@@ -184,22 +184,22 @@ function InboxPanel({
                   <button
                     type="button"
                     onClick={() => onOpenColony(session.id)}
-                    className="ml-auto shrink-0 cursor-pointer rounded-md border-0 bg-text px-2.5 py-1 font-sans text-[12.5px] font-medium text-bg hover:opacity-85"
+                    className="ml-auto shrink-0 cursor-pointer rounded-md border-0 bg-text px-2.5 py-1 font-sans text-small-lg font-medium text-bg hover:opacity-85"
                   >
-                    Answer
+                    {questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}
                   </button>
                 </div>
-                <div className="mt-1.5 text-[13.5px] font-semibold [text-wrap:pretty]">
-                  {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
+                <div className="mt-1.5 text-body font-semibold [text-wrap:pretty]">
+                  {questions[session.id] ?? needsYouLine(session)}
                 </div>
-                <div className="mt-0.5 truncate text-[12.5px] text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}</div>
+                <div className="mt-0.5 truncate text-small-lg text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}</div>
               </div>
             ))}
           </section>
         )}
 
         {shown.length === 0 ? (
-          <div className="px-4 py-6 text-center text-[13px] text-muted">{waiting.length === 0 ? "nothing waits on you, and nothing new" : "nothing else new"}</div>
+          <div className="px-4 py-6 text-center text-body-sm text-muted">{waiting.length === 0 ? "nothing waits on you, and nothing new" : "nothing else new"}</div>
         ) : (
           <ul aria-label="recent" className="m-0 list-none p-0">
             {shown.map((entry) => {
@@ -215,10 +215,10 @@ function InboxPanel({
                   >
                     <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: KIND_DOT[entry.kind] }} />
                     <span className="min-w-0">
-                      <span className={`block truncate text-[13px] ${unread ? "font-semibold" : "font-normal"}`}>{entry.text}</span>
-                      <span className="mt-0.5 block truncate font-mono text-[11px] text-faint">{entry.label}</span>
+                      <span className={`block truncate text-body-sm ${unread ? "font-semibold" : "font-normal"}`}>{entry.text}</span>
+                      <span className="mt-0.5 block truncate font-mono text-meta text-faint">{entry.label}</span>
                     </span>
-                    <span className="whitespace-nowrap font-mono text-[11px] text-faint">{relative(entry.at)}</span>
+                    <span className="whitespace-nowrap font-mono text-meta text-faint">{relative(entry.at)}</span>
                   </button>
                 </li>
               );
@@ -227,7 +227,7 @@ function InboxPanel({
         )}
       </div>
 
-      <div className="flex shrink-0 items-center gap-3 border-t border-border px-4 py-2.5 text-[12.5px]">
+      <div className="flex shrink-0 items-center gap-3 border-t border-border px-4 py-2.5 text-small-lg">
         <button type="button" onClick={onOpenInbox} className="cursor-pointer border-0 bg-transparent p-0 font-medium text-text hover:text-accent">
           Open inbox{entries.length > shown.length ? ` · ${entries.length - shown.length} more` : ""} ›
         </button>

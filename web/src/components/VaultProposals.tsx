@@ -54,20 +54,20 @@ export function VaultProposalList({
   return (
     <section aria-labelledby="vault-proposals-title" className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 id="vault-proposals-title" className="text-[14.5px] font-semibold">
+        <h2 id="vault-proposals-title" className="text-lead-sm font-semibold">
           Proposed for your vault
         </h2>
         {visible.length > 0 && <Badge tone="accent">{visible.length}</Badge>}
       </div>
-      {error && <p className="text-[13px] text-err">{error}</p>}
+      {error && <p className="text-body-sm text-err">{error}</p>}
       {listing && (
-        <p className="text-[12.5px] text-muted">
-          Accepting writes a new note into <code className="font-mono text-[12px] text-text">{listing.inbox}/</code> in your vault. Nothing is
+        <p className="text-small-lg text-muted">
+          Accepting writes a new note into <code className="font-mono text-small text-text">{listing.inbox}/</code> in your vault. Nothing is
           overwritten, and nothing reaches the vault until you accept it.
         </p>
       )}
       {listing && visible.length === 0 && (
-        <p className="rounded-xl border border-dashed border-border-strong px-4 py-5 text-center text-[13px] text-muted">No vault proposals waiting.</p>
+        <p className="rounded-xl border border-dashed border-border-strong px-4 py-5 text-center text-body-sm text-muted">No vault proposals waiting.</p>
       )}
       {listing &&
         visible.map((proposal) => (
@@ -102,7 +102,7 @@ function VaultProposalCard({ proposal, inbox, onResolved }: { proposal: VaultPro
   const commit = proposal.source.commit ? proposal.source.commit.slice(0, 12) : null;
   return (
     <article className="rounded-xl border border-border bg-panel">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 pt-3 text-[12.5px] text-muted">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 pt-3 text-small-lg text-muted">
         <Badge>
           <span className="font-mono font-medium [overflow-wrap:anywhere]">
             {inbox}/{proposal.path}
@@ -111,14 +111,14 @@ function VaultProposalCard({ proposal, inbox, onResolved }: { proposal: VaultPro
         <span className="text-faint">· {timeAgo(proposal.created_at)}</span>
       </div>
       <div className="space-y-2 px-4 py-3">
-        <h3 className="text-[14.5px] font-semibold [overflow-wrap:anywhere]">{proposal.title}</h3>
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-panel-2 px-3 py-2 font-mono text-[12.5px] leading-relaxed text-text [overflow-wrap:anywhere]">
+        <h3 className="text-lead-sm font-semibold [overflow-wrap:anywhere]">{proposal.title}</h3>
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-panel-2 px-3 py-2 font-mono text-small-lg leading-relaxed text-text [overflow-wrap:anywhere]">
           {proposal.body}
         </pre>
-        <p className="text-[12.5px] text-muted [overflow-wrap:anywhere]">
+        <p className="text-small-lg text-muted [overflow-wrap:anywhere]">
           <span className="font-medium text-text">Why:</span> {proposal.reason}
         </p>
-        <p className="text-[12px] text-faint [overflow-wrap:anywhere]">
+        <p className="text-small text-faint [overflow-wrap:anywhere]">
           From colony <code className="font-mono">{proposal.source.session_id}</code> on <span className="font-mono">{proposal.source.repo}</span>
           {commit && (
             <>
