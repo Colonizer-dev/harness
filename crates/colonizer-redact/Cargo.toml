@@ -8,6 +8,7 @@ description = "Secret redaction for Colonizer logs, shared by the harness and it
 license = "MIT"
 repository = "https://github.com/Colonizer-dev/harness"
 homepage = "https://colonizer.dev"
+readme = "README.md"
 
 [lib]
 name = "colonizer_redact"
