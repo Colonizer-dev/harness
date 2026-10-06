@@ -90,9 +90,12 @@ website lives in another repository, so when an illustration changes there, reco
 
 Stated here rather than buried.
 
-- **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
-  Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
-  publishes no macOS build of it.
+- **A colony runs on the machine that launched it.** Linux x86_64 with KVM, or an Apple Silicon
+  Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale publishes no
+  macOS build of it. Several motherships can join a [fleet](fleet.md) and share one view, and
+  [remote access](remote-tunnel.md) reaches a cockpit from anywhere, but neither moves a colony: a
+  launch on another member is not built yet, nor is enrolling members into one mesh
+  ([#298](https://github.com/Colonizer-dev/harness/issues/298)).
 - **Seven agent modules, one forge.** Claude Code, Pi, OpenCode, Codex, Grok Build, ACP and Hermes
   ship as agent modules (`modules/agents`); GitHub is the only source and publisher. Claude Code is
   staged from the host (or fetched at install time on a Mac), Pi is bundled with its module, and
