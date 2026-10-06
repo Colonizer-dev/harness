@@ -12,7 +12,7 @@ import { YourCockpitCard } from "./YourCockpitCard";
 const api = { remote: () => new Promise<RemoteStatus>(() => {}), phones: () => new Promise(() => {}) } as unknown as Api;
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(<ApiContext.Provider value={api}>{node}</ApiContext.Provider>);
 
-const remoteOn: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: null, replaced: false };
+const remoteOn: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: null, replaced: false, require_github: false };
 const tailnet: PhoneOrigin = { kind: "tailnet", url: "http://100.72.1.4:7878", reachable: true, secure: false, note: null };
 
 describe("YourCockpitCard", () => {

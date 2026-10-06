@@ -70,7 +70,26 @@ test('registration stores the public key, the created-at and nothing else, and r
   assert.equal(row.public_key, publicKey);
   assert.equal(row.owner_github_id, null);
   assert.ok(Math.abs(row.created_at - Math.floor(Date.now() / 1000)) < 5);
-  assert.deepEqual(Object.keys(row).sort(), ['created_at', 'id', 'owner_github_id', 'owner_github_login', 'public_key']);
+  assert.deepEqual(Object.keys(row).sort(), ['created_at', 'id', 'owner_github_id', 'owner_github_login', 'public_key', 'require_github']);
+  // A new install pairs with the pair code alone unless its mothership asks for the GitHub gate (#1086).
+  assert.equal(row.require_github, 0);
+  assert.equal(install.require_github, false);
+});
+
+test('registration turns the GitHub gate on only for a literal require_github: true', async () => {
+  const { env, db } = setup();
+  for (const [asked, stored] of [[true, 1], [false, 0], ['yes', 0], [1, 0], [null, 0]]) {
+    const response = await worker.fetch(
+      new Request(`https://${DOMAIN}/api/installs`, { method: 'POST', body: JSON.stringify({ public_key: keyPair(), require_github: asked }) }),
+      env,
+      NO_CTX,
+    );
+    assert.equal(response.status, 201);
+    const install = await response.json();
+    assert.equal(install.require_github, stored === 1, String(asked));
+    const row = await db.prepare('SELECT require_github FROM installs WHERE id = ?').bind(install.install_id).first();
+    assert.equal(row.require_github, stored, String(asked));
+  }
 });
 
 test('registration refuses keys that are not base64 or not exactly 32 bytes, and honours the limiter', async () => {
@@ -178,7 +197,7 @@ test('signed endpoints accept a fresh valid signature and refuse bad, stale, mis
 
   const view = await worker.fetch(new Request(`https://${DOMAIN}${path}`, { headers: await sigHeaders(good, 'GET', path, now) }), env, NO_CTX);
   assert.equal(view.status, 200);
-  assert.deepEqual(await view.json(), { owner: null, pending: [] });
+  assert.deepEqual(await view.json(), { owner: null, pending: [], require_github: false });
 
   const wrong = await ed25519Key();
   const stale = await sigHeaders(good, 'GET', path, now - 301);
@@ -211,6 +230,7 @@ test('a confirmed pairing binds its owner once, and unbinding clears owner and p
   assert.deepEqual(await view.json(), {
     owner: null,
     pending: [{ code: '123456', github_login: 'owner', expires_at: now + 60 }],
+    require_github: false,
   });
 
   const confirm = await worker.fetch(

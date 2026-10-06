@@ -100,7 +100,7 @@ export function remoteMock(ms: MockState): RemoteApi {
       // Like the server: a PUT that does not change the switch answers the view and records nothing.
       if (enabled === ms.remoteState.enabled) return clone(ms.remoteState);
       ms.remoteState = enabled
-        ? { enabled: true, host: ms.remoteHost, connected: true, since: now(), replaced: false }
+        ? { ...ms.remoteState, enabled: true, host: ms.remoteHost, connected: true, since: now(), replaced: false }
         : { ...ms.remoteState, enabled: false, connected: false, since: null };
       ms.logActivity({ kind: enabled ? "remote.enable" : "remote.disable", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
       return clone(ms.remoteState);
@@ -116,6 +116,14 @@ export function remoteMock(ms: MockState): RemoteApi {
       // And it rotates the link credentials: every browser signed in to the link is signed out.
       ms.linkState = { devices: [], pending: [] };
       ms.logActivity({ kind: "remote.reset", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+      return clone(ms.remoteState);
+    },
+    setRemoteRequireGithub: async (requireGithub) => {
+      await sleep(250);
+      // Like the server: no change answers the view and records nothing.
+      if (requireGithub === ms.remoteState.require_github) return clone(ms.remoteState);
+      ms.remoteState = { ...ms.remoteState, require_github: requireGithub };
+      ms.logActivity({ kind: "remote.require_github", actor: "you", via: "cockpit", target: requireGithub ? "on" : "off", section: "remote" });
       return clone(ms.remoteState);
     },
     remotePairing: () => ms.later(() => ms.remotePairingState),

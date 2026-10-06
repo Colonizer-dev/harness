@@ -148,6 +148,7 @@ const PARK_REASONS: Record<string, string> = {
   provider_quota_exhausted: "provider quota exhausted",
   hold_timeout: "hold timed out",
   provider_retry: "gateway error, retrying automatically",
+  repo_pr_rate_limit: "repo's daily PR cap reached",
 };
 
 /** The short local date/time a parked colony can resume at, e.g. "27 Sep, 14:05"; "" for a timestamp that will not parse. */
@@ -407,6 +408,8 @@ export function attentionText(attention: Attention): string {
       return attention.detail?.trim() || "Autopilot held the PR";
     case "hold_timeout":
       return "Held too long — parked, resume to continue";
+    case "repo_pr_rate_limit":
+      return "Repo's daily PR cap reached — parked, resume to continue";
     case "control_defeat":
       return "A control may have been bypassed";
     case "provider_retry":

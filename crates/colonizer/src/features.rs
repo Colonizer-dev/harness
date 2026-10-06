@@ -49,6 +49,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::history::FEATURE,
     &crate::maps::FEATURE,
     &crate::model_switch::FEATURE,
+    &crate::observability::FEATURE,
     &crate::quota_cards::FEATURE,
     &crate::supply_chain_loop::FEATURE,
     &crate::switch_agent::FEATURE,

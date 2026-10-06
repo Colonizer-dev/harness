@@ -109,6 +109,43 @@ struct Saved {
     enabled: bool,
     install_id: Option<String>,
     host: Option<String>,
+    /// Whether the relay sends every browser through GitHub sign-in before forwarding anything
+    /// (#534), on top of this machine's own pairing (#1086). `None` is a state file from before the
+    /// setting: an install registered then keeps the gate it was built with, a fresh one starts
+    /// without it. [`Saved::require_github`] reads it.
+    #[serde(default)]
+    require_github: Option<bool>,
+}
+
+impl Saved {
+    /// The GitHub gate as it stands: what was set, else on for an install already registered (the
+    /// relay keeps the gate on for those until told otherwise) and off for a new one.
+    fn require_github(&self) -> bool {
+        self.require_github.unwrap_or(self.install_id.is_some())
+    }
+}
+
+/// The header the cockpit answers a tunnelled request with when the invite, pairing secret or
+/// link/phone credential it carried did not authenticate (#1086). Its only value is `rejected`; the
+/// relay counts it toward its throttle and strips it, so it never reaches a browser.
+pub(crate) const CREDENTIAL_VERDICT: &str = "x-colonizer-credential";
+/// The close code of a tunnelled websocket whose credential did not authenticate, for the same count.
+const REJECTED_CLOSE: u16 = 4401;
+
+/// Marks an answer to a tunnelled request as a rejected credential ([`CREDENTIAL_VERDICT`]).
+pub(crate) fn mark_rejected(mut res: axum::response::Response) -> axum::response::Response {
+    res.headers_mut()
+        .insert(CREDENTIAL_VERDICT, axum::http::HeaderValue::from_static("rejected"));
+    res
+}
+
+/// Whether a request presents a link (`clk_…`) or phone (`cph_…`) credential, as a bearer or as the
+/// cockpit cookie: what the relay forwards without a GitHub session, and so what the cockpit must
+/// report back when it does not authenticate.
+pub(crate) fn presents_credential(headers: &axum::http::HeaderMap) -> bool {
+    let credential = |token: &str| token.starts_with(LINK_PREFIX) || token.starts_with("cph_");
+    crate::auth::bearer_token(headers).is_some_and(|t| credential(&t))
+        || crate::auth::cookie_token(headers).is_some_and(|t| credential(&t))
 }
 
 /// Marks a request that arrived through the tunnel. Only in-process code can create one —
@@ -236,6 +273,7 @@ impl Remote {
             "connected": connected,
             "since": connected.then(|| status.since.clone()).flatten(),
             "replaced": saved.enabled && status.replaced,
+            "require_github": saved.require_github(),
         })
     }
 
@@ -386,6 +424,62 @@ pub async fn reset(State(app): State<Shared>, via: Option<Extension<crate::auth:
     Ok(Json(view))
 }
 
+#[derive(Deserialize)]
+pub struct RequireGithubRequest {
+    require_github: bool,
+}
+
+/// `PUT /api/remote/require-github {"require_github": bool}` (#1086): whether the relay sends every
+/// browser through GitHub sign-in before it forwards anything. Off, a device pairs with this
+/// machine's pair code alone — the single-use invite and the six digits confirmed here — and the
+/// relay forwards only invites and link/phone credentials, which this cockpit checks. On, the
+/// GitHub owner gate of #534 comes first, as before. Local only: loosening or tightening who may
+/// reach the link is this machine's call. With a link registered, the relay is told first (a
+/// signed `PUT …/settings`), and nothing is saved unless it agreed; before the first enable the
+/// choice is only saved, and the registration carries it. Records `remote.require_github`.
+pub async fn put_require_github(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<Tunnelled>>,
+    via: Option<Extension<crate::auth::Via>>,
+    Json(body): Json<RequireGithubRequest>,
+) -> ApiResult<Value> {
+    local_only(tunnelled.as_ref(), "change the GitHub sign-in requirement")?;
+    let mut saved = app.remote.saved().await;
+    let changed = saved.require_github() != body.require_github;
+    if !changed && saved.install_id.is_none() {
+        return Ok(Json(app.remote.view().await)); // no change: nothing to do, nothing to record
+    }
+    // With a link registered the relay is always told, even when this machine already reads the
+    // same value: the relay holds the gate that counts, and a PUT is how the two are put back in
+    // step if they ever drifted (an install registered against a relay older than the setting).
+    if saved.install_id.is_some() {
+        let request = json!({ "require_github": body.require_github });
+        match install_call(&app, Method::PUT, "/settings", Some(&request)).await? {
+            (StatusCode::OK, answer) if answer["require_github"] == body.require_github => {}
+            // A relay deployed before #1086 has no settings endpoint: its catch-all answers 404
+            // `not found`, and it keeps the GitHub gate on whatever this machine says.
+            (StatusCode::NOT_FOUND, answer) if answer["error"] == "not found" => {
+                return Err(client_error(
+                    StatusCode::BAD_GATEWAY,
+                    "the relay does not support pairing without GitHub yet (it needs a redeploy); nothing was changed",
+                ));
+            }
+            (status, answer) => return Err(relay_refused(status, &answer)),
+        }
+    }
+    saved.require_github = Some(body.require_github);
+    app.remote.persist(saved).await?;
+    if !changed {
+        return Ok(Json(app.remote.view().await)); // re-sent to the relay, but nothing to record
+    }
+    let mut entry = activity::Entry::new("remote.require_github", "you");
+    entry.via = activity::via_name(via.map(|Extension(v)| v));
+    entry.target = Some(if body.require_github { "on" } else { "off" }.into());
+    entry.section = Some("remote".into());
+    activity::record(&app, entry).await;
+    Ok(Json(app.remote.view().await))
+}
+
 async fn set_enabled(app: &Shared, on: bool) -> Result<Value, AppError> {
     let mut saved = app.remote.saved().await;
     if on {
@@ -396,9 +490,10 @@ async fn set_enabled(app: &Shared, on: bool) -> Result<Value, AppError> {
             )
         })?;
         if saved.install_id.is_none() {
-            let (install_id, host) = register(&app.remote.relay().await, &key).await?;
+            let (install_id, host, require_github) = register(&app.remote.relay().await, &key, saved.require_github()).await?;
             saved.install_id = Some(install_id);
             saved.host = Some(host);
+            saved.require_github = Some(require_github);
         }
         saved.enabled = true;
         app.remote.persist(saved).await?;
@@ -424,7 +519,8 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
         )
     })?;
     let relay = app.remote.relay().await;
-    let (install_id, host) = register(&relay, &key).await?;
+    // The new install is registered with the gate the old one had: a reset is not a way to drop it.
+    let (install_id, host, require_github) = register(&relay, &key, app.remote.saved().await.require_github()).await?;
     // The old install is retired at the relay (review finding R2): its row, owner and pairings are
     // deleted and its tunnel closed, signed with the old key before it is overwritten, so a leaked
     // copy of that key reaches nothing afterwards. If the relay cannot be told, the reset stops
@@ -454,6 +550,7 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
     let mut saved = app.remote.saved().await;
     saved.install_id = Some(install_id);
     saved.host = Some(host);
+    saved.require_github = Some(require_github);
     app.remote.persist(saved).await?;
     app.remote.set_replaced(false).await; // a reset is the way out of a taken-over link
     app.remote.signal.send_replace(()); // an immediate redial under the new identity
@@ -507,15 +604,22 @@ fn read_key(dir: &Path) -> Result<Ed25519KeyPair> {
 }
 
 /// Registers the public key with the relay: `POST /api/installs` answers `{"install_id", "host"}`,
-/// and the tunnel URL and admitted `Host` are both derived from that host.
-async fn register(relay: &str, key: &Ed25519KeyPair) -> Result<(String, String), AppError> {
+/// and the tunnel URL and admitted `Host` are both derived from that host. `require_github` asks
+/// the relay for its GitHub sign-in gate on the new install (#1086); without it the install pairs
+/// with this machine's pair code alone. Answers the gate the relay actually gave the install, from
+/// its answer's `require_github`; a relay older than the setting names none and always gates, so a
+/// missing field reads as on.
+async fn register(relay: &str, key: &Ed25519KeyPair, require_github: bool) -> Result<(String, String, bool), AppError> {
     let bad = |message: String| client_error(StatusCode::BAD_GATEWAY, &message);
     let url = format!("{}/api/installs", http_base(relay)?);
     let answer = tokio::time::timeout(
         REGISTER_WAIT,
         reqwest::Client::new()
             .post(&url)
-            .json(&json!({"public_key": util::b64_encode(key.public_key().as_ref())}))
+            .json(&json!({
+                "public_key": util::b64_encode(key.public_key().as_ref()),
+                "require_github": require_github,
+            }))
             .send(),
     )
     .await
@@ -535,7 +639,8 @@ async fn register(relay: &str, key: &Ed25519KeyPair) -> Result<(String, String),
             .map(str::to_string)
             .ok_or_else(|| bad(format!("the relay's registration answer named no {name}")))
     };
-    Ok((field("install_id")?, field("host")?))
+    let granted = answer["require_github"].as_bool().unwrap_or(true);
+    Ok((field("install_id")?, field("host")?, granted))
 }
 
 /// `wss://my.colonizer.dev` → `https://my.colonizer.dev` (and ws → http, for a local test relay).
@@ -1502,6 +1607,12 @@ async fn serve_ws(
     }
     let inner = match tokio_tungstenite::client_async(request, client_io).await {
         Ok((inner, _)) => inner,
+        // The guard turned the socket's credential down (#1086): a close the relay counts toward
+        // its throttle, as it counts a rejected HTTP request by its verdict header.
+        Err(tungstenite::Error::Http(res)) if res.headers().contains_key(CREDENTIAL_VERDICT) => {
+            conn.close_ws(&id, REJECTED_CLOSE);
+            return;
+        }
         Err(_) => {
             conn.close_ws(&id, 1014); // Bad Gateway: the inner upgrade did not happen
             return;
@@ -1736,6 +1847,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/remote", routing::get(status).put(put))
         .route("/api/remote/reset", routing::post(reset))
+        .route("/api/remote/require-github", routing::put(put_require_github))
         .route("/api/remote/pairing", routing::get(pairing))
         .route("/api/remote/pairing/confirm", routing::post(confirm_pairing))
         .route("/api/remote/pairing/reject", routing::post(reject_pairing))
@@ -1919,6 +2031,7 @@ mod tests {
         Router::new()
             .route("/api/remote", get(status).put(put))
             .route("/api/remote/reset", post(reset))
+            .route("/api/remote/require-github", axum::routing::put(put_require_github))
             .route("/api/remote/pairing", get(pairing))
             .route("/api/remote/pairing/confirm", post(confirm_pairing))
             .route("/api/remote/pairing/reject", post(reject_pairing))
@@ -2195,6 +2308,7 @@ mod tests {
                 enabled: true,
                 install_id: Some("abcdefghijklmnopqrst".into()),
                 host: Some(host.clone()),
+                require_github: None,
             })
             .await
             .unwrap();
@@ -2695,6 +2809,7 @@ mod tests {
                 enabled: false,
                 install_id: Some(install),
                 host: Some(host),
+                require_github: None,
             })
             .await
             .unwrap();
@@ -2861,7 +2976,7 @@ mod tests {
 
         let (status, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
         assert_eq!(status, StatusCode::OK, "{view}");
-        assert_eq!(view, json!({"owner": null, "pending": []}));
+        assert_eq!(view, json!({"owner": null, "pending": [], "require_github": false}));
 
         // The first sign-in parks a code; the local cockpit sees it, with the account behind it.
         let (status, page) = sign_in(port, &host, "4242:alice").await;
@@ -2914,7 +3029,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "a code is single-use");
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
-        assert_eq!(view, json!({"owner": {"github_login": "alice"}, "pending": []}));
+        assert_eq!(
+            view,
+            json!({"owner": {"github_login": "alice"}, "pending": [], "require_github": false})
+        );
 
         // The relay now lets the owner straight through and refuses anyone else.
         let (status, _) = sign_in(port, &host, "4242:alice").await;
@@ -2926,7 +3044,7 @@ mod tests {
         let (status, _) = local(&router, &app, Method::DELETE, "/api/remote/owner", None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
-        assert_eq!(view, json!({"owner": null, "pending": []}));
+        assert_eq!(view, json!({"owner": null, "pending": [], "require_github": false}));
         let (status, page) = sign_in(port, &host, "4242:alice").await;
         assert_eq!(status, 200, "unbound, the old owner pairs again: {page}");
 
@@ -2995,7 +3113,11 @@ mod tests {
         let (status, _, _) = relay_http(port, "/_auth?next=/", &host, None).await;
         assert_eq!(status, 404, "after a reset the relay no longer knows the old link");
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
-        assert_eq!(view, json!({"owner": null, "pending": []}), "the new link starts unowned");
+        assert_eq!(
+            view,
+            json!({"owner": null, "pending": [], "require_github": false}),
+            "the new link starts unowned"
+        );
 
         // Each decision is in the activity log, as its own kind.
         let kinds = activity_kinds(&app).await;
@@ -3057,64 +3179,18 @@ mod tests {
             .map(|(ws, _)| ws)
     }
 
-    /// The whole link, end to end through the real relay (worker, DO, D1 schema, tunnel) and the
-    /// real tunnel client, with only GitHub stubbed: register, tunnel up, pair the owner, a
-    /// cockpit GET and a cockpit websocket through the relay, then unpair and reset.
-    #[tokio::test]
-    async fn the_whole_link_round_trips_through_the_real_relay() {
-        let Some((_relay, port)) = spawn_local_relay().await else {
-            return;
-        };
-        let root = temp_root();
-        let app = test_app(root.path());
-        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
-        let router = remote_router(&app, idle_park());
-        tokio::spawn(run(app.clone(), router.clone()));
-
-        // 1. Register and bring the tunnel up, through the cockpit's own switch.
-        let (status, view) = local(&router, &app, Method::PUT, "/api/remote", Some(json!({"enabled": true}))).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        until(&app, |v| v["connected"] == true, "the tunnel never came up").await;
-        let host = app.remote.saved().await.host.unwrap();
-
-        // 2. Nobody is forwarded before pairing: the relay sends a browser to sign in.
-        let (status, headers, _) = relay_http(port, "/api/remote", &host, None).await;
-        assert_eq!(status, 302);
-        assert!(headers.iter().any(|(k, v)| k == "location" && v.starts_with("/_auth")));
-
-        // 3. Pair: the owner's first sign-in parks a code, the local cockpit confirms it.
-        let (status, page) = sign_in(port, &host, "4242:alice").await;
-        assert_eq!(status, 200, "{page}");
-        let code = code_on(&page);
-        let (status, answer) = local(
-            &router,
-            &app,
-            Method::POST,
-            "/api/remote/pairing/confirm",
-            Some(json!({ "code": code })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{answer}");
-        let session = owner_session(port, &host, "4242:alice").await;
-
-        // 4. The relay lets the owner through, and the cockpit's own check still applies behind it:
-        //    neither the relay session alone nor this machine's install token gets in (R3).
-        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&session)).await;
-        assert_eq!(status, 401, "the relay's sign-in alone is not the cockpit's: {body}");
-        let install = format!("{session}; {}={}", crate::auth::COOKIE_NAME, app.api_token);
-        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&install)).await;
-        assert_eq!(status, 401, "the install token is refused through the link: {body}");
-
-        // 5. Hand-over ("Sign in on another device"): an invite minted here, opened on the link,
-        //    its code confirmed here, and the claim sets the link credential on the link's origin.
-        let (status, invite) = local(&router, &app, Method::POST, "/api/remote/devices/invites", None).await;
+    /// "Sign in on another device", through the local relay: an invite minted here, opened on the
+    /// link with `cookie` (or none), its six digits confirmed here, and the claim — the answer is the
+    /// link credential's `name=value` the claim set on the link's origin.
+    async fn hand_over(port: u16, router: &Router, app: &Shared, host: &str, cookie: Option<&str>) -> String {
+        let (status, invite) = local(router, app, Method::POST, "/api/remote/devices/invites", None).await;
         assert_eq!(status, StatusCode::OK, "{invite}");
         let url = invite["url"].as_str().unwrap();
         let path = url
             .strip_prefix(&format!("https://{host}"))
             .expect("the invite opens on the link");
-        let (status, headers, page) = relay_http(port, path, &host, Some(&session)).await;
-        assert_eq!(status, 200, "{page}");
+        let (status, headers, page) = relay_http(port, path, host, cookie).await;
+        assert_eq!(status, 200, "the invite opens the pairing page: {page}");
         let pair = headers
             .iter()
             .find(|(k, v)| k == "set-cookie" && v.starts_with(crate::phone::PAIR_COOKIE))
@@ -3129,17 +3205,19 @@ mod tests {
             .chars()
             .filter(char::is_ascii_digit)
             .collect();
+        // The six digits are confirmed here, on this machine: never through the link.
         let (status, answer) = local(
-            &router,
-            &app,
+            router,
+            app,
             Method::POST,
             "/api/remote/devices/confirm",
             Some(json!({ "code": digits })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{answer}");
-        let claim_cookie = format!("{session}; {}", pair.split(';').next().unwrap());
-        let (status, headers, body) = relay_request(port, "POST", "/api/phone/claim", &host, Some(&claim_cookie)).await;
+        let pair = pair.split(';').next().unwrap();
+        let claim_cookie = cookie.map_or_else(|| pair.to_string(), |c| format!("{c}; {pair}"));
+        let (status, headers, body) = relay_request(port, "POST", "/api/phone/claim", host, Some(&claim_cookie)).await;
         assert_eq!(status, 200, "{body}");
         let link = headers
             .iter()
@@ -3147,23 +3225,93 @@ mod tests {
             .map(|(_, v)| v.clone())
             .expect("the link credential cookie");
         assert!(link.contains("HttpOnly") && link.ends_with("; Secure"), "{link}");
-        let link = link.split(';').next().unwrap().to_string();
-        let link_token = link.split_once('=').unwrap().1.to_string();
-        let both = format!("{session}; {link}");
+        link.split(';').next().unwrap().to_string()
+    }
 
-        // 6. A cockpit GET through the relay on the link credential.
-        let (status, headers, body) = relay_http(port, "/api/remote", &host, Some(&both)).await;
+    /// The relay's own "Pair this device" page (#1086): what a browser with no invite and no
+    /// credential, or a rejected one, gets — never GitHub, never the cockpit.
+    fn is_pair_page(status: u16, headers: &[(String, String)], body: &str) -> bool {
+        status == 401 && body.contains("Pair this device") && !headers.iter().any(|(k, _)| k == "location")
+    }
+
+    /// Whether the relay cleared the cockpit cookie (a dead credential) on this answer.
+    fn clears_token(headers: &[(String, String)]) -> bool {
+        headers.iter().any(|(k, v)| {
+            k == "set-cookie" && v.starts_with(&format!("{}=;", crate::auth::COOKIE_NAME)) && v.contains("Max-Age=0")
+        })
+    }
+
+    /// Waits, bounded, for a held socket to end: any close or error, but no more text frames.
+    async fn ends(
+        socket: &mut WebSocketStream<tokio::net::TcpStream>,
+    ) -> Option<Result<tungstenite::Message, tungstenite::Error>> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(tungstenite::Message::Text(_) | tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) => {}
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .expect("the held socket closed")
+    }
+
+    /// The whole link, end to end through the real relay (worker, DO, D1 schema, tunnel) and the
+    /// real tunnel client, with only GitHub stubbed: register, tunnel up, pair a fresh browser with
+    /// the pair code alone (#1086) and load the cockpit and its websocket through the relay, see a
+    /// rejected and a revoked credential land on the pair page, then switch the GitHub gate on and
+    /// run the owner flow of #534 behind it, unpair and reset.
+    #[tokio::test]
+    async fn the_whole_link_round_trips_through_the_real_relay() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        let router = remote_router(&app, idle_park());
+        tokio::spawn(run(app.clone(), router.clone()));
+
+        // 1. Register and bring the tunnel up, through the cockpit's own switch. A new install pairs
+        //    with the pair code alone: no GitHub gate at the relay.
+        let (status, view) = local(&router, &app, Method::PUT, "/api/remote", Some(json!({"enabled": true}))).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], false);
+        until(&app, |v| v["connected"] == true, "the tunnel never came up").await;
+        let host = app.remote.saved().await.host.unwrap();
+
+        // 2. No invite, no credential: the relay's pair page, never GitHub and never the cockpit; an
+        //    API call and a websocket are refused there too.
+        let (status, headers, body) = relay_http(port, "/", &host, None).await;
+        assert!(is_pair_page(status, &headers, &body), "{status} {body}");
+        let (status, _, body) = relay_http(port, "/api/remote", &host, None).await;
+        assert_eq!(status, 401, "{body}");
+        assert!(body.contains("not paired"), "{body}");
+        assert!(relay_socket(port, &host, "/api/stream", "a=b").await.is_err());
+        // Not even this machine's install token gets past the relay now (R3): it is no credential.
+        let install = format!("{}={}", crate::auth::COOKIE_NAME, app.api_token);
+        let (status, headers, body) = relay_http(port, "/", &host, Some(&install)).await;
+        assert!(is_pair_page(status, &headers, &body), "{status} {body}");
+
+        // 3. A fresh browser pairs with the invite and the six digits alone — no GitHub session.
+        let link = hand_over(port, &router, &app, &host, None).await;
+        let link_token = link.split_once('=').unwrap().1.to_string();
+
+        // 4. The cockpit through the relay on that link credential alone: a GET, the cookies it sets
+        //    (host-only and Secure, R4), and its websocket.
+        let (status, headers, body) = relay_http(port, "/api/remote", &host, Some(&link)).await;
         assert_eq!(status, 200, "{body}");
         assert!(
             headers
                 .iter()
                 .any(|(k, v)| k == "content-type" && v.contains("application/json"))
         );
+        assert!(!headers.iter().any(|(k, _)| k == CREDENTIAL_VERDICT));
         let seen: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(seen["host"], host.as_str());
         assert_eq!(seen["connected"], true, "the cockpit answered over its own live tunnel");
-        // Cookies the cockpit sets come back host-only and Secure (R4).
-        let (status, headers, _) = relay_http(port, "/api/demo", &host, Some(&both)).await;
+        let (status, headers, _) = relay_http(port, "/api/demo", &host, Some(&link)).await;
         assert_eq!(status, 201);
         let cookies: Vec<&str> = headers
             .iter()
@@ -3171,9 +3319,7 @@ mod tests {
             .map(|(_, v)| v.as_str())
             .collect();
         assert_eq!(cookies, ["one=1; Path=/; HttpOnly; Secure", "two=2; Path=/; Secure"]);
-
-        // 7. A cockpit websocket (the colony event stream) through the relay, both ways.
-        let mut socket = relay_socket(port, &host, "/api/stream", &both)
+        let mut socket = relay_socket(port, &host, "/api/stream", &link)
             .await
             .expect("the upgrade went through");
         let first = tokio::time::timeout(Duration::from_secs(10), socket.next())
@@ -3187,9 +3333,100 @@ mod tests {
         let first: Value = serde_json::from_str(&first).unwrap();
         assert_eq!(first["type"], "sessions", "the cockpit stream's first frame");
         socket.close(None).await.unwrap();
-        // Without the relay session there is no upgrade at all.
+        let mut held = relay_socket(port, &host, "/api/stream", &link).await.expect("a held socket");
+
+        // 5. A credential of the right shape that the cockpit does not know: forwarded, rejected, and
+        //    the browser lands on the pair page with the dead cookie cleared. A websocket on it is
+        //    closed 4401, which the relay counts the same way.
+        let forged = format!("{}=clk_{}", crate::auth::COOKIE_NAME, "0".repeat(64));
+        let (status, headers, body) = relay_http(port, "/", &host, Some(&forged)).await;
+        assert!(is_pair_page(status, &headers, &body), "{status} {body}");
+        assert!(clears_token(&headers), "{headers:?}");
+        assert!(!headers.iter().any(|(k, _)| k == CREDENTIAL_VERDICT));
+        let mut rejected = relay_socket(port, &host, "/api/stream", &forged)
+            .await
+            .expect("the relay accepts the upgrade before the cockpit decides");
+        match ends(&mut rejected).await {
+            Some(Ok(tungstenite::Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 4401),
+            other => panic!("expected a 4401 close, got {other:?}"),
+        }
+
+        // 6. Revoking the device signs it out at once: the held socket ends, and its very next page
+        //    load is the pair page.
+        let (_, devices) = local(&router, &app, Method::GET, "/api/remote/devices", None).await;
+        let id = devices["devices"][0]["id"].as_str().unwrap().to_string();
+        let (status, _) = local(&router, &app, Method::DELETE, &format!("/api/remote/devices/{id}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let ended = ends(&mut held).await;
+        assert!(!matches!(ended, Some(Ok(tungstenite::Message::Text(_)))), "{ended:?}");
+        let (status, headers, body) = relay_http(port, "/", &host, Some(&link)).await;
+        assert!(
+            is_pair_page(status, &headers, &body),
+            "a revoked clk_ gets the pair page: {status} {body}"
+        );
+        assert!(clears_token(&headers));
+        assert!(app.remote.authenticate_link(&link_token).is_none());
+
+        // A PUT of the value already set still reaches the relay (it puts the two back in step if
+        // they ever drifted) and records nothing.
+        let (status, view) = local(
+            &router,
+            &app,
+            Method::PUT,
+            "/api/remote/require-github",
+            Some(json!({"require_github": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], false);
+        let (_, pairing) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(pairing["require_github"], false);
+
+        // 7. The GitHub gate, switched on here (local only): the relay sends every browser to sign in
+        //    first, invites and link credentials included, and the owner flow of #534 works as before.
+        let (status, view) = local(
+            &router,
+            &app,
+            Method::PUT,
+            "/api/remote/require-github",
+            Some(json!({"require_github": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], true);
+        let (status, headers, _) = relay_http(port, "/api/remote", &host, None).await;
+        assert_eq!(status, 302);
+        assert!(headers.iter().any(|(k, v)| k == "location" && v.starts_with("/_auth")));
+        let (_, pairing) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(pairing["require_github"], true, "the relay holds the gate: {pairing}");
+        let (status, page) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 200, "{page}");
+        let code = code_on(&page);
+        let (status, answer) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let session = owner_session(port, &host, "4242:alice").await;
+        // Behind the gate the cockpit's own check still applies: neither the relay session alone
+        // nor this machine's install token gets in (R3).
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&session)).await;
+        assert_eq!(status, 401, "the relay's sign-in alone is not the cockpit's: {body}");
+        let with_install = format!("{session}; {install}");
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&with_install)).await;
+        assert_eq!(status, 401, "the install token is refused through the link: {body}");
+        let link = hand_over(port, &router, &app, &host, Some(&session)).await;
+        let both = format!("{session}; {link}");
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&both)).await;
+        assert_eq!(status, 200, "{body}");
+        // With the gate on, the link credential alone opens nothing.
+        let (status, _, _) = relay_http(port, "/api/remote", &host, Some(&link)).await;
+        assert_eq!(status, 302);
         assert!(relay_socket(port, &host, "/api/stream", &link).await.is_err());
-        // A second socket stays open across what follows, until the reset.
         let mut held = relay_socket(port, &host, "/api/stream", &both).await.expect("a held socket");
 
         // 8. Unpair: the owner's session dies on its next request, HTTP and websocket alike.
@@ -3199,23 +3436,15 @@ mod tests {
         assert_eq!(status, 302, "back to sign-in");
         assert!(relay_socket(port, &host, "/api/stream", &both).await.is_err());
 
-        // 9. Reset: the old link is retired at the relay (R2), the link credential is rotated
-        //    (R3) — the held socket closes — and a new link comes up.
+        // 9. Reset: the old link is retired at the relay (R2), the link credential is rotated (R3) —
+        //    the held socket closes — and a new link comes up, keeping the gate it had.
         let (status, _) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
         assert_eq!(status, StatusCode::OK);
-        let ended = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match held.next().await {
-                    Some(Ok(tungstenite::Message::Text(_) | tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) => {}
-                    other => return other,
-                }
-            }
-        })
-        .await
-        .expect("the held socket closed after the reset");
+        let ended = ends(&mut held).await;
         assert!(!matches!(ended, Some(Ok(tungstenite::Message::Text(_)))), "{ended:?}");
+        let link_token = link.split_once('=').unwrap().1;
         assert!(
-            app.remote.authenticate_link(&link_token).is_none(),
+            app.remote.authenticate_link(link_token).is_none(),
             "the old credential is dead"
         );
         let (status, _, _) = relay_http(port, "/", &host, None).await;
@@ -3226,6 +3455,12 @@ mod tests {
             "the new link never came up",
         )
         .await;
+        let new_host = app.remote.saved().await.host.unwrap();
+        let (status, headers, _) = relay_http(port, "/", &new_host, None).await;
+        assert_eq!(status, 302, "the new install was registered with the GitHub gate on");
+        assert!(headers.iter().any(|(k, v)| k == "location" && v.starts_with("/_auth")));
+        let kinds = activity_kinds(&app).await;
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.require_github").count(), 1);
     }
 
     /// A signed `GET …/pairing` for `install_id` with `key`, straight at the relay: its status.
@@ -3343,6 +3578,153 @@ mod tests {
         }
         let kinds = activity_kinds(&app).await;
         assert!(!kinds.iter().any(|k| k.starts_with("remote.pair") || k == "remote.unpair"));
+    }
+
+    /// Whether a tunnelled answer carries the rejected-credential verdict for the relay (#1086).
+    fn verdict(headers: &[Value]) -> Option<String> {
+        headers
+            .iter()
+            .find(|h| {
+                h[0].as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(CREDENTIAL_VERDICT))
+            })
+            .and_then(|h| h[1].as_str().map(str::to_string))
+    }
+
+    #[tokio::test]
+    async fn the_cockpit_tells_the_relay_which_tunnelled_credentials_it_rejected() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let live = app.remote.add_link("test").unwrap();
+        let revoked = app.remote.add_link("gone").unwrap();
+        let id = app.remote.links.read().unwrap().last().unwrap().id.clone();
+        assert!(app.remote.revoke_link(&id));
+        let forged = format!("clk_{}", "0".repeat(64));
+        let phone = format!("cph_{}", "1".repeat(64));
+        let cookie = |token: &str| format!("{}={token}", crate::auth::COOKIE_NAME);
+        let invite = format!("/?pair={}", "f".repeat(64));
+        let cases: Vec<(&str, &str, Value, u16, bool)> = vec![
+            // A live link credential: through, and no verdict.
+            ("a", "/api/remote", json!([["Cookie", cookie(&live)]]), 200, false),
+            // Revoked, forged, an unknown phone: answered 401 as before, and marked for the relay —
+            // on an API call and on a page load alike.
+            ("b", "/api/remote", json!([["Cookie", cookie(&revoked)]]), 401, true),
+            ("c", "/", json!([["Cookie", cookie(&forged)]]), 401, true),
+            (
+                "d",
+                "/api/remote",
+                json!([["Authorization", format!("Bearer {forged}")]]),
+                401,
+                true,
+            ),
+            ("e", "/", json!([["Cookie", cookie(&phone)]]), 401, true),
+            // No credential at all is not a rejected one (the relay never forwards it anyway).
+            ("f", "/api/remote", json!([]), 401, false),
+            // An invite that opens nothing is marked too; an invite that opens shows its page, unmarked.
+            ("g", &invite, json!([]), 401, true),
+        ];
+        for (id, path, headers, want, marked) in cases {
+            ws.send(req_frame(id, "GET", path, headers)).await.unwrap();
+            let (status, headers, _) = read_response(&mut ws, id, path).await;
+            assert_eq!(status, want, "{id} {path}");
+            assert_eq!(verdict(&headers).as_deref(), marked.then_some("rejected"), "{id} {path}");
+        }
+        let code = app.phones.book().mint_link(crate::phone::now_secs()).unwrap();
+        let path = format!("/?pair={code}");
+        ws.send(req_frame("h", "GET", &path, json!([]))).await.unwrap();
+        let (status, headers, _) = read_response(&mut ws, "h", &path).await;
+        assert_eq!(status, 200);
+        assert_eq!(verdict(&headers), None);
+        // A claim whose pairing secret finds nothing is marked; locally the same claim is not.
+        ws.send(req_frame(
+            "i",
+            "POST",
+            "/api/phone/claim",
+            json!([["Cookie", "colonizer_pair=ph_00000000.nope"]]),
+        ))
+        .await
+        .unwrap();
+        ws.send(end_body("i")).await.unwrap();
+        let (status, headers, _) = read_response(&mut ws, "i", "claim").await;
+        assert_eq!(status, 404);
+        assert_eq!(verdict(&headers).as_deref(), Some("rejected"));
+    }
+
+    #[tokio::test]
+    async fn a_tunnelled_websocket_on_a_rejected_credential_closes_4401() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let forged = format!("{}=clk_{}", crate::auth::COOKIE_NAME, "0".repeat(64));
+        let host = app.remote.saved().await.host.unwrap();
+        let open = json!({"t": "ws_open", "id": "w", "path": "/api/stream", "headers": [["Cookie", forged], ["Origin", format!("https://{host}")]]});
+        ws.send(open.to_string().into()).await.unwrap();
+        let frame = next_frame(&mut ws, "the ws_close").await;
+        assert_eq!(frame["t"], "ws_close");
+        assert_eq!(frame["code"], 4401);
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_names_no_gate_at_registration_is_taken_as_gating() {
+        // The fake relay answers like one deployed before #1086: no `require_github` in its answer,
+        // and it gates every install with GitHub whatever was asked. The cockpit must read it so.
+        let root = temp_root();
+        let app = test_app(root.path());
+        let (relay, _tunnels) = spawn_relay().await;
+        app.remote.set_relay(relay).await;
+        assert_eq!(
+            app.remote.view().await["require_github"],
+            false,
+            "a new install asks for no gate"
+        );
+        set_enabled(&app, true).await.unwrap();
+        assert_eq!(app.remote.saved().await.require_github, Some(true));
+        assert_eq!(app.remote.view().await["require_github"], true);
+    }
+
+    #[test]
+    fn the_github_gate_defaults_to_what_the_install_was_built_with() {
+        // A state file from before the setting: a registered install keeps the gate, a fresh one has none.
+        let old: Saved = serde_json::from_str(r#"{"enabled": true, "install_id": "i", "host": "h"}"#).unwrap();
+        assert!(old.require_github());
+        let fresh: Saved = serde_json::from_str(r#"{"enabled": false, "install_id": null, "host": null}"#).unwrap();
+        assert!(!fresh.require_github());
+        assert!(!Saved::default().require_github());
+        let set: Saved =
+            serde_json::from_str(r#"{"enabled": true, "install_id": "i", "host": "h", "require_github": false}"#).unwrap();
+        assert!(!set.require_github());
+    }
+
+    #[tokio::test]
+    async fn the_github_gate_is_switched_only_here_and_carried_into_the_registration() {
+        let root = temp_root();
+        let app = test_app(root.path());
+        let router = remote_router(&app, idle_park());
+        // Before any link exists the choice is only saved; nothing is called (the relay is unset here).
+        let (status, view) = local(
+            &router,
+            &app,
+            Method::PUT,
+            "/api/remote/require-github",
+            Some(json!({"require_github": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], true);
+        assert_eq!(app.remote.saved().await.require_github, Some(true));
+        // Through the tunnel it is refused, like every decision about who may reach the link.
+        let refused = local_only(
+            Some(&Extension(Tunnelled { host: "h".into() })),
+            "change the GitHub sign-in requirement",
+        );
+        assert!(refused.is_err());
+        // Enabling registers with it (the real relay honours it: the whole-link test's reset step).
+        let (relay, _tunnels) = spawn_relay().await;
+        app.remote.set_relay(relay).await;
+        set_enabled(&app, true).await.unwrap();
+        assert_eq!(app.remote.view().await["require_github"], true);
+        assert_eq!(app.remote.saved().await.require_github, Some(true));
+        let kinds = activity_kinds(&app).await;
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.require_github").count(), 1);
     }
 
     #[tokio::test]
@@ -3480,6 +3862,7 @@ mod tests {
                 enabled: true,
                 install_id: Some("i".into()),
                 host: Some(host.into()),
+                require_github: None,
             })
             .await
             .unwrap();

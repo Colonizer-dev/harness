@@ -62,6 +62,7 @@ pub(crate) fn apply_exec_policy(
     worktree: &std::path::Path,
     env: &mut Map<String, Value>,
 ) -> Result<()> {
+    // The org layer arrives already trimmed, blanks dropped, by `orgs::org_exec_policy` at boot.
     if applies_exec_policy(&agent.schema) {
         // The colony's own setting already travelled (agent_env); otherwise the install's policy
         // rides along under this module's env name for the setting.

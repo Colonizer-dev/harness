@@ -646,7 +646,11 @@ fn pair_cookie(headers: &HeaderMap) -> Option<(String, String)> {
 /// authentication is the pairing cookie only the phone that spent the invite holds. 202 while the
 /// owner has not confirmed; 200 with the phone's own credential as its cookie once they have;
 /// 404 for anything else. Rate-limited like every pairing step.
-pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Response {
+pub(crate) async fn claim(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<remote::Tunnelled>>,
+    headers: HeaderMap,
+) -> Response {
     let now = now_secs();
     let found = {
         let mut book = app.phones.book();
@@ -667,6 +671,7 @@ pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Resp
         found
     };
     let over = found != Claim::Pending;
+    let found_gone = found == Claim::Gone;
     let mut res = match found {
         Claim::Pending => (StatusCode::ACCEPTED, Json(json!({"status": "pending"}))).into_response(),
         Claim::Gone => (
@@ -708,6 +713,10 @@ pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Resp
     // A pairing that is not pending any more is over, whatever the answer: drop the device secret.
     if over && let Ok(clear) = format!("{PAIR_COOKIE}=; HttpOnly; SameSite=Strict; Path=/api/phone/claim; Max-Age=0").parse() {
         res.headers_mut().append(header::SET_COOKIE, clear);
+    }
+    // Through the tunnel, a pairing secret that finds nothing counts at the relay too (#1086).
+    if found_gone && tunnelled.is_some() {
+        return remote::mark_rejected(res);
     }
     res
 }
