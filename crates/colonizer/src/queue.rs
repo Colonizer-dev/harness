@@ -1666,32 +1666,94 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
 
 /// Colonies parked because their repository's daily pull-request cap was reached (issue #910)
 /// rejoin the queue once the UTC day rolls over: the cap is counted in UTC days, so a new day is
-/// the whole reset, and the worktree never left. The two routes are the quota pass's: a park that
-/// discarded the microVM is a plain requeue, and one that kept it goes through the resume handler,
-/// which warms it and queues when no slot is free.
+/// the whole reset, and the worktree never left. They rejoin sooner when the cap stops applying —
+/// set to `0` (the default since the cap became opt-in) or raised past what the repo spent today:
+/// a colony parked under a cap that is gone does not wait for midnight. The two routes are the
+/// quota pass's: a park that discarded the microVM is a plain requeue, and one that kept it goes
+/// through the resume handler, which warms it and queues when no slot is free.
 pub(crate) async fn resume_repo_pr_rate_limit_parked(app: &Shared) {
-    let today = Utc::now().date_naive();
-    let due = |s: &Session| {
+    let fetch = crate::epic::gh_fetch(app);
+    resume_repo_pr_rate_limit_parked_with(app, &fetch, recheck_due).await
+}
+
+/// How often a repo with colonies parked on today's cap has that cap re-read: it is a GitHub
+/// lookup (the repo's `.colonizer/config.toml`), so it is not repeated on every 5 s tick.
+const PR_CAP_RECHECK: Duration = Duration::from_secs(300);
+
+/// Whether `repo`'s cap is due a re-read, stamping it when it is. Process-wide on purpose: the
+/// queue tick is the only caller.
+fn recheck_due(repo: &str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<std::collections::HashMap<String, Instant>>> = OnceLock::new();
+    let mut last = LAST.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if last.get(repo).is_some_and(|at| now.duration_since(*at) < PR_CAP_RECHECK) {
+        return false;
+    }
+    last.insert(repo.to_string(), now);
+    true
+}
+
+/// [`resume_repo_pr_rate_limit_parked`] with the repo-config fetcher and the re-read throttle handed
+/// in, so a test can answer a repo's config without GitHub and without waiting out the throttle.
+pub(crate) async fn resume_repo_pr_rate_limit_parked_with(
+    app: &Shared,
+    fetch: &crate::epic::Fetch,
+    may_recheck: impl Fn(&str) -> bool,
+) {
+    let now = Utc::now();
+    let today = now.date_naive();
+    let capped = |s: &Session| {
         s.status == SessionStatus::Parked
-            && s.parked
-                .as_ref()
-                .is_some_and(|p| p.reason == crate::publish::REPO_PR_RATE_LIMIT_REASON && p.at.date_naive() < today)
+            && s.parked.as_ref().is_some_and(|p| p.reason == crate::publish::REPO_PR_RATE_LIMIT_REASON)
+            // Issue #673: a merge covered this colony's work — it stays parked, park record
+            // intact, until it is kept; the tick after that resumes it like any other.
+            && !crate::supersede::blocks_start(s)
     };
+    let parked_before_today = |s: &Session| s.parked.as_ref().is_some_and(|p| p.at.date_naive() < today);
+    // Parked today: the day has not rolled over, so these go only if the cap has stopped applying.
+    let mut today_by_repo: std::collections::BTreeMap<String, Vec<(DateTime<Utc>, String)>> = Default::default();
+    let mut due: Vec<String> = Vec::new();
+    {
+        let sessions = app.sessions.read().await;
+        for s in sessions.iter().filter(|s| capped(s)) {
+            if parked_before_today(s) {
+                due.push(s.id.clone());
+            } else if let Some(p) = &s.parked {
+                today_by_repo.entry(s.repo.clone()).or_default().push((p.at, s.id.clone()));
+            }
+        }
+    }
+    let mut lifted: Vec<String> = Vec::new();
+    for (repo, mut parked) in today_by_repo {
+        if !may_recheck(&repo) {
+            continue;
+        }
+        let limit = crate::publish::repo_pr_limit(app, fetch, &repo).await;
+        // Room left today: everything when the cap is gone, else only what a raised cap left free,
+        // so a colony resumed now is not parked again by the publish it resumes for.
+        let room = if limit == 0 {
+            parked.len()
+        } else {
+            let spent = crate::publish::repo_pr_budget_spent(&app.sessions.read().await, &repo, now);
+            limit.saturating_sub(spent) as usize
+        };
+        parked.sort();
+        lifted.extend(parked.into_iter().take(room).map(|(_, id)| id));
+    }
     let (cold, kept): (Vec<String>, Vec<String>) = {
         let sessions = app.sessions.read().await;
         let mut cold = Vec::new();
         let mut kept = Vec::new();
-        for s in sessions
-            .iter()
-            .filter(|s| due(s))
-            // Issue #673: a merge covered this colony's work — it stays parked, park record
-            // intact, until it is kept; the tick after that resumes it like any other.
-            .filter(|s| !crate::supersede::blocks_start(s))
-        {
+        for id in due.iter().chain(&lifted) {
+            let Some(s) = sessions.iter().find(|s| &s.id == id) else {
+                continue;
+            };
             if s.parked.as_ref().is_some_and(|p| p.vm_kept) {
-                kept.push(s.id.clone());
+                kept.push(id.clone());
             } else {
-                cold.push(s.id.clone());
+                cold.push(id.clone());
             }
         }
         (cold, kept)
@@ -1702,11 +1764,11 @@ pub(crate) async fn resume_repo_pr_rate_limit_parked(app: &Shared) {
         // resumed or republished wins instead of being doubled.
         let flipped = app
             .update_session(&id, |x| {
-                let due = x.status == SessionStatus::Parked
+                let still = x.status == SessionStatus::Parked
                     && x.parked
                         .as_ref()
-                        .is_some_and(|p| p.reason == crate::publish::REPO_PR_RATE_LIMIT_REASON && p.at.date_naive() < today);
-                if due {
+                        .is_some_and(|p| p.reason == crate::publish::REPO_PR_RATE_LIMIT_REASON);
+                if still {
                     x.status = SessionStatus::Queued;
                     x.error = None;
                     x.attention = None;
@@ -1714,7 +1776,7 @@ pub(crate) async fn resume_repo_pr_rate_limit_parked(app: &Shared) {
                     x.parked = None;
                     x.updated_at = Utc::now();
                 }
-                due
+                still
             })
             .await
             .is_some_and(|(_, flipped)| flipped);
@@ -1723,12 +1785,12 @@ pub(crate) async fn resume_repo_pr_rate_limit_parked(app: &Shared) {
             if let Some(s) = s {
                 app.persist_and_broadcast(&s).await;
             }
-            app.session_log(
-                &id,
-                "info",
-                "a new UTC day, so the repo's daily PR cap is fresh again; queued to resume".into(),
-            )
-            .await;
+            let why = if due.contains(&id) {
+                "a new UTC day, so the repo's daily PR cap is fresh again; queued to resume"
+            } else {
+                "the repo's daily PR cap no longer holds this colony back; queued to resume"
+            };
+            app.session_log(&id, "info", why.into()).await;
         }
     }
     for id in kept {
@@ -2504,11 +2566,13 @@ mod tests {
             repo_pr_parked("capped-yesterday", crate::publish::REPO_PR_RATE_LIMIT_REASON, 1),
             repo_pr_parked("capped-today", crate::publish::REPO_PR_RATE_LIMIT_REASON, 0),
             repo_pr_parked("quota-yesterday", provider_quota::QUOTA_EXHAUSTED_REASON, 1),
+            opened_today("opened-today"),
         ];
         for id in ["capped-yesterday", "capped-today", "quota-yesterday"] {
             tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
         }
-        resume_repo_pr_rate_limit_parked(&app).await;
+        // The repo still caps itself at one a day, and has opened one today.
+        resume_repo_pr_rate_limit_parked_with(&app, &crate::publish::tests::capped_at(1), |_| true).await;
         let sessions = app.sessions.read().await;
         let resumed = sessions.iter().find(|s| s.id == "capped-yesterday").unwrap();
         assert_eq!(resumed.status, SessionStatus::Queued, "a new UTC day requeues the colony");
@@ -2531,6 +2595,112 @@ mod tests {
         drop(sessions);
         let log = std::fs::read_to_string(app.session_dir("capped-yesterday").join("harness.jsonl")).unwrap_or_default();
         assert!(log.contains("a new UTC day"), "{log}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony of `acme/repo` that opened its pull request today: a slot of the repo's day spent.
+    fn opened_today(id: &str) -> Session {
+        let mut s = stopped_colony_with_worktree("acme", id.into());
+        s.status = SessionStatus::PrOpened;
+        s.pr_opened_at = Some(Utc::now());
+        s
+    }
+
+    /// Issue #910: the cap became opt-in. A colony parked on it today, under the old default of five,
+    /// must not wait for midnight once no cap applies: with neither the install nor the repo
+    /// setting one, the next pass requeues it — a cold park as a plain requeue — while a repo that
+    /// still caps itself keeps its colony parked, and a park for another reason is left alone.
+    #[tokio::test]
+    async fn a_colony_parked_on_a_cap_that_no_longer_applies_resumes_the_same_day() {
+        let root = std::env::temp_dir().join(format!("colonizer-repo-pr-cap-lifted-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut other = repo_pr_parked("other-today", crate::publish::REPO_PR_RATE_LIMIT_REASON, 0);
+        other.repo = "other/repo".into();
+        let mut sessions = vec![
+            repo_pr_parked("capped-today", crate::publish::REPO_PR_RATE_LIMIT_REASON, 0),
+            repo_pr_parked("quota-today", provider_quota::QUOTA_EXHAUSTED_REASON, 0),
+            other,
+        ];
+        // Five opened today: what parked it under the old default.
+        sessions.extend((0..5).map(|i| opened_today(&format!("opened-{i}"))));
+        *app.sessions.write().await = sessions;
+        for id in ["capped-today", "quota-today", "other-today"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        assert_eq!(
+            crate::publish::install_max_prs_per_day(&app).await,
+            0,
+            "the default is no cap"
+        );
+        // `acme/repo` sets nothing (its config 404s); `other/repo` still caps itself at one, and its
+        // one for today is spent.
+        let mut spent = opened_today("other-opened");
+        spent.repo = "other/repo".into();
+        app.sessions.write().await.push(spent);
+        let fetch = crate::publish::tests::fake_fetch(vec![(
+            "repos/other/repo/contents/.colonizer/config.toml",
+            crate::publish::tests::repo_config("[colonizer]\nmax_prs_per_day = 1\n"),
+        )]);
+        resume_repo_pr_rate_limit_parked_with(&app, &fetch, |_| true).await;
+
+        let session = |id: &str| app.sessions.try_read().unwrap().iter().find(|s| s.id == id).cloned().unwrap();
+        let resumed = session("capped-today");
+        assert_eq!(
+            resumed.status,
+            SessionStatus::Queued,
+            "no cap applies, so it does not wait for midnight"
+        );
+        assert!(
+            resumed.parked.is_none() && resumed.error.is_none(),
+            "the requeue reads like any other resume"
+        );
+        assert_eq!(
+            session("other-today").status,
+            SessionStatus::Parked,
+            "a repo's own cap still holds"
+        );
+        assert_eq!(
+            session("quota-today").status,
+            SessionStatus::Parked,
+            "another park reason is not this pass's"
+        );
+        let log = std::fs::read_to_string(app.session_dir("capped-today").join("harness.jsonl")).unwrap_or_default();
+        assert!(log.contains("no longer holds this colony back"), "{log}");
+
+        // The install-wide setting caps again: a fresh park of `acme/repo` today stays parked.
+        app.modules
+            .write()
+            .await
+            .publish
+            .settings
+            .insert("max_prs_per_day".into(), json!(5));
+        app.sessions
+            .write()
+            .await
+            .push(repo_pr_parked("capped-again", crate::publish::REPO_PR_RATE_LIMIT_REASON, 0));
+        resume_repo_pr_rate_limit_parked_with(&app, &fetch, |_| true).await;
+        assert_eq!(
+            session("capped-again").status,
+            SessionStatus::Parked,
+            "an install cap of five is spent"
+        );
+        // Raised to six: one slot of room, so exactly one parked colony goes.
+        app.modules
+            .write()
+            .await
+            .publish
+            .settings
+            .insert("max_prs_per_day".into(), json!(6));
+        app.sessions
+            .write()
+            .await
+            .push(repo_pr_parked("capped-later", crate::publish::REPO_PR_RATE_LIMIT_REASON, 0));
+        resume_repo_pr_rate_limit_parked_with(&app, &fetch, |_| true).await;
+        let queued = ["capped-again", "capped-later"]
+            .iter()
+            .filter(|id| session(id).status == SessionStatus::Queued)
+            .count();
+        assert_eq!(queued, 1, "a raised cap frees only the room it adds");
         let _ = std::fs::remove_dir_all(root);
     }
 

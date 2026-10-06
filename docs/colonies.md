@@ -239,31 +239,35 @@ logged and ignored.
 
 ## A repo's daily PR cap
 
-Colonies open pull requests; a repository would rather be handed a few than be flooded. So a repo
-can have at most **5 pull requests opened per UTC day** — the cap every repo starts with, because
-most would rather colonies trickle changes in than have twenty land at once.
+Colonies open pull requests, and some repositories would rather be handed a few a day than be
+flooded. You can cap how many pull requests colonies open in a repo per UTC day. **The cap is off
+unless you set one**: nothing is parked by default.
 
-The cap is checked when a pull request is about to be opened, not at launch, so a colony that runs
-out of room is the only thing delayed. The Create PR press and autopilot's verdict both go through
-the same check, so neither can outrun it, and a publish already in flight counts toward the cap —
-so two presses at once cannot both slip a sixth one through. A colony that hits the cap is
-**parked** with the reason `repo_pr_rate_limit`: it keeps its worktree, its branch and its work, the
-cockpit shows the park and when it resumes, and the queue requeues it on its own once the UTC day
-rolls over — nothing to press. A park releases the colony's slot and tears its microVM down, as
-every park does, unless your org sets `discard_vm = false` (or its worktree cannot be verified, in
-which case the machine is kept for the work in it).
-
-**How to change it.** Set `max_prs_per_day` under the `[colonizer]` table in `.colonizer/config.toml`
-at the repo's root, next to the `enabled` key above:
+**How to set it.** Install-wide, set **Pull requests per repository per day** (`max_prs_per_day`)
+in the publish settings; it applies to every repo. A repo can set its own with `max_prs_per_day`
+under the `[colonizer]` table in `.colonizer/config.toml` at its root, next to the `enabled` key
+above, and that wins over the install-wide setting:
 
 ```toml
 [colonizer]
-max_prs_per_day = 12   # a busier repo's own cap
+max_prs_per_day = 12   # this repo's own cap
 ```
 
-`0` means uncapped, for a repo that wants none of this. A key that is missing means the default of
-5. Like the opt-out above, the lookup is best effort: if the config file cannot be read, the default
-applies.
+`0` means uncapped, in either place: it is the default, and a repo can set it to opt out of an
+install-wide cap. Like the opt-out above, the repo lookup is best effort: if the config file cannot
+be read, the install-wide setting applies.
+
+**What a cap does.** The cap is checked when a pull request is about to be opened, not at launch, so
+a colony that runs out of room is the only thing delayed. The Create PR press and autopilot's
+verdict both go through the same check, so neither can outrun it, and a publish already in flight
+counts toward the cap — so two presses at once cannot both slip one past it. A colony that hits the
+cap is **parked** with the reason `repo_pr_rate_limit`: it keeps its worktree, its branch and its
+work, the cockpit shows the park and when it resumes, and the queue requeues it on its own once the
+UTC day rolls over — nothing to press. It resumes sooner if the cap stops holding it back: set the
+cap to `0`, or raise it past what the repo has opened today, and the queue requeues as many parked
+colonies as the new room allows within a few minutes. A park releases the colony's slot and tears
+its microVM down, as every park does, unless your org sets `discard_vm = false` (or its worktree
+cannot be verified, in which case the machine is kept for the work in it).
 
 ## Exec policy: install, org and repo
 

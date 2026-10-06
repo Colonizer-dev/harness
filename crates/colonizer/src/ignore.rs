@@ -101,9 +101,9 @@ async fn config_disables(fetch: &Fetch, repo: &str) -> Result<bool> {
 }
 
 /// `max_prs_per_day` under the `[colonizer]` table of `.colonizer/config.toml`: the repo's override
-/// of [`crate::publish::DEFAULT_MAX_PRS_PER_DAY`] (issue #910). `None` when the file is missing,
-/// empty, unreadable, unparseable or sets no such key — the caller then applies the default, the
-/// same best effort as [`config_disables`]. A `0` is uncapped.
+/// of the publish module's install-wide `max_prs_per_day` (issue #910). `None` when the file is
+/// missing, empty, unreadable, unparseable or sets no such key — the caller then applies the
+/// install's setting, the same best effort as [`config_disables`]. A `0` is uncapped.
 pub async fn max_prs_per_day(fetch: &Fetch, repo: &str) -> Option<u64> {
     let file = fetch(format!("repos/{repo}/contents/{CONFIG_FILE_PATH}")).await.ok()?;
     let content = file["content"].as_str().unwrap_or_default().replace(['\n', '\r'], "");
