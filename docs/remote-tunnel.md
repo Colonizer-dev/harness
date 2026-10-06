@@ -17,8 +17,8 @@ switch, link and badge (#535, PR #575), the mothership's pairing routes (#599, d
 [Pairing and the owner](#pairing-and-the-owner)), and the security review
 ([remote-access-review.md](remote-access-review.md), #536). The relay is deployed at
 my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Every finding of
-the review is fixed (R1 in #659, R2–R5 in #1030); the deployed Worker carries the relay-side
-fixes once it is redeployed. The whole link is verified end to end against the real relay code
+the review is fixed (R1 in #659, R2–R5 in #1030), and the deployed Worker carries the relay-side
+fixes and pairing by code since its redeploy on 2026-10-06. The whole link is verified end to end against the real relay code
 run locally — register, tunnel, pairing a fresh browser with the pair code alone and no GitHub
 session, a cockpit GET and websocket through the relay on its link credential, a rejected and a
 revoked credential landing on the pair page, then the GitHub gate switched on with owner pairing,
