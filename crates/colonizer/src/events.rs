@@ -63,6 +63,11 @@ pub(crate) const GATEWAY_ERROR_CAUSE: &str = "gateway_error";
 /// The `attention.cause` of a colony held because its turn ended on an error that is not transient.
 pub(crate) const TURN_ERROR_CAUSE: &str = "turn_error";
 
+/// The `attention.cause` of a colony held because its fresh-checkout verification never got to the
+/// tests — a toolchain or registry download, a DNS lookup failed — and the retries ran out (issue
+/// #1117). Not "the completion claim was contradicted": no test ran, so nothing contradicts it.
+pub(crate) const VERIFY_NETWORK_CAUSE: &str = "verify_network";
+
 /// "a model gateway error (502, connection to Anthropic)", or without the parentheses when the
 /// error named neither a status nor a failure.
 fn gateway_error_phrase(cause: &str) -> String {
@@ -130,6 +135,13 @@ pub(crate) fn turn_error_held_attention(error: Option<&str>) -> Value {
         None => "The agent's turn ended with an error".into(),
     };
     json!({"reason": AUTOPILOT_HELD_REASON, "since": Utc::now(), "nudges": 0, "cause": TURN_ERROR_CAUSE, "detail": detail})
+}
+
+/// The hold for a claim whose verification could not run for the network (issue #1117): the card says
+/// "verification could not run (network: rustup toolchain download, connection reset)".
+pub(crate) fn verify_network_held_attention(cause: &str) -> Value {
+    let detail = format!("verification could not run (network: {cause})");
+    json!({"reason": AUTOPILOT_HELD_REASON, "since": Utc::now(), "nudges": 0, "cause": VERIFY_NETWORK_CAUSE, "detail": detail})
 }
 
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.

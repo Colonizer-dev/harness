@@ -230,6 +230,118 @@ pub fn turn_error_cause(message: &str) -> String {
     parts.join(", ")
 }
 
+/// How long the fresh-checkout verification waits before running its check again when the run
+/// never got to the tests because the network failed under it (issue #1117): a rustup toolchain
+/// download, a crates.io or npm registry fetch, a DNS lookup. Three delays, so a check is run four
+/// times in all before the verification reports that it could not run. Shorter than the boot's
+/// schedule: the verification holds the colony's verify lock while it waits.
+pub const VERIFY_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(2 * 60),
+    std::time::Duration::from_secs(5 * 60),
+];
+
+/// Why a failed verification run never reached its tests, when the network is why (issue #1117):
+/// a short cause for the attention card — "rustup toolchain download, connection reset", "crates.io
+/// registry, DNS lookup failed" — or `None` when the output is a real failure (or says nothing
+/// recognisable), which still contradicts the claim.
+///
+/// Output from a test harness that started — cargo's `running N tests` or `test result:`, a JS
+/// runner's summary — is never a network failure, whatever it mentions: a test that talks to a
+/// socket and fails is the change's failure. Only output that names a fetch (rustup, a registry, a
+/// download) or a network-level failure (DNS, reset, refused, timed out) earns the retry.
+pub fn verify_network_cause(output: &str) -> Option<String> {
+    let text = output.to_ascii_lowercase();
+    // The harness ran: whatever the failure is, it is the tests'.
+    const HARNESS: &[&str] = &[
+        "test result:",
+        "test files ",
+        "tests:  ",
+        "# tests ",
+        "# pass ",
+        " tests across ",
+        "passing (",
+    ];
+    let harness_ran = HARNESS.iter().any(|m| text.contains(m))
+        || text.lines().any(|l| {
+            let l = l.trim();
+            l.starts_with("running ") && (l.ends_with(" tests") || l.ends_with(" test"))
+        });
+    if harness_ran {
+        return None;
+    }
+    // What was being fetched, most specific first.
+    let source = if text.contains("rustup")
+        || text.contains("static.rust-lang.org")
+        || (text.contains("toolchain") && text.contains("download"))
+    {
+        Some("rustup toolchain download")
+    } else if text.contains("crates.io") || text.contains("crates-io") || text.contains("failed to download from") {
+        Some("crates.io registry")
+    } else if text.contains("registry.npmjs.org")
+        || text.contains("npm err!")
+        || text.contains("npm error")
+        || text.contains("registry.yarnpkg.com")
+    {
+        Some("npm registry")
+    } else if text.contains("failed to update registry") || text.contains("failed to fetch") {
+        Some("package registry")
+    } else {
+        None
+    };
+    // How the network failed. Each marker names a network-level failure, not a test's assertion.
+    let how = if [
+        "could not resolve host",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "dns error",
+        "failed to lookup address",
+        "eai_again",
+        "enotfound",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
+    {
+        Some("DNS lookup failed")
+    } else if ["connection reset", "econnreset", "connection was reset", "socket hang up"]
+        .iter()
+        .any(|m| text.contains(m))
+    {
+        Some("connection reset")
+    } else if text.contains("connection refused") || text.contains("econnrefused") {
+        Some("connection refused")
+    } else if ["timed out", "etimedout", "err_socket_timeout", "operation timeout"]
+        .iter()
+        .any(|m| text.contains(m))
+    {
+        Some("timed out")
+    } else if text.contains("network is unreachable") || text.contains("enetunreach") {
+        Some("network unreachable")
+    } else if [
+        "could not download",
+        "failed to download",
+        "error downloading",
+        "download failed",
+        "spurious network error",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
+    {
+        Some("download failed")
+    } else {
+        None
+    };
+    match (source, how) {
+        (Some(source), Some(how)) => Some(format!("{source}, {how}")),
+        // A connection-level failure with nothing named as being fetched: before any harness output,
+        // that is still the network (a build script's fetch, a git dependency). A bare "timed out"
+        // or "download failed" is too loose to be evidence on its own.
+        (None, Some(how)) if !matches!(how, "timed out" | "download failed") => Some(how.to_string()),
+        // A registry or rustup line with no network failure in it is not evidence enough.
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +493,72 @@ mod tests {
         assert_eq!(turn_error_cause("read ECONNRESET"), "connection reset");
         assert_eq!(turn_error_cause("model timed out after 600 s"), "timed out");
         assert_eq!(turn_error_cause("something else"), "");
+    }
+
+    /// Issue #1117: a verify run that died fetching before any test ran names the fetch and the
+    /// network failure — rustup, crates.io, npm, a bare DNS failure.
+    #[test]
+    fn a_verify_run_that_never_reached_its_tests_names_the_network_cause() {
+        for (output, cause) in [
+            (
+                "info: syncing channel updates for '1.98.1-x86_64-unknown-linux-gnu'\n\
+                 error: could not download file from 'https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.sha256' \
+                 to '/root/.rustup/tmp/x': error during download: connection reset by peer (os error 104)",
+                "rustup toolchain download, connection reset",
+            ),
+            (
+                "error: failed to install toolchain '1.98.1': could not download: operation timed out",
+                "rustup toolchain download, timed out",
+            ),
+            (
+                "    Updating crates.io index\nerror: failed to get `serde` as a dependency of package `demo`\n\
+                 Caused by:\n  [6] Could not resolve host: index.crates.io",
+                "crates.io registry, DNS lookup failed",
+            ),
+            (
+                "error: failed to download from `https://static.crates.io/crates/serde/1.0.0/download`\n\
+                 Caused by:\n  [56] Failure when receiving data from the peer (Connection reset by peer)",
+                "crates.io registry, connection reset",
+            ),
+            (
+                "npm error code EAI_AGAIN\nnpm error request to https://registry.npmjs.org/vitest failed, reason: getaddrinfo EAI_AGAIN",
+                "npm registry, DNS lookup failed",
+            ),
+            (
+                "npm ERR! code ETIMEDOUT\nnpm ERR! network request to https://registry.npmjs.org/left-pad failed",
+                "npm registry, timed out",
+            ),
+            (
+                "fatal: unable to access 'https://example.com/dep.git/': Could not resolve host: example.com",
+                "DNS lookup failed",
+            ),
+        ] {
+            assert_eq!(verify_network_cause(output).as_deref(), Some(cause), "{output}");
+        }
+    }
+
+    /// Issue #1117: a run whose harness started failed for its tests, whatever its output names,
+    /// and a failure with no network shape in it is never a network failure.
+    #[test]
+    fn a_real_test_failure_is_never_a_network_cause() {
+        for output in [
+            "running 3 tests\ntest api::reconnects ... FAILED\npanicked: connection refused\ntest result: FAILED. 2 passed; 1 failed",
+            " FAIL  src/net.test.ts > fetches\nError: getaddrinfo ENOTFOUND api.example.com\n Test Files  1 failed (1)",
+            "Tests:       1 failed, 4 passed, 5 total\nrequest to https://registry.npmjs.org timed out",
+            "error[E0425]: cannot find value `x` in this scope\nerror: could not compile `demo`",
+            "    Updating crates.io index\nerror: failed to select a version for `serde`",
+            "the operation timed out",
+            "",
+        ] {
+            assert_eq!(verify_network_cause(output), None, "{output}");
+        }
+    }
+
+    /// The verify schedule is short and runs out after three retries.
+    #[test]
+    fn the_verify_retries_run_out_after_three() {
+        assert_eq!(VERIFY_RETRY_DELAYS.len(), 3);
+        assert!(VERIFY_RETRY_DELAYS.windows(2).all(|w| w[0] < w[1]), "longest last");
+        assert!(VERIFY_RETRY_DELAYS.iter().sum::<std::time::Duration>() <= std::time::Duration::from_secs(10 * 60));
     }
 }

@@ -51,9 +51,11 @@ export interface Attention {
   /**
    * What stopped the colony (issue #1093): `gateway_error` for a transient model gateway error —
    * retried automatically under `provider_retry`, held as `autopilot_held` once the retries run out —
-   * and `turn_error` for an error a retry cannot fix. Absent on older motherships and other reasons.
+   * and `turn_error` for an error a retry cannot fix. `verify_network` (issue #1117): the claim's
+   * fresh-checkout verification never got to the tests — a toolchain or registry download failed —
+   * and its retries ran out. Absent on older motherships and other reasons.
    */
-  cause?: "gateway_error" | "turn_error";
+  cause?: "gateway_error" | "turn_error" | "verify_network";
   /** `provider_retry`: what stopped it, e.g. "Stopped on a model gateway error (502, connection to Anthropic)". */
   summary?: string;
   /** `provider_retry`: when the next automatic attempt runs. */

@@ -101,6 +101,19 @@ describe("feedEntry text", () => {
     expect(feedEntries([stalled])[0].text).toBe("webshop#42 has stopped making progress");
   });
 
+  it("says a claim whose tests could not run for the network is not a failure (issue #1117)", () => {
+    const attention = {
+      reason: "autopilot_held" as const,
+      since: "2026-10-06T08:00:00Z",
+      nudges: 0,
+      cause: "verify_network" as const,
+      detail: "verification could not run (network: rustup toolchain download, connection reset)",
+    };
+    expect(feedEntries([session({ status: "idle", attention })])[0].text).toBe(
+      "webshop#42 finished, but its tests could not run for the network",
+    );
+  });
+
   it("reads a stacked colony's queue as waiting for its parent, not a slot", () => {
     const stacked = session({ status: "queued", parent: "root0001" });
     expect(feedEntries([stacked])[0].text).toBe("webshop#42 waits for the colony it is stacked on");

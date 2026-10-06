@@ -81,6 +81,11 @@ pub struct Verification {
     /// predates the change, so it is not attributed to it. Never changes the verdict to a hold.
     #[serde(default)]
     pub inconclusive: Vec<String>,
+    /// Why the checks never got to run, when the network is why and the retries ran out (issue
+    /// #1117): "rustup toolchain download, connection reset". Set only on an unverifiable verdict,
+    /// and autopilot then holds the colony with this cause on its card instead of publishing.
+    #[serde(default)]
+    pub network: Option<String>,
     pub command: Option<String>,
     /// `"config"` (an explicit command), the base branch file that declared it, or null.
     pub command_source: Option<String>,
@@ -110,6 +115,7 @@ impl Verification {
             contradictions: Vec::new(),
             advisories: Vec::new(),
             inconclusive: Vec::new(),
+            network: None,
             command: None,
             command_source: None,
             exit_code: None,
@@ -726,7 +732,7 @@ async fn clean_up(dirs: &[&Path]) {
 /// Runs the verification for one completion claim and answers the record. Every failure is part
 /// of the verdict: git that cannot be read, a missing command or broken infra make the claim
 /// unverifiable with the reason; only real disagreements contradict it.
-async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification {
+async fn verify_claim(app: &App, s: &Session, runner: &VmRunner, delays: &[Duration]) -> Verification {
     let started = Instant::now();
     let mut record = Verification::blank();
     macro_rules! unverifiable {
@@ -878,20 +884,15 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
             for &index in &order {
                 let check = &checks[index];
                 let (check_started, contradicted_before) = (Instant::now(), contradictions.len());
-                let ran = match run_tests(
-                    app,
-                    s,
-                    admin,
-                    &cwd,
-                    &snapshot,
-                    &check.dir,
-                    &check.command,
-                    check.needs,
-                    runner,
-                )
-                .await
-                {
-                    Ok(ran) => ran,
+                let ran = match run_check(app, s, admin, &cwd, &snapshot, check, runner, delays).await {
+                    Ok(Checked::Ran(ran)) => ran,
+                    // Issue #1117: the run never reached the tests and the retries are spent —
+                    // nothing contradicts the claim, and nothing confirms it either.
+                    Ok(Checked::Network(cause)) => {
+                        forced = Some(format!("verification could not run (network: {cause})"));
+                        record.network = Some(cause);
+                        break;
+                    }
                     Err(e) => {
                         forced = Some(format!("could not run the tests: {e:#}"));
                         break;
@@ -907,7 +908,7 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
                     // merge-base, in the same kind of fresh checkout, before a hold.
                     Outcome::Failed(code) => {
                         all_green = false;
-                        match base_run(app, s, admin, &cwd, &merge_base, check, runner).await {
+                        match base_run(app, s, admin, &cwd, &merge_base, check, runner, delays).await {
                             BaseOut::FailsToo => record
                                 .inconclusive
                                 .push(format!("`{}` fails on the base commit as well", check.command)),
@@ -1025,8 +1026,57 @@ enum BaseOut {
 /// branch need not pay for a second base VM. Exit codes only — infra trouble is never cached.
 static BASE_RESULTS: LazyLock<Mutex<HashMap<String, i32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// What running one check came to once network failures were retried (issue #1117).
+enum Checked {
+    /// The run reached an answer — green, red, or the image's or sandbox's trouble.
+    Ran(Ran),
+    /// Every attempt failed before the tests for the network; the cause, for the card.
+    Network(String),
+}
+
+/// Runs one check in a fresh checkout of `rev`, running it again on [`crate::retry::verify_network_cause`]'s
+/// shapes — a rustup toolchain or registry download, a DNS lookup that failed before any test ran —
+/// after each of `delays`, so a blip never reads as failing tests (issue #1117). A real failure, and
+/// every other outcome, is answered at once.
+#[allow(clippy::too_many_arguments)]
+async fn run_check(
+    app: &App,
+    s: &Session,
+    admin: &Path,
+    cwd: &Path,
+    rev: &str,
+    check: &Check,
+    runner: &VmRunner,
+    delays: &[Duration],
+) -> Result<Checked> {
+    let mut retries = delays.iter();
+    loop {
+        let ran = run_tests(app, s, admin, cwd, rev, &check.dir, &check.command, check.needs, runner).await?;
+        let cause = match classify(&ran) {
+            Outcome::Failed(_) => ran.tail.as_deref().and_then(crate::retry::verify_network_cause),
+            _ => None,
+        };
+        let Some(cause) = cause else { return Ok(Checked::Ran(ran)) };
+        let Some(delay) = retries.next() else {
+            return Ok(Checked::Network(cause));
+        };
+        app.session_log(
+            &s.id,
+            "info",
+            format!(
+                "verification: `{}` could not reach the network before its tests ran ({cause}); retrying in {}s",
+                check.command,
+                delay.as_secs()
+            ),
+        )
+        .await;
+        tokio::time::sleep(*delay).await;
+    }
+}
+
 /// Runs one check on the merge-base's own fresh checkout (`git archive` of it), answering whether
 /// the head failure is the base's too. Never contradicts; at worst it could not be checked.
+#[allow(clippy::too_many_arguments)]
 async fn base_run(
     app: &App,
     s: &Session,
@@ -1035,6 +1085,7 @@ async fn base_run(
     merge_base: &str,
     check: &Check,
     runner: &VmRunner,
+    delays: &[Duration],
 ) -> BaseOut {
     let modules = app.modules.read().await.clone();
     let image = s
@@ -1046,20 +1097,9 @@ async fn base_run(
     if let Some(code) = cache().get(&key).copied() {
         return if code == 0 { BaseOut::Passes } else { BaseOut::FailsToo };
     }
-    let out = match run_tests(
-        app,
-        s,
-        admin,
-        cwd,
-        merge_base,
-        &check.dir,
-        &check.command,
-        check.needs,
-        runner,
-    )
-    .await
-    {
-        Ok(ran) => match classify(&ran) {
+    let out = match run_check(app, s, admin, cwd, merge_base, check, runner, delays).await {
+        Ok(Checked::Network(cause)) => BaseOut::Unchecked(format!("the base run could not reach the network ({cause})")),
+        Ok(Checked::Ran(ran)) => match classify(&ran) {
             Outcome::Green => BaseOut::Passes,
             Outcome::Failed(_) => BaseOut::FailsToo,
             Outcome::MissingTool => BaseOut::Unchecked("the base image is missing the tool the check needs".into()),
@@ -1221,12 +1261,22 @@ fn shell_quote(s: &str) -> String {
 /// check for the tool the command needs (a miss leaves a `missing` marker and stands in exit 127),
 /// run the command with its combined output in the report mount, and report its exit number where
 /// only this harness reads it. The redirect is on the command's subshell, so `$?` survives.
-fn guest_script(dir: &str, command: &str, needs: Option<&Needs>) -> String {
-    let cd = if dir.is_empty() {
+fn guest_script(dir: &str, command: &str, needs: Option<&Needs>, toolchain: Option<&str>) -> String {
+    let mut cd = if dir.is_empty() {
         "cd /workspace".to_string()
     } else {
         format!("cd {}", shell_quote(&format!("/workspace/{dir}")))
     };
+    // Issue #1117: a pinned toolchain the image already has is used as installed, so rustup never
+    // goes to static.rust-lang.org for its manifest; with none installed, rustup resolves it as before.
+    if let Some(channel) = toolchain {
+        cd.push_str(&format!(
+            " && if command -v rustup >/dev/null 2>&1; then t=$(rustup toolchain list 2>/dev/null | \
+             awk -v c={channel} '$1 == c || index($1, c \"-\") == 1 {{ print $1; exit }}'); \
+             if [ -n \"$t\" ]; then export RUSTUP_TOOLCHAIN=\"$t\"; fi; fi",
+            channel = shell_quote(channel)
+        ));
+    }
     match needs {
         Some(needs) => format!(
             "{cd} && if {}; then ({command}) >/colonizer-verify/output 2>&1; else touch /colonizer-verify/missing; \
@@ -1305,7 +1355,11 @@ async fn run_tests(
         // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
         // to nothing of the harness's. Left empty, msb's own default would decide instead.
         net_profiles: vec!["public".into()],
-        command: vec!["sh".into(), "-c".into(), guest_script(dir, command, needs)],
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            guest_script(dir, command, needs, pinned_toolchain(&checkout, dir).await.as_deref()),
+        ],
         ..Default::default()
     };
     let started = Instant::now();
@@ -1342,6 +1396,44 @@ async fn run_tests(
     })
 }
 
+/// The Rust toolchain the fresh checkout pins for `dir` — the nearest `rust-toolchain.toml` or
+/// `rust-toolchain` at or above it, as rustup looks for one — when its channel is a plain name
+/// (`1.98.1`, `stable`, `nightly-2026-01-01`). Read on the host, never executed.
+async fn pinned_toolchain(checkout: &Path, dir: &str) -> Option<String> {
+    for at in ancestors(dir) {
+        for name in ["rust-toolchain.toml", "rust-toolchain"] {
+            if let Ok(text) = tokio::fs::read_to_string(checkout.join(join(at, name))).await {
+                return pinned_channel(&text);
+            }
+        }
+    }
+    None
+}
+
+/// The channel a toolchain file names: TOML's `[toolchain] channel = "…"`, or the legacy file's
+/// single bare line. `None` for anything that is not a plain toolchain name, so nothing odd ever
+/// reaches the guest's shell.
+fn pinned_channel(text: &str) -> Option<String> {
+    let channel = match toml::from_str::<toml::Table>(text) {
+        Ok(table) => table.get("toolchain")?.get("channel")?.as_str()?.trim().to_string(),
+        Err(_) => {
+            let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
+            let line = lines.next()?;
+            if lines.next().is_some() {
+                return None;
+            }
+            line.to_string()
+        }
+    };
+    let plain = !channel.is_empty()
+        && channel.len() <= 64
+        && channel
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !channel.starts_with('-');
+    plain.then_some(channel)
+}
+
 /// The exit number the guest wrote to `/colonizer-verify/exit` (mounted from `report`). `None`
 /// when the runner never reported one — no verdict may rest on that.
 async fn read_exit_report(report: &Path) -> Option<i32> {
@@ -1362,8 +1454,9 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
     let _serial = rt.verify_lock.lock().await;
     let Some(s) = app.session(&id).await else { return };
     let runner = microsandbox_runner(app.cfg.msb.clone());
-    let verification = verify_claim(&app, &s, &runner).await;
+    let verification = verify_claim(&app, &s, &runner, &crate::retry::VERIFY_RETRY_DELAYS).await;
     let verdict = verification.verdict;
+    let network = verification.network.clone().filter(|_| verdict == Verdict::Unverifiable);
     let detail = verification.contradictions.join("; ");
     let summary = verification.summary.clone();
     let advisories = verification.advisories.clone();
@@ -1381,6 +1474,25 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
     }
     crate::validation::emit_chain(&app, &id, event).await;
     if !gate_publish {
+        return;
+    }
+    // Issue #1117: the checks never ran for the network, and the retries are spent. Not a
+    // contradiction — no test ran — but not a verified claim to publish unseen either: held, with
+    // the cause on the card.
+    if let Some(cause) = network {
+        app.session_log(
+            &id,
+            "warn",
+            format!(
+                "autopilot: not publishing, verification could not run (network: {cause}); \
+                 press Create PR to publish anyway, or message the agent to verify again"
+            ),
+        )
+        .await;
+        app.update_session(&id, |x| {
+            x.attention = Some(crate::events::verify_network_held_attention(&cause))
+        })
+        .await;
         return;
     }
     use crate::events::Autopilot;
@@ -1472,11 +1584,12 @@ pub(crate) mod tests {
         assert_eq!(event["type"], "verification");
         assert_eq!(event["advisories"], json!([]));
         assert_eq!(event["inconclusive"], json!([]));
-        assert_eq!(event.as_object().unwrap().len(), 15);
+        assert_eq!(event.as_object().unwrap().len(), 16);
         // A record persisted before advisories or inconclusive checks existed still loads.
         let mut old = serde_json::to_value(Verification::blank()).unwrap();
         old.as_object_mut().unwrap().remove("advisories");
         old.as_object_mut().unwrap().remove("inconclusive");
+        old.as_object_mut().unwrap().remove("network");
         assert_eq!(serde_json::from_value::<Verification>(old).unwrap(), Verification::blank());
     }
 
@@ -1754,18 +1867,18 @@ pub(crate) mod tests {
     #[test]
     fn the_guest_checks_the_tool_before_it_runs_the_command() {
         assert_eq!(
-            guest_script("", "true", None),
+            guest_script("", "true", None, None),
             "cd /workspace && (true) >/colonizer-verify/output 2>&1; echo $? > /colonizer-verify/exit"
         );
         assert_eq!(
-            guest_script("web", "bun install && bun run test", Some(&BUN)),
+            guest_script("web", "bun install && bun run test", Some(&BUN), None),
             "cd '/workspace/web' && if command -v bun >/dev/null 2>&1; then (bun install && bun run test) \
              >/colonizer-verify/output 2>&1; else touch /colonizer-verify/missing; (exit 127); fi; \
              echo $? > /colonizer-verify/exit"
         );
         // The directory is quoted, so anything in it reaches the script verbatim.
         assert_eq!(
-            guest_script("weird dir", "true", None),
+            guest_script("weird dir", "true", None, None),
             "cd '/workspace/weird dir' && (true) >/colonizer-verify/output 2>&1; echo $? > /colonizer-verify/exit"
         );
         // Run for real: a present tool runs the command, a missing one reports 127 and the marker,
@@ -1774,7 +1887,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let run = |needs: &Needs, command: &str| {
             let _ = std::fs::remove_file(dir.join("missing"));
-            let script = guest_script("", command, Some(needs))
+            let script = guest_script("", command, Some(needs), None)
                 .replace("cd /workspace", &format!("cd {}", dir.display()))
                 .replace("/colonizer-verify", &dir.display().to_string());
             let out = std::process::Command::new("sh").args(["-c", &script]).status().unwrap();
@@ -1943,7 +2056,7 @@ pub(crate) mod tests {
 
     async fn verify(app: &crate::Shared, runner: &VmRunner) -> Verification {
         let s = app.session("abc").await.expect("the colony exists");
-        verify_claim(app, &s, runner).await
+        verify_claim(app, &s, runner, &[Duration::ZERO; 3]).await
     }
 
     /// The heart of it: the snapshot captures the colony's uncommitted work, the agent's
@@ -2736,5 +2849,151 @@ pub(crate) mod tests {
             )]
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The tail of issue #1117's run: rustup could not fetch the pinned toolchain's manifest, and no
+    /// test ran.
+    const RUSTUP_RESET: &str = "info: syncing channel updates for '1.98.1-x86_64-unknown-linux-gnu'\n\
+        error: could not download file from 'https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.sha256' \
+        to '/root/.rustup/tmp/abc_file': error during download: connection reset by peer (os error 104)";
+    /// cargo could not reach the crates.io index before compiling anything.
+    const REGISTRY_DNS: &str = "    Updating crates.io index\n\
+        error: failed to get `serde` as a dependency of package `demo v0.1.0 (/workspace)`\n\
+        Caused by:\n  download of config.json failed\n\
+        Caused by:\n  [6] Could not resolve host: index.crates.io";
+    /// A real failure: the harness ran and a test failed — even one whose message names a socket.
+    const REAL_FAILURE: &str = "running 3 tests\n\
+        test api::serves ... ok\n\
+        test api::reconnects ... FAILED\n\
+        ---- api::reconnects stdout ----\n\
+        thread 'api::reconnects' panicked: connection refused (os error 111)\n\
+        test result: FAILED. 2 passed; 1 failed; 0 ignored";
+
+    /// A runner whose head runs answer `answers` in turn (exit code, output), repeating the last;
+    /// base runs (no `marker` in the checkout) answer green. Counts the head runs.
+    fn sequence_runner(answers: Vec<(i32, &'static str)>) -> (VmRunner, Arc<std::sync::atomic::AtomicUsize>) {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        let runner: VmRunner = Arc::new(move |spec| {
+            let (seen, answers) = (seen.clone(), answers.clone());
+            Box::pin(async move {
+                let source = |target: &str| spec.mounts.iter().find(|m| m.target == target).unwrap().source.clone();
+                let report = source("/colonizer-verify");
+                if !tokio::fs::try_exists(source("/workspace").join("uncommitted.txt"))
+                    .await
+                    .unwrap_or(false)
+                {
+                    tokio::fs::write(report.join("exit"), "0").await?;
+                    return Ok(0);
+                }
+                let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (code, output) = answers[n.min(answers.len() - 1)];
+                tokio::fs::write(report.join("output"), output).await?;
+                tokio::fs::write(report.join("exit"), code.to_string()).await?;
+                Ok(code)
+            })
+        });
+        (runner, count)
+    }
+
+    /// Issue #1117: a run that dies on a rustup download before any test is retried, and the retry
+    /// that gets through decides — no contradiction, no hold.
+    #[tokio::test]
+    async fn a_rustup_download_failure_is_retried_not_held() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("cargo test"), "did the work", true).await;
+        let (runner, runs) = sequence_runner(vec![(1, RUSTUP_RESET), (1, RUSTUP_RESET), (0, "")]);
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert!(v.contradictions.is_empty() && v.network.is_none(), "{v:?}");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3, "two retries, then green");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1117: when every attempt dies on the network, the claim is not contradicted: the
+    /// verdict is unverifiable with the cause, which autopilot holds on the card.
+    #[tokio::test]
+    async fn a_download_failure_that_outlasts_the_retries_reports_that_verification_could_not_run() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("cargo test"), "did the work", true).await;
+        for (output, cause) in [
+            (RUSTUP_RESET, "rustup toolchain download, connection reset"),
+            (REGISTRY_DNS, "crates.io registry, DNS lookup failed"),
+        ] {
+            let (runner, runs) = sequence_runner(vec![(1, output)]);
+            let v = verify(&app, &runner).await;
+            assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+            assert!(v.contradictions.is_empty(), "{v:?}");
+            assert_eq!(v.network.as_deref(), Some(cause));
+            assert_eq!(v.summary, format!("verification could not run (network: {cause})"));
+            assert_eq!(
+                runs.load(std::sync::atomic::Ordering::SeqCst),
+                4,
+                "the first run and three retries"
+            );
+            assert_eq!(crate::events::verdict_step(&v.verdict), crate::events::Autopilot::Publish);
+            let card = crate::events::verify_network_held_attention(v.network.as_deref().unwrap());
+            assert_eq!(card["reason"], "autopilot_held");
+            assert_eq!(card["cause"], crate::events::VERIFY_NETWORK_CAUSE);
+            assert_eq!(card["detail"], format!("verification could not run (network: {cause})"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1117: a real test failure is still held at once — no retry, even when its output
+    /// names a refused connection.
+    #[tokio::test]
+    async fn a_real_test_failure_still_contradicts_without_a_retry() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("cargo test"), "did the work", true).await;
+        let (runner, runs) = sequence_runner(vec![(101, REAL_FAILURE), (0, "")]);
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert!(v.network.is_none());
+        assert!(v.contradictions[0].contains("failing: api::reconnects"), "{v:?}");
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a real failure is not retried"
+        );
+        assert_eq!(
+            crate::events::verdict_step(&v.verdict),
+            crate::events::Autopilot::Hold("the completion claim was contradicted")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1117: a pinned toolchain is read from the nearest toolchain file, and only a plain
+    /// name reaches the guest, which prefers an installed match over a rustup download.
+    #[tokio::test]
+    async fn a_pinned_toolchain_is_preferred_as_installed() {
+        assert_eq!(
+            pinned_channel("[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n").as_deref(),
+            Some("1.98.1")
+        );
+        assert_eq!(pinned_channel("nightly-2026-01-01\n").as_deref(), Some("nightly-2026-01-01"));
+        assert_eq!(pinned_channel("[toolchain]\npath = \"/opt/rust\"\n"), None);
+        assert_eq!(pinned_channel("1.98.1; rm -rf /\n"), None);
+        assert_eq!(pinned_channel("[toolchain]\nchannel = \"$(id)\"\n"), None);
+        let root = std::env::temp_dir().join(format!("colonizer-toolchain-{}", short_id()));
+        std::fs::create_dir_all(root.join("crates/a")).unwrap();
+        assert_eq!(pinned_toolchain(&root, "crates/a").await, None);
+        std::fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.98.1\"\n").unwrap();
+        assert_eq!(pinned_toolchain(&root, "crates/a").await.as_deref(), Some("1.98.1"));
+        let _ = std::fs::remove_dir_all(root);
+        let script = guest_script("", "cargo test", None, Some("1.98.1"));
+        assert!(
+            script.starts_with("cd /workspace && if command -v rustup >/dev/null 2>&1; then t=$(rustup toolchain list"),
+            "{script}"
+        );
+        assert!(
+            script.contains("awk -v c='1.98.1' '$1 == c || index($1, c \"-\") == 1 { print $1; exit }'"),
+            "{script}"
+        );
+        assert!(
+            script.contains("export RUSTUP_TOOLCHAIN=\"$t\"; fi; fi && (cargo test)"),
+            "{script}"
+        );
+        assert!(!guest_script("", "cargo test", None, None).contains("rustup"));
     }
 }
