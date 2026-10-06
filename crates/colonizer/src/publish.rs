@@ -70,12 +70,13 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
     // Issue #910: the repo's daily pull-request cap, applied together with the claim, so a colony
     // over the cap keeps its worktree and its branch and simply waits for tomorrow. The park tears
     // the microVM down, as every park does, unless the org turns `discard_vm` off (or the worktree
-    // cannot be verified, in which case the machine is kept). The limit is the repo's own
-    // `.colonizer/config.toml` key, defaulting to `DEFAULT_MAX_PRS_PER_DAY`; the count and the claim
+    // cannot be verified, in which case the machine is kept). The cap is opt-in: the limit is the
+    // repo's own `.colonizer/config.toml` key, else the publish module's `max_prs_per_day`, and
+    // `0` (the default, `DEFAULT_MAX_PRS_PER_DAY`) is no cap at all; the count and the claim
     // that spends it are one step, so two concurrent publishes of one repo cannot both read a count
     // the other has not spent. Both the operator's press and autopilot's verdict land here, so
     // neither can outrun the cap.
-    let limit = repo_pr_limit(fetch, &current.repo).await;
+    let limit = repo_pr_limit(&app, fetch, &current.repo).await;
     // The claim captures whether a microVM was live, because the status it leaves behind is
     // `publishing`; it also comes before the teardown, so a refused publish tears nothing down.
     let (s, was_live) = match claim_publish_within_daily_cap(&app, &id, limit).await {
@@ -1234,11 +1235,11 @@ pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: 
     !crate::authority::external_writes_blocked() && push_allowed(status, cleaned_up, has_worktree)
 }
 
-/// Default cap on pull requests one repo can have opened per UTC day, for a repo whose
-/// `.colonizer/config.toml` sets no `max_prs_per_day` of its own (issue #910). Slow rather than
-/// flood: most repositories would rather colonies trickle a few changes in than have twenty pull
-/// requests land in one go.
-pub(crate) const DEFAULT_MAX_PRS_PER_DAY: u64 = 5;
+/// Default cap on pull requests one repo can have opened per UTC day, for an install whose publish
+/// module and a repo whose `.colonizer/config.toml` set no `max_prs_per_day` (issue #910). `0`, no
+/// cap: the cap is opt-in, because a mothership's operator decides how fast its colonies ship, and
+/// a default that parks finished work behind a number nobody chose is a surprise, not a safeguard.
+pub(crate) const DEFAULT_MAX_PRS_PER_DAY: u64 = 0;
 
 /// The park reason recorded when a repo's daily pull-request cap is reached (issue #910). The
 /// queue's resume pass looks for exactly this, so a colony parked under it rejoins the queue once
@@ -1273,19 +1274,30 @@ pub(crate) fn repo_pr_cap_error(sessions: &[Session], repo: &str, limit: u64, no
     let spent = repo_pr_budget_spent(sessions, repo, now);
     (spent >= limit).then(|| {
         format!(
-            "{repo} has already spent {spent} of its {limit} pull request{} for today (UTC); wait for tomorrow or raise max_prs_per_day in .colonizer/config.toml",
+            "{repo} has already spent {spent} of its {limit} pull request{} for today (UTC); wait for tomorrow or raise max_prs_per_day (the publish settings, or the repo's .colonizer/config.toml)",
             if spent == 1 { "" } else { "s" }
         )
     })
 }
 
-/// The repo's own daily cap, read from its `.colonizer/config.toml` and falling back to
-/// [`DEFAULT_MAX_PRS_PER_DAY`] (issue #910). Best effort like the repo-config lookups elsewhere:
-/// a config that cannot be read or parsed is simply the default.
-async fn repo_pr_limit(fetch: &crate::epic::Fetch, repo: &str) -> u64 {
-    crate::ignore::max_prs_per_day(fetch, repo)
-        .await
+/// The install-wide daily cap: the publish module's `max_prs_per_day`, [`DEFAULT_MAX_PRS_PER_DAY`]
+/// (no cap) unless the operator set one (issue #910).
+pub(crate) async fn install_max_prs_per_day(app: &crate::App) -> u64 {
+    let modules = app.modules.read().await.clone();
+    let schema = crate::modules::schema_for("publish", &modules.publish.provider, &app.agents);
+    crate::config::setting(&modules.publish, &schema, "max_prs_per_day")
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(DEFAULT_MAX_PRS_PER_DAY)
+}
+
+/// The repo's daily cap: its own `.colonizer/config.toml` key when it sets one, else the install's
+/// [`install_max_prs_per_day`] (issue #910). Best effort like the repo-config lookups elsewhere: a
+/// config that cannot be read or parsed is simply the install's setting.
+pub(crate) async fn repo_pr_limit(app: &crate::App, fetch: &crate::epic::Fetch, repo: &str) -> u64 {
+    match crate::ignore::max_prs_per_day(fetch, repo).await {
+        Some(own) => own,
+        None => install_max_prs_per_day(app).await,
+    }
 }
 
 /// What the publish path's claim step decided, the repo's daily cap answered inside the same step
@@ -1384,7 +1396,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sessions::tests::colony;
 
@@ -2250,7 +2262,7 @@ mod tests {
     /// A `gh api` fetcher answering from a fixed list of paths and 404ing everything else, the shape
     /// `ignore.rs`'s own tests use: the repo-config read behind the daily PR cap (issue #910) is
     /// then answerable without a real GitHub.
-    fn fake_fetch(answers: Vec<(&'static str, serde_json::Value)>) -> crate::epic::Fetch {
+    pub(crate) fn fake_fetch(answers: Vec<(&'static str, serde_json::Value)>) -> crate::epic::Fetch {
         Box::new(move |path: String| {
             let answer = answers.iter().find(|(p, _)| *p == path).map(|(_, v)| v.clone());
             Box::pin(async move { answer.ok_or_else(|| anyhow::anyhow!("HTTP 404: Not Found ({path})")) })
@@ -2259,7 +2271,7 @@ mod tests {
 
     /// `.colonizer/config.toml` as the contents API answers with it: the base64 `content` field,
     /// wrapped at 60 columns the way GitHub wraps it.
-    fn repo_config(text: &str) -> serde_json::Value {
+    pub(crate) fn repo_config(text: &str) -> serde_json::Value {
         let wrapped: String = crate::util::b64_encode(text.as_bytes())
             .as_bytes()
             .chunks(60)
@@ -2270,7 +2282,7 @@ mod tests {
     }
 
     /// A fetcher for a repo whose own `max_prs_per_day` is `cap` (issue #910).
-    fn capped_at(cap: u64) -> crate::epic::Fetch {
+    pub(crate) fn capped_at(cap: u64) -> crate::epic::Fetch {
         fake_fetch(vec![(
             "repos/acme/repo/contents/.colonizer/config.toml",
             repo_config(&format!("[colonizer]\nmax_prs_per_day = {cap}\n")),
@@ -2283,6 +2295,32 @@ mod tests {
         let mut s = colony(org, SessionStatus::PrOpened);
         s.pr_opened_at = Some(Utc::now());
         s
+    }
+
+    /// Issue #910: the cap is opt-in. With nothing set anywhere there is no cap; the publish
+    /// module's `max_prs_per_day` sets one for every repo, and a repo's own key overrides it either
+    /// way, `0` included.
+    #[tokio::test]
+    async fn the_daily_cap_is_off_unless_the_install_or_the_repo_sets_one() {
+        let root = std::env::temp_dir().join(format!("colonizer-pr-cap-optin-{}", crate::util::short_id()));
+        let app = test_app(&root);
+        let unset = fake_fetch(vec![]);
+        assert_eq!(DEFAULT_MAX_PRS_PER_DAY, 0);
+        assert_eq!(repo_pr_limit(&app, &unset, "acme/repo").await, 0, "no cap by default");
+        app.modules
+            .write()
+            .await
+            .publish
+            .settings
+            .insert("max_prs_per_day".into(), json!(4));
+        assert_eq!(repo_pr_limit(&app, &unset, "acme/repo").await, 4, "the install's cap");
+        assert_eq!(
+            repo_pr_limit(&app, &capped_at(9), "acme/repo").await,
+            9,
+            "the repo's own cap wins"
+        );
+        assert_eq!(repo_pr_limit(&app, &capped_at(0), "acme/repo").await, 0, "a repo can opt out");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
