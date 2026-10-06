@@ -58,6 +58,7 @@ export function textFor(session: Session, kind: FeedKind): string {
     // A hold names its cause (issue #1093): a turn that died on an error has no pull request to hold.
     if (session.attention?.reason === "autopilot_held" && session.attention.cause === "gateway_error") return `${at} stopped on repeated gateway errors`;
     if (session.attention?.reason === "autopilot_held" && session.attention.cause === "turn_error") return `${at} stopped on an error`;
+    if (session.attention?.reason === "autopilot_held" && session.attention.cause === "verify_network") return `${at} finished, but its tests could not run for the network`;
     if (session.attention?.reason === "autopilot_held") return `${at} finished, and autopilot is holding the pull request`;
     if (session.attention?.reason === "control_defeat") return `${at} may have got past one of its controls`;
     return `${at} is waiting on your answer`;
