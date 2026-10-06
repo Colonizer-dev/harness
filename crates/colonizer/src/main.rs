@@ -75,6 +75,7 @@ mod hotspots;
 mod hunters;
 mod ignore;
 mod img_proxy;
+mod ipv6;
 mod jev;
 mod jev_ladder;
 mod ledger;
