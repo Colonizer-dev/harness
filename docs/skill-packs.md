@@ -146,6 +146,43 @@ description: Use when the colony needs an example worked through.
 Do the example thing, then stop.
 ```
 
+## Vendored packs
+
+### ponytail
+
+[ponytail](https://github.com/DietrichGebert/ponytail) (v4.12.0, MIT) is a skill pack that makes
+an agent stop at the first rung that holds before it writes code: does this need to exist at all,
+is it already in the codebase, the standard library, a native platform feature, an installed
+dependency, one line — and only then the minimum that actually works. It does not ask for that
+discipline at the expense of correctness: validation, error handling, security and accessibility
+stay in, and a reviewer-flagged over-cut is the failure mode to watch for.
+
+**Skills only.** Six skills are staged, each one `SKILL.md`: `ponytail`, `ponytail-review`,
+`ponytail-audit`, `ponytail-debt`, `ponytail-gain`, `ponytail-help`. Upstream's `hooks/`,
+`ponytail-mcp/`, `commands/`, the per-agent folders it ships for other harnesses and its benchmark
+assets are deliberately **not** staged. Staging is an allowlist rather than a copy with holes: the
+staged pack is asserted to hold only `.claude-plugin/`, `LICENSE`, `plugin.json` and `skills/`, so
+`scripts/fetch-vendor.sh` fails if any of them survives. The skills are instructions an agent reads; a
+hook or an MCP server would be third-party code executing inside a colony, which is the one thing no
+vendored pack is allowed to do. Neither upstream manifest is copied either — the root `plugin.json` is
+a bare `{"name": "ponytail"}` that fails validation for want of a version and a description, and
+`.claude-plugin/plugin.json` declares a hooks path to a `hooks/` nothing stages — so staging generates
+both. The six names are an allowlist too: a seventh upstream skill fails staging until a maintainer
+adds it to `scripts/fetch-vendor.sh` and to the `vendor.lock` comment.
+
+**Off by default.** An operator switches it on in Settings → Skillsets, by adding `ponytail` to the
+Claude Code module's `plugins` list (comma-separated names; `archify` is the default), or per-org
+with the workspace's `agent.skillsets` override. It is not in the default, and nothing turns it on
+by itself. In a colony the skills are addressed as `ponytail:<name>` — `ponytail:ponytail`,
+`ponytail:ponytail-review` and so on.
+
+**Its pin.** The upstream release and archive sha256 live in `vendor/vendor.lock` as the `ponytail`
+plugin entry, like every other vendored pack, and the daily vendored-plugin updater proposes each
+move as a pull request; see [Plugin directories](protocol/plugins.md). Its cost-saving claim is
+upstream's own benchmark, not Colonizer's: see [Token savings](protocol/token-savings.md) and the
+bench protocol in [The bench](bench.md#measuring-a-skill-pack) for what has and has not been
+measured here.
+
 ## Downloadable skillsets
 
 Some skillsets are too big, or carry native code, to ship in every release. Those are

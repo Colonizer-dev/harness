@@ -105,9 +105,10 @@ function diffSkills(before, after) {
 
 // The plugin pins scripts/fetch-vendor.sh stages into dist/plugins/<name> straight from the archive's
 // top-level directory, so that directory is the pack a colony would mount. Not here: google-skills,
-// whose staged pack is synthesized at stage time (a generated manifest, Colonizer's finder, a rewritten
-// catalog) and so has no pack in the archive to validate — CI validates the staged copy instead — and
-// pins of other kinds (caveman's prompt text, fast-jev-compaction's hook), which stage no pack at all.
+// archify and ponytail, whose staged packs are synthesized at stage time (a generated manifest, a
+// subset of upstream's own tree, and for google-skills Colonizer's finder and a rewritten catalog) and
+// so have no pack in the archive to validate — CI validates the staged copy instead — and pins of other
+// kinds (caveman's prompt text, fast-jev-compaction's hook), which stage no pack at all.
 const ARCHIVE_STAGED_PACKS = new Set(['ecc', 'superpowers']);
 
 /** validatePack on the pack a pin's archive stages into dist/plugins, or null for a pin that stages no
