@@ -314,6 +314,15 @@ const GUIDES: Record<string, Guide> = {
       { icon: "ant", label: "Colonies" },
     ],
   },
+  "built-with": {
+    icon: "box",
+    blurb: "What this venture is built with, each product linked — and the page that says so.",
+    flow: [
+      { icon: "box", label: "Stack" },
+      { icon: "eye", label: "Live today" },
+      { icon: "globe", label: "Published" },
+    ],
+  },
   notifications: {
     icon: "bell",
     blurb: "Tells you when a colony needs an answer.",

@@ -22,6 +22,7 @@ mod autonomy;
 mod boot;
 mod boundary;
 mod brief_pick;
+mod built_with;
 mod burn_down;
 mod cache_store;
 mod chat;

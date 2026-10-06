@@ -1,0 +1,89 @@
+{
+  "registry": "https://factory0.ventures/stack.json",
+  "venture": "FZ-006",
+  "venture_name": "Colonizer",
+  "venture_page": "https://factory0.ventures/ventures/colonizer/",
+  "retrieved": "2026-10-05",
+  "uses": [
+    {
+      "id": "FZ-004",
+      "name": "Cratefield",
+      "kind": "factory-zero",
+      "url": "https://cratefield.com/",
+      "role": "framework",
+      "phrase": "Built with",
+      "status": "live",
+      "note": "The fleet waitlist Worker at api.colonizer.dev runs on the Cratefield harness, and the app uses its telemetry module."
+    },
+    {
+      "id": "FZ-013",
+      "name": "Owlpost",
+      "kind": "factory-zero",
+      "url": "https://owlpost.to/",
+      "role": "email",
+      "phrase": "Email by",
+      "status": "planned",
+      "note": "Waitlist confirmation mail. Double opt-in is off today, so no mail is sent yet."
+    },
+    {
+      "id": "FZ-008",
+      "name": "SupportGenius",
+      "kind": "factory-zero",
+      "url": "https://supportgeni.us/",
+      "role": "bug-reports",
+      "phrase": "Bug reports to",
+      "status": "planned",
+      "note": "Errors and bug reports become deduplicated GitHub issues, through the Cratefield error reporter."
+    },
+    {
+      "id": "polar",
+      "name": "Polar",
+      "kind": "third-party",
+      "url": "https://polar.sh",
+      "role": "payments",
+      "phrase": "Payments by",
+      "status": "planned",
+      "note": "Paid plans through Polar as Merchant of Record, via the Cratefield Payments port. Nothing is on sale yet."
+    },
+    {
+      "id": "FZ-009",
+      "name": "promptdecode",
+      "kind": "factory-zero",
+      "url": "https://promptdeco.de/",
+      "role": "screening-engine",
+      "phrase": "Screens with the method of",
+      "status": "live",
+      "note": "Colony output is screened before a pull request opens by the screen module’s promptdecode provider, a built-in decoder for promptdecode’s three code-point classes."
+    },
+    {
+      "id": "FZ-016",
+      "name": "Sealbin",
+      "kind": "factory-zero",
+      "url": "https://sealb.in/",
+      "role": "secrets-handoff",
+      "phrase": "Handoffs sealed by",
+      "status": "planned",
+      "note": "Optional sealed handoffs between colonies on different machines."
+    },
+    {
+      "id": "FZ-012",
+      "name": "Keep Shipping",
+      "kind": "factory-zero",
+      "url": "https://keepshipping.run/",
+      "role": "deploys",
+      "phrase": "Deploys by",
+      "status": "planned",
+      "note": "Every venture site and Worker deployed from the Keep Shipping console."
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "kind": "third-party",
+      "url": "https://www.cloudflare.com",
+      "role": "hosting",
+      "phrase": "Hosted on",
+      "status": "live",
+      "note": "The site and the waitlist Worker."
+    }
+  ]
+}

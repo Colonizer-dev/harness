@@ -96,6 +96,8 @@ them (and --json), which only the client commands use.";
 enum Command {
     /// Print what this build is, and whether it is a release (also `--version`)
     Version,
+    /// Print what the venture is built with, each product's status said in words (issue #944)
+    About,
     /// Install the newest release against a running mothership and restart into it
     Update {
         /// Install over a development build, or one newer than the latest release
@@ -1340,6 +1342,7 @@ const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("migrate-store", &["host", "token_file", "json"]),
     ("sessions", &["host", "token_file"]),
     ("version", &["host", "token_file", "json"]),
+    ("about", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
     ("man", &["host", "token_file", "json"]),
 ];
@@ -1465,6 +1468,11 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             // The stamped build, not CARGO_PKG_VERSION: the crate version says nothing about
             // which commit an install came from.
             println!("{}", crate::version::build().line());
+            EXIT_OK
+        }
+        // Local: the vendored registry copy is compiled into the binary (built_with.rs).
+        Command::About => {
+            crate::built_with::print();
             EXIT_OK
         }
         Command::Update { force, check } => await_local(update_command(cli, force, check).await),
@@ -3438,7 +3446,16 @@ mod tests {
     /// host flags and hides only `--json`, and a client command still advertises all three.
     #[test]
     fn local_help_hides_the_client_flags() {
-        for command in ["open", "setup", "login-item", "telemetry", "version", "completions", "man"] {
+        for command in [
+            "open",
+            "setup",
+            "login-item",
+            "telemetry",
+            "version",
+            "about",
+            "completions",
+            "man",
+        ] {
             let help = help_for(command);
             for flag in ["--host", "--token-file", "--json"] {
                 assert!(!help.contains(flag), "`{command} --help` should not list {flag}:\n{help}");

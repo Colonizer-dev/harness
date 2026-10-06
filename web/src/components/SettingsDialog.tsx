@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { errorMessage, useApi } from "../context";
 import type {
+  BuiltWith,
   HarnessStatus,
   ModelOption,
   ModelProvider,
@@ -34,6 +35,7 @@ import { UpdatesPane } from "./settings/UpdatesPane";
 import { LiveMapPane } from "./settings/LiveMapPane";
 import { UsagePane } from "./settings/UsagePane";
 import { DesktopPane } from "./settings/DesktopPane";
+import { BuiltWithPane } from "./settings/BuiltWithPane";
 import { NotificationsPane } from "./settings/NotificationsPane";
 import { ModulePane } from "./settings/ModulePane";
 import { ProvidersPane } from "./settings/ProvidersPane";
@@ -226,6 +228,9 @@ export function SettingsBody({
   const [providersError, setProvidersError] = useState<string | null>(null);
   // Fetched here rather than threaded through App: nothing outside Settings needs it.
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  // The venture's stack, loaded here for the same reason as `update`: nothing outside Settings reads
+  // it, and the hero's live/planned counts need it on this screen (issue #944).
+  const [builtWith, setBuiltWith] = useState<BuiltWith | null>(null);
   const models = useModels();
 
   useEffect(() => {
@@ -233,6 +238,18 @@ export function SettingsBody({
     api
       .update()
       .then((u) => !cancelled && setUpdate(u))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // A mothership from before issue #944 has no such route; the pane falls back to its empty state.
+    api
+      .builtWith()
+      .then((b) => !cancelled && setBuiltWith(b))
       .catch(() => {});
     return () => {
       cancelled = true;
@@ -369,6 +386,11 @@ export function SettingsBody({
           label: "Desktop",
           hint: "Install the cockpit as an app, start the mothership at login",
         },
+        {
+          id: "built-with",
+          label: "Built with",
+          hint: "What this venture is built with, and the page that says so",
+        },
       ],
     },
     {
@@ -442,6 +464,13 @@ export function SettingsBody({
           : [];
       case "usage":
         return usage ? [{ label: "Usage data", value: usage.enabled ? "On" : "Off", tone: onOff(usage.enabled) }] : [];
+      case "built-with":
+        return builtWith
+          ? [
+              { label: "Live", value: String(builtWith.uses.filter((u) => u.status === "live").length), tone: "ok" as const },
+              { label: "Planned", value: String(builtWith.uses.filter((u) => u.status === "planned").length) },
+            ]
+          : [];
       case "notifications":
         return [
           { label: "In tab", value: notifications.inTab ? "On" : "Off", tone: onOff(notifications.inTab) },
@@ -492,6 +521,7 @@ export function SettingsBody({
     onTelemetryChanged,
     usage,
     onUsageChanged,
+    builtWith,
     notifications,
     onNotificationsChanged,
     remote,
@@ -588,6 +618,8 @@ type SectionContext = {
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
   usage: UsageStatus | null;
   onUsageChanged: (usage: UsageStatus) => void;
+  /** The venture's stack, for the Built with pane and its hero counts (issue #944). */
+  builtWith: BuiltWith | null;
   notifications: NotificationPrefs;
   onNotificationsChanged: Dispatch<SetStateAction<NotificationPrefs>>;
   remote: RemoteStatus | null;
@@ -664,6 +696,7 @@ const SECTIONS: SectionEntry[] = [
   { id: "usage", render: (c) => <UsagePane usage={c.usage} onChanged={c.onUsageChanged} back={c.back} /> },
   { id: "notifications", render: (c) => <NotificationsPane prefs={c.notifications} onChanged={c.onNotificationsChanged} orgs={c.orgs} back={c.back} /> },
   { id: "desktop", render: (c) => <DesktopPane back={c.back} /> },
+  { id: "built-with", render: (c) => <BuiltWithPane builtWith={c.builtWith} back={c.back} /> },
   {
     id: "providers",
     render: (c) => (
