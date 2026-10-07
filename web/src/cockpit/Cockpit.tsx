@@ -26,6 +26,7 @@ import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
+import { autoCeilingLabel } from "./host";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
 import { MobileTabBar } from "./MobileTabBar";
@@ -612,6 +613,7 @@ export function Cockpit({
             statusKnown={status !== null}
             autopilotDefault={autopilotDefault}
             maxParallel={status?.sandbox.max_parallel ?? null}
+            capacityNote={autoCeilingLabel(status?.sandbox)}
             sessions={sessions}
             prefill={launchPrefill}
             onOpenColony={(session) => openColonyById(session.id)}
@@ -721,6 +723,7 @@ export function Cockpit({
           <NestView
             sessions={inOrg}
             capacity={status?.sandbox.max_parallel ?? null}
+            capacityNote={autoCeilingLabel(status?.sandbox)}
             // The inspector wins while it is open; otherwise the chamber for the colony App has
             // selected stays lit, so coming back from the colony view lands somewhere familiar.
             selectedId={inspector?.kind === "colony" ? inspector.session.id : selectedId}

@@ -52,6 +52,15 @@ export function autoCapacityLine(sandbox: HarnessStatus["sandbox"] | undefined):
   return sandbox.waiting_reason ? `${live} · the next colony waits on ${WAITING_ON[sandbox.waiting_reason]}` : live;
 }
 
+/**
+ * Auto mode's ceiling in words: how many colonies the host admits now, and the safety cap above it
+ * (issue #1177). Null for a fixed limit or a mothership that does not report both numbers.
+ */
+export function autoCeilingLabel(sandbox: HarnessStatus["sandbox"] | undefined): string | null {
+  if (!sandbox || sandbox.mode !== "auto" || sandbox.max_parallel == null || sandbox.auto_max_parallel == null) return null;
+  return `auto: ${sandbox.max_parallel} now (cap ${sandbox.auto_max_parallel})`;
+}
+
 export interface HostFact {
   /** Which icon leads the segment; a segment without one is self-labeled text. */
   icon?: "server" | "cpu" | "memory";

@@ -483,6 +483,11 @@ impl Limit {
                 "reserve_gb": auto.size.reserve_gib,
                 "reserve_cpus": auto.size.reserve_cpus,
             });
+            // In auto mode the static settings are stale: the effective ceiling and the auto colony
+            // size take their keys (the configured values stay under `configured_*`, see status.rs).
+            value["max_parallel"] = json!(self.max_parallel);
+            value["cpus"] = json!(auto.size.cpus);
+            value["memory"] = json!(format!("{}G", auto.size.memory_gib));
             value["auto_max_parallel"] = json!(auto.cap);
             value["committed_gb"] = json!(auto.running as u64 * auto.size.memory_gib);
             value["overcommit"] = json!(auto.overcommit);

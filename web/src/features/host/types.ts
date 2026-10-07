@@ -33,6 +33,10 @@ export interface HarnessStatus {
     cpus?: number;
     memory?: string;
     max_parallel?: number;
+    /** Issue #1177: the settings form's own values. In auto mode `cpus`, `memory` and `max_parallel` above are the auto colony size and the effective ceiling (running + room), so the static settings live here. Older builds omit these. */
+    configured_cpus?: number;
+    configured_memory?: string;
+    configured_max_parallel?: number;
     /** Issue #1141: `auto` sizes colonies from the host and admits them from its live free memory and load; `fixed` is the static `max_parallel`. Older mothership builds omit the rest of this block. */
     mode?: "auto" | "fixed";
     /** Auto mode only: what one colony is given, computed from the host. */

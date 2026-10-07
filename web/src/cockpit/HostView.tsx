@@ -11,7 +11,7 @@ import { SESSION_STATUS, isLive, timeAgo } from "../components/ui";
 import type { FleetHost, HarnessStatus, Session, StorageSummary } from "../types";
 import { KpiStrip, Rules, Section, type KpiDef } from "./DashChart";
 import { sparkPoints, TONE_VAR } from "./dash";
-import { autoCapacityLine, formatBytes, formatUptime } from "./host";
+import { autoCapacityLine, autoCeilingLabel, formatBytes, formatUptime } from "./host";
 import { parseSize, useHostHistory, type HostSample } from "./hostHistory";
 
 const pct = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? "—" : `${Math.round(v * 100)}%`);
@@ -305,7 +305,7 @@ export function HostView({
           <div className="grid grid-cols-2 gap-x-6 sm:grid-cols-3">
             <Fact label="Sandbox">{sandbox?.msb_version ? `microsandbox ${sandbox.msb_version}` : "—"}</Fact>
             <Fact label="Colony image">{sandbox?.image ?? "—"}</Fact>
-            <Fact label="Colony size">{[sandbox?.cpus != null ? `${sandbox.cpus} vCPU` : null, sandbox?.memory, sandbox?.max_parallel != null ? `${sandbox.max_parallel} in parallel` : null].filter(Boolean).join(" · ") || "—"}</Fact>
+            <Fact label="Colony size">{[sandbox?.cpus != null ? `${sandbox.cpus} vCPU` : null, sandbox?.memory, autoCeilingLabel(sandbox) ?? (sandbox?.max_parallel != null ? `${sandbox.max_parallel} in parallel` : null)].filter(Boolean).join(" · ") || "—"}</Fact>
             <Fact label="KVM">{runtime?.kvm == null ? "not needed on this platform" : ok(runtime.kvm.ok, "ready", runtime.kvm.error ?? "unavailable")}</Fact>
             <Fact label="git">{runtime ? ok(runtime.git.ok, runtime.git.version ?? "ok", runtime.git.error ?? "missing") : "—"}</Fact>
             <Fact label="GitHub CLI">{runtime ? ok(runtime.gh.ok, runtime.gh.version ?? "ok", runtime.gh.error ?? "missing") : "—"}</Fact>
