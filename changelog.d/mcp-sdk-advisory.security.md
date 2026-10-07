@@ -1,0 +1,1 @@
+**The Claude Code module no longer carries a vulnerable MCP SDK.** Its locked `@modelcontextprotocol/sdk` (a dependency of the Claude Agent SDK) moves from 1.30.0 to 1.32.1, which fixes GHSA-6qxp-vccf-f47h, where an OAuth client could send credentials to an authorization server chosen by the MCP server.
