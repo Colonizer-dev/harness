@@ -594,3 +594,23 @@ test('commands that only touch a secret path\'s name are allowed, ones that read
     assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
   }
 });
+
+// #1169 follow-up: copying a repository while EXCLUDING the placeholder dotfiles is the safe thing to
+// do; the --exclude patterns of tar and rsync are not paths the command touches.
+test('tar and rsync --exclude patterns do not count as touching a secret path; reads still do', () => {
+  const policy = policyIn('/repo');
+  const allowed = [
+    "tar cf - --exclude='./.env' --exclude='./.envrc' --exclude='./.npmrc' --exclude='./.netrc' . | tar xf - -C /tmp/mutrepo",
+    'rsync -a --exclude .env --exclude .netrc ./ /tmp/ks52fix/',
+    'rsync -a --exclude=.git-credentials --exclude=".pypirc" ./ /tmp/copy/',
+  ];
+  for (const command of allowed) assert.notEqual(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+  const reads = [
+    'tar cf - .env | cat',
+    'tar cf - --exclude=.envrc .env',
+    'rsync -a .netrc /tmp/x/',
+    'cp .env /tmp/x; tar cf - --exclude=.env .',
+    'cat .env --exclude=.env',
+  ];
+  for (const command of reads) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+});
