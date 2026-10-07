@@ -1734,6 +1734,13 @@ trait PublishOps {
     async fn remote_head(&self) -> Result<Option<String>>;
     /// Pushes the branch to origin.
     async fn push(&self) -> Result<()>;
+    /// Fetches the branch as origin has it and folds the colony's new commits onto it (a rebase, a
+    /// merge when that fails), after a push was rejected as non-fast-forward (issue #1206). A conflict
+    /// is a [`crate::push_guard::PublishHold::Conflict`].
+    async fn sync_remote(&self) -> Result<()>;
+    /// Whether the pre-push scan for secret-shaped literals still applies to this colony: it runs
+    /// once, so a colony already resumed for one publishes as it stands (issue #1206).
+    fn secret_scan_due(&self) -> bool;
     /// The URL of a pull request that is already open for this branch, if there is one.
     async fn existing_pr(&self) -> Result<Option<String>>;
     /// Opens the pull request and returns its URL.
@@ -1828,7 +1835,19 @@ async fn run_publish_with<O: PublishOps>(
         None => body,
     };
 
-    let local = ops.local_head().await?;
+    // Issue #1206: a secret-shaped literal on an added line is caught here, before anything leaves the
+    // machine, and held for the colony to remove instead of failing it at GitHub's push protection.
+    // Best effort: a diff that cannot be read is the screening gate's to refuse, not this scan's.
+    if ops.secret_scan_due()
+        && let Ok(diff) = ops.diff_against_base().await
+    {
+        let spots = crate::push_guard::scan_diff(&diff);
+        if !spots.is_empty() {
+            return Err(crate::push_guard::PublishHold::Secrets(spots).into());
+        }
+    }
+
+    let mut local = ops.local_head().await?;
     // Issue #98: the push and the PR check against the approved candidate rather than a recomputed
     // one. The tree the approval bound was recomputed at the commit above; a restack may since have
     // rewritten the branch legitimately, and what pins the push to reality is `verify_tree_binding`
@@ -1840,7 +1859,26 @@ async fn run_publish_with<O: PublishOps>(
         ops.note("the branch is already on origin; skipping the push".to_string())
             .await;
     } else {
-        ops.push().await?;
+        // Issue #1206: something else moved the branch on GitHub (a merge of main, a rebase, update
+        // branch), so the plain push is rejected. Fold the colony's commits onto it and push again,
+        // twice at most, rather than failing a colony whose work is fine.
+        let syncs = crate::push_guard::push_syncing(
+            || ops.push(),
+            || async {
+                ops.note(
+                    "the push was rejected as non-fast-forward; fetching the branch and folding the new commits onto it"
+                        .to_string(),
+                )
+                .await;
+                ops.sync_remote().await
+            },
+            crate::push_guard::MAX_SYNCS,
+        )
+        .await?;
+        if syncs > 0 {
+            // The branch was rewritten on top of the remote's: what was pushed is the new head.
+            local = ops.local_head().await?;
+        }
     }
     ops.checkpoint(PublishStage::Pushed).await;
     // The pull request is bound to the exact tree that was pushed: a branch that moved since is refused.
@@ -2210,7 +2248,7 @@ impl PublishOps for GitPublishOps<'_> {
         // path ever force-pushes, and only the colony's own branch (`check_publish_branch` guards the
         // shape at the publish entry).
         let expected = self.lease.lock().expect("publish lease poisoned").clone();
-        if let Some(expected) = expected {
+        let pushed = if let Some(expected) = expected {
             let lease = format!("--force-with-lease=refs/heads/{0}:{expected}", self.s.branch);
             exec(
                 self.app
@@ -2218,7 +2256,7 @@ impl PublishOps for GitPublishOps<'_> {
                     .args(["push", "--quiet", "origin", &lease])
                     .arg(&refspec),
             )
-            .await?;
+            .await
         } else {
             exec(
                 self.app
@@ -2226,7 +2264,16 @@ impl PublishOps for GitPublishOps<'_> {
                     .args(["push", "--quiet", "origin"])
                     .arg(&refspec),
             )
-            .await?;
+            .await
+        };
+        if let Err(e) = pushed {
+            // Issue #1206: GitHub's push protection names the files and lines it refused. While the
+            // colony has its one fix round left that is a hold, not a failure.
+            let text = format!("{e:#}");
+            if self.secret_scan_due() && crate::push_guard::is_secret_rejection(&text) {
+                return Err(crate::push_guard::PublishHold::Secrets(crate::push_guard::parse_gh013(&text)).into());
+            }
+            return Err(e);
         }
         // Only now — with the rebased history actually on the remote — does the recorded base
         // follow it; see the doc comment on `restack` for why persisting it any sooner is unsafe.
@@ -2248,6 +2295,38 @@ impl PublishOps for GitPublishOps<'_> {
             Err(e) => self.log.warn(format!("could not record commit links: {e:#}")).await,
         }
         Ok(())
+    }
+
+    async fn sync_remote(&self) -> Result<()> {
+        let branch = self.s.branch.as_str();
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        // The repository lock, as the restack takes it: the fetch and the fold see one origin.
+        let lock = self.app.repo_lock(&self.s.repo).await;
+        let _guard = lock.lock().await;
+        exec(
+            self.app
+                .git_authed(&self.bare)
+                .args(["fetch", "--quiet", "origin"])
+                .arg(format!("+refs/heads/{branch}:{remote_ref}")),
+        )
+        .await
+        .with_context(|| format!("could not fetch {branch} from origin to fold in what changed there"))?;
+        let mut git = crate::exec_bits::WorktreeGit::new(self.app, &self.admin, &self.wt);
+        let how = crate::push_guard::integrate(&mut git, &remote_ref).await?;
+        self.log
+            .info(format!(
+                "folded the colony's new commits onto origin/{branch} ({})",
+                match how {
+                    crate::push_guard::Integrated::Rebased => "rebased",
+                    crate::push_guard::Integrated::Merged => "merged",
+                }
+            ))
+            .await;
+        Ok(())
+    }
+
+    fn secret_scan_due(&self) -> bool {
+        self.s.secret_fix_rounds == 0
     }
 
     async fn existing_pr(&self) -> Result<Option<String>> {
@@ -4219,6 +4298,10 @@ mod tests {
         parent_merged: bool,
         /// The rebase hits a conflict: the publish must fail before any push.
         restack_conflict: bool,
+        /// Folding the remote branch in conflicts (issue #1206).
+        sync_conflict: bool,
+        /// The colony was already resumed once for a secret-shaped literal, so the scan stands aside.
+        scan_spent: bool,
         /// A restack's new base, held until the push that carries it actually lands — mirrors
         /// `GitPublishOps::pending_base`, so `base` above only ever follows a successful push.
         pending_base: Option<String>,
@@ -4276,6 +4359,18 @@ mod tests {
         /// The restack rebase hits a conflict.
         fn with_conflict(self) -> Self {
             self.state.borrow_mut().restack_conflict = true;
+            self
+        }
+
+        /// Folding in a moved remote branch hits a conflict.
+        fn with_sync_conflict(self) -> Self {
+            self.state.borrow_mut().sync_conflict = true;
+            self
+        }
+
+        /// The colony already had its one secret fix round.
+        fn with_scan_spent(self) -> Self {
+            self.state.borrow_mut().scan_spent = true;
             self
         }
 
@@ -4451,6 +4546,23 @@ mod tests {
                 self.note(format!("parent PR merged; rebased 1 commit(s) onto {base}")).await;
             }
             Ok(())
+        }
+
+        async fn sync_remote(&self) -> Result<()> {
+            self.state.borrow_mut().calls.push("sync_remote");
+            if self.state.borrow().sync_conflict {
+                return Err(crate::push_guard::PublishHold::Conflict {
+                    files: vec!["CHANGELOG.md".into()],
+                }
+                .into());
+            }
+            // The colony's commits now sit on top of the remote's: the remote head is one the local head descends from.
+            self.state.borrow_mut().remote = Some(PARENT.into());
+            Ok(())
+        }
+
+        fn secret_scan_due(&self) -> bool {
+            !self.state.borrow().scan_spent
         }
 
         async fn existing_pr(&self) -> Result<Option<String>> {
@@ -4677,10 +4789,11 @@ mod tests {
     }
 
     /// Real git rejects a push that does not fast-forward the remote branch — and so does the
-    /// modelled one, so a future `--force` on the real push cannot slip past this suite.
+    /// modelled one, so a future `--force` on the real push cannot slip past this suite. Since #1206
+    /// the publish first folds the remote branch in; here that conflicts, so the push stays rejected.
     #[tokio::test]
     async fn a_diverged_remote_rejects_the_push_instead_of_being_force_pushed() {
-        let repo = FakeRepo::new(true, false, Some(DIVERGED), None);
+        let repo = FakeRepo::new(true, false, Some(DIVERGED), None).with_sync_conflict();
         assert!(
             run_publish(&repo).await.is_err(),
             "a diverged remote must fail the publish loudly"
@@ -4746,6 +4859,64 @@ mod tests {
             "the lease must let the restacked push through"
         );
         assert!(repo.lease_used(), "the push must have moved the pre-rebase remote head aside");
+    }
+
+    /// Issue #1206: a branch someone else moved on GitHub is folded onto and pushed again, and the
+    /// publish goes on to open the pull request instead of failing.
+    #[tokio::test]
+    async fn a_non_fast_forward_push_syncs_and_pushes_again() {
+        let repo = FakeRepo::new(false, true, Some(DIVERGED), None);
+        let out = run_publish(&repo).await.unwrap();
+        assert!(
+            matches!(out, Published::PullRequest(_)),
+            "the publish carries on to the pull request"
+        );
+        assert_eq!(repo.count("sync_remote"), 1);
+        assert_eq!(repo.count("push"), 2, "rejected once, landed after the sync");
+        assert!(repo.noted("non-fast-forward"));
+    }
+
+    /// Issue #1206: a conflict while folding in the remote branch is a hold the publish hands back,
+    /// not a plain failure, and nothing is pushed twice.
+    #[tokio::test]
+    async fn a_conflict_while_syncing_is_a_hold() {
+        let repo = FakeRepo::new(false, true, Some(DIVERGED), None).with_sync_conflict();
+        let err = run_publish(&repo).await.err().expect("the publish is held");
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::push_guard::PublishHold>(),
+                Some(crate::push_guard::PublishHold::Conflict { files }) if files == &["CHANGELOG.md".to_string()]
+            ),
+            "{err:#}"
+        );
+        assert_eq!(repo.count("push"), 1);
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    /// Issue #1206: a Stripe-shaped literal on an added line holds the publish before any push, naming
+    /// the file, the line and the kind and never the value.
+    #[tokio::test]
+    async fn a_secret_shaped_literal_holds_the_publish_before_any_push() {
+        let key = concat!("sk_", "live_4eC39HqLyjWDarjtT1zdp7dc");
+        let diff = format!(
+            "diff --git a/tests/schema.rs b/tests/schema.rs\n--- a/tests/schema.rs\n+++ b/tests/schema.rs\n@@ -10,2 +10,3 @@ fn t() {{\n let a = 1;\n+let key = \"{key}\";\n let b = 2;\n"
+        );
+        let repo = FakeRepo::new(false, true, None, None).with_diff(&diff);
+        let err = run_publish(&repo).await.err().expect("the publish is held");
+        let Some(crate::push_guard::PublishHold::Secrets(spots)) = err.downcast_ref::<crate::push_guard::PublishHold>() else {
+            panic!("expected a secrets hold: {err:#}");
+        };
+        assert_eq!(spots.len(), 1);
+        assert_eq!(
+            (spots[0].path.as_str(), spots[0].line, spots[0].kind.as_str()),
+            ("tests/schema.rs", 11, "stripe_key")
+        );
+        assert!(!format!("{err:#}").contains(key), "the value is never in the message");
+        assert_eq!(repo.count("push"), 0, "nothing leaves the machine");
+
+        // Once the colony had its fix round the scan stands aside and the publish goes on.
+        let spent = FakeRepo::new(false, true, None, None).with_diff(&diff).with_scan_spent();
+        assert!(matches!(run_publish(&spent).await.unwrap(), Published::PullRequest(_)));
     }
 
     /// A conflicted rebase fails the publish before anything pushes, so the branch is never left

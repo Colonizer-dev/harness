@@ -118,6 +118,7 @@ mod provider_quota;
 mod providers;
 mod publish;
 mod push;
+mod push_guard;
 mod push_prefs;
 mod queue;
 mod queue_priority;

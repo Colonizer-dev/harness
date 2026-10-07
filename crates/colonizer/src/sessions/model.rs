@@ -608,6 +608,20 @@ pub struct Session {
     /// cleared — like `pending_answer` but with no suspension behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_note: Option<String>,
+    /// How many times a publish stopped on a secret-shaped literal and resumed the colony to remove it
+    /// (issue #1206). The first time the colony is resumed with the path, line and kind; after that the
+    /// scan stands aside and GitHub's own push protection has the last word.
+    #[serde(default)]
+    pub secret_fix_rounds: u8,
+    /// How many times a push found the branch moved on GitHub, could not fold the colony's commits onto it
+    /// and resumed the colony to resolve the conflict (issue #1206). Bounded like `secret_fix_rounds`.
+    #[serde(default)]
+    pub push_conflict_rounds: u8,
+    /// Set when a held publish (issue #1206) left the colony `stopped` with a resume note: the queue's
+    /// next tick resumes it and clears this. Kept apart from the publish itself because the resume
+    /// is the queue's to run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub publish_resume_pending: bool,
     /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
     /// question and the queue has not started (or has already given up on) the warm-up boot.
     /// `None` unless a request is live.
@@ -763,6 +777,9 @@ impl Default for Session {
             pending_answer: None,
             switch_note: None,
             resume_note: None,
+            secret_fix_rounds: 0,
+            push_conflict_rounds: 0,
+            publish_resume_pending: false,
             prewarm: None,
             supply_chain: None,
             supply_chain_targets: Vec::new(),
