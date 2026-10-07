@@ -13,6 +13,9 @@
 //!   head that was read (`--match-head-commit`), by the org's merge method. GitHub's own
 //!   `mergeStateStatus` is the branch-protection gate: only `CLEAN` merges, so a pending or failing
 //!   required check, a missing review or a merge queue is never overridden;
+//! - a pull request that adds a `changelog.d/` fragment waits while a `release: vX.Y.Z` pull request is
+//!   open in its repository (the release train, issue #1193): the release's changelog check would fail
+//!   on a fragment that lands after it was assembled;
 //! - behind or conflicting, in `green+rebase`: GitHub's update-branch first; when that conflicts, the
 //!   colony is resumed with a rebase task (the watcher's `needs_rebase` flag says its own host rebase
 //!   already failed);
@@ -163,6 +166,8 @@ pub(crate) struct Facts {
     /// GitHub's `reviewDecision`, uppercased, when the repository asks for reviews.
     pub review: Option<String>,
     pub head: String,
+    /// The pull request adds or edits a fragment under `changelog.d/` (the first 100 files it touches).
+    pub adds_fragment: bool,
     pub checks: Vec<Check>,
 }
 
@@ -182,6 +187,8 @@ pub(crate) struct Ctx {
     pub fixed_head: Option<String>,
     /// The head update-branch was last tried on.
     pub update_tried_head: Option<String>,
+    /// A `release: vX.Y.Z` pull request is open in this repository (the release train's freeze).
+    pub release_open: bool,
 }
 
 /// What the steward does about one pull request this cycle.
@@ -224,6 +231,9 @@ pub(crate) fn decide(f: &Facts, ctx: &Ctx) -> Action {
     }
     if let Some(label) = f.labels.iter().find(|l| is_hold_label(l)) {
         return Action::Wait(format!("it carries the {label:?} label"));
+    }
+    if ctx.release_open && f.adds_fragment {
+        return Action::Wait("a release pull request is open, and this one adds a changelog fragment".into());
     }
     if ctx.needs_human {
         return Action::Wait("the colony marked it as needing a person's decision".into());
@@ -302,7 +312,7 @@ pub(crate) fn parse_pr_url(url: &str) -> Option<(String, u64)> {
 }
 
 const PR_FRAGMENT: &str = "fragment F on PullRequest{number url title state isDraft isCrossRepository mergeable mergeStateStatus \
-    reviewDecision headRefOid labels(first:20){nodes{name}} \
+    reviewDecision headRefOid labels(first:20){nodes{name}} files(first:100){nodes{path}} \
     commits(last:1){nodes{commit{statusCheckRollup{contexts(first:60){nodes{__typename \
     ...on CheckRun{name status conclusion startedAt completedAt detailsUrl steps(first:1){totalCount} \
     annotations(first:5){nodes{title message}}} \
@@ -380,6 +390,55 @@ pub(crate) fn parse_check(node: &Value) -> Option<Check> {
     }
 }
 
+/// Whether a changed path is a changelog fragment (`changelog.d/` holds a README too).
+pub(crate) fn is_fragment_path(path: &str) -> bool {
+    path.strip_prefix("changelog.d/")
+        .is_some_and(|rest| !rest.contains('/') && rest != "README.md" && rest != ".gitkeep")
+}
+
+/// Whether a release pull request (`release: vX.Y.Z`) is open in `repo`. A failed read says yes: a
+/// pull request held a cycle too long costs nothing, one merged under a release breaks its check.
+async fn release_pr_open(app: &App, repo: &str) -> bool {
+    let mut cmd = app.gh([
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--search",
+        "release: in:title",
+        "--json",
+        "title",
+        "--limit",
+        "30",
+    ]);
+    match exec_capture(GH_LIMIT, &mut cmd).await {
+        Ok((stdout, _)) => serde_json::from_str::<Value>(&stdout)
+            .map(|v| {
+                v.as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|p| is_release_title(&text(&p["title"])))
+            })
+            .unwrap_or(true),
+        Err(e) => {
+            eprintln!("merge steward: could not look for an open release pull request in {repo}: {e:#}");
+            true
+        }
+    }
+}
+
+/// `release: vX.Y.Z`, the title the release train gives its pull request.
+pub(crate) fn is_release_title(title: &str) -> bool {
+    let Some(v) = title.trim().strip_prefix("release: v") else {
+        return false;
+    };
+    let v = v.split_whitespace().next().unwrap_or_default();
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// One pull request node as [`Facts`]; `None` when GitHub returned no such pull request.
 pub(crate) fn parse_pr(node: &Value) -> Option<Facts> {
     let url = text(&node["url"]);
@@ -411,6 +470,11 @@ pub(crate) fn parse_pr(node: &Value) -> Option<Facts> {
         },
         review: Some(review).filter(|r| !r.is_empty()),
         head: text(&node["headRefOid"]),
+        adds_fragment: node["files"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|n| is_fragment_path(&text(&n["path"]))),
         checks: contexts.as_array().into_iter().flatten().filter_map(parse_check).collect(),
     })
 }
@@ -798,6 +862,8 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
     let dir = app.cfg.config_dir.clone();
     let memory = load(&dir).await;
     let mut merged_repos: HashSet<String> = HashSet::new();
+    // Per repository, looked up once and only for a pull request that adds a fragment.
+    let mut release_open: HashMap<String, bool> = HashMap::new();
     let mut results: Vec<(String, PrMemory)> = Vec::new();
     let mut bumped: Vec<(String, Rounds)> = Vec::new();
     for s in &candidates {
@@ -805,8 +871,13 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
         let Some(f) = facts.get(&url) else { continue };
         let saved = memory.prs.get(&url);
         let rounds = memory.rounds.get(&s.id).cloned().unwrap_or_default();
+        if f.adds_fragment && !release_open.contains_key(&s.repo) {
+            let open = release_pr_open(app, &s.repo).await;
+            release_open.insert(s.repo.clone(), open);
+        }
         let mut ctx = Ctx {
             mode,
+            release_open: release_open.get(&s.repo).copied().unwrap_or(false),
             colony_idle: s.status == SessionStatus::PrOpened,
             needs_human: s.pending_answer.is_some() || s.attention.is_some() || s.superseded.as_ref().is_some_and(|x| !x.kept),
             rebase_flagged: s.needs_rebase,

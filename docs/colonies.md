@@ -239,6 +239,7 @@ from what GitHub says. The decision is a pure function, `merge_steward::decide`:
 | Behind or conflicting, in `green+rebase` | GitHub's **update-branch** first. If that conflicts, and the watcher's own rebase has flagged the colony (`needs_rebase`), the colony is resumed with a rebase task. |
 | A real failing check | The colony is resumed with the failing job's name and the tail of its log. Two rounds at most, and never twice for the same head; then the pull request is marked **needs attention**. |
 | Every failed job ended in under 10 s with no steps, or GitHub's annotation names billing or a spending limit | Marked **ci blocked**. No colony is spent on it, and one banner per org says GitHub Actions is blocked there. |
+| It adds a `changelog.d/` fragment while a `release: vX.Y.Z` pull request is open in the repository | Waits: the [release train](release.md#the-freeze)'s changelog check would fail on a fragment that lands after the release assembled its own. |
 | Anything else (running or missing checks, `BLOCKED`, a requested change, a fork) | Waits, and says why. |
 
 Branch protection is never second-guessed: only `mergeStateStatus: CLEAN` merges, so a pending or

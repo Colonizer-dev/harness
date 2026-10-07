@@ -34,6 +34,7 @@ fn facts(checks: Vec<Check>) -> Facts {
         merge_state: "CLEAN".into(),
         review: None,
         head: "abc123".into(),
+        adds_fragment: false,
         checks,
     }
 }
@@ -85,6 +86,24 @@ fn the_decision_table() {
         (
             "an unrelated label does not hold",
             |f, _| f.labels = vec!["bug".into()],
+            "merge",
+        ),
+        (
+            "a fragment waits while a release is open",
+            |f, c| {
+                f.adds_fragment = true;
+                c.release_open = true;
+            },
+            "wait",
+        ),
+        (
+            "a fragment merges when no release is open",
+            |f, _| f.adds_fragment = true,
+            "merge",
+        ),
+        (
+            "a pull request without a fragment merges under a release",
+            |_, c| c.release_open = true,
             "merge",
         ),
         ("a colony marked needing a person waits", |_, c| c.needs_human = true, "wait"),
@@ -402,6 +421,23 @@ fn a_graphql_node_reads_into_facts() {
     assert_eq!(f.checks[1].outcome, Outcome::Pending);
     assert_eq!(f.checks[2].outcome, Outcome::Pass);
     assert!(matches!(judge_checks(&f.checks), ChecksVerdict::CiBlocked(_)));
+}
+
+#[test]
+fn fragments_and_release_titles_are_recognised() {
+    assert!(is_fragment_path("changelog.d/1193.added.md"));
+    assert!(!is_fragment_path("changelog.d/README.md"));
+    assert!(!is_fragment_path("changelog.d/.gitkeep"));
+    assert!(!is_fragment_path("docs/changelog.d/1.fixed.md"));
+    assert!(!is_fragment_path("CHANGELOG.md"));
+    assert!(is_release_title("release: v0.2.12"));
+    assert!(is_release_title("release: v0.2.12 (#1200)"));
+    assert!(!is_release_title("release: vNext"));
+    assert!(!is_release_title("fix: release: v0.2.12"));
+    let mut n = node();
+    assert!(!parse_pr(&n).unwrap().adds_fragment);
+    n["files"] = json!({"nodes": [{"path": "src/a.rs"}, {"path": "changelog.d/9.fixed.md"}]});
+    assert!(parse_pr(&n).unwrap().adds_fragment);
 }
 
 #[test]

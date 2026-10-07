@@ -70,6 +70,10 @@ CI (`scripts` job) validates the fragments and fails any other pull request that
 written under Unreleased into fragments. A deliberate correction to an already released entry takes
 the `changelog-edit` label.
 
+The release train (`.github/workflows/release-train.yml`, [docs/release.md](docs/release.md)) opens that
+release pull request and pushes the tag by itself while `main` is green; `node scripts/release-prep.mjs prep`
+is the same step by hand.
+
 Once the release PR is merged and its tag pushed, the `Release` workflow builds and publishes the
 release; the `release-health` workflow then checks it (assets against `SHA256SUMS`, both crates on
 crates.io, an install on Linux and macOS, `colonizer update --check`, and colonizer.dev) and keeps a
