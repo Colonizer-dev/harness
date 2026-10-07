@@ -226,11 +226,7 @@ impl History {
                 let date: NaiveDate = today - Duration::days(days - 1 - back);
                 let key = date.format("%Y-%m-%d").to_string();
                 let tally = h.days.get(&key).cloned().unwrap_or_default();
-                let avg = if tally.requests == 0 {
-                    0
-                } else {
-                    tally.duration_ms / tally.requests
-                };
+                let avg = tally.duration_ms.checked_div(tally.requests).unwrap_or(0);
                 json!({
                     "date": key,
                     "requests": tally.requests,
