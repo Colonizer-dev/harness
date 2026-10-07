@@ -45,6 +45,10 @@ export interface SessionsApi {
    */
   messageSession(id: string, text: string): Promise<{ id: string; duplicate: boolean }>;
   stopSession(id: string): Promise<StopReply>;
+  /** POST /api/sessions/{id}/priority (issue #1156): a queued colony's own queue priority, higher first; null follows its org again. 409 when it is not queued. */
+  setSessionPriority(id: string, priority: number | null): Promise<Session>;
+  /** POST /api/sessions/{id}/move-to-front or move-to-back (issue #1156): just ahead of or behind every other queued colony. 409 when it is not queued. */
+  moveSession(id: string, to: "front" | "back"): Promise<Session>;
   /** POST /api/sessions/{id}/prewarm (issue #701): boot a suspended colony's question ahead of its answer. Answers 202 when requested, 204 when it is a no-op. */
   prewarmSession(id: string): Promise<unknown>;
   /** POST /api/sessions/{id}/keep (issue #673): release a superseded colony to start again. 409 when it is not superseded. */
@@ -82,6 +86,8 @@ export const sessionsHttp: SessionsApi = {
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   messageSession: (id, text) => post(`/api/sessions/${enc(id)}/messages`, { id: outboxId(), text }),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
+  setSessionPriority: (id, priority) => post(`/api/sessions/${enc(id)}/priority`, { priority }),
+  moveSession: (id, to) => post(`/api/sessions/${enc(id)}/move-to-${to}`),
   prewarmSession: (id) => post(`/api/sessions/${enc(id)}/prewarm`),
   keepSession: (id) => post(`/api/sessions/${enc(id)}/keep`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),

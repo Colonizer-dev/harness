@@ -115,6 +115,7 @@ export function OverviewView({
   onSynthesize,
   onOpenColony,
   onResume,
+  onMove,
   onOpenSettings,
   scopeOrg,
   onScopeOrg,
@@ -153,6 +154,8 @@ export function OverviewView({
   onOpenColony: (id: string) => void;
   /** Resumes a parked colony in place (issue #213); Cockpit's `act` surfaces a failure as a toast. Absent renders no row action. */
   onResume?: (id: string) => Promise<unknown> | void;
+  /** Moves a queued colony to the front or back of the start queue (issue #1156). Absent renders no row action. */
+  onMove?: (id: string, to: "front" | "back") => Promise<unknown> | void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
   /** The cockpit's workspace scope: set, it opens that org's dashboard in place; null is the
@@ -611,6 +614,7 @@ export function OverviewView({
                         bumped={isBumped(events, session.id, nowMs)}
                         onOpen={onOpenColony}
                         onResume={onResume}
+                        onMove={onMove}
                         orgAvatar={workspaces.find((w) => sameOrg(w.org, orgOf(session)))?.avatar ?? null}
                       />
                     ))}

@@ -518,6 +518,18 @@ export function Cockpit({
     [onSessionChanged, sessions, toast],
   );
 
+  // Move to front / back on a queued colony's row (issue #1156): the 4s poll shows the new order.
+  const moveQueued = useCallback(
+    async (id: string, to: "front" | "back") => {
+      try {
+        onSessionChanged(await api.moveSession(id, to));
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      }
+    },
+    [api, onSessionChanged, toast],
+  );
+
   // Retry on a colony stopped on a model gateway error (issue #1093): one backing off an automatic
   // retry is parked, so Retry now resumes it; one held after the retries ran out is still live, so
   // Retry sends its agent on again.
@@ -585,6 +597,7 @@ export function Cockpit({
             onSynthesize={onRedSynthesize}
             onOpenColony={openColonyById}
             onResume={(id) => act(id, "resume", (x) => api.resumeSession(x))}
+            onMove={moveQueued}
             onOpenSettings={(section) => onOpenSettings(section)}
           />
         );

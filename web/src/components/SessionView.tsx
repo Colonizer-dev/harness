@@ -33,7 +33,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up";
+type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up" | "move";
 
 export function SessionView({
   sessionId,
@@ -361,6 +361,24 @@ export function SessionView({
               >
                 {busy === "resume" ? <Spinner /> : <IconPower size={15} />} Resume
               </Button>
+            )}
+            {session.status === "queued" && (
+              <>
+                <Button
+                  disabled={busy !== null}
+                  onClick={() => act("move", (a, id) => a.moveSession(id, "front"))}
+                  title="Start this colony before every other queued one, as soon as a slot is free"
+                >
+                  {busy === "move" ? <Spinner /> : null} Move to front
+                </Button>
+                <Button
+                  disabled={busy !== null}
+                  onClick={() => act("move", (a, id) => a.moveSession(id, "back"))}
+                  title="Start this colony after every other queued one"
+                >
+                  Move to back
+                </Button>
+              </>
             )}
             <Button
               disabled={(!live && session.status !== "queued" && session.status !== "blocked") || busy !== null}

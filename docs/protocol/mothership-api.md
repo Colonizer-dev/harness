@@ -142,6 +142,12 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 for the whole install (§7.2); `null` inherits. It must name an installed module. The pick is read at
 create and recorded on the colony, so a later change moves new colonies only.
 
+`queue_priority` is where the org's queued colonies stand in the start queue (issue #1156): any whole
+number from -1000000 to 1000000, higher first, `null` meaning 0. The queue orders by `(priority desc,
+created_at asc)`; a colony's own `priority` (below, `POST /api/sessions/{id}/priority`) overrides its
+org's. `max_wait_hours` (`null` or 0 is off, at most 8760) is the starvation guard: a colony queued
+that long counts as 10 whatever its priority. Neither lifts any limit below.
+
 `max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
 (`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
 layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's

@@ -215,6 +215,8 @@ export interface Session {
   queued_behind?: string | null;
   /** True while this colony waits in its issue's successor queue: it starts when the holder releases the issue (`queued_behind` names the holder). Absent in older payloads. */
   claim_wait?: boolean;
+  /** This colony's own place in the start queue (issue #1156), overriding its org's `queue_priority`: higher starts first, ties go to the older. Absent follows the org. */
+  priority?: number | null;
   /** True when the colony branch has diverged from origin/{base} and needs a rebase. Absent in older payloads. */
   needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
