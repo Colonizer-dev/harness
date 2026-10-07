@@ -178,8 +178,11 @@ export function prep(root, { version, date, lock = true, dryRun = false } = {}) 
   }
   if (lock) {
     const cargo = process.env.CARGO ?? 'cargo';
-    const r = spawnSync(cargo, ['update', '-w', '--offline'], { cwd: root, stdio: 'inherit' });
-    if (r.status !== 0) throw new Error(`cargo update -w --offline failed (${r.status ?? r.error})`);
+    // Offline first (a laptop with a warm registry cache); a fresh CI runner has no cache, so
+    // fall back to the network. `-w` only rewrites the workspace's own versions either way.
+    let r = spawnSync(cargo, ['update', '-w', '--offline'], { cwd: root, stdio: 'inherit' });
+    if (r.status !== 0) r = spawnSync(cargo, ['update', '-w'], { cwd: root, stdio: 'inherit' });
+    if (r.status !== 0) throw new Error(`cargo update -w failed (${r.status ?? r.error})`);
   }
   const notes = join(root, 'docs', 'release-notes', `${version}.md`);
   if (!existsSync(notes)) writeFileSync(notes, releaseNotesStub(version, p.fragments));
