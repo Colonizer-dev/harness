@@ -7,9 +7,9 @@ import { useCallback, useEffect, useRef, useState, type ReactElement, type React
 import { useApi } from "../context";
 import { Badge, Button, Spinner, Switch, cx } from "../components/ui";
 import type { LoopHistory, LoopHistoryRun, LoopOutcome } from "../types";
-import { AreaChart, RangePicker } from "./DashChart";
+import { AreaChart, RangePicker, niceStep } from "./DashChart";
 import type { RangeDays } from "./dash";
-import { OUTCOME, dayLabel, dayInitial, dayShort, groupItems, lineSubject, money, outcomeSeries, plural, stripBars, stripTotals, type DetailGroup, type DetailGroupDef, type DetailItem } from "./loopHistory";
+import { OUTCOME, describeBucket, dayLabel, dayInitial, dayShort, groupItems, lineSubject, money, outcomeSeries, plural, stripBars, stripTotals, type DetailGroup, type DetailGroupDef, type DetailItem } from "./loopHistory";
 import { relative } from "./loops";
 
 /** The loop's history, refreshed every minute and whenever `refreshKey` changes. `null` while loading or when the server has none. */
@@ -57,14 +57,14 @@ export function LoopStrip({ history, onClick }: { history: LoopHistory | null; o
   return (
     <div data-strip={mode} className="relative z-[1]">
       <div role="img" aria-label={`Last ${history.days} days: ${stripTotals(history)}`} onClick={onClick} className={cx(onClick && "cursor-pointer")}>
-        <div className={cx("flex h-10 items-end", mode === "day" ? "gap-2" : "gap-px")}>
+        <div className={cx("flex h-10 items-end", "gap-2")}>
           {empty && <div className="h-px w-full bg-border-strong" />}
           {bars.map((b) => (
-            <div key={b.key} title={b.label} className={cx("flex h-full min-w-0 flex-1 items-end", mode === "day" && "justify-center")}>
+            <div key={b.key} title={b.label} className={"flex h-full min-w-0 flex-1 items-end justify-center"}>
               {b.segments.length === 0 ? (
                 <div className="h-[3px] w-full rounded-full bg-border-strong" />
               ) : (
-                <div className={cx("flex w-full flex-col-reverse overflow-hidden", mode === "day" ? "max-w-7 rounded-[4px]" : "rounded-[1px]")} style={{ height: `${Math.max(b.height, 0.12) * 100}%` }}>
+                <div className={"flex w-full max-w-7 flex-col-reverse overflow-hidden rounded-[4px]"} style={{ height: `${Math.max(b.height, 0.12) * 100}%` }}>
                   {b.segments.map((s) => (
                     <div key={s.outcome} style={{ flex: s.n, background: OUTCOME[s.outcome].color, opacity: s.outcome === "skipped" ? 0.45 : 1 }} />
                   ))}
@@ -74,13 +74,13 @@ export function LoopStrip({ history, onClick }: { history: LoopHistory | null; o
           ))}
         </div>
         {!empty && (
-          <div className={cx("mt-1.5 flex", mode === "day" ? "gap-2" : "gap-px")} aria-hidden="true">
+          <div className={cx("mt-1.5 flex", "gap-2")} aria-hidden="true">
             {bars.map((b) => (
-              <div key={b.key} className={cx("h-[3px] min-w-0 flex-1 rounded-full bg-accent", mode === "day" && "mx-auto max-w-7")} style={{ opacity: b.cost > 0 ? 0.2 + 0.8 * b.cost : 0.08 }} />
+              <div key={b.key} className={"mx-auto h-[3px] min-w-0 max-w-7 flex-1 rounded-full bg-accent"} style={{ opacity: b.cost > 0 ? 0.2 + 0.8 * b.cost : 0.08 }} />
             ))}
           </div>
         )}
-        {mode === "day" && (
+        {(
           <div className="mt-1 flex gap-2 text-meta text-faint" aria-hidden="true">
             {history.buckets.map((b, i) => (
               <span key={b.day} className={cx("min-w-0 flex-1 text-center", i === history.buckets.length - 1 && "font-medium text-muted")}>
@@ -334,7 +334,7 @@ export function ActivityCharts({ history, range }: { history: LoopHistory | null
       </div>
       <div className="[--chart-h:150px]">
         <div className="mb-1 text-small-lg font-medium text-muted">Runs per day</div>
-        <AreaChart series={outcomeSeries(history)} labels={labels} xLabels={xLabels} format={(v) => String(Math.round(v))} formatY={(v) => (Number.isInteger(v) ? String(v) : "")} readTitle={`Last ${range} days`} emptyNote="no runs in this range" />
+        <StackedBars history={history} range={range} />
       </div>
       <div className="[--chart-h:110px]">
         <div className="mb-1 text-small-lg font-medium text-muted">Spend per day</div>
@@ -348,6 +348,74 @@ export function ActivityCharts({ history, range }: { history: LoopHistory | null
           emptyNote="no spend in this range"
           seriesReadout={false}
         />
+      </div>
+    </div>
+  );
+}
+
+/** Runs per day as stacked bars: counts are discrete, so each day is a column split by outcome. */
+export function StackedBars({ history, range }: { history: LoopHistory; range: RangeDays }): ReactElement {
+  const [hover, setHover] = useState<number | null>(null);
+  const series = outcomeSeries(history);
+  const n = history.buckets.length;
+  const totals = history.buckets.map((b) => b.runs);
+  const top = Math.max(0, ...totals);
+  if (top <= 0) return <div className="py-10 text-center text-small-lg text-faint">no runs in this range</div>;
+  // Whole runs on the axis: a step under one would label the same number twice.
+  const step = Math.max(1, Math.ceil(niceStep(top / 4)));
+  const max = step * 4;
+  const every = Math.ceil(n / 6);
+  const spaced = n <= 14;
+  return (
+    <div data-stacked-bars>
+      <div className="flex min-h-5 flex-wrap items-baseline gap-x-4 gap-y-1 text-body-sm tabular-nums text-muted">
+        <span className="font-medium text-text">{hover != null ? dayLabel(history.buckets[hover].day) : `Last ${range} days`}</span>
+        {series.map((s) => (
+          <span key={s.label} className="inline-flex items-center gap-1.5">
+            <span aria-hidden="true" className="h-[7px] w-[7px] rounded-[2px]" style={{ background: s.color }} />
+            {s.label} <span className="text-text">{hover != null ? s.values[hover] : s.values.reduce((t, v) => t + v, 0)}</span>
+          </span>
+        ))}
+      </div>
+      <div className="mt-4 flex gap-2.5">
+        <div aria-hidden="true" className="flex h-[var(--chart-h,150px)] w-[34px] shrink-0 flex-col justify-between text-right font-mono text-meta leading-none text-faint">
+          {[4, 3, 2, 1, 0].map((k) => (
+            <span key={k}>{step * k}</span>
+          ))}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div role="img" aria-label={`Runs per day by outcome, last ${range} days`} onMouseLeave={() => setHover(null)} className="relative h-[var(--chart-h,150px)]">
+            <div aria-hidden="true" className="absolute inset-x-0 top-0 border-t border-dashed border-border" />
+            <div aria-hidden="true" className="absolute inset-x-0 top-1/2 border-t border-dashed border-border" />
+            <div aria-hidden="true" className="absolute inset-x-0 bottom-0 border-t border-border" />
+            <div className={cx("absolute inset-0 flex items-end", spaced ? "gap-2" : "gap-px")}>
+              {history.buckets.map((b, i) => (
+                <div
+                  key={b.day}
+                  tabIndex={0}
+                  aria-label={describeBucket(b)}
+                  onMouseEnter={() => setHover(i)}
+                  onFocus={() => setHover(i)}
+                  onBlur={() => setHover(null)}
+                  className={cx("flex h-full min-w-0 flex-1 items-end justify-center focus-visible:outline-none", hover === i && "bg-panel-2")}
+                >
+                  <div className={cx("flex w-full flex-col-reverse overflow-hidden", spaced ? "max-w-9 rounded-t-[4px]" : "rounded-t-[2px]")} style={{ height: `${(b.runs / max) * 100}%` }}>
+                    {series.map((s) => (s.values[i] > 0 ? <div key={s.label} style={{ flex: s.values[i], background: s.color, opacity: s.label === "Skipped" ? 0.45 : 1 }} /> : null))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div aria-hidden="true" className="relative mt-2 h-[18px] font-mono text-meta text-faint">
+            {history.buckets.map((b, i) =>
+              i % every === 0 ? (
+                <span key={b.day} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${((i + 0.5) / n) * 100}%` }}>
+                  {dayShort(b.day)}
+                </span>
+              ) : null,
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -70,13 +70,18 @@ describe("the 7-day strip", () => {
     expect(stripTotals(h)).toBe("3 runs · 1 failed · 1 partial · $2.00");
   });
 
-  it("draws a bar per run for a loop that runs more than twice a day", () => {
-    const hourly = Array.from({ length: 24 }, (_, i) => run(`2026-10-06T${String(i).padStart(2, "0")}:00:00Z`, i === 5 ? "failed" : "ok"));
+  it("draws a bar per day even for an hourly loop, split by the day's mix of outcomes", () => {
+    const hourly = Array.from({ length: 24 }, (_, i) => run(`2026-10-06T${String(i).padStart(2, "0")}:00:00Z`, i < 3 ? "failed" : i < 8 ? "skipped" : "ok"));
     const { mode, bars } = stripBars(days(hourly));
-    expect(mode).toBe("run");
-    expect(bars).toHaveLength(24);
+    expect(mode).toBe("day");
+    expect(bars).toHaveLength(7);
+    expect(bars[5].segments).toEqual([
+      { outcome: "ok", n: 16 },
+      { outcome: "failed", n: 3 },
+      { outcome: "skipped", n: 5 },
+    ]);
     expect(bars[5].height).toBe(1);
-    expect(bars[5].segments).toEqual([{ outcome: "failed", n: 1 }]);
+    expect(bars[6].segments).toEqual([]);
   });
 
   it("says so when nothing ran, and charts outcomes per day", () => {

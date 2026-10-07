@@ -78,26 +78,8 @@ export interface StripBar {
   label: string;
 }
 
-/** A loop that runs more than twice a day draws one bar per run; the others one per day. */
-export const PER_RUN_ABOVE = 14;
-
-/** The strip's bars for a 7-day history: a bar per day, or — for an hourly loop — a bar per run. */
-export function stripBars(history: LoopHistory): { mode: "day" | "run"; bars: StripBar[] } {
-  if (history.totals.runs > PER_RUN_ABOVE) {
-    const runs = [...history.runs].reverse();
-    const top = Math.max(0, ...runs.map((r) => r.cost_usd));
-    return {
-      mode: "run",
-      bars: runs.map((r, i) => ({
-        key: `${r.at}-${i}`,
-        segments: [{ outcome: r.outcome, n: 1 }],
-        // A run's bar is full height, so the outcome reads; failures stand above the rest.
-        height: r.outcome === "failed" ? 1 : r.outcome === "skipped" ? 0.4 : 0.7,
-        cost: top > 0 ? r.cost_usd / top : 0,
-        label: `${new Date(r.at).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}: ${OUTCOME[r.outcome].label.toLowerCase()}, ${r.summary}${r.cost_usd > 0 ? `, ${money(r.cost_usd)}` : ""}`,
-      })),
-    };
-  }
+/** The strip's bars for a 7-day history: always one bar per day, stacked by the day's mix of outcomes, so every card reads the same. */
+export function stripBars(history: LoopHistory): { mode: "day"; bars: StripBar[] } {
   const most = Math.max(1, ...history.buckets.map((b) => b.runs));
   const topCost = Math.max(0, ...history.buckets.map((b) => b.cost_usd));
   return {

@@ -8,7 +8,7 @@ import { buildHistory } from "../features/loops/mockHistory";
 import type { Loop, LoopHistoryRun } from "../types";
 import { DiskCleanupCard } from "./DiskCleanupLoop";
 import { DocsLoopPanel } from "./DocsLoopCard";
-import { LoopStrip } from "./LoopCard";
+import { LoopStrip, StackedBars } from "./LoopCard";
 import { CustomLoopCard, LoopsView } from "./LoopsView";
 import { MergeLoopPanel } from "./MergeLoopCard";
 import { defaultMergeLoopSettings } from "./mergeLoop";
@@ -115,6 +115,24 @@ describe("the 7-day strip's markup", () => {
     expect(html).toContain("background:var(--ok)");
     expect(html).toContain("background:var(--err)");
     expect(html.match(/title="/g)).toHaveLength(7);
+  });
+
+  it("draws seven bars for an hourly loop too, so every card's strip reads the same", () => {
+    const hourly: LoopHistoryRun[] = Array.from({ length: 48 }, (_, i) => ({ at: `2026-10-0${6 + Math.floor(i / 24)}T${String(i % 24).padStart(2, "0")}:00:00Z`, trigger: "schedule", outcome: i % 10 === 0 ? "failed" : "ok", summary: "x", counts: {}, colonies: [], cost_usd: 0 }));
+    const html = renderToStaticMarkup(<LoopStrip history={buildHistory("x", hourly, 7, 0, now)} />);
+    expect(html).toContain('data-strip="day"');
+    expect(html.match(/title="/g)).toHaveLength(7);
+  });
+
+  it("draws the detail's runs per day as stacked bars, one column a day, split by outcome", () => {
+    const html = renderToStaticMarkup(<StackedBars history={buildHistory("x", runs, 7, 0, now)} range={7} />);
+    expect(html).toContain("data-stacked-bars");
+    expect(html.match(/aria-label="[A-Z][a-z]{2} \d+ Oct:/g)).toHaveLength(7);
+    expect(html).toContain("Wed 7 Oct: 1 run (1 ok), $2.00");
+    expect(html).toContain("background:var(--ok)");
+    expect(html).toContain("background:var(--err)");
+    expect(html).not.toContain("<path");
+    expect(renderToStaticMarkup(<StackedBars history={buildHistory("x", [], 7, 0, now)} range={7} />)).toContain("no runs in this range");
   });
 
   it("shows a placeholder while the history loads", () => {
