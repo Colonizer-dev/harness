@@ -127,3 +127,91 @@ export const CHECKLIST_LABEL: Record<ChecklistStatus, string> = {
   needs_review: "Needs review",
   not_verifiable: "Not verifiable from the repo",
 };
+
+// ---------------------------------------------------------------------------
+// The repository list (#1145): which repositories have a run, and the one muted line each row shows.
+// ---------------------------------------------------------------------------
+
+const OVER = new Set<RedTeamRun["state"]>(["done", "stopped", "cancelled"]);
+const HUNTER_DONE = new Set<Session["status"]>(["publishing", "pr_opened", "merged", "closed", "no_changes", "stopped", "failed"]);
+
+/** `1 colony`, `2 colonies`: the singular for exactly one. */
+export function plural(n: number, one: string, many: string = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** The repository's active (not over) run, if it has one. The server refuses a second with a 409. */
+export function activeRunFor(runs: RedTeamRun[], repo: string): RedTeamRun | null {
+  return runs.find((r) => r.repo === repo && !OVER.has(r.state)) ?? null;
+}
+
+/** The repository's most recent finished hunt: the latest run that is over and actually launched hunters. */
+export function lastHunt(runs: RedTeamRun[], repo: string): RedTeamRun | null {
+  let best: RedTeamRun | null = null;
+  for (const r of runs) {
+    if (r.repo !== repo || !OVER.has(r.state) || (r.hunters.length === 0 && !r.started_at)) continue;
+    if (!best || huntTime(r) > huntTime(best)) best = r;
+  }
+  return best;
+}
+
+function huntTime(run: RedTeamRun): number {
+  return Date.parse(run.ended_at ?? run.started_at ?? run.created_at) || 0;
+}
+
+/** "3 d ago" / "2 h ago" / "12 min ago" / "just now". */
+export function ago(ts: string, now: number = Date.now()): string {
+  const minutes = Math.max(0, Math.round((now - Date.parse(ts)) / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
+}
+
+/** How many of a run's hunters have ended, out of how many it has (or was sized for). */
+export function huntersDone(run: RedTeamRun, sessions: Session[]): { done: number; total: number } {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const total = run.hunters.length || run.swarm_size;
+  const done = run.hunters.filter((h) => {
+    const s = byId.get(h.session_id);
+    return !s || HUNTER_DONE.has(s.status);
+  }).length;
+  return { done, total };
+}
+
+/** The line a repository's row shows when it has an active run: "run in progress · started 14:02 · 3/8 hunters done". */
+export function activeLine(run: RedTeamRun, sessions: Session[]): string {
+  const { done, total } = huntersDone(run, sessions);
+  const gated = run.state === "armed" || run.state === "waiting";
+  const started = run.started_at ?? run.created_at;
+  const at = new Date(started).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  return gated
+    ? `run queued · waiting for the nest to empty`
+    : `run in progress · started ${at} · ${done}/${total} hunters done`;
+}
+
+/** The line for a repository with no active run: its red-team history, then when it was last pushed to. */
+export function historyLine(runs: RedTeamRun[], repo: string, pushedAt: string | null, now: number = Date.now()): string {
+  const last = lastHunt(runs, repo);
+  const hunted = last
+    ? `last hunted ${ago(last.ended_at ?? last.started_at ?? last.created_at, now)} · ${plural(last.counts.found, "finding")} (${last.counts.filed} filed)`
+    : "never hunted";
+  return pushedAt ? `${hunted} · pushed ${ago(pushedAt, now)}` : hunted;
+}
+
+/**
+ * Sort for the picker: active runs last, then never-hunted first, then the oldest hunt first; ties
+ * keep their incoming order (the most-pushed first), so the sort is stable.
+ */
+export function sortForRedTeam<T extends { full_name: string }>(repos: T[], runs: RedTeamRun[]): T[] {
+  const rank = (r: T): [number, number] => {
+    if (activeRunFor(runs, r.full_name)) return [2, 0];
+    const last = lastHunt(runs, r.full_name);
+    return last ? [1, huntTime(last)] : [0, 0];
+  };
+  return repos
+    .map((r, i) => ({ r, i, k: rank(r) }))
+    .sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.i - b.i)
+    .map((x) => x.r);
+}

@@ -137,6 +137,17 @@ pub struct OrgSettings {
     /// module's `repo_max_parallel`; the global and org limits apply as well.
     #[serde(default)]
     pub repo_max_parallel: Option<u64>,
+    /// Where this org's queued colonies stand in the start queue (issue #1156): an integer, higher
+    /// first, `None` meaning 0. The queue orders by `(priority desc, created_at asc)`, so a colony of
+    /// a higher-priority org starts before an older one of a normal org; the global, org and
+    /// per-repository limits still decide whether it fits. A colony's own `priority` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_priority: Option<i32>,
+    /// The starvation guard (issue #1156): after a queued colony of this org has waited this many
+    /// hours, it is treated as high priority whatever its org or colony priority says, so a low
+    /// priority colony cannot wait for ever. `None` or `0` turns the guard off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wait_hours: Option<u64>,
     /// The repositories of this org (full `owner/name`) whose superseded colonies' pull requests
     /// Colonizer may close on GitHub when another colony's pull request merges over them (issue
     /// #673). Empty — the default — marks the colonies superseded but never touches GitHub.
@@ -790,6 +801,18 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
 }
 
 pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
+    if let Some(priority) = settings.queue_priority
+        && !crate::queue_priority::valid_priority(i64::from(priority))
+    {
+        return Err(format!(
+            "queue_priority is a whole number from {} to {}",
+            -crate::queue_priority::PRIORITY_LIMIT,
+            crate::queue_priority::PRIORITY_LIMIT
+        ));
+    }
+    if settings.max_wait_hours.is_some_and(|hours| hours > 24 * 365) {
+        return Err("max_wait_hours is at most a year (8760); 0 turns the guard off".into());
+    }
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
             .into_iter()
@@ -1035,6 +1058,12 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("repo_max_parallel") {
         incoming.repo_max_parallel = saved.repo_max_parallel;
     }
+    if !named("queue_priority") {
+        incoming.queue_priority = saved.queue_priority;
+    }
+    if !named("max_wait_hours") {
+        incoming.max_wait_hours = saved.max_wait_hours;
+    }
     if !named("close_superseded_prs") {
         incoming.close_superseded_prs = saved.close_superseded_prs.clone();
     }
@@ -1217,6 +1246,33 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_priority_survives_a_save_that_does_not_name_it_and_is_range_checked() {
+        let saved = OrgSettings {
+            queue_priority: Some(10),
+            max_wait_hours: Some(24),
+            ..Default::default()
+        };
+        let body = json!({"max_parallel": 3});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.queue_priority, Some(10), "an older build's save keeps the priority");
+        assert_eq!(incoming.max_wait_hours, Some(24));
+
+        let body = json!({"queue_priority": -10, "max_wait_hours": null});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.queue_priority, Some(-10), "what the client names wins");
+        assert_eq!(incoming.max_wait_hours, None, "a named null clears it");
+
+        assert!(validate(&incoming).is_ok());
+        let wild = OrgSettings {
+            queue_priority: Some(i32::MAX),
+            ..Default::default()
+        };
+        assert!(validate(&wild).is_err());
+    }
 
     #[test]
     fn org_overrides_layer_over_global_settings() {

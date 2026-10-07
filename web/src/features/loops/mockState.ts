@@ -286,6 +286,6 @@ export function installLoopsMockState(ms: MockState): void {
     },
   ];
   ms.redActive = (repo: string) =>
-    ms.redRuns.some((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped");
+    ms.redRuns.some((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped" && r.state !== "cancelled");
 
 }

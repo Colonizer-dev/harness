@@ -179,6 +179,22 @@ export function sessionsMock(ms: MockState): SessionsApi {
       s.log("Removed the worktree and local branch");
       return clone(s.session);
     },
+    setSessionPriority: async (id, priority) => {
+      const s = ms.find(id);
+      if (s.session.status !== "queued") throw new ApiError("only a queued colony has a place in the queue", 409);
+      s.patch({ priority });
+      s.log(priority === null ? "Queue priority cleared" : `Queue priority set to ${priority}`);
+      return clone(s.session);
+    },
+    moveSession: async (id, to) => {
+      const s = ms.find(id);
+      if (s.session.status !== "queued") throw new ApiError("only a queued colony has a place in the queue", 409);
+      const others = [...ms.sessions.values()].filter((x) => x.session.status === "queued" && x.session.id !== id).map((x) => x.session.priority ?? 0);
+      const priority = to === "front" ? Math.max(0, 10, ...others) + 1 : Math.min(0, ...others) - 1;
+      s.patch({ priority });
+      s.log(`Moved to the ${to} of the queue (priority ${priority})`);
+      return clone(s.session);
+    },
     setKeep: async (id, keep) => {
       const s = ms.find(id);
       s.patch({ keep_worktree: keep });

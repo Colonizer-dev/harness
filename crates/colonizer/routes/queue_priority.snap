@@ -1,0 +1,3 @@
+/api/sessions/{id}/move-to-back                      POST   unauth=401    token=owner            activity=colony.move_to_back
+/api/sessions/{id}/move-to-front                     POST   unauth=401    token=owner            activity=colony.move_to_front
+/api/sessions/{id}/priority                          POST   unauth=401    token=owner            activity=colony.priority

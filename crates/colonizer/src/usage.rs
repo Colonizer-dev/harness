@@ -950,6 +950,7 @@ mod tests {
             blocked_reason: None,
             pr_rewrite_nudged: false,
             claim_wait: false,
+            priority: None,
             verify: None,
             verification: None,
             app_slot: None,

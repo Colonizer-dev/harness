@@ -2059,6 +2059,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             size.cpus, size.memory_gib, size.reserve_gib, size.reserve_cpus
         ))
         .await;
+        if size.slots <= 1 {
+            log.info(format!("auto: small host, running 1 colony at {} GB", size.memory_gib))
+                .await;
+        }
     }
     let sandbox_settings = crate::config::with_preset(&modules.sandbox, &preset_defaults);
     // Path policy (docs/path-policy.md, issue #300): credential-shaped files in the worktree are

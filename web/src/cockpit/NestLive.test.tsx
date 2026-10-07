@@ -37,7 +37,7 @@ describe("nest live chrome", () => {
   it("heads the nest with its counts, read off the sessions", () => {
     const markup = nest();
     expect(markup).toContain(">Nest</h1>");
-    expect(markup).toContain("1 need you · 2 live · 1 queued · capacity 2/5");
+    expect(markup).toContain("1 need you · 2 live · 1 queued · next up: webshop#8 · capacity 2/5");
   });
 
   it("stays quiet until something actually moves", () => {

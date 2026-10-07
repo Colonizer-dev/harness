@@ -111,9 +111,11 @@ export function OverviewView({
   liveStorage = null,
   onStart,
   onStop,
+  onCancel,
   onSynthesize,
   onOpenColony,
   onResume,
+  onMove,
   onOpenSettings,
   scopeOrg,
   onScopeOrg,
@@ -145,11 +147,15 @@ export function OverviewView({
   liveStorage?: StorageSummary | null;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
+  /** Cancels a red-team run (#1145). */
+  onCancel?: (id: string) => Promise<void>;
   /** (Re)launches a done run's synthesis colony (issue #309); folded back into the runs list by the caller. */
   onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
   /** Resumes a parked colony in place (issue #213); Cockpit's `act` surfaces a failure as a toast. Absent renders no row action. */
   onResume?: (id: string) => Promise<unknown> | void;
+  /** Moves a queued colony to the front or back of the start queue (issue #1156). Absent renders no row action. */
+  onMove?: (id: string, to: "front" | "back") => Promise<unknown> | void;
   /** Opens settings at a section; threaded to the storage panel's gear button. Absent in tests. */
   onOpenSettings?: (section: SectionId) => void;
   /** The cockpit's workspace scope: set, it opens that org's dashboard in place; null is the
@@ -608,6 +614,7 @@ export function OverviewView({
                         bumped={isBumped(events, session.id, nowMs)}
                         onOpen={onOpenColony}
                         onResume={onResume}
+                        onMove={onMove}
                         orgAvatar={workspaces.find((w) => sameOrg(w.org, orgOf(session)))?.avatar ?? null}
                       />
                     ))}
@@ -652,6 +659,7 @@ export function OverviewView({
         sessions={sessions}
         runs={runs}
         onStart={onStart}
+        onCancel={onCancel}
         onClose={() => setRedTeam((r) => (r?.view === "wizard" ? null : r))}
         onDone={() => {}}
         onOpenHistory={(org) => setRedTeam({ org, view: "history" })}
@@ -662,6 +670,7 @@ export function OverviewView({
         sessions={sessions}
         runs={runs}
         onStop={onStop}
+        onCancel={onCancel}
         onSynthesize={onSynthesize}
         onOpenColony={onOpenColony}
         onClose={() => setRedTeam((r) => (r?.view === "history" ? null : r))}

@@ -429,6 +429,11 @@ async fn tick_once(app: &Shared) {
     match decide(&cfg, now, &obs) {
         Decision::Launch { repo_index, focus_index } => {
             if let Some(repo) = cfg.repos.get(repo_index).cloned() {
+                // One hunt per repository at a time (#1145): a repository with an active red-team
+                // run is left alone; the next tick decides again.
+                if app.redteam.active_for(&repo).await.is_some() {
+                    return;
+                }
                 launch(app, &repo, &instructions, redteam::FOCUSES[focus_index]).await;
             }
         }

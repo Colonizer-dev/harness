@@ -9,10 +9,11 @@ import { createMockApi } from "../mock";
 import type { OrgEntry } from "../orgs";
 import type { RedTeamRun, RedTeamSchedule, Session } from "../types";
 import { HistoryBody, SecurityReport } from "./RedTeamHistory";
-import { WizardBody } from "./RedTeamWizard";
+import { RepoList, WizardBody } from "./RedTeamWizard";
+import { CancelRunButton, cancelPrompt } from "./RedTeamCancel";
 import { OverviewView } from "./OverviewView";
 import { compareDelta } from "./dash";
-import { describeCadence, estimateCost, presetOf, runCost, toUtcCadence } from "./redTeamPlan";
+import { activeLine, activeRunFor, describeCadence, estimateCost, historyLine, plural, presetOf, runCost, sortForRedTeam, toUtcCadence } from "./redTeamPlan";
 import type { PreScan } from "../types";
 
 const api = createMockApi();
@@ -111,7 +112,12 @@ describe("the red-team wizard", () => {
   it("step 1 offers the swarm and Shannon as startable, and Strix alone as coming soon", () => {
     const html = wizard(0);
     expect(html).toContain("Colony swarm");
-    expect(html).toMatch(/Shannon[\s\S]*Ready · runs in a colony/);
+    expect(html).toMatch(/Shannon[\s\S]*Ready[\s\S]*runs in a colony/);
+    // No pill wraps and no name truncates: the pill sits on its own line under the name.
+    expect(html).not.toContain("Ready · runs in a colony");
+    expect(html).toMatch(/whitespace-nowrap[^"]*"[^>]*>Coming soon/);
+    expect(html).not.toMatch(/<span class="truncate">(Colony swarm|Strix|Shannon)/);
+    expect(html).toContain("grid-cols-1");
     expect(html).toMatch(/Strix[\s\S]*Coming soon/);
     // Swarm is picked by default and Shannon is selectable (an enabled, unpressed button); Strix alone is disabled.
     expect(html).toMatch(/<button type="button" aria-pressed="true" class="[^"]*">[\s\S]*?Colony swarm/);
@@ -348,5 +354,108 @@ describe("the overview's workspace rows", () => {
     expect(compareDelta(3, null)).toBeUndefined();
     expect(compareDelta(0, 0)).toBeUndefined();
     expect(compareDelta(6, 3)?.text).toBe("+100%");
+  });
+});
+
+describe("the red-team repository list (#1145)", () => {
+  const NOW = Date.parse("2026-10-07T12:00:00Z");
+  const repo = (name: string, pushed: string | null = "2026-10-07T10:00:00Z") => ({
+    full_name: `acme/${name}`,
+    description: null,
+    private: false,
+    fork: false,
+    archived: false,
+    open_issues_count: 0,
+    pushed_at: pushed,
+  });
+  const live = run({ id: "rt_live", repo: "acme/harness", state: "running", ended_at: null, counts: { found: 0, validated: 0, rejected: 0, filed: 0, merged: null } });
+  const old = run({ id: "rt_old", repo: "acme/old", state: "done", ended_at: "2026-10-04T12:00:00Z", counts: { found: 4, validated: 3, rejected: 0, filed: 2, merged: null } });
+  const newer = run({ id: "rt_new", repo: "acme/newer", state: "cancelled", ended_at: "2026-10-06T12:00:00Z", counts: { found: 1, validated: 1, rejected: 0, filed: 0, merged: null } });
+  const repos = [repo("harness"), repo("newer"), repo("old"), repo("fresh")];
+  const list = (runs: RedTeamRun[], picked: string[] = []) =>
+    renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <RepoList org="acme" repos={repos} runs={runs} sessions={[session({ id: "h1", status: "merged" }), session({ id: "h2", status: "running" })]} picked={picked} onPick={noop} onCancel={async () => {}} onOpenRun={noop} now={NOW} />
+      </ApiContext.Provider>,
+    );
+
+  it("a repository with an active run is a disabled row with its status, a link and a Cancel run button", () => {
+    const html = list([live]);
+    expect(html).toMatch(/<input[^>]*aria-label="harness"[^>]*disabled=""/);
+    expect(html).toMatch(/run in progress · started \d\d:\d\d · 1\/2 hunters done/);
+    expect(html).toContain("View run");
+    expect(html).toContain("Cancel run");
+    // Other rows stay enabled and have no Cancel.
+    expect(html).toMatch(/<input[^>]*aria-label="fresh"(?![^>]*disabled)/);
+  });
+
+  it("All skips the active repository and says so", () => {
+    const html = list([live]);
+    expect(html).toContain("All 3");
+    expect(html).toContain("3 of 4: harness already has a run");
+    // A picked-but-active repo is never shown ticked.
+    expect(list([live], ["acme/harness"])).not.toMatch(/aria-label="harness"[^>]*checked/);
+  });
+
+  it("each row reads its red-team history, never an all-time colony count, and pluralises", () => {
+    const html = list([old, newer]);
+    expect(html).toContain("never hunted");
+    expect(html).toContain("last hunted 3 d ago · 4 findings (2 filed)");
+    expect(html).toContain("last hunted 1 d ago · 1 finding (0 filed)");
+    expect(html).toContain("pushed 2 h ago");
+    expect(html).not.toMatch(/\d+ colonies/);
+    expect(plural(1, "colony", "colonies")).toBe("1 colony");
+    expect(plural(0, "hunter")).toBe("0 hunters");
+  });
+
+  it("sorts active runs last, then never hunted, then the oldest hunt first", () => {
+    const runs = [live, old, newer];
+    expect(sortForRedTeam(repos, runs).map((r) => r.full_name)).toEqual(["acme/fresh", "acme/old", "acme/newer", "acme/harness"]);
+    expect(activeRunFor(runs, "acme/harness")?.id).toBe("rt_live");
+    expect(activeRunFor(runs, "acme/old")).toBeNull();
+    expect(historyLine([], "acme/x", null, NOW)).toBe("never hunted");
+    expect(activeLine(run({ state: "armed" }), [])).toContain("waiting for the nest to empty");
+  });
+
+  it("the cancel confirm names the hunters and says the findings are kept", () => {
+    expect(cancelPrompt(run({ repo: "acme/harness", swarm_size: 8, hunters: [] }))).toBe("Stop 8 hunters on harness? Findings so far are kept.");
+    const html = renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <CancelRunButton run={live} onCancel={async () => {}} />
+      </ApiContext.Provider>,
+    );
+    expect(html).toContain("Cancel run");
+    expect(html).toContain("Stop 2 hunters on harness? Findings so far are kept.");
+  });
+
+  it("the history shows Cancel run on an active run and who cancelled a cancelled one", () => {
+    const html = renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <HistoryBody
+          org="acme"
+          sessions={hunterSessions}
+          runs={[live, run({ id: "rt_c", state: "cancelled", cancelled_by: "you", cancelled_at: "2026-10-06T12:00:00Z" })]}
+          onClose={noop}
+          onCancel={async () => {}}
+          onOpenColony={noop}
+          onNew={noop}
+          initialSchedules={[]}
+        />
+      </ApiContext.Provider>,
+    );
+    expect(html).toContain("Cancel run");
+    expect(html).toContain("cancelled by you");
+    expect(html).toContain("findings so far kept");
+  });
+
+  it("the mock cancel lands the run cancelled, keeps its counts and is idempotent", async () => {
+    const mock = createMockApi();
+    const started = await mock.startRedTeamRun({ repo: "acme/untouched", arm: true });
+    await expect(mock.startRedTeamRun({ repo: "acme/untouched", arm: true })).rejects.toThrow(started.id);
+    const cancelled = await mock.cancelRedTeamRun(started.id);
+    expect(cancelled.state).toBe("cancelled");
+    expect(cancelled.cancelled_by).toBe("you");
+    expect((await mock.cancelRedTeamRun(started.id)).state).toBe("cancelled");
+    await expect(mock.startRedTeamRun({ repo: "acme/untouched", arm: true })).resolves.toBeTruthy();
   });
 });
