@@ -578,6 +578,7 @@ pub async fn create(
         stack: req.stack,
         stack_fork: None,
         origin: req.origin.clone(),
+        auto_note: None,
         launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
         placement: Some(placement_reason),
         worktree: app

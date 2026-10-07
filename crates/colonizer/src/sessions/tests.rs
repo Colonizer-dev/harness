@@ -18,6 +18,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         stack: false,
         stack_fork: None,
         origin: None,
+        auto_note: None,
         launched_by_token: None,
         placement: None,
         worktree: String::new(),

@@ -18,6 +18,7 @@ mod app;
 mod archive;
 mod auth;
 mod authority;
+mod auto_colonize;
 mod autonomy;
 mod backlog;
 mod blocked;

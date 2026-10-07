@@ -245,6 +245,21 @@ pub struct OrgSettings {
     /// (sensitivity.rs).
     #[serde(default)]
     pub sensitivity: Option<SensitivityOverrides>,
+    /// Trusted auto-colonize (issue #1219): whether a new issue from an org member, a collaborator
+    /// with write access, an allowlisted login or Colonizer itself becomes a queued colony without a
+    /// click. `None` is `off`; a stranger's issue never starts by itself (`auto_colonize.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_colonize: Option<crate::auto_colonize::AutoColonize>,
+    /// Repositories of this org (full `owner/name`) with a choice of their own, which wins over the
+    /// org's `auto_colonize`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub auto_colonize_repos: BTreeMap<String, crate::auto_colonize::AutoColonize>,
+    /// Logins always trusted for auto mode, such as the mothership's own bot account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_colonize_allow: Vec<String>,
+    /// The most colonies auto mode starts per repository per hour; `None` is 5, `0` pauses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_colonize_rate: Option<u32>,
 }
 
 pub fn valid_org(org: &str) -> bool {
@@ -865,6 +880,7 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
 }
 
 pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
+    crate::auto_colonize::validate(settings)?;
     if let Some(priority) = settings.queue_priority
         && !crate::queue_priority::valid_priority(i64::from(priority))
     {
@@ -1136,6 +1152,18 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("auto_merge") {
         incoming.auto_merge = saved.auto_merge;
+    }
+    if !named("auto_colonize") {
+        incoming.auto_colonize = saved.auto_colonize;
+    }
+    if !named("auto_colonize_repos") {
+        incoming.auto_colonize_repos = saved.auto_colonize_repos.clone();
+    }
+    if !named("auto_colonize_allow") {
+        incoming.auto_colonize_allow = saved.auto_colonize_allow.clone();
+    }
+    if !named("auto_colonize_rate") {
+        incoming.auto_colonize_rate = saved.auto_colonize_rate;
     }
     if !named("merge_method") {
         incoming.merge_method = saved.merge_method;
