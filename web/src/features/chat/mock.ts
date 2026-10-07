@@ -115,6 +115,29 @@ export function chatMock(ms: MockState): ChatApi {
         else ms.mockPrefs.feedback[messageId] = note;
         return structuredClone(ms.mockPrefs);
       }),
+    chatApprovals: (chat) => ms.later(() => ({ approvals: [...ms.mockApprovals.values()].filter((a) => !chat || a.chat === chat) })),
+    proposeApproval: (tool, args, chat) => ms.later(() => ms.mockPropose(tool, args, chat ?? "", chat ? "cockpit" : "spotlight")),
+    decideApproval: (id, body) =>
+      ms.later(() => {
+        const a = ms.mockApprovals.get(id);
+        if (!a) throw new Error("no such approval");
+        if (a.status !== "pending") throw new Error(`this approval is already ${a.status}`);
+        const next = { ...a, decision: body.decision, decided_at: new Date().toISOString() } as typeof a;
+        if (body.decision === "reject") next.status = "rejected";
+        else {
+          next.status = "approved";
+          if (body.decision === "edit" && body.args) next.ran_with = body.args;
+          next.result = a.tool === "switch_models" ? "Switched 3 settings; 7 colonies restarted." : "Done.";
+        }
+        ms.mockApprovals.set(id, next);
+        // The note on the proposing message follows the decision, as the mothership's does.
+        const note = ms.mockChats.get(a.chat)?.messages.find((m) => m.id === a.message)?.tools?.find((t) => t.approval === id);
+        if (note) {
+          note.status = next.status === "rejected" ? "rejected" : "approved";
+          note.result = next.result;
+        }
+        return { approval: next, result: next.result, ok: true };
+      }, 450),
     chatIssue: async (_id, body) => ({ url: `https://github.com/${body.repo}/issues/999`, labels: ms.sourceLabels(), labels_skipped: [] })
   };
 }

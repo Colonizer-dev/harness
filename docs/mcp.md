@@ -113,3 +113,22 @@ What the mothership must allow for remote callers is in [cli.md](cli.md).
 least scope that client needs, bounded by org and repo limits and, at `launch`, by a concurrency
 cap and a daily budget. The tool list then shows exactly what that client may do, `--scope`
 cannot raise the ceiling, and nothing an agent does holds the owner token.
+
+## The cockpit chat's tools
+
+The cockpit's Chat (and Spotlight's inline answers) reach this same surface in-process, scoped to the
+signed-in cockpit user, through tools the model calls on Anthropic-wire models (`crates/colonizer/src/chat_tools.rs`).
+Every tool is a **read** or a **write**:
+
+- **Reads** (`list_colonies`, `colony_status`, `colony_question`, `list_issues`, `list_loops`, `list_providers`,
+  `model_assignments`, `list_orgs`, `recent_activity`) run at once. Results drop key-like fields and are redacted.
+- **Writes** (`stop_colony`, `resume_colony`, `publish_colony`, `answer_colony`, `launch_colony`, `move_to_front`,
+  `move_to_back`, `set_priority`, `switch_models`, `run_loop_now`, `apply_update`) never run when the model calls them.
+  The call becomes a pending approval: the tool, its arguments, a plain-language summary, the diff from the API's
+  `dry_run` where it has one (`switch_models`), and the blast radius (colonies, orgs, repos).
+- `GET /api/chat/approvals[?chat=]` lists approvals; `POST /api/chat/approvals {tool,args,chat?}` holds a write the
+  cockpit itself proposes (Spotlight's Do rows); `POST /api/chat/approvals/{id}` with `{"decision":"approve"|"edit"|"reject","args"?}`
+  settles one **exactly once** (a second decision is a 409). Each decision is an activity-log line, `chat.approve` or
+  `chat.reject`, naming the chat message that proposed it. Writes are rate-limited to 10 a minute.
+- Refused outright: any tool or argument that names a secret (Settings → Secrets is the only way), releasing a
+  security hold (resume, answer and publish on a held colony), and any org that is switched off.

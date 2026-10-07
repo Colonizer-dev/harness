@@ -20,12 +20,13 @@ import {
 } from "../../components/icons";
 import { Button, cx } from "../../components/ui";
 import { formatCost, formatTokens } from "../../spend";
-import type { ChatAttachmentNote, ChatMessage, ChatModels } from "../../types";
+import type { ChatAttachmentNote, ChatMessage, ChatModels, ChatToolNote } from "../../types";
 import { ChatMarkdown, CopyButton } from "./ChatMarkdown";
 import { ModelPopoverList, markFor, shortModel } from "./ModelChip";
 import { Popover } from "./Popover";
 import { formatMs, type Persona } from "./logic";
 import { ANT_COLORS, PersonaAnt } from "./PersonaAnt";
+import { ToolCalls, type ApprovalsHandle } from "./ToolCalls";
 
 export type MessageAction =
   | { kind: "edit"; content: string }
@@ -135,6 +136,7 @@ export const MessageRow = memo(function MessageRow({
   imageUrl,
   onOpenImage,
   ant = null,
+  approvals,
 }: {
   m: ChatMessage;
   models: ChatModels | null;
@@ -152,6 +154,8 @@ export const MessageRow = memo(function MessageRow({
   onOpenImage?: (image: OpenImage) => void;
   /** The conversation's persona ant, drawn as the reply's speaker; `null` shows the provider's mark. */
   ant?: Persona | null;
+  /** The held writes of this conversation (#1217); without it, tool calls show as plain notes. */
+  approvals?: ApprovalsHandle;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [regenOpen, setRegenOpen] = useState(false);
@@ -244,8 +248,9 @@ export const MessageRow = memo(function MessageRow({
         ) : user ? (
           <p className="m-0 whitespace-pre-wrap break-words text-lead-sm leading-[1.65] text-text">{m.content}</p>
         ) : (
-          <ChatMarkdown text={m.content || (m.error ? "" : "…")} onOpenFile={onOpenFile} />
+          <ChatMarkdown text={m.content || (m.error || (m.tools?.length ?? 0) > 0 ? "" : "…")} onOpenFile={onOpenFile} />
         )}
+        {!user && m.tools && m.tools.length > 0 && approvals && <ToolCalls notes={m.tools} approvals={approvals} autoFocusFirst={isLastReply} />}
         {m.error && <p className="m-0 mt-1.5 rounded-lg border border-err/30 bg-err/5 px-2.5 py-1.5 text-small-lg text-err">{m.error}</p>}
         {note && <p className="m-0 mt-1.5 text-small italic text-warn">Your note: {note}</p>}
 
@@ -385,7 +390,22 @@ function AntMark({ ant, motion, mark, model }: { ant: Persona; motion: "none" | 
 }
 
 /** A reply still streaming in: the model's mark (or the persona's ant, walking), the text so far, a caret. */
-export function StreamingRow({ model, text, models, ant = null }: { model: string; text: string; models: ChatModels | null; ant?: Persona | null }): ReactElement {
+export function StreamingRow({
+  model,
+  text,
+  models,
+  ant = null,
+  tools = [],
+  approvals,
+}: {
+  model: string;
+  text: string;
+  models: ChatModels | null;
+  ant?: Persona | null;
+  /** The tool calls so far, as they arrive. */
+  tools?: ChatToolNote[];
+  approvals?: ApprovalsHandle;
+}): ReactElement {
   const mark = markFor(model, models);
   return (
     <div className="flex gap-3 px-2 py-2" aria-live="polite" aria-busy="true">
@@ -399,13 +419,14 @@ export function StreamingRow({ model, text, models, ant = null }: { model: strin
         </div>
         {text ? (
           <ChatMarkdown text={text} live />
-        ) : (
+        ) : tools.length === 0 ? (
           <span className="chat-dots inline-flex gap-1 py-2" aria-label="thinking">
             <i />
             <i />
             <i />
           </span>
-        )}
+        ) : null}
+        {tools.length > 0 && approvals && <ToolCalls notes={tools} approvals={approvals} />}
       </div>
     </div>
   );

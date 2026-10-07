@@ -85,6 +85,8 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.path_policy",
     "chat.colony",
     "chat.issue",
+    "chat.approve",
+    "chat.reject",
     "colonize.issue",
     "colonize.colony",
     "decision.shadow",

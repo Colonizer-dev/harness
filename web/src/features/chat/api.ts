@@ -1,7 +1,7 @@
 // Chat API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request, streamNdjson, uploadWithProgress } from "../../http";
-import type { ChatCompareRequest, ChatImageRef, ChatMessage, ChatMeta, ChatModels, ChatPatch, ChatPrefs, ChatSendRequest, ChatStreamEvent } from "./types";
+import type { ChatApproval, ChatCompareRequest, ChatDecision, ChatImageRef, ChatMessage, ChatMeta, ChatModels, ChatPatch, ChatPrefs, ChatSendRequest, ChatStreamEvent } from "./types";
 
 export interface ChatApi {
   /** Chat (docs/protocol.md): direct conversations with a model, stored on the mothership. */
@@ -33,6 +33,12 @@ export interface ChatApi {
   /** Keeps a note on a reply; `null` clears it. */
   saveChatFeedback(messageId: string, note: string | null): Promise<ChatPrefs>;
   /** Files the issue with the Source include labels (as Colonize does); `labels_skipped` are any the repository could not be given. */
+  /** The writes held for approval (#1217), a conversation's or every one. */
+  chatApprovals(chat?: string): Promise<{ approvals: ChatApproval[] }>;
+  /** Holds a write the cockpit itself proposes (a Spotlight action) for the same approval a model's call gets. */
+  proposeApproval(tool: string, args: Record<string, unknown>, chat?: string): Promise<ChatApproval>;
+  /** Approves, edits or rejects a held write. It settles once; a second decision is a 409. */
+  decideApproval(id: string, body: ChatDecision): Promise<{ approval: ChatApproval; result?: string; ok?: boolean }>;
   chatIssue(id: string, body: { repo: string; title: string; body: string }): Promise<{ url: string; labels?: string[]; labels_skipped?: string[] }>;
 }
 
@@ -54,5 +60,8 @@ export const chatHttp: ChatApi = {
   chatPrefs: () => request("/api/chat/prefs"),
   saveChatPersona: (id, system) => put(`/api/chat/prefs/personas/${enc(id)}`, { system }),
   saveChatFeedback: (messageId, note) => put(`/api/chat/prefs/feedback/${enc(messageId)}`, { note }),
+  chatApprovals: (chat) => request(`/api/chat/approvals${chat ? `?chat=${enc(chat)}` : ""}`),
+  proposeApproval: (tool, args, chat) => post("/api/chat/approvals", { tool, args, chat }),
+  decideApproval: (id, body) => post(`/api/chat/approvals/${enc(id)}`, body),
   chatIssue: (id, body) => post(`/api/chat/${enc(id)}/issue`, body),
 };

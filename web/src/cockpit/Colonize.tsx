@@ -19,16 +19,16 @@ import { createPortal } from "react-dom";
 
 import { ApiError, epicMarker, heldByFor, isEpic, type Api } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
-import { Spinner, Switch, cx, sameOrg } from "../components/ui";
+import { Spinner, Switch, cx, sameOrg, stored, store } from "../components/ui";
 import type { CreatedIssue, Issue, IssueDraft, Repo, Session } from "../types";
 import { AntGlyph } from "./chat/PersonaAnt";
 import { MicButton, appendHeard, useVoiceInput } from "./Composer";
-import { relative } from "./InboxView";
-import { Pagination, SearchBox } from "./ListControls";
+import { Pagination } from "./ListControls";
 import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
 import { isModelCommand, openModelSwitcher } from "./ModelSwitcher";
 import { usePagedFilter } from "./paging";
-import { taskLine } from "../summary";
+import { EmptyList, IssueFilterBar, IssueRow, BulkBar, RepoSection } from "./IssueList";
+import { HIDDEN_KEY, NO_FILTERS, emptyHint, filtering, groupByRepo, issueFits, issueState, listOrder, loadHidden, saveHidden, statusCounts, type IssueFilters, type IssueState } from "./issuesList";
 
 /** Repositories fetched when the pane shows "all repos in scope": the most recently pushed first. */
 export const ALL_REPOS_LIMIT = 30;
@@ -299,8 +299,15 @@ export function draftReducer(state: DraftState, action: DraftAction): DraftState
 
 // --- The buttons and the pane's owner -----------------------------------------------------------
 
+/** Where the pane starts when something else opens it: a repository, a search, or text for the box. */
+export interface ColonizeStart {
+  repo?: string;
+  search?: string;
+  text?: string;
+}
+
 interface ColonizeHandle {
-  open: () => void;
+  open: (start?: ColonizeStart) => void;
   isOpen: boolean;
   count: number;
   exact: boolean;
@@ -318,8 +325,21 @@ export function useColonize(): ColonizeHandle | null {
  * Owns the pane: whether it is open, the filtered count its last load found, and ⌘K / Ctrl+K, which
  * opens it from anywhere in the cockpit. Every Colonize button reads it through `useColonize`.
  */
-export function ColonizeProvider({ children, onOpenLaunch, ...actions }: IssuesActions & { children: ReactNode; onOpenLaunch?: () => void }): ReactElement {
+export function ColonizeProvider({
+  children,
+  onOpenLaunch,
+  shortcut = true,
+  avatarFor,
+  ...actions
+}: IssuesActions & {
+  children: ReactNode;
+  onOpenLaunch?: () => void;
+  /** Whether ⌘K opens this pane. The cockpit gives ⌘K to Spotlight, which reaches Colonize under "Do". */
+  shortcut?: boolean;
+  avatarFor?: (org: string) => string | null;
+}): ReactElement {
   const [open, setOpen] = useState(false);
+  const [start, setStart] = useState<ColonizeStart | undefined>(undefined);
   // The filtered count the pane last loaded for this scope, which beats GitHub's rough one.
   const [loaded, setLoaded] = useState<{ scope: string; count: number } | null>(null);
   const opener = useRef<Element | null>(null);
@@ -328,12 +348,15 @@ export function ColonizeProvider({ children, onOpenLaunch, ...actions }: IssuesA
   const exact = loaded?.scope === scopeKey;
   const count = exact ? loaded.count : roughIssueCount(scope);
 
-  const show = useCallback(() => {
+  const show = useCallback((from?: ColonizeStart) => {
     opener.current = typeof document === "undefined" ? null : document.activeElement;
+    // The buttons hand their click event to this; only a real start is kept.
+    setStart(from && !("nativeEvent" in from) ? from : undefined);
     setOpen(true);
   }, []);
 
   useEffect(() => {
+    if (!shortcut) return;
     const onKey = (event: KeyboardEvent) => {
       if (!isColonizeShortcut(event)) return;
       event.preventDefault();
@@ -341,7 +364,7 @@ export function ColonizeProvider({ children, onOpenLaunch, ...actions }: IssuesA
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [show]);
+  }, [show, shortcut]);
 
   const handle = useMemo<ColonizeHandle>(() => ({ open: show, isOpen: open, count, exact, disabled: !actions.githubConnected }), [show, open, count, exact, actions.githubConnected]);
 
@@ -352,6 +375,8 @@ export function ColonizeProvider({ children, onOpenLaunch, ...actions }: IssuesA
         <ColonizePane
           {...actions}
           scope={scope}
+          start={start}
+          avatarFor={avatarFor}
           onOpenLaunch={
             onOpenLaunch &&
             (() => {
@@ -405,7 +430,7 @@ export function ColonizeButton(): ReactElement | null {
       aria-expanded={isOpen}
       aria-keyshortcuts="Meta+K Control+K"
       disabled={disabled}
-      onClick={colonize.open}
+      onClick={() => colonize.open()}
       className={cx(
         // The dashboard's primary action: solid accent, the one orange button on the page.
         "ant-glyph-host inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 text-body-sm font-semibold text-on-accent shadow-[0_1px_0_rgb(0_0_0/0.15)] transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50",
@@ -435,8 +460,12 @@ export function ColonizePane({
   onClose,
   preloaded,
   initialDraft,
+  start,
+  avatarFor,
 }: IssuesActions & {
   scope: Repo[];
+  start?: ColonizeStart;
+  avatarFor?: (org: string) => string | null;
   onOpenLaunch?: () => void;
   onLoadedCount: (count: number) => void;
   onClose: () => void;
@@ -449,7 +478,7 @@ export function ColonizePane({
   const toast = useToast();
   const panel = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLTextAreaElement>(null);
-  const [repo, setRepo] = useState<string>("*");
+  const [repo, setRepo] = useState<string>(start?.repo && scope.some((r) => r.full_name === start.repo) ? start.repo : "*");
   const [repoQuery, setRepoQuery] = useState("");
   const [lists, setLists] = useState<Record<string, ListState>>(preloaded ?? {});
   // Issues this pane filed, shown at once whatever GitHub's list (or the Source label filter) says.
@@ -459,7 +488,7 @@ export function ColonizePane({
   const [autopilot, setAutopilot] = useState(autopilotDefault);
   const [results, setResults] = useState<Record<string, HandoffResult>>({});
   const [running, setRunning] = useState(false);
-  const [draft, send] = useReducer(draftReducer, initialDraft ?? DRAFT_START);
+  const [draft, send] = useReducer(draftReducer, initialDraft ?? (start?.text ? { ...DRAFT_START, text: start.text } : DRAFT_START));
   const [dispatchAfter, setDispatchAfter] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -508,10 +537,85 @@ export function ColonizePane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, loadingCount, errors.length, fetched.length]);
 
-  const list = usePagedFilter(issues, { filters: { labels: [] as string[] }, match: matchIssue });
-  const labelSet = new Set(list.filters.labels);
+  // Where every issue stands, read off the colonies; "Skip" hides one in this browser.
+  const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(typeof window === "undefined" ? null : stored(HIDDEN_KEY)));
+  const [showHidden, setShowHidden] = useState(false);
+  const [acting, setActing] = useState(false);
+  const states = useMemo(() => new Map<string, IssueState>(issues.map((i) => [issueKey(i.repo, i.number), issueState(sessions, i.repo, i.number)])), [issues, sessions]);
+  const ordered = useMemo(
+    () => [...issues].sort((a, b) => listOrder({ state: states.get(issueKey(a.repo, a.number))!.status, updatedAt: a.updatedAt }, { state: states.get(issueKey(b.repo, b.number))!.status, updatedAt: b.updatedAt })),
+    [issues, states],
+  );
+  const shownIssues = useMemo(() => (showHidden ? ordered : ordered.filter((i) => !hidden.has(issueKey(i.repo, i.number)))), [ordered, hidden, showHidden]);
+  const matchRow = useCallback(
+    (issue: ScopedIssue, needle: string, f: IssueFilters) => issueFits(issue, states.get(issueKey(issue.repo, issue.number))?.status ?? "new", needle, f),
+    [states],
+  );
+  const list = usePagedFilter(shownIssues, { filters: NO_FILTERS, match: matchRow });
   const pickable = selectable(list.matched, sessions);
   const chosen = selectable(issues, sessions).filter((i) => selected.has(issueKey(i.repo, i.number)));
+  const hiddenCount = issues.filter((i) => hidden.has(issueKey(i.repo, i.number))).length;
+  const counts = useMemo(() => statusCounts(shownIssues.map((i) => states.get(issueKey(i.repo, i.number))?.status ?? "new")), [shownIssues, states]);
+  const groups = useMemo(() => groupByRepo(list.rows), [list.rows]);
+  const perRepo = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const i of list.matched) m.set(i.repo, (m.get(i.repo) ?? 0) + 1);
+    return m;
+  }, [list.matched]);
+  const frontable = chosen.filter((i) => states.get(issueKey(i.repo, i.number))?.queued).length;
+  // The search text a start asked for lands once, when the pane first has a list to filter.
+  const searched = useRef(false);
+  useEffect(() => {
+    if (searched.current || !start?.search) return;
+    searched.current = true;
+    list.setQuery(start.search);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const hide = (batch: readonly ScopedIssue[]) => {
+    const next = new Set(hidden);
+    for (const i of batch) next.add(issueKey(i.repo, i.number));
+    setHidden(next);
+    store(HIDDEN_KEY, saveHidden(next));
+    setSelected((s) => {
+      const left = new Set(s);
+      for (const i of batch) left.delete(issueKey(i.repo, i.number));
+      return left;
+    });
+    toast({
+      title: batch.length === 1 ? `Skipped #${batch[0].number}` : `Skipped ${batch.length} issues`,
+      kind: "info",
+      action: {
+        label: "Undo",
+        onClick: () => {
+          const back = new Set(next);
+          for (const i of batch) back.delete(issueKey(i.repo, i.number));
+          setHidden(back);
+          store(HIDDEN_KEY, saveHidden(back));
+        },
+      },
+    });
+  };
+  const unhide = (issue: ScopedIssue) => {
+    const next = new Set(hidden);
+    next.delete(issueKey(issue.repo, issue.number));
+    setHidden(next);
+    store(HIDDEN_KEY, saveHidden(next));
+  };
+  const moveFront = async (ids: readonly string[]) => {
+    if (ids.length === 0) return;
+    setActing(true);
+    let moved = 0;
+    for (const id of ids) {
+      try {
+        await api.moveSession(id, "front");
+        moved += 1;
+      } catch (e) {
+        toast(errorMessage(e), "error");
+      }
+    }
+    setActing(false);
+    if (moved > 0) toast({ title: moved === 1 ? "Moved to the front of the queue" : `Moved ${moved} colonies to the front`, kind: "success" });
+  };
   const allOn = pickable.length > 0 && pickable.every((i) => selected.has(issueKey(i.repo, i.number)));
   const target = draftRepo(scope, repo);
 
@@ -810,119 +914,81 @@ export function ColonizePane({
             )}
           </section>
 
-          <div className="shrink-0 space-y-2 px-4 pt-3">
-            <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search title or #number…" label="search issues" className="w-full" />
-            {issues.length > 0 && (
-              <div role="group" aria-label="filter by label" className="flex max-h-16 flex-wrap gap-1 overflow-y-auto">
-                {labelCounts(issues)
-                  .slice(0, 24)
-                  .map(([name, n]) => {
-                    const on = labelSet.has(name);
-                    return (
-                      <button
-                        key={name}
-                        type="button"
-                        aria-pressed={on}
-                        onClick={() => list.setFilters({ labels: on ? list.filters.labels.filter((l) => l !== name) : [...list.filters.labels, name] })}
-                        className={cx("cursor-pointer rounded-full border px-2 py-0.5 text-meta-lg", on ? "border-accent bg-accent-soft text-accent" : "border-border bg-transparent text-muted hover:text-text")}
-                      >
-                        {name} <span className="tabular-nums text-faint">{n}</span>
-                      </button>
-                    );
-                  })}
-              </div>
-            )}
-          </div>
+          <IssueFilterBar query={list.query} onQuery={list.setQuery} filters={list.filters} onFilters={list.setFilters} counts={counts} labels={labelCounts(shownIssues)} />
 
-          <div className="flex shrink-0 items-center gap-2 px-4 py-2 text-small text-muted">
-            <button
-              type="button"
-              disabled={pickable.length === 0}
-              onClick={() => setSelected((s) => toggleAll(s, pickable))}
-              className="cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-small text-text hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {allOn ? "Select none" : `Select all ${pickable.length}`}
-            </button>
-            <span className="tabular-nums">
-              {list.total} shown · {chosen.length} selected
-            </span>
-            {loadingCount > 0 && (
-              <span className="ml-auto inline-flex items-center gap-1.5">
-                <Spinner className="size-3" /> loading {loadingCount}…
-              </span>
-            )}
-          </div>
+          <BulkBar
+            shown={list.total}
+            selected={chosen.length}
+            allOn={allOn}
+            pickable={pickable.length}
+            busy={acting || running}
+            hidden={hiddenCount}
+            showHidden={showHidden}
+            frontable={frontable}
+            onToggleAll={() => setSelected((s) => toggleAll(s, pickable))}
+            onFront={() => void moveFront(chosen.flatMap((i) => (states.get(issueKey(i.repo, i.number))?.queued ? [states.get(issueKey(i.repo, i.number))!.colony!.id] : [])))}
+            onHide={() => hide(chosen)}
+            onClear={() => setSelected(new Set())}
+            onShowHidden={() => setShowHidden((v) => !v)}
+            loading={
+              loadingCount > 0 && (
+                <span className="inline-flex items-center gap-1.5">
+                  <Spinner className="size-3" /> loading {loadingCount}…
+                </span>
+              )
+            }
+          />
 
-          <ul aria-label="issues" className="m-0 list-none px-2 pb-1">
+          <ul aria-label="issues" className="m-0 shrink-0 list-none px-2 pb-1">
             {errors.map((e) => (
               <li key={e} className="px-2 py-1.5 text-small text-err">
                 {e}
               </li>
             ))}
-            {loadingCount === 0 && list.total === 0 && <li className="px-2 py-6 text-center text-body-sm text-faint">No open issues match.</li>}
-            {list.rows.map((issue) => {
-              const key = issueKey(issue.repo, issue.number);
-              const held = heldByFor(sessions, issue.repo, issue.number);
-              const epic = epicMarker(issue);
-              const result = results[key];
-              const fresh = made.some((m) => issueKey(m.repo, m.number) === key);
-              const id = `colonize-${key.replace(/[^a-z0-9]/gi, "-")}`;
-              return (
-                <li key={key} data-new={fresh || undefined} className={cx("flex items-start gap-2.5 rounded-lg px-2 py-2 hover:bg-panel-2", (held || epic) && "opacity-60", fresh && "bg-accent-soft/60")}>
-                  <input
-                    id={id}
-                    type="checkbox"
-                    disabled={held !== null || epic !== null || running}
-                    checked={held === null && epic === null && selected.has(key)}
-                    title={epic ? "An epic is a planning container: hand off its sub-issues instead" : undefined}
-                    onChange={() =>
-                      setSelected((s) => {
-                        const next = new Set(s);
-                        if (next.has(key)) next.delete(key);
-                        else next.add(key);
-                        return next;
-                      })
-                    }
-                    className="mt-0.5 size-4 shrink-0 cursor-pointer accent-[var(--accent)] disabled:cursor-not-allowed"
-                  />
-                  <label htmlFor={id} className="min-w-0 flex-1 cursor-pointer">
-                    <span className="block text-body-sm leading-snug text-text">{issue.title}</span>
-                    <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-meta-lg text-faint">
-                      <span className="font-mono">
-                        {issue.repo.split("/")[1]}#{issue.number}
-                      </span>
-                      {epic && (
-                        <span className="text-warn" title={issue.epic?.reason ? `An epic: ${issue.epic.reason}. Hand off its sub-issues instead.` : "An epic: hand off its sub-issues instead."}>
-                          {epic}
-                        </span>
-                      )}
-                      {fresh ? <span className="rounded-full bg-accent px-1.5 leading-4 text-on-accent">new</span> : <span>{relative(issue.updatedAt)}</span>}
-                      {issue.author && <span>@{issue.author.login}</span>}
-                      {issue.labels.slice(0, 4).map((l) => (
-                        <span key={l.name} className="rounded-full border border-border px-1.5 leading-4 text-muted">
-                          {l.name}
-                        </span>
-                      ))}
-                    </span>
-                  </label>
-                  <span className="shrink-0 pt-0.5 text-meta-lg">
-                    {/* What this pane just did wins over "held": the colony holding it is the one it started. */}
-                    {result ? (
-                      <ResultBadge result={result} onOpen={onOpenColony} />
-                    ) : held ? (
-                      <button
-                        type="button"
-                        onClick={() => onOpenColony(held.id)}
-                        title={`held by a colony: ${taskLine(held, held.id)}`}
-                        className="cursor-pointer border-0 bg-transparent p-0 text-accent underline-offset-2 hover:underline"
-                      >
-                        held · open
-                      </button>
-                    ) : null}
-                  </span>
-                </li>
-              );
-            })}
+            {loadingCount === 0 && list.total === 0 && (
+              <EmptyList {...emptyHint({ githubConnected, total: shownIssues.length, hidden: hiddenCount, narrowed: filtering(list.filters, list.query) })} />
+            )}
+            {groups.map((group) => (
+              <RepoSection key={group.repo} group={group} total={perRepo.get(group.repo) ?? group.rows.length} avatar={avatarFor?.(group.repo.split("/")[0]) ?? null}>
+                {group.rows.map((issue) => {
+                  const key = issueKey(issue.repo, issue.number);
+                  const held = heldByFor(sessions, issue.repo, issue.number);
+                  const epic = epicMarker(issue);
+                  const result = results[key];
+                  const fresh = made.some((m) => issueKey(m.repo, m.number) === key);
+                  return (
+                    <IssueRow
+                      key={key}
+                      id={`colonize-${key.replace(/[^a-z0-9]/gi, "-")}`}
+                      issue={issue}
+                      state={states.get(key) ?? issueState(sessions, issue.repo, issue.number)}
+                      checked={held === null && epic === null && selected.has(key)}
+                      disabled={held !== null || epic !== null || running}
+                      fresh={fresh}
+                      hiddenRow={hidden.has(key)}
+                      // What this pane just did wins over the pill: the colony it started is the one holding the issue.
+                      result={result ? <ResultBadge result={result} onOpen={onOpenColony} /> : null}
+                      busy={acting || running}
+                      actions={{
+                        onColonize: (i) => void dispatch([i]),
+                        onFront: (id) => void moveFront([id]),
+                        onHide: (i) => hide([i]),
+                        onUnhide: unhide,
+                        onOpenColony,
+                      }}
+                      onToggle={() =>
+                        setSelected((cur) => {
+                          const next = new Set(cur);
+                          if (next.has(key)) next.delete(key);
+                          else next.add(key);
+                          return next;
+                        })
+                      }
+                    />
+                  );
+                })}
+              </RepoSection>
+            ))}
           </ul>
           <Pagination view={list} onPage={list.setPage} noun="issues" className="mb-2 px-4" />
         </div>
@@ -958,11 +1024,6 @@ export function ColonizePane({
   // Portalled to <body>: rendered in place it sat inside the page's own stacking context, below the
   // top bar, whose avatars and bell then covered the pane's title. (The static-markup tests have no document.)
   return typeof document === "undefined" ? body : createPortal(body, document.body);
-}
-
-/** The list's search and label match, for usePagedFilter. */
-function matchIssue(issue: ScopedIssue, needle: string, filters: { labels: string[] }): boolean {
-  return issueMatches(issue, needle, filters.labels);
 }
 
 function DispatchAfter({ checked, onChange }: { checked: boolean; onChange: (on: boolean) => void }): ReactElement {

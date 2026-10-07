@@ -24,6 +24,7 @@ import { buildThread, useSessionStream } from "../sessionStream";
 import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
+import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { ModelSwitcher } from "./ModelSwitcher";
@@ -219,6 +220,8 @@ export function Cockpit({
   const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? (bootRoute?.view === "colony" ? "home" : bootRoute?.view) ?? storedView());
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
+  // A conversation Spotlight expanded into the Chat page (or `null`: a fresh one), opened once.
+  const [chatRequest, setChatRequest] = useState<{ id: string | null; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
   const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
   // An issue a share-target launch handed over (`?share_url=…`, issue #745), kept until the colony
@@ -722,6 +725,7 @@ export function Cockpit({
                 autopilotDefault={autopilotDefault}
                 initialPrompt={askPrompt}
                 onPromptTaken={() => setAskPrompt(null)}
+                openRequest={chatRequest}
                 onCreated={(session) => {
                   onCreated(session);
                   setView("home");
@@ -816,9 +820,37 @@ export function Cockpit({
     }
   };
 
+  // What Spotlight searches and how it goes to each thing (issue #1218).
+  const spotlightHost: SpotlightHost = {
+    sessions,
+    repos,
+    orgs: workspaces.map((w) => w.org),
+    org: selectedOrg,
+    view,
+    colony: view === "colony" ? (sessions.find((s) => s.id === selectedId) ?? null) : view === "home" && inspector?.kind === "colony" ? inspector.session : null,
+    updateAvailable: Boolean(update?.available),
+    onNavigate: navigate,
+    onOpenColony: openColonyById,
+    onOpenSettings: (section) => onOpenSettings(section),
+    onSelectOrg: switchOrg,
+    onOpenRepo: (repo) => {
+      const owner = repo.split("/")[0];
+      if (selectedOrg && !sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+      setCodeRequest((r) => ({ repo, path: "README.md", n: (r?.n ?? 0) + 1 }));
+      setView("code");
+    },
+    onOpenChat: (id) => {
+      setChatRequest({ id, n: Date.now() });
+      setView("chat");
+    },
+  };
+
   return (
-    // Colonize — the rail's button, the dashboard's, ⌘K — is one pane, owned here for every view.
+    // Colonize — the rail's button, the dashboard's, Spotlight's "Do" row — is one pane, owned here for every view.
+    // ⌘K belongs to Spotlight, which reaches Colonize from there.
     <ColonizeProvider
+      shortcut={false}
+      avatarFor={avatarFor}
       repos={repos}
       org={selectedOrg}
       sessions={sessions}
@@ -828,6 +860,7 @@ export function Cockpit({
       onOpenColony={openColonyById}
       onOpenLaunch={() => setView("launch")}
     >
+    <SpotlightProvider host={spotlightHost}>
     <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] bg-bg text-text">
       <NavRail
         orgs={workspaces}
@@ -863,6 +896,7 @@ export function Cockpit({
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
         models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}
+        search={<SpotlightSearch />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,
@@ -1015,6 +1049,7 @@ export function Cockpit({
           Self-gating, so it renders null when it has nothing to say. */}
       {!welcome && !DEMO && <BookmarkPrompt />}
     </div>
+    </SpotlightProvider>
     </ColonizeProvider>
   );
 }
