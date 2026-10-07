@@ -75,9 +75,10 @@ its RAM and 2 vCPUs, the colonies share the rest (3 vCPUs and 11 GB on 32 cores 
 on Linux, free plus inactive pages from `vm_stat` on macOS) less that reserve holds its memory and the
 1-minute load average leaves room for its vCPUs, re-checked on every queue tick. Below the reserve
 nothing new starts and admission resumes when memory frees; running colonies are never stopped for it.
+A microVM allocates lazily, so free memory alone would let a burst of colonies in that the host cannot hold once they work. Admission therefore also counts what is committed: the memory sizes of the live colonies times `auto_overcommit` (default 0.75, kept within 0.5 to 1.0), plus the reserve, must fit in RAM, and their vCPUs must stay within 1.5 times the cores. Over the limit, nothing new starts.
 `auto_max_parallel` (default 32) is the cap that holds regardless, and a number in `max_parallel`
 switches back to a fixed limit. If the host cannot be measured the fixed `max_parallel` applies.
-`/api/status` reports it as `sandbox.mode`, `size`, `room_for` and `waiting_reason`.
+`/api/status` reports it as `sandbox.mode`, `size`, `room_for`, `waiting_reason`, `committed_gb` and `limited_by` (`cap`, `memory-commit`, `cpu-commit`, `free` or `load`).
 
 See
 [architecture.md, Session lifecycle](architecture.md#session-lifecycle) for every state a colony
