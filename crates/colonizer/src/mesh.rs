@@ -33,6 +33,8 @@ const FLEET_USER: &str = "fleet";
 /// on a slow-but-healthy CLI would fail a boot or a teardown for nothing. `/api/status` gets its
 /// tighter guarantee from `MESH_STATUS_LIMIT` instead.
 const CLI_LIMIT: Duration = Duration::from_secs(10);
+/// The most a mesh warm-up ping may take; it is best effort and a boot never waits longer for it.
+const WARM_LIMIT: Duration = Duration::from_secs(2);
 /// `tailscale up` bounds its own wait with `--timeout=60s`, but that covers only the wait for the
 /// node to come up, not a CLI stuck before it gets there; this backstop leaves it room to report
 /// its own timeout first.
@@ -462,6 +464,25 @@ taildrop:
         tokio_socks::tcp::Socks5Stream::connect(("127.0.0.1", self.ports.socks), (ip, port))
             .await
             .with_context(|| format!("mesh connection to {ip}:{port} failed"))
+    }
+
+    /// Warms the WireGuard path to a node that just joined: one `tailscale ping`, through the harness
+    /// node's LocalAPI, so the handshake happens now instead of under the first real request, whose
+    /// SOCKS dial otherwise stalls ~5 s (issue #1143). Best effort and bounded: it never fails a
+    /// boot, and the result is a short description for the debug log.
+    pub async fn warm(&self, ip: &str) -> String {
+        let started = tokio::time::Instant::now();
+        let result = exec_within(
+            WARM_LIMIT,
+            self.tailscale()
+                .args(["ping", "-c", "1", "--until-direct=false", "--timeout", "1500ms", ip]),
+        )
+        .await;
+        let took = started.elapsed();
+        match result {
+            Ok(_) => format!("answered in {took:?}"),
+            Err(e) => format!("no answer after {took:?} ({e:#})"),
+        }
     }
 
     /// Network rules that let a VM send WireGuard UDP straight to the harness node, so traffic

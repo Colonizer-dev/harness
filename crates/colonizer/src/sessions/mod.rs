@@ -60,6 +60,7 @@ mod files;
 mod launch;
 mod model;
 mod persist;
+mod readiness;
 mod runtime;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -67,6 +68,7 @@ pub(crate) mod tests;
 // Everything keeps its `crate::sessions::…` path: the split is by concern, not a new API. `persist`
 // only adds methods to `App`, so it has nothing to re-export.
 pub(crate) use agentd::*;
+pub(crate) use readiness::*;
 // By name: the glob imports of `lifecycle` and `publish` above bring a `routes` of their own.
 pub(crate) use api::routes;
 pub use api::*;
