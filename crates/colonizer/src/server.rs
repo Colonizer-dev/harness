@@ -579,6 +579,7 @@ pub(crate) async fn serve() -> Result<()> {
         store,
     };
     let app = Arc::new(App::new(cfg, boot)?);
+    app.migrate_custom_presets().await;
 
     let router = router(&app);
 

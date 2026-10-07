@@ -483,7 +483,7 @@ function ProviderRow({
   const limits = limitLabels(provider);
   return (
     <div className="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-border px-3.5 py-3">
-      <ProviderMark preset={provider.preset} name={provider.name} />
+      <ProviderMark preset={provider.preset} name={provider.name} baseUrl={provider.base_url} />
       <div className="min-w-0 flex-1 basis-48">
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-body-lg font-semibold">{provider.name}</span>

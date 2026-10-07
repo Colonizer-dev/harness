@@ -246,7 +246,7 @@ export function ModelPicker({
     ...(providers ?? []).map((p) => ({
       value: p.id,
       text: p.name,
-      label: <Mark id={p.id} name={p.name} preset={p.preset} keyed={p.has_key} />,
+      label: <Mark id={p.id} name={p.name} preset={p.preset} baseUrl={p.base_url} keyed={p.has_key} />,
       hint: p.has_key ? undefined : "no key",
     })),
     ...(unknownProvider ? [{ value: parsed.provider, text: parsed.provider, label: <span className="truncate">Unknown: {parsed.provider}</span> }] : []),
@@ -292,7 +292,7 @@ export function ModelPicker({
             unknownProvider ? (
               <span className="truncate text-warn">Unknown: {parsed.provider}</span>
             ) : (
-              <Mark id={parsed.provider} name={providerName} preset={parsed.provider === ANTHROPIC ? "anthropic" : provider?.preset} keyed={provider ? provider.has_key : undefined} />
+              <Mark id={parsed.provider} name={providerName} preset={parsed.provider === ANTHROPIC ? "anthropic" : provider?.preset} baseUrl={provider?.base_url} keyed={provider ? provider.has_key : undefined} />
             )
           }
         />
@@ -335,10 +335,10 @@ export function ModelPicker({
 }
 
 /** A provider's mark and name, with a key dot when its key status is known. */
-function Mark({ name, preset, keyed }: { id: string; name: string; preset?: string; keyed?: boolean }) {
+function Mark({ name, preset, baseUrl, keyed }: { id: string; name: string; preset?: string; baseUrl?: string; keyed?: boolean }) {
   return (
     <>
-      <ProviderMark preset={preset} name={name} size="button" />
+      <ProviderMark preset={preset} name={name} baseUrl={baseUrl} size="button" />
       <span className="truncate">{name}</span>
       {keyed !== undefined && (
         <span

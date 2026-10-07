@@ -22,11 +22,18 @@ Marks in the icon set, and whose they are:
   - DeepSeek — DeepSeek, shown on the DeepSeek preset
   - Alibaba Cloud — Alibaba, shown on the Alibaba (Qwen) preset
   - Qwen — Alibaba, in the icon set for that same preset; not on screen today
+  - Z.AI — Zhipu AI, shown on the Z.AI preset and the Zhipu GLM entries
+  - Meta — Meta Platforms, shown on the Meta Model API entry
+  - BytePlus — ByteDance's mark, shown on the BytePlus entry
+
+The Z.AI, Meta and BytePlus marks are not from Simple Icons. Their SVG paths
+are copied from @lobehub/icons (https://github.com/lobehub/lobe-icons), which
+is MIT licensed, Copyright (c) 2023 LobeHub. The package itself is not a
+dependency. The trademark paragraph above applies to them equally.
 
 Vendors shown by name only, with a neutral lettermark in place of a logo:
 
   - OpenAI
-  - Z.AI
 
 Colonizer's own code is licensed under the MIT license; see LICENSE.
 

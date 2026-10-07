@@ -144,7 +144,7 @@ pub async fn models(State(app): State<Shared>) -> Json<Value> {
                     "id": p.id,
                     "name": p.name,
                     "models": p.models,
-                    "preset": p.preset,
+                    "preset": crate::providers::resolved_preset(&p.preset, &p.base_url),
                     "wire": p.wire,
                     "has_key": p.auth == "none" || app.provider_key(&p.id).is_some(),
                     "pricing": p.pricing.map(|r| json!({"input_per_mtok": r.input_per_mtok, "output_per_mtok": r.output_per_mtok})),
