@@ -15,7 +15,7 @@ export const mockSecrets: import("./types").SecretRow[] = [
   { id: "provider-keys:bailian", label: "Alibaba Bailian", group: "providers", used_by: "Models routed to bailian", icon: "plug", location: "unset", env: null, env_set: false, updated_at: null, editable: true, colonies: { kind: "gateway", hosts: [] } },
   { id: "voice-keys:openai", label: "OpenAI (voice)", group: "integrations", used_by: "Speech to text in the composer", icon: "mic", location: "env", env: "OPENAI_API_KEY", env_set: true, updated_at: null, editable: true, colonies: { kind: "none", hosts: [] } },
   { id: "colony:STRIPE_TEST_KEY", label: "STRIPE_TEST_KEY", group: "colonies", used_by: "Colonies on acme/web", icon: "key", location: "keychain", env: null, env_set: false, updated_at: "2026-09-23T09:00:00Z", editable: true, colonies: { kind: "injected", hosts: ["api.stripe.com"] } },
-  { id: "jev", label: "TypeSafe (Jev)", group: "integrations", used_by: "Jev compaction", icon: "spark", location: "unset", env: "JEV_API_KEY", env_set: false, updated_at: null, editable: false, colonies: { kind: "injected", hosts: ["api.typesafe.ai"] } },
+  { id: "jev", label: "TypeSafe (Jev)", group: "integrations", used_by: "Jev compaction, routing and recovery", icon: "spark", location: "unset", env: "JEV_API_KEY", env_set: false, updated_at: null, editable: true, colonies: { kind: "injected", hosts: ["api.typesafe.ai"] } },
 ];
 export function mockSecret(id: string): import("./types").SecretRow {
   const row = mockSecrets.find((r) => r.id === id);

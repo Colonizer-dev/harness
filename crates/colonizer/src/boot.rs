@@ -1090,7 +1090,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let sensitivity = crate::sensitivity::classify_paths(named_paths, &sensitivity_config);
     // Jev (jev.rs): an optional external classifier's second opinion, fetched here in the async boot
     // path — never inside `routing::decide`, which stays synchronous and pure. Off by default, and a
-    // silent no-op without both a setting and a `JEV_API_KEY` secret. Shadow mode records it for
+    // silent no-op without both a setting and a TypeSafe key (Secrets page or `JEV_API_KEY`). Shadow mode records it for
     // comparison; act mode (issue #583) lets a confident opinion pick the tier, never below the
     // floor `decide` derives from `sensitive` — whether this org's gateway demands more than any
     // provider for the task's class (sensitivity.rs `required_mark`).
@@ -2298,7 +2298,7 @@ pub(crate) fn jev_compaction(
         "Jev compaction is switched on, but fast-jev-compaction isn't installed (scripts/install.sh stages it); running without it",
     )?;
     let key =
-        key.ok_or("Jev compaction is switched on, but the mothership has no TypeSafe key (set JEV_API_KEY); running without it")?;
+        key.ok_or("Jev compaction is switched on, but the mothership has no TypeSafe key (save it on the Secrets page, or set JEV_API_KEY); running without it")?;
     Ok((source, key))
 }
 
@@ -3583,7 +3583,7 @@ mod tests {
         );
         assert_eq!(
             jev_compaction(payload, None).unwrap_err(),
-            "Jev compaction is switched on, but the mothership has no TypeSafe key (set JEV_API_KEY); running without it"
+            "Jev compaction is switched on, but the mothership has no TypeSafe key (save it on the Secrets page, or set JEV_API_KEY); running without it"
         );
     }
 }
