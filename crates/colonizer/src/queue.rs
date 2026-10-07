@@ -522,7 +522,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // that keep coming), nothing boots either — each boot would only fail against the refusal and
     // add one more call. Queued colonies keep their place and move once the breaker closes.
     let held = paused || app.drain.draining() || crate::github_breaker::paused(app).is_some();
-    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    let max_parallel = crate::capacity::max_parallel(app, &modules).await;
     // Issue #321: a waiter whose holder changed says so. `queued_behind` follows whoever
     // effectively holds its issue now, so the second waiter shows it is queued behind the first
     // once the first takes over. A no-op write persists and broadcasts nothing.
@@ -1213,7 +1213,7 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .collect()
     };
     candidates.sort();
-    let max_parallel = orgs::global_max_parallel(modules) as usize;
+    let max_parallel = crate::capacity::max_parallel(app, modules).await;
     for (_, id) in candidates {
         let Some(s) = app.session(&id).await else { continue };
         let settings = app.org_settings(&s.org);
@@ -1316,7 +1316,7 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
     };
     // Oldest request first: whoever has been looking longest warms first.
     candidates.sort();
-    let max_parallel = orgs::global_max_parallel(modules) as usize;
+    let max_parallel = crate::capacity::max_parallel(app, modules).await;
     for (requested_at, id) in candidates {
         if now - requested_at >= timeout {
             // Stale: the question was opened and left. A cheap claim — no boot, no lifecycle lock.

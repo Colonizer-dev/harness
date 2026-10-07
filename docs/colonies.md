@@ -56,7 +56,20 @@ default comes from the **Publish** module's `autopilot` setting, which is on.
 
 A launch past the parallel limit is not refused. The colony is created `queued` and starts when
 a slot frees. The limits are the Sandbox settings `max_parallel` (default 3) and
-`repo_max_parallel` (default 3), plus an org's own limit if it sets one. See
+`repo_max_parallel` (default 3), plus an org's own limit if it sets one.
+
+**Automatic mode.** With the stack on Automatic and no number in `max_parallel`, there is no fixed
+parallel limit. Each colony is sized from the host: the host keeps the larger of 8 GB or a tenth of
+its RAM and 2 vCPUs, the colonies share the rest (3 vCPUs and 11 GB on 32 cores and 124 GB; a
+`cpus` or `memory` you set still wins). A queued colony starts when the live free memory (`MemAvailable`
+on Linux, free plus inactive pages from `vm_stat` on macOS) less that reserve holds its memory and the
+1-minute load average leaves room for its vCPUs, re-checked on every queue tick. Below the reserve
+nothing new starts and admission resumes when memory frees; running colonies are never stopped for it.
+`auto_max_parallel` (default 32) is the cap that holds regardless, and a number in `max_parallel`
+switches back to a fixed limit. If the host cannot be measured the fixed `max_parallel` applies.
+`/api/status` reports it as `sandbox.mode`, `size`, `room_for` and `waiting_reason`.
+
+See
 [architecture.md, Session lifecycle](architecture.md#session-lifecycle) for every state a colony
 passes through.
 

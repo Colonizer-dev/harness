@@ -23,6 +23,22 @@ export interface HarnessStatus {
     cpus?: number;
     memory?: string;
     max_parallel?: number;
+    /** Issue #1141: `auto` sizes colonies from the host and admits them from its live free memory and load; `fixed` is the static `max_parallel`. Older mothership builds omit the rest of this block. */
+    mode?: "auto" | "fixed";
+    /** Auto mode only: what one colony is given, computed from the host. */
+    size?: { cpus: number; memory_gb: number; slots: number; reserve_gb: number; reserve_cpus: number };
+    /** Colonies holding a microVM slot now. */
+    running?: number;
+    /** How many more colonies fit right now. */
+    room_for?: number;
+    /** Why the next colony waits, when none fits; null otherwise. */
+    waiting_reason?: "memory" | "cpu" | "cap" | null;
+    /** Auto mode only: the safety cap that holds whatever the host has free. */
+    auto_max_parallel?: number;
+    /** Auto mode only, and only what the host measured: free memory for a new colony, the 1-minute load and the core count. */
+    free_bytes?: number;
+    load?: number;
+    cpu_cores?: number;
     claude_bin?: string | null;
     claude_bin_error?: string | null;
   };

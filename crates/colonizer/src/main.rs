@@ -25,6 +25,7 @@ mod brief_pick;
 mod built_with;
 mod burn_down;
 mod cache_store;
+mod capacity;
 mod chat;
 mod chat_images;
 mod claims;

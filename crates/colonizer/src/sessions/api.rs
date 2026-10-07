@@ -736,12 +736,14 @@ async fn hold_answer(
             let paused = crate::reclaim::admission_paused(app).await || crate::providers::quota_status(app).await.paused;
             // Resolved before the admission read: `org_settings` reads the orgs file with blocking IO.
             let org_settings = app.org_settings(&x.org);
+            // Resolved before the sessions lock: auto mode reads the sessions itself.
+            let max_parallel = crate::capacity::max_parallel(app, &modules).await;
             let note = {
                 let sessions = app.sessions.read().await;
                 crate::queue::restore_line_note(
                     &sessions,
                     &x,
-                    orgs::global_max_parallel(&modules) as usize,
+                    max_parallel,
                     orgs::org_max_parallel(&org_settings),
                     crate::queue::repo_limit(&modules, &org_settings),
                     paused,

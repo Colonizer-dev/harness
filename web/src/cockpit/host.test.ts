@@ -4,8 +4,8 @@
 // never a zero, never an "undefined".
 import { describe, expect, it } from "vitest";
 
-import { colonyFacts, formatBootMs, formatBytes, formatLoad, formatUptime, hostFacts } from "./host";
-import type { HostInfo, Session } from "../types";
+import { autoCapacityLine, colonyFacts, formatBootMs, formatBytes, formatLoad, formatUptime, hostFacts } from "./host";
+import type { HarnessStatus, HostInfo, Session } from "../types";
 
 const FULL_HOST: HostInfo = {
   id: "1e6f2a84-c5b3-4f2a-9f1c-8d4e2a1b6c90",
@@ -158,5 +158,24 @@ describe("colonyFacts", () => {
     // `total_ms` is only sent once a boot finished; the phases alone must not read as "last boot, end to end".
     const partial = session({ boot_timing: { phases: [{ name: "issue", ms: 240 }] } });
     expect(colonyFacts(partial).map((f) => f.value)).toEqual(["claude-code"]);
+  });
+});
+
+describe("autoCapacityLine", () => {
+  const auto = { msb_version: null, image: "x", mode: "auto", running: 7, room_for: 2, waiting_reason: null, free_bytes: 18 * 1024 ** 3, load: 9.04, cpu_cores: 32 } as HarnessStatus["sandbox"];
+
+  it("reads the running count, the room left, the free memory and the load", () => {
+    expect(autoCapacityLine(auto)).toBe("auto: 7 running · room for 2 more (18 GB free, load 9/32)");
+  });
+
+  it("says what the next colony waits on when nothing fits", () => {
+    expect(autoCapacityLine({ ...auto, room_for: 0, waiting_reason: "memory" })).toBe("auto: 7 running · room for 0 more (18 GB free, load 9/32) · the next colony waits on memory");
+    expect(autoCapacityLine({ ...auto, room_for: 0, waiting_reason: "cap" })).toContain("waits on the cap");
+  });
+
+  it("drops what the host did not measure, and says nothing outside auto mode", () => {
+    expect(autoCapacityLine({ ...auto, free_bytes: undefined, load: undefined })).toBe("auto: 7 running · room for 2 more");
+    expect(autoCapacityLine({ ...auto, mode: "fixed" })).toBeNull();
+    expect(autoCapacityLine(undefined)).toBeNull();
   });
 });

@@ -645,6 +645,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "root_disk": {"type": "string", "title": "Root disk", "default": "16G"},
                 "max_duration": {"type": "string", "title": "Max session length", "description": "e.g. 8h", "default": "8h"},
                 "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
+                "auto_max_parallel": {"type": "integer", "title": "Safety cap on colonies (automatic mode)", "minimum": 1, "maximum": 256, "default": crate::capacity::DEFAULT_AUTO_MAX_PARALLEL,
+                    "description": "With the Automatic stack and no fixed number in Parallel sessions, colonies are sized from the host and admitted from its live free memory and load, with no fixed limit: this is the ceiling that stays whatever the host has free. Setting Parallel sessions to a number switches back to a fixed limit."},
                 "repo_max_parallel": {"type": "integer", "title": "Parallel sessions per repository", "minimum": 1, "maximum": 32, "default": 3,
                     "description": "Live colonies one repository may run at once, on top of the overall limit above and any org's own. An org can set its own figure in its settings."},
                 "egress": {"type": "string", "title": "Egress policy", "enum": ["open", "allowlist"], "default": "open",

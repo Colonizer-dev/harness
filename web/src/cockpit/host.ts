@@ -7,7 +7,7 @@
 // diskSize: the 512M a sandbox setting calls "512M" must look like the 512M the strip reads), so a
 // memory reading and a colony's host footprint never disagree about a unit.
 import { diskSize } from "../components/SessionView";
-import type { HostInfo, Session } from "../types";
+import type { HarnessStatus, HostInfo, Session } from "../types";
 
 /** Bytes in the app's compact G/M/K shape, the same formatter the colony host footprint uses. */
 export const formatBytes = diskSize;
@@ -33,6 +33,23 @@ export function formatLoad(load: [number, number, number]): string {
 /** A boot's wall clock, milliseconds read as whole seconds: 94_000 → `94s`. */
 export function formatBootMs(totalMs: number): string {
   return `${Math.round(totalMs / 1000)}s`;
+}
+
+const WAITING_ON = { memory: "memory", cpu: "CPU", cap: "the cap" } as const;
+
+/**
+ * The auto-mode capacity line (issue #1141): "auto: 7 running · room for 2 more (18 GB free, load 9/32)",
+ * with what the next colony waits on appended when nothing fits. Null in fixed mode and for a
+ * mothership that does not report the mode, so the host page shows nothing it cannot back up. A
+ * measurement the host did not give drops its part of the parentheses.
+ */
+export function autoCapacityLine(sandbox: HarnessStatus["sandbox"] | undefined): string | null {
+  if (!sandbox || sandbox.mode !== "auto" || sandbox.room_for == null) return null;
+  const parts: string[] = [];
+  if (sandbox.free_bytes != null) parts.push(`${Math.round(sandbox.free_bytes / 2 ** 30)} GB free`);
+  if (sandbox.load != null) parts.push(`load ${+sandbox.load.toFixed(1)}${sandbox.cpu_cores != null ? `/${sandbox.cpu_cores}` : ""}`);
+  const live = `auto: ${sandbox.running ?? 0} running · room for ${sandbox.room_for} more${parts.length ? ` (${parts.join(", ")})` : ""}`;
+  return sandbox.waiting_reason ? `${live} · the next colony waits on ${WAITING_ON[sandbox.waiting_reason]}` : live;
 }
 
 export interface HostFact {

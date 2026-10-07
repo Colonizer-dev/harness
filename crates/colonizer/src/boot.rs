@@ -1992,7 +1992,23 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // repository when the configured preset was `auto`, otherwise the one the
     // operator or the org pinned — and anything set explicitly in modules.json
     // still wins. See crates/colonizer/src/presets.rs.
-    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&stack));
+    let mut preset_defaults = crate::presets::defaults(&stack);
+    // Issue #1141: under `auto` with no fixed parallel number, the machine size comes from the host
+    // — cores and RAM less the host's reserve — instead of the stack's table. Still only a default:
+    // a `cpus` or `memory` set in Settings wins, as it does over the stack's.
+    if orgs::effective_stack(&modules, &sandbox_schema, &org_settings) == crate::presets::AUTO
+        && let Some(size) = crate::capacity::boot_size(app, &modules).await
+    {
+        if let (Some(into), Some(auto)) = (preset_defaults.as_object_mut(), size.defaults().as_object()) {
+            into.extend(auto.clone());
+        }
+        log.info(format!(
+            "auto: sized this colony from the host at {} vCPUs and {}G (host keeps {}G and {} vCPUs)",
+            size.cpus, size.memory_gib, size.reserve_gib, size.reserve_cpus
+        ))
+        .await;
+    }
+    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &preset_defaults);
     // Path policy (docs/path-policy.md, issue #300): credential-shaped files in the worktree are
     // masked out of the colony's view and its agent-facing config pinned read-only. The host plans
     // the enforcement — binds, plus an empty placeholder for every listed path the checkout does

@@ -535,7 +535,7 @@ pub async fn create(
     };
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
-    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    let max_parallel = crate::capacity::max_parallel(&app, &modules).await;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
     let org_settings = app.org_settings(owner);
     let org_limit = orgs::org_max_parallel(&org_settings);
