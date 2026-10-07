@@ -424,6 +424,11 @@ pub struct Session {
     /// stays the waiter's whole wait.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claim_wait: bool,
+    /// This colony's own place in the start queue (issue #1156), overriding its org's
+    /// `queue_priority` while it waits: higher starts first, ties go to the older colony. Set by
+    /// `POST /api/sessions/{id}/priority`, `move-to-front` and `move-to-back`; `None` follows the org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     /// How this colony's completion claims are verified (issue #328): the `verify` configuration
     /// resolved at launch — `auto` (the default), `none`, or an explicit test command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -686,6 +691,7 @@ impl Default for Session {
             blocked_reason: None,
             pr_rewrite_nudged: false,
             claim_wait: false,
+            priority: None,
             verify: None,
             verification: None,
             error: None,

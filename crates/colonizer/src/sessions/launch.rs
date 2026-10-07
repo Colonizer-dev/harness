@@ -617,6 +617,7 @@ pub async fn create(
         pr_rewrite_nudged: false,
         // Set by admission when the launch waits for the issue's holder (issue #321).
         claim_wait: false,
+        priority: None,
         verify: Some(
             req.verify
                 .as_deref()

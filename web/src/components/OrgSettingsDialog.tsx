@@ -17,6 +17,8 @@ type FieldKey =
   | "background_model"
   | "max_parallel"
   | "repo_max_parallel"
+  | "queue_priority"
+  | "max_wait_hours"
   | "close_superseded_prs"
   | "budget_usd"
   | "host_disk"
@@ -32,7 +34,7 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos";
+  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos" | "priority";
   min?: number;
   max?: number;
   unit?: string;
@@ -48,6 +50,8 @@ const FIELDS: FieldSpec[] = [
   { key: "stack", group: "Colonies", label: "Stack", hint: "The sandbox stack for this org's colonies; Automatic reads each repository's own", kind: "choice" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
   { key: "repo_max_parallel", group: "Colonies", label: "Per repository", hint: "Live colonies in any one of this org's repositories at once", kind: "number", min: 1, max: 32 },
+  { key: "queue_priority", group: "Colonies", label: "Queue priority", hint: "Where this org's queued colonies start relative to other orgs'; higher goes first, older first within a priority", kind: "priority" },
+  { key: "max_wait_hours", group: "Colonies", label: "Starvation guard", hint: "After a colony has queued this long it counts as High, so a low priority never waits for ever; unset is off", kind: "number", min: 1, max: 8760, unit: "h" },
   { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories like acme/api whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
@@ -71,6 +75,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       return settings.agent?.[key];
     case "max_parallel":
     case "repo_max_parallel":
+    case "queue_priority":
+    case "max_wait_hours":
       return settings[key];
     case "close_superseded_prs":
       // One comma-separated line in the draft; an empty list reads as no override, like inherit.
@@ -117,6 +123,11 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "max_parallel":
     case "repo_max_parallel":
       return setting("sandbox", key);
+    case "queue_priority":
+      // Org-only: nothing configured is Normal.
+      return 0;
+    case "max_wait_hours":
+      return undefined;
     case "close_superseded_prs":
       // Org-only, with no module setting behind it: the default is an empty list, never closing.
       return "";
@@ -143,6 +154,8 @@ function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = 
     const list = typeof value === "string" ? parseRepoList(value) : [];
     return list.length ? list.join(", ") : "never closes";
   }
+  if (spec.key === "queue_priority") return typeof value === "number" ? priorityLabel(value) : "Normal";
+  if (spec.key === "max_wait_hours" && (value === undefined || value === null)) return "off";
   if (value === undefined || value === null) return "global default";
   if (typeof value === "boolean") return value ? "on" : "off";
   // 0 — or nothing set at all, on the server's quota fields — is how unlimited is written.
@@ -156,6 +169,17 @@ function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = 
     return value.trim() === "" || value === "auto" ? "Automatic" : value.charAt(0).toUpperCase() + value.slice(1);
   if (value === "") return spec.key === "model" ? "Claude Code default" : "same as orchestrator";
   return spec.unit ? `${value} ${spec.unit}` : String(value);
+}
+
+/** The queue priority presets the select offers; any other saved integer shows as custom. */
+export const PRIORITY_PRESETS = [
+  { value: 10, label: "High" },
+  { value: 0, label: "Normal" },
+  { value: -10, label: "Low" },
+] as const;
+
+export function priorityLabel(value: number): string {
+  return PRIORITY_PRESETS.find((p) => p.value === value)?.label ?? `Custom (${value})`;
 }
 
 /** A repo-list field's text as the array it sends: comma- or newline-separated `owner/name`, trimmed, blanks dropped. */
@@ -211,6 +235,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     if (!field.override) return null;
     if (spec.kind === "boolean") return Boolean(field.value);
     if (spec.kind === "choice") return String(field.value).trim() || null;
+    if (spec.kind === "priority") return Number.parseInt(String(field.value), 10) || 0;
     if (spec.kind === "model") return String(field.value).trim() || null;
     if (spec.kind === "size") {
       const text = parseSize(String(field.value));
@@ -234,6 +259,8 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     },
     max_parallel: pick("max_parallel") as number | null,
     repo_max_parallel: pick("repo_max_parallel") as number | null,
+    queue_priority: pick("queue_priority") as number | null,
+    max_wait_hours: pick("max_wait_hours") as number | null,
     // There is nothing to inherit: not overridden is the default empty list, which closes nothing.
     close_superseded_prs: draft.close_superseded_prs.override ? parseRepoList(String(draft.close_superseded_prs.value)) : [],
     budget_usd: pick("budget_usd") as number | null,
@@ -596,6 +623,23 @@ export function OrgSettingsForm({
                         ).map(([id, label]) => (
                           <option key={id} value={id}>
                             {label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {spec.kind === "priority" && (
+                      <select
+                        value={String(draft[spec.key].value)}
+                        onChange={(e) => set(spec.key, { value: e.target.value })}
+                        aria-label={`${spec.label} for ${org}`}
+                        className={cx(inputClass, "w-40")}
+                      >
+                        {!PRIORITY_PRESETS.some((p) => String(p.value) === String(draft[spec.key].value)) && (
+                          <option value={String(draft[spec.key].value)}>{priorityLabel(Number(draft[spec.key].value))}</option>
+                        )}
+                        {PRIORITY_PRESETS.map((p) => (
+                          <option key={p.value} value={String(p.value)}>
+                            {p.label}
                           </option>
                         ))}
                       </select>

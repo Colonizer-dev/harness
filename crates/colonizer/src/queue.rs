@@ -497,15 +497,21 @@ fn claim_rebase(s: &mut Session, reason: &str) -> Option<Claim> {
     Some(Claim::Rebase(s.clone(), reason.to_string()))
 }
 
-/// The queued colony this tick acts on, oldest first: the first one nothing holds back and that fits.
+/// The queued colony this tick acts on, highest priority first and the oldest within a priority: the first one nothing holds back and that fits.
 /// A colony still waiting for its stacked-on parent's branch is looked past, so a slow parent cannot
 /// stall the colonies behind it, and the first one whose parent can never provide a branch stops the
 /// walk — it is retired where it stands, which needs no slot — as does the first one whose parent
 /// failed and can be re-parented up the stack (issue #982), which likewise takes no slot. `Hold` is
 /// filtered here and never returned; `None` when nothing in the queue can move this tick.
-fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<(&Session, Gate)> {
+fn next_queued(
+    sessions: &[Session],
+    priority: impl Fn(&Session) -> i64,
+    room: impl Fn(&Session) -> bool,
+) -> Option<(&Session, Gate)> {
     let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
-    waiting.sort_by_key(|s| s.created_at);
+    // Issue #1156: highest effective priority first, the older colony within a priority. Every
+    // priority at its default 0 is the plain oldest-first line.
+    waiting.sort_by_key(|s| crate::queue_priority::queue_key(priority(s), s.created_at));
     for candidate in waiting {
         match gate(candidate, sessions) {
             Gate::Hold => continue,
@@ -618,12 +624,18 @@ pub(crate) async fn start_queued(app: &Shared) {
             let settings = app.org_settings(org);
             (orgs::org_max_parallel(&settings), repo_limit(&modules, &settings))
         };
-        let Some((next, gate_result)) = next_queued(&sessions, |s| {
-            let (org_limit, repo_limit) = limits(&s.org);
-            !held
-                && !troubled_accounts.contains(&crate::account_health::account_of(s))
-                && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
-        }) else {
+        let org_settings = app.all_org_settings();
+        let now = Utc::now();
+        let Some((next, gate_result)) = next_queued(
+            &sessions,
+            |s| crate::queue_priority::effective(s, &org_settings, now),
+            |s| {
+                let (org_limit, repo_limit) = limits(&s.org);
+                !held
+                    && !troubled_accounts.contains(&crate::account_health::account_of(s))
+                    && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
+            },
+        ) else {
             break;
         };
         // A waiter the gate called ready is checked against the forge before its promotion: the holder's
@@ -2240,6 +2252,111 @@ mod tests {
     }
 
     /// A parent another colony could be stacked on, with the id and branch the tests need.
+    /// A queued colony of `org` in its own repository, created `age_minutes` ago.
+    fn queued_in(id: &str, org: &str, repo: &str, age_minutes: i64) -> Session {
+        let mut s = colony(org, SessionStatus::Queued);
+        s.id = id.into();
+        s.repo = repo.into();
+        s.created_at = Utc::now() - chrono::Duration::minutes(age_minutes);
+        s
+    }
+
+    /// The order the queue tries colonies in, against the saved org settings given.
+    fn picked<'a>(
+        sessions: &'a [Session],
+        orgs: &std::collections::BTreeMap<String, orgs::OrgSettings>,
+        room: impl Fn(&Session) -> bool,
+    ) -> Option<&'a str> {
+        let now = Utc::now();
+        next_queued(sessions, |s| crate::queue_priority::effective(s, orgs, now), room).map(|(s, _)| s.id.as_str())
+    }
+
+    fn org_with_priority(priority: i32) -> orgs::OrgSettings {
+        orgs::OrgSettings {
+            queue_priority: Some(priority),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_higher_priority_orgs_colony_is_admitted_before_an_older_normal_one() {
+        let sessions = vec![
+            queued_in("old", "normal", "normal/a", 600),
+            queued_in("new", "hot", "hot/a", 1),
+        ];
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(picked(&sessions, &none, |_| true), Some("old"), "all at 0 is oldest first");
+        let hot = [("hot".to_string(), org_with_priority(10))].into();
+        assert_eq!(picked(&sessions, &hot, |_| true), Some("new"));
+        let cold = [("normal".to_string(), org_with_priority(-10))].into();
+        assert_eq!(
+            picked(&sessions, &cold, |_| true),
+            Some("new"),
+            "a low priority org waits behind"
+        );
+    }
+
+    #[test]
+    fn within_a_priority_the_older_colony_goes_first() {
+        let sessions = vec![queued_in("b", "hot", "hot/a", 5), queued_in("a", "hot", "hot/a", 50)];
+        let hot = [("hot".to_string(), org_with_priority(10))].into();
+        assert_eq!(picked(&sessions, &hot, |_| true), Some("a"));
+    }
+
+    #[test]
+    fn priority_never_gets_past_the_repository_cap() {
+        // The hot org's colonies fill their repository; its next one must not block the normal org's.
+        let mut sessions = vec![
+            queued_in("hot-queued", "hot", "hot/a", 1),
+            queued_in("normal", "normal", "normal/a", 500),
+        ];
+        sessions.push({
+            let mut running = colony("hot", SessionStatus::Running);
+            running.id = "running".into();
+            running.repo = "hot/a".into();
+            running
+        });
+        let hot = [("hot".to_string(), org_with_priority(10))].into();
+        let snapshot = sessions.clone();
+        let room = |s: &Session| has_room(&snapshot, &s.org, &s.repo, 8, None, 1);
+        assert_eq!(
+            picked(&sessions, &hot, room),
+            Some("normal"),
+            "the capped repository is skipped"
+        );
+        let global = |s: &Session| has_room(&snapshot, &s.org, &s.repo, 1, None, 8);
+        assert_eq!(picked(&sessions, &hot, global), None, "the global limit still holds everyone");
+    }
+
+    #[test]
+    fn a_colony_moved_to_the_front_starts_first_and_the_starvation_guard_promotes() {
+        let mut moved = queued_in("moved", "normal", "normal/a", 1);
+        moved.priority = Some(11);
+        let sessions = vec![queued_in("old", "normal", "normal/a", 600), moved];
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(picked(&sessions, &none, |_| true), Some("moved"));
+
+        // A low priority org's colony that has waited past `max_wait_hours` outranks a normal one.
+        let sessions = vec![
+            queued_in("normal", "plain", "plain/a", 300),
+            queued_in("starved", "cold", "cold/a", 30 * 60),
+        ];
+        let mut cold = org_with_priority(-10);
+        let orgs: std::collections::BTreeMap<_, _> = [("cold".to_string(), cold.clone())].into();
+        assert_eq!(
+            picked(&sessions, &orgs, |_| true),
+            Some("normal"),
+            "no guard, it waits behind"
+        );
+        cold.max_wait_hours = Some(24);
+        let orgs: std::collections::BTreeMap<_, _> = [("cold".to_string(), cold)].into();
+        assert_eq!(
+            picked(&sessions, &orgs, |_| true),
+            Some("starved"),
+            "past 24 h it counts as High"
+        );
+    }
+
     fn parent_colony(id: &str, status: SessionStatus, branch: &str) -> Session {
         let mut p = colony("acme", status);
         p.id = id.into();
@@ -2273,7 +2390,7 @@ mod tests {
         let waiter = claim_waiter("waiter", "holder", 10);
         let sessions = vec![holder.clone(), waiter.clone()];
         assert!(
-            next_queued(&sessions, |_| true).is_none(),
+            next_queued(&sessions, |_| 0, |_| true).is_none(),
             "the holder still holds the issue, so the waiter is looked past"
         );
         // The pure decision the promotion re-checks under the lock: the waiter is held, and the
@@ -2290,7 +2407,7 @@ mod tests {
         let mut first = claim_waiter("first", "holder", 100);
         let second = claim_waiter("second", "holder", 50);
         let sessions = vec![first.clone(), second.clone()];
-        let (picked, refuse) = next_queued(&sessions, |_| true).expect("the oldest waiter's turn has come");
+        let (picked, refuse) = next_queued(&sessions, |_| 0, |_| true).expect("the oldest waiter's turn has come");
         assert_eq!(picked.id, "first");
         assert!(matches!(refuse, Gate::Admit));
         // The promotion, re-checked under the lock: nothing holds the issue against it any more.
@@ -2323,7 +2440,7 @@ mod tests {
         let sessions = vec![retrying.clone(), other.clone()];
         assert!(matches!(gate(&retrying, &sessions), Gate::Hold), "the backoff has not passed");
         // The colony behind it is admitted this tick: a retrying colony is held, not a blocker.
-        let (picked, _) = next_queued(&sessions, |_| true).expect("the colony behind starts");
+        let (picked, _) = next_queued(&sessions, |_| 0, |_| true).expect("the colony behind starts");
         assert_eq!(picked.id, "other");
         // Once the wait passes, the colony itself is admitted again.
         retrying.retry_at = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -2357,7 +2474,7 @@ mod tests {
             parent_colony("parent", SessionStatus::Running, "colonizer/issue-1-parent"),
         ];
         assert!(
-            next_queued(&sessions, |_| true).is_none(),
+            next_queued(&sessions, |_| 0, |_| true).is_none(),
             "the parent has not pushed a branch yet, so the child keeps waiting"
         );
     }
@@ -2374,7 +2491,7 @@ mod tests {
                 unrelated
             },
         ];
-        let (picked, refuse) = next_queued(&sessions, |_| true).expect("something in the queue can move");
+        let (picked, refuse) = next_queued(&sessions, |_| 0, |_| true).expect("something in the queue can move");
         assert_eq!(picked.id, "unrelated", "the child waiting on its parent is looked past");
         assert!(
             matches!(refuse, Gate::Admit),
@@ -2389,11 +2506,11 @@ mod tests {
             parent_colony("parent", SessionStatus::PrOpened, "colonizer/issue-1-parent"),
         ];
         let (picked, refuse) =
-            next_queued(&sessions, |_| true).expect("the parent's branch is on the remote, so the child starts");
+            next_queued(&sessions, |_| 0, |_| true).expect("the parent's branch is on the remote, so the child starts");
         assert_eq!(picked.id, "child");
         assert!(matches!(refuse, Gate::Admit));
         // But it still waits for a slot like everyone else.
-        assert!(next_queued(&sessions, |_| false).is_none(), "no room, nothing moves");
+        assert!(next_queued(&sessions, |_| 0, |_| false).is_none(), "no room, nothing moves");
     }
 
     #[test]
@@ -2405,7 +2522,7 @@ mod tests {
             parent_colony("parent", SessionStatus::PrOpened, "colonizer/issue-1-parent"),
         ];
         assert!(
-            next_queued(&sessions, |_| true).is_none(),
+            next_queued(&sessions, |_| 0, |_| true).is_none(),
             "the parent's pull request has not merged yet, so the child keeps waiting"
         );
     }
@@ -2416,7 +2533,7 @@ mod tests {
             queued_default_child("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::Merged, "colonizer/issue-1-parent"),
         ];
-        let (picked, refuse) = next_queued(&sessions, |_| true).expect("the parent's work is merged, so the child starts");
+        let (picked, refuse) = next_queued(&sessions, |_| 0, |_| true).expect("the parent's work is merged, so the child starts");
         assert_eq!(picked.id, "child");
         assert!(matches!(refuse, Gate::Admit));
     }
@@ -2431,7 +2548,7 @@ mod tests {
         let mut failed = parent_colony("parent", SessionStatus::Failed, "");
         failed.parent = Some("grandparent".into());
         let sessions = vec![queued_child("child", "parent", Utc::now()), failed, grandparent];
-        let Some((picked, gate)) = next_queued(&sessions, |_| true) else {
+        let Some((picked, gate)) = next_queued(&sessions, |_| 0, |_| true) else {
             panic!("the child is acted on, not left sitting at the head of the queue");
         };
         assert_eq!(picked.id, "child", "the child is what this tick acts on");
@@ -2465,7 +2582,7 @@ mod tests {
             queued_child("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::Failed, ""),
         ];
-        let (picked, gate_result) = next_queued(&sessions, |_| true).expect("the child can move");
+        let (picked, gate_result) = next_queued(&sessions, |_| 0, |_| true).expect("the child can move");
         assert_eq!(picked.id, "child");
         assert!(matches!(gate_result, Gate::Rebase(_)), "re-based, never retired");
     }
@@ -2478,7 +2595,7 @@ mod tests {
             queued_child("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::NoChanges, "colonizer/issue-1-parent"),
         ];
-        let Some((picked, gate)) = next_queued(&sessions, |_| true) else {
+        let Some((picked, gate)) = next_queued(&sessions, |_| 0, |_| true) else {
             panic!("the child is moved, not left sitting at the head of the queue");
         };
         assert_eq!(picked.id, "child", "the child is what this tick acts on");
@@ -2516,7 +2633,8 @@ mod tests {
             queued_resume("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::Failed, "colonizer/issue-1-parent"),
         ];
-        let (picked, refuse) = next_queued(&sessions, |_| true).expect("a resume-capable colony moves whatever its parent did");
+        let (picked, refuse) =
+            next_queued(&sessions, |_| 0, |_| true).expect("a resume-capable colony moves whatever its parent did");
         assert_eq!(picked.id, "child");
         assert!(
             matches!(refuse, Gate::Admit),
@@ -2532,7 +2650,7 @@ mod tests {
             queued_resume("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::Running, "colonizer/issue-1-parent"),
         ];
-        let (picked, refuse) = next_queued(&sessions, |_| true).expect("the resume does not wait on its parent");
+        let (picked, refuse) = next_queued(&sessions, |_| 0, |_| true).expect("the resume does not wait on its parent");
         assert_eq!(picked.id, "child");
         assert!(matches!(refuse, Gate::Admit));
     }
@@ -4371,7 +4489,7 @@ mod tests {
         let (mut blocked, mut rebased) = (Vec::new(), Vec::new());
         for _ in 0..64 {
             let snapshot = sessions.to_vec();
-            let Some((next, gate_result)) = next_queued(&snapshot, |_| false) else {
+            let Some((next, gate_result)) = next_queued(&snapshot, |_| 0, |_| false) else {
                 break;
             };
             let id = next.id.clone();

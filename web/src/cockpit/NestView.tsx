@@ -38,6 +38,7 @@ import {
   type NestBox,
 } from "./nest";
 import { taskLine, taskTooltip } from "../summary";
+import { nextUp, shortName } from "../queueOrder";
 
 /** The nest by colony, or the architecture map (NestMapView). */
 export type NestMode = "nest" | "map";
@@ -360,11 +361,13 @@ export function NestView({
   const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
   const liveCount = sessions.filter((s) => isLive(s.status)).length;
   const queuedCount = sessions.filter((s) => s.status === "queued").length;
+  const next = nextUp(sessions);
   const known = new Set(sessions.map((s) => s.id));
   const meta = [
     `${waiting.length} need you`,
     `${liveCount} live`,
     `${queuedCount} queued`,
+    next ? `next up: ${shortName(next)}` : null,
     capacity != null ? `capacity ${liveCount}/${capacity}` : null,
   ]
     .filter(Boolean)

@@ -16,6 +16,10 @@ export interface OrgSettings {
   max_parallel?: number | null;
   /** Live colonies one repository of this org may run at once; null inherits the global per-repository limit. */
   repo_max_parallel?: number | null;
+  /** Where this org's queued colonies start relative to other orgs' (issue #1156): higher first, null is Normal (0). */
+  queue_priority?: number | null;
+  /** Hours a colony may queue before it counts as High whatever its priority; null or absent turns the guard off. */
+  max_wait_hours?: number | null;
   /**
    * Repositories of this org (full `owner/name`) whose superseded colonies' pull requests Colonizer
    * may close on GitHub when another colony's pull request merges over them (issue #673). Empty —

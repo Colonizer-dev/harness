@@ -58,6 +58,16 @@ A launch past the parallel limit is not refused. The colony is created `queued` 
 a slot frees. The limits are the Sandbox settings `max_parallel` (default 3) and
 `repo_max_parallel` (default 3), plus an org's own limit if it sets one.
 
+**Queue priority.** Queued colonies start by `(priority desc, created_at asc)`, so with nothing set
+it is first in, first out. An org's `queue_priority` (High = 10, Normal = 0, Low = -10 in the
+cockpit; any integer through the API) puts all its colonies ahead of or behind other orgs'. A single
+queued colony can be moved with **Move to front** (above every other queued colony) or **Move to
+back** (below), on its page and in the Overview table; the Nest header names the colony that is
+**next up**. Priority only picks who is tried first: the global, org and per-repository limits still
+apply, and a colony whose repository is at its cap is skipped for the next one that fits. An org's
+optional `max_wait_hours` is a starvation guard: once a colony has queued that long it counts as
+High, however low its org or own priority, though never above a colony moved to the front.
+
 **Automatic mode.** With the stack on Automatic and no number in `max_parallel`, there is no fixed
 parallel limit. Each colony is sized from the host: the host keeps the larger of 8 GB or a tenth of
 its RAM and 2 vCPUs, the colonies share the rest (3 vCPUs and 11 GB on 32 cores and 124 GB; a

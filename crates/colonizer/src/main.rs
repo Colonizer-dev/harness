@@ -116,6 +116,7 @@ mod publish;
 mod push;
 mod push_prefs;
 mod queue;
+mod queue_priority;
 mod quota_cards;
 mod rebase;
 mod reclaim;
