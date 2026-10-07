@@ -153,6 +153,7 @@ export type ActivityKind =
   | "loop.docs"
   | "redteam.start"
   | "redteam.stop"
+  | "redteam.cancel"
   | "redteam.schedule"
   | "redteam.unschedule"
   | "remote.enable"

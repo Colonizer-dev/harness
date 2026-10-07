@@ -162,6 +162,8 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You started a red-team run on ${subjectOf(entry.repo, null) ?? "a repository"}`;
     case "redteam.stop":
       return "You stopped a red-team run";
+    case "redteam.cancel":
+      return "You cancelled a red-team run";
     case "redteam.schedule":
       return "You saved a red-team schedule";
     case "redteam.unschedule":

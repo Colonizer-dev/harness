@@ -186,12 +186,15 @@ pub enum RedTeamState {
     Draining,
     Done,
     Stopped,
+    /// Cancelled by the operator (#1145): hunters stopped like a stop, findings so far kept, and
+    /// nothing is filed afterwards.
+    Cancelled,
 }
 
 impl RedTeamState {
     /// Whether the run is over; the tick and a stop never touch it again.
     pub fn over(self) -> bool {
-        matches!(self, Self::Done | Self::Stopped)
+        matches!(self, Self::Done | Self::Stopped | Self::Cancelled)
     }
 }
 
@@ -298,6 +301,9 @@ pub struct RedTeamRun {
     /// A security run's deterministic pre-scan (leads, notes, operator checklist); `None` for a
     /// general run and until a security run launches.
     pub prescan: Option<crate::prescan::PreScan>,
+    /// Who cancelled the run (`you`, the owner) and when; `None` unless it was cancelled.
+    pub cancelled_by: Option<String>,
+    pub cancelled_at: Option<DateTime<Utc>>,
 }
 
 impl Default for RedTeamRun {
@@ -323,6 +329,8 @@ impl Default for RedTeamRun {
             schedule_id: None,
             preset: Preset::General,
             prescan: None,
+            cancelled_by: None,
+            cancelled_at: None,
         }
     }
 }
@@ -384,6 +392,30 @@ impl RedTeamStore {
 }
 
 /// `data/redteam.json` → the runs it holds. A missing file is a first run.
+impl RedTeamStore {
+    /// The id of the active (not over) run on this repository, if any.
+    pub(crate) async fn active_for(&self, repo: &str) -> Option<String> {
+        self.runs
+            .read()
+            .await
+            .iter()
+            .find(|r| r.repo == repo && !r.state.over())
+            .map(|r| r.id.clone())
+    }
+}
+
+/// The 409 for a second run on a repository that has one; the body carries `run_id` so a client can
+/// link to the holder.
+fn already_active(repo: &str, run_id: &str) -> crate::AppError {
+    crate::AppError(
+        StatusCode::CONFLICT,
+        anyhow::Error::new(crate::app::RunActive {
+            run_id: run_id.to_string(),
+            message: format!("a red-team run ({run_id}) is already active for {repo}"),
+        }),
+    )
+}
+
 fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
     let data = match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -1042,7 +1074,7 @@ fn advance_state(run: &mut RedTeamRun, sessions: &[Session]) {
                 finish(run);
             }
         }
-        RedTeamState::Done | RedTeamState::Stopped => {}
+        RedTeamState::Done | RedTeamState::Stopped | RedTeamState::Cancelled => {}
     }
 }
 
@@ -1361,7 +1393,9 @@ async fn launch_synthesis(app: &Shared, run: &mut RedTeamRun) {
     let recorded = app
         .redteam
         .update(&id, |r| {
-            if r.state == RedTeamState::Stopped || r.synthesis.as_ref().is_some_and(Synthesis::in_flight) {
+            if matches!(r.state, RedTeamState::Stopped | RedTeamState::Cancelled)
+                || r.synthesis.as_ref().is_some_and(Synthesis::in_flight)
+            {
                 return false; // a stop beat this launch, or a concurrent retry or tick won it
             }
             *r = run.clone(); // done state and pending phase land together, before any colony exists
@@ -1685,6 +1719,11 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
     }
     let autofix = req.autofix.unwrap_or(false);
     let armed = req.arm.unwrap_or(false);
+    // A repository with an active run is refused first, whatever the nest looks like, naming that
+    // run; the check under the write lock below is the atomic one.
+    if let Some(active) = app.redteam.active_for(&repo).await {
+        return Err(already_active(&repo, &active));
+    }
     let live = live_count(app).await;
     // The nest gate is checked before anything is created, so a start-now against live colonies
     // spends nothing.
@@ -1697,11 +1736,8 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
     let mut run = {
         let mut runs = app.redteam.runs.write().await;
         // One run per repository while one is still active, armed or not.
-        if runs.iter().any(|r| r.repo == repo && !r.state.over()) {
-            return Err(client_error(
-                StatusCode::CONFLICT,
-                &format!("a red-team run is already active for {repo}"),
-            ));
+        if let Some(active) = runs.iter().find(|r| r.repo == repo && !r.state.over()) {
+            return Err(already_active(&repo, &active.id));
         }
         let run = RedTeamRun {
             id: id.clone(),
@@ -1724,6 +1760,8 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
             schedule_id,
             preset,
             prescan: None,
+            cancelled_by: None,
+            cancelled_at: None,
         };
         runs.push(run.clone());
         run
@@ -1753,7 +1791,19 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
 /// stopped and their microVMs removed, queued ones leave the queue; already-finished hunters are not
 /// touched. Idempotent once the run is terminal.
 pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<RedTeamRun> {
-    let hunter_ids: Vec<String> = {
+    halt(&app, &id, RedTeamState::Stopped).await
+}
+
+/// `POST /api/redteam/runs/{id}/cancel` (#1145): the stop path, landing the run `cancelled` with who
+/// and when. Findings validated so far are kept (the counts are read once more before the hunters
+/// go) and nothing is filed afterwards: the hunters are stopped and a finished run is never
+/// stepped, synthesised or ingested again. Idempotent once the run is terminal.
+pub async fn cancel(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<RedTeamRun> {
+    halt(&app, &id, RedTeamState::Cancelled).await
+}
+
+async fn halt(app: &Shared, id: &str, to: RedTeamState) -> ApiResult<RedTeamRun> {
+    let (hunter_ids, snapshot): (Vec<String>, RedTeamRun) = {
         let runs = app.redteam.runs.read().await;
         let Some(run) = runs.iter().find(|r| r.id == id) else {
             return Err(client_error(StatusCode::NOT_FOUND, "no such red-team run"));
@@ -1761,7 +1811,13 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         if run.state.over() {
             return Ok(Json(run.clone()));
         }
-        run.hunters.iter().map(|h| h.session_id.clone()).collect()
+        (run.hunters.iter().map(|h| h.session_id.clone()).collect(), run.clone())
+    };
+    // Keep what the hunters validated so far: the tally is read before they are stopped.
+    let counts = if to == RedTeamState::Cancelled {
+        Some(counts_for(app, &snapshot).await)
+    } else {
+        None
     };
     let sessions = app.sessions.read().await.clone();
     for hunter in &hunter_ids {
@@ -1777,10 +1833,20 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         }
     }
     app.redteam
-        .update(&id, |r| {
-            r.state = RedTeamState::Stopped;
+        .update(id, |r| {
+            if r.state.over() {
+                return; // a concurrent stop or cancel already landed it
+            }
+            r.state = to;
             r.ended_at = Some(Utc::now());
             r.gate_reason = None;
+            if to == RedTeamState::Cancelled {
+                r.cancelled_by = Some("you".to_string());
+                r.cancelled_at = r.ended_at;
+                if let Some(c) = counts {
+                    r.counts = c;
+                }
+            }
         })
         .await;
     let run = app
@@ -1791,7 +1857,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         .iter()
         .find(|r| r.id == id)
         .cloned()
-        .expect("the run exists: its stop just updated it");
+        .expect("the run exists: its halt just updated it");
     Ok(Json(run))
 }
 
@@ -2110,6 +2176,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/redteam/runs", routing::get(list).post(create))
         .route("/api/redteam/runs/{id}", routing::get(get))
         .route("/api/redteam/runs/{id}/stop", routing::post(stop))
+        .route("/api/redteam/runs/{id}/cancel", routing::post(cancel))
         .route("/api/redteam/runs/{id}/synthesize", routing::post(synthesize))
         .route("/api/redteam/runs/{id}/report", routing::get(report))
         .route("/api/redteam/schedules", routing::get(list_schedules).post(create_schedule))
@@ -2501,6 +2568,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_racing_starts_on_one_repo_make_one_run_and_one_409_naming_it() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let mut tasks = Vec::new();
+        for arm in [false, false, true, true] {
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move {
+                start(&app, new_run("acme/race", Some(1), arm), None).await
+            }));
+        }
+        let mut won = Vec::new();
+        let mut refused = Vec::new();
+        for t in tasks {
+            match t.await.unwrap() {
+                Ok(run) => won.push(run),
+                Err(e) => refused.push(e),
+            }
+        }
+        assert_eq!(won.len(), 1, "exactly one start wins the repository");
+        assert_eq!(refused.len(), 3);
+        for e in &refused {
+            assert_eq!(e.status(), StatusCode::CONFLICT);
+            assert!(e.message().contains(&won[0].id), "the 409 names the holder: {}", e.message());
+        }
+        let runs = app.redteam.runs.read().await;
+        assert_eq!(runs.iter().filter(|r| r.repo == "acme/race").count(), 1);
+        drop(runs);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_409_body_carries_the_active_run_id() {
+        use axum::response::IntoResponse;
+        let root = temp_root();
+        let app = test_app(&root);
+        let first = start(&app, new_run("acme/repo", Some(1), true), None).await.unwrap();
+        let err = start(&app, new_run("acme/repo", Some(1), false), None).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        let resp = err.into_response();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["run_id"], json!(first.id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_every_hunter_keeps_findings_and_files_nothing_afterwards() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let (id, hunters) = seeded_run(&app).await;
+        app.update_session(&hunters[0], |s| s.status = SessionStatus::Running).await;
+        app.update_session(&hunters[1], |s| s.status = SessionStatus::Queued).await;
+        let cancelled = cancel(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(cancelled.state, RedTeamState::Cancelled);
+        assert_eq!(cancelled.cancelled_by.as_deref(), Some("you"));
+        assert!(cancelled.cancelled_at.is_some() && cancelled.ended_at.is_some());
+        assert!(
+            cancelled.counts.validated >= 2,
+            "validated findings are kept: {:?}",
+            cancelled.counts
+        );
+        {
+            let sessions = app.sessions.read().await;
+            for h in &hunters {
+                let s = sessions.iter().find(|s| s.id == *h).unwrap();
+                assert_eq!(s.status, SessionStatus::Stopped, "hunter {h} (queued included) is stopped");
+            }
+        }
+        // Later ticks never re-open it, synthesise it or move its counts.
+        let before = app.redteam.runs.read().await.iter().find(|r| r.id == id).cloned().unwrap();
+        tick_once(&app).await;
+        let after = app.redteam.runs.read().await.iter().find(|r| r.id == id).cloned().unwrap();
+        assert_eq!(before, after);
+        assert!(after.synthesis.is_none());
+        assert_eq!(synthesis_colonies(&app).await, 0);
+        // Idempotent, 404 for an unknown run, and the repository is free again.
+        let again = cancel(State(app.clone()), Path(id.clone())).await.unwrap().0;
+        assert_eq!(again, after);
+        let err = cancel(State(app.clone()), Path("rt_nope".into())).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert!(app.redteam.active_for("acme/repo").await.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn the_swarm_size_is_validated_and_defaults_to_three() {
         let root = temp_root();
@@ -2887,8 +3039,11 @@ mod tests {
             schedule_id: None,
             preset: Preset::General,
             prescan: None,
+            cancelled_by: None,
+            cancelled_at: None,
         };
         let value = serde_json::to_value(&run).unwrap();
+        assert!(value["cancelled_by"].is_null() && value["cancelled_at"].is_null());
         assert_eq!(value["preset"], "general", "a run names its preset");
         assert!(value["prescan"].is_null(), "a general run has no pre-scan");
         assert_eq!(value["hunter"], "swarm");

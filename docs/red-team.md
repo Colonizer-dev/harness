@@ -231,6 +231,6 @@ live first, with state, hunter, models, found / validated / filed / rejected, co
 a stop button.
 
 API: `GET`/`POST` `/api/redteam/runs`, `GET /api/redteam/runs/{id}`,
-`POST /api/redteam/runs/{id}/stop`, `POST /api/redteam/runs/{id}/synthesize`,
+`POST /api/redteam/runs/{id}/stop`, `POST /api/redteam/runs/{id}/cancel`, `POST /api/redteam/runs/{id}/synthesize`,
 `GET /api/redteam/runs/{id}/report`, `GET`/`POST` `/api/redteam/schedules`,
 `PUT`/`DELETE` `/api/redteam/schedules/{id}`.

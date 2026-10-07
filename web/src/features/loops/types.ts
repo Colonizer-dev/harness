@@ -7,7 +7,7 @@
  * the run is live but not raiding until the nest empties — `running`/`draining` are
  * raiding, and `done`/`stopped` are terminal.
  */
-export type RedTeamState = "armed" | "waiting" | "running" | "draining" | "done" | "stopped";
+export type RedTeamState = "armed" | "waiting" | "running" | "draining" | "done" | "stopped" | "cancelled";
 
 export interface RedTeamHunter {
   session_id: string;
@@ -104,6 +104,9 @@ export interface RedTeamRun {
   preset?: RedTeamPreset;
   /** A security run's pre-scan; null for general runs and until a security run launches. */
   prescan?: PreScan | null;
+  /** Who cancelled the run and when (#1145); null unless it was cancelled. */
+  cancelled_by?: string | null;
+  cancelled_at?: string | null;
 }
 
 /** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */

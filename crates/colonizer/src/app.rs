@@ -637,6 +637,21 @@ async fn walk_claude_candidates(candidates: &[PathBuf], elf_only: bool) -> Resul
 // HTTP plumbing
 // ---------------------------------------------------------------------------
 
+/// A red-team start refused because the repository already has an active run.
+#[derive(Debug)]
+pub struct RunActive {
+    pub run_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RunActive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunActive {}
+
 #[derive(Debug)]
 pub struct AppError(pub(crate) StatusCode, pub(crate) anyhow::Error);
 
@@ -647,6 +662,10 @@ impl IntoResponse for AppError {
         // Allow duplicate (issue #832).
         if let Some(refusal) = self.1.downcast_ref::<crate::duplicates::Refusal>() {
             body["duplicate"] = json!(refusal.holder);
+        }
+        // A start refused because the repository already has a red-team run names it (#1145).
+        if let Some(active) = self.1.downcast_ref::<RunActive>() {
+            body["run_id"] = json!(active.run_id);
         }
         (self.0, Json(body)).into_response()
     }

@@ -101,6 +101,7 @@ pub(crate) const KINDS: &[&str] = &[
     "loop.docs",
     "redteam.start",
     "redteam.stop",
+    "redteam.cancel",
     "redteam.schedule",
     "redteam.unschedule",
     "remote.enable",
@@ -488,6 +489,12 @@ const RULES: &[Rule] = &[
         "POST",
         "/api/redteam/runs/{id}/stop",
         "redteam.stop",
+        Target::Named("red-team run", "redteam"),
+    ),
+    rule(
+        "POST",
+        "/api/redteam/runs/{id}/cancel",
+        "redteam.cancel",
         Target::Named("red-team run", "redteam"),
     ),
     rule(

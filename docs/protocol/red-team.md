@@ -53,6 +53,8 @@ persist to `data/redteam.json` and survive a restart, where the tick re-derives 
 hunter sessions it finds: hunters whose sessions are gone count as ended, so a run interrupted
 mid-launch drains to `done` rather than re-launching a duplicate swarm.
 
+`POST /api/redteam/runs/{id}/cancel` (owner-only, activity kind `redteam.cancel`) takes the same stop path for every hunter, queued ones included, and lands the run `cancelled` with `cancelled_by` and `cancelled_at`; the findings counted so far are kept and nothing is filed afterwards. A start on a repository that already has an active run is a **409** whose body carries `run_id`; the check is atomic with creating the run.
+
 Synthesis. A run with findings that lands `done` launches one more colony — the synthesis judge —
 which merges the hunters' findings into one report and publishes nothing (autopilot, autofix and
 automerge off; the brief orders it to write only that one file). It fires exactly once, at the

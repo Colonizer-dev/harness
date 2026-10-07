@@ -481,6 +481,15 @@ export function App() {
     [api],
   );
 
+  // Cancel (#1145): the server stops every hunter and keeps the findings; fold the cancelled run in.
+  const cancelRedRun = useCallback(
+    async (id: string) => {
+      const run = await api.cancelRedTeamRun(id);
+      setRedRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
+    },
+    [api],
+  );
+
   // The synthesis step (issue #309): the returned run carries the new synthesis state, fold it in.
   const synthesizeRedRun = useCallback(
     async (id: string) => {
@@ -806,6 +815,7 @@ export function App() {
               onSessionChanged={upsertSession}
               onRedStart={startRedRun}
               onRedStop={stopRedRun}
+              onRedCancel={cancelRedRun}
               onRedSynthesize={synthesizeRedRun}
               onCreated={(session) => {
                 upsertSession(session);
