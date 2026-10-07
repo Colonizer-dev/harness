@@ -573,6 +573,12 @@ pub struct Session {
     /// goes ahead.
     #[serde(default)]
     pub verify_fix_rounds: u32,
+    /// What the watchdog's remediation playbook has fixed on this colony by itself (issue #1191),
+    /// newest last and capped at [`crate::playbook::KEPT_FIXES`]. Each entry is also a
+    /// `auto-fixed: <signature>` line in the colony's log; the cockpit reads this list for its
+    /// header line, and the playbook counts its entries against each rule's `max_tries`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_fixes: Vec<crate::playbook::AutoFix>,
     /// How many automatic continues have been scheduled after a transient provider error
     /// (issue #980): the 1-based attempt the colony is backing off for, so the delay already
     /// spent is `provider_retries - 1` into the schedule. Reset to 0 on a successful turn and
@@ -751,6 +757,7 @@ impl Default for Session {
             hold_cause: None,
             hold_cause_repeats: 0,
             verify_fix_rounds: 0,
+            auto_fixes: Vec::new(),
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,

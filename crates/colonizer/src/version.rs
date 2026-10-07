@@ -172,6 +172,9 @@ pub fn is_newer(installed: Option<&str>, latest: &str) -> bool {
 struct Choice {
     #[serde(default)]
     enabled: Option<bool>,
+    /// `updates.auto_apply` (issue #1191); absent means off.
+    #[serde(default)]
+    auto_apply: Option<crate::update::AutoApply>,
 }
 
 impl Choice {
@@ -207,6 +210,8 @@ pub struct Latest {
 /// What the last check found. Named for the check, not the app: `State` is axum's extractor.
 #[derive(Default)]
 struct LastCheck {
+    /// What the last auto-apply poll did or is waiting for (issue #1191), and when it changed.
+    auto_apply_last: Option<(DateTime<Utc>, String)>,
     last_checked: Option<DateTime<Utc>>,
     latest: Option<Latest>,
     error: Option<String>,
@@ -299,6 +304,28 @@ impl Updates {
         self.blocked.is_none() && self.choice.lock().await.enabled.unwrap_or(true)
     }
 
+    /// The auto-apply mode; off unless the operator chose otherwise.
+    pub async fn auto_apply(&self) -> crate::update::AutoApply {
+        self.choice.lock().await.auto_apply.unwrap_or_default()
+    }
+
+    async fn set_auto_apply(&self, mode: crate::update::AutoApply) -> Result<()> {
+        let mut choice = self.choice.lock().await;
+        choice.auto_apply = Some(mode);
+        choice.save(&self.path)
+    }
+
+    /// Records what the auto-apply poll did. A wait is logged only when its text changes, so a
+    /// colony holding the spare slot for hours is one line, not one per check.
+    pub(crate) async fn note_auto_apply(&self, message: String, waiting: bool) {
+        let mut state = self.state.lock().await;
+        let same = waiting && state.auto_apply_last.as_ref().is_some_and(|(_, last)| *last == message);
+        if !same {
+            eprintln!("update: auto-apply: {message}");
+            state.auto_apply_last = Some((Utc::now(), message));
+        }
+    }
+
     async fn set(&self, enabled: bool) -> Result<()> {
         let mut choice = self.choice.lock().await;
         choice.enabled = Some(enabled);
@@ -368,6 +395,8 @@ impl Updates {
             .is_some_and(|l| is_newer(build.release.as_deref(), &l.version));
         json!({
             "enabled": self.enabled().await,
+            "auto_apply": self.auto_apply().await.as_str(),
+            "auto_apply_last": state.auto_apply_last.as_ref().map(|(at, what)| json!({"at": at, "what": what})),
             "blocked_by": self.blocked,
             "installed": build,
             "latest": state.latest,
@@ -418,7 +447,11 @@ pub async fn full_status(app: &Shared) -> Value {
 
 #[derive(Deserialize)]
 pub struct SetRequest {
-    enabled: bool,
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// `off`, `when_idle` or `always` (issue #1191).
+    #[serde(default)]
+    auto_apply: Option<String>,
 }
 
 /// `PUT /api/update` — `{"enabled": true|false}`
@@ -429,12 +462,21 @@ pub async fn put(State(app): State<Shared>, Json(body): Json<SetRequest>) -> cra
             &format!("the update check is kept off by {blocked} in the mothership's environment"),
         ));
     }
-    app.updates
-        .set(body.enabled)
-        .await
-        .map_err(|e| crate::client_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    if body.enabled {
-        app.updates.check().await;
+    let failed = |e: anyhow::Error| crate::client_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
+    if let Some(mode) = &body.auto_apply {
+        let Some(mode) = crate::update::AutoApply::parse(mode) else {
+            return Err(crate::client_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "auto_apply is one of off, when_idle or always",
+            ));
+        };
+        app.updates.set_auto_apply(mode).await.map_err(failed)?;
+    }
+    if let Some(enabled) = body.enabled {
+        app.updates.set(enabled).await.map_err(failed)?;
+        if enabled {
+            app.updates.check().await;
+        }
     }
     Ok(Json(full_status(&app).await))
 }
@@ -448,6 +490,8 @@ pub async fn run(app: Shared) {
     loop {
         if app.updates.enabled().await {
             app.updates.check().await;
+            // Issue #1191: on the same cadence, install what the check found when the operator said so.
+            crate::update::auto_apply_poll(&app).await;
         }
         tokio::time::sleep(CHECK_EVERY).await;
     }
@@ -579,12 +623,38 @@ mod tests {
         let path = dir.join("updates.json");
 
         // Nothing written yet: the check is on.
-        assert_eq!(Choice::load(&path), Choice { enabled: None });
+        assert_eq!(Choice::load(&path), Choice::default());
         assert!(Choice::load(&path).enabled.unwrap_or(true));
 
-        Choice { enabled: Some(false) }.save(&path).unwrap();
-        assert_eq!(Choice::load(&path), Choice { enabled: Some(false) });
+        Choice {
+            enabled: Some(false),
+            auto_apply: None,
+        }
+        .save(&path)
+        .unwrap();
+        assert_eq!(
+            Choice::load(&path),
+            Choice {
+                enabled: Some(false),
+                auto_apply: None
+            }
+        );
         assert!(!Choice::load(&path).enabled.unwrap_or(true), "off must survive a restart");
+
+        // Issue #1191: auto-apply is off unless chosen, and the choice survives a restart.
+        assert_eq!(
+            Choice::load(&path).auto_apply.unwrap_or_default(),
+            crate::update::AutoApply::Off
+        );
+        Choice {
+            enabled: None,
+            auto_apply: Some(crate::update::AutoApply::WhenIdle),
+        }
+        .save(&path)
+        .unwrap();
+        assert_eq!(Choice::load(&path).auto_apply, Some(crate::update::AutoApply::WhenIdle));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"when_idle\""), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -598,7 +668,16 @@ mod tests {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         let app = crate::tests::test_app(&dir);
         // Off, so no check call reaches the network.
-        let put = put(State(app.clone()), Json(SetRequest { enabled: false })).await.unwrap().0;
+        let put = put(
+            State(app.clone()),
+            Json(SetRequest {
+                enabled: Some(false),
+                auto_apply: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
         let get = status(State(app.clone())).await.0;
         for key in [
             "enabled",

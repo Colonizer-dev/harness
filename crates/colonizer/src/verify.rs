@@ -125,7 +125,7 @@ impl Verification {
     }
 
     /// The empty record every path through a verification fills in as the facts arrive.
-    fn blank() -> Self {
+    pub(crate) fn blank() -> Self {
         Verification {
             verdict: Verdict::Unverifiable,
             by_declaration: false,

@@ -994,6 +994,7 @@ mod tests {
             hold_cause: None,
             hold_cause_repeats: 0,
             verify_fix_rounds: 0,
+            auto_fixes: Vec::new(),
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,

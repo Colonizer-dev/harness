@@ -107,6 +107,7 @@ mod packages;
 mod path_policy;
 mod phone;
 mod placement;
+mod playbook;
 mod plugins;
 mod prescan;
 mod presets;

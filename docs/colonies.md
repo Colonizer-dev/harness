@@ -766,6 +766,71 @@ branch deleted is skipped rather than run to a meaningless exit 1. A base result
 per repository, image, base commit and check, so a re-verification does not pay for it twice. The
 full description is in [architecture.md, Session lifecycle](architecture.md#session-lifecycle), step 5.
 
+## Self-healing: the watchdog playbook
+
+The watchdog used to send a generic "no progress" nudge, and a person (or an outside agent polling
+`harness.jsonl`) did the rest: recognise a known stall, send the colony the exact fix, publish,
+switch model. The playbook is that step done by the mothership. It is a table of **signature,
+action, tries**; each fix is logged as `auto-fixed: <signature>` in the colony's `harness.jsonl`,
+listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: pr_md_write").
+
+| Signature | Matches | Action | Tries |
+|---|---|---|---|
+| `placeholder_dotfiles` | a `secret-paths` denial whose target is a harness placeholder (`.env`, `.netrc`, ...) in the worktree and names no real credential path | message: the placeholders are harness mounts, leave them, continue the issue | 1 |
+| `pr_md_write` | a `writes-outside-repo` denial on `/harness/out/pr.md` | message: write `pr.md` with the file tool | 1 |
+| `toolchain_installer` | a `script-egress` denial on a toolchain installer (rustup, swift, ghcup, ...) | message: no toolchains, say in `pr.md` what was not compiled | 1 |
+| `provider_unavailable` | a turn-error hold on `unrecognized_model`, or a provider quota flag, where the provider's `fallback_model` is a `<provider>/<model>` on a configured provider that is not itself out of quota | `switch_fallback_and_resume` | 2 |
+| `idle_verified` | idle, autopilot on, `pr.md` written, a confirmed verification of the tree as it stands now, nothing flagged, quiet for 10 minutes | `publish` | 1 |
+
+The same denial coming back after its tries are spent (the colony is looping) runs `stop_looping`:
+the colony is stopped, its slot is freed, and it carries the attention reason `looping` naming the
+signature. Between a fix and the next action on the same signature the playbook waits
+`settle_secs` (120 by default) for the agent to read the message. A person's resume gives a
+stopped colony fresh tries.
+
+Rows handled by their own mechanism are not repeated here: a contradicted verification is sent back
+to the agent in fix rounds, a `pr.md` that only redaction changed is published redacted, and an
+open question is closed by the judge.
+
+**The playbook never releases a security hold.** A colony carrying a control-defeat flag, or any
+attention reason naming a secret, a redaction or a defeat, is left alone, and a denial that
+completes a control-defeat signature is flagged as before and not answered with a message. The
+publish action refuses when the tree is not the one that was verified, when the kill-switch is up,
+or when GitHub's breaker is open.
+
+### Adding a pattern: `playbook.toml`
+
+The table is data. The compiled-in rows are the defaults; `<config dir>/playbook.toml` (next to
+`updates.json`) adds rows, replaces a default by naming the same `signature`, or turns one off. It
+is read on each use, so a new pattern needs no release and no restart. A file that does not parse
+is ignored with a line in the mothership's output.
+
+```toml
+# replace = true            # start from an empty table instead of the defaults
+
+[[entry]]
+signature = "npm_registry_denied"       # what the cockpit shows as "auto-fixed: ..."
+trigger = "denial"                      # denial (default) | provider_failure | idle_verified
+action = "send_message"                 # send_message | publish | switch_fallback_and_resume | stop_looping
+message = "The npm registry is not reachable from here; use the vendored packages."
+max_tries = 2                           # fixes per colony before the signature counts as looping
+settle_secs = 120                       # wait this long after a fix before acting again
+stop_when_exhausted = true              # stop the colony (attention `looping`) when it comes back
+# enabled = false                       # switch a default off by repeating its signature
+
+[entry.when]
+kind = "egress_denied"                  # the boundary kind; exec_policy_deny when absent
+control = "egress"                      # substring of the control
+text_any = ["registry.npmjs.org"]       # one of these in the denial's detail or target
+text_none = []                          # none of these
+target_in = []                          # target must be a relative path with one of these file names
+# error_any = ["unrecognized_model"]    # provider_failure: words in the hold's detail
+# quota = true                          # provider_failure: a quota flag matches too
+```
+
+A stall that no row matches goes to `playbook::on_unmatched_stall`, which does nothing today; it is
+the hook for an operator agent (#1192).
+
 ## Conditional instructions
 
 `CLAUDE.md` and `AGENTS.md` load once when a colony starts, and a compaction can summarise them

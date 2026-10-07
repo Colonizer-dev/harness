@@ -26,7 +26,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle } from "./ui";
+import { AttentionBadge, Badge, autoFixLine, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -337,6 +337,9 @@ export function SessionView({
               <CostSummary session={session} />
               <HostDiskSummary session={session} />
               {live && session.last_activity_at && !attention && <span>Last activity {minutesAgo(session.last_activity_at)}</span>}
+              {autoFixLine(session) && (
+                <span title={(session.auto_fixes ?? []).map((fix) => `${fix.signature}: ${fix.detail}`).join("\n")}>{autoFixLine(session)}</span>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">

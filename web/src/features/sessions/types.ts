@@ -33,7 +33,20 @@ export type AttentionReason =
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
   | "control_defeat"
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
-  | "provider_retry";
+  | "provider_retry"
+  /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
+  | "looping";
+
+/** One thing the watchdog's remediation playbook fixed on a colony by itself (issue #1191). */
+export interface AutoFix {
+  /** The signature that matched, e.g. `pr_md_write`, `toolchain_installer`, `idle_verified`; `looping` for a stop. */
+  signature: string;
+  /** `send_message`, `publish`, `switch_fallback_and_resume` or `stop_looping`. */
+  action: string;
+  at: string;
+  /** One line for a person. */
+  detail: string;
+}
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
@@ -277,6 +290,8 @@ export interface Session {
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+  /** What the watchdog playbook fixed here by itself (issue #1191), oldest first; absent when nothing. */
+  auto_fixes?: AutoFix[];
   /**
    * True while the colony is `failed` and nobody has opened it since (issue #744): the badge and
    * the mothership's attention count include it until POST /api/sessions/{id}/seen marks it looked
