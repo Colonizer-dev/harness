@@ -18,7 +18,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, store, stored } from "../components/ui";
 import { untilWords } from "../resetTime";
-import type { LeftoverClaude, ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
+import type { AutonomyStatus, LeftoverClaude, ModelProvider, ModuleInfo, ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
+import { JudgeSection, judgeFailing, judgeSaveBody, type JudgeSectionProps } from "./JudgeModel";
 import { PlanList } from "./ModelPlans";
 import { ProfileBar } from "./ModelProfiles";
 import { formatResetUtc } from "./ProviderQuotaCard";
@@ -356,6 +357,11 @@ export interface ModelSwitcherProps {
   initialLeftovers?: LeftoverClaude;
   /** The cockpit's chosen workspace: the popover opens on it. */
   selectedOrg?: string | null;
+  /** The autonomy judge's health (the cockpit's poll): a warning on the chip while it is failing. */
+  judge?: AutonomyStatus | null;
+  /** For the tests: the autonomy module and providers in hand. */
+  initialAutonomy?: ModuleInfo;
+  initialProviders?: ModelProvider[];
 }
 
 export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
@@ -375,7 +381,37 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   const [profileMessage, setProfileMessage] = useState<{ text: string; tone: "info" | "err" } | null>(null);
   const [profileBusy, setProfileBusy] = useState(false);
   const [leftovers, setLeftovers] = useState<LeftoverClaude | null>(props.initialLeftovers ?? null);
+  const [autonomy, setAutonomy] = useState<ModuleInfo | null>(props.initialAutonomy ?? null);
+  const [providers, setProviders] = useState<ModelProvider[]>(props.initialProviders ?? []);
+  const [judgeStatus, setJudgeStatus] = useState<AutonomyStatus | null>(props.judge ?? null);
+  const [judgeSaving, setJudgeSaving] = useState(false);
+  const [judgeError, setJudgeError] = useState<{ message: string; model: string } | null>(null);
   const root = useRef<HTMLDivElement>(null);
+
+  useEffect(() => setJudgeStatus(props.judge ?? null), [props.judge]);
+
+  const loadJudge = useCallback(() => {
+    api.modules().then((list) => setAutonomy(list.find((m) => m.kind === "autonomy") ?? null)).catch(() => {});
+    api.providers().then(setProviders).catch(() => {});
+    api.autonomyStatus().then(setJudgeStatus).catch(() => {});
+  }, [api]);
+
+  const saveJudge = async (model: string, saveAnyway = false) => {
+    if (!autonomy) return;
+    setJudgeSaving(true);
+    setJudgeError(null);
+    try {
+      const saved = await api.saveModule("autonomy", { ...judgeSaveBody(autonomy, model), ...(saveAnyway ? { save_anyway: true } : {}) });
+      setAutonomy(saved);
+      toast({ title: "Judge model switched", body: model, kind: "success" });
+      api.autonomyStatus().then(setJudgeStatus).catch(() => {});
+    } catch (e) {
+      // The judge's save runs a live test call; its refusal is shown here with the "Save anyway".
+      setJudgeError({ message: errorMessage(e), model });
+    } finally {
+      setJudgeSaving(false);
+    }
+  };
 
   const loadExtras = useCallback(() => {
     setPlansError(null);
@@ -401,10 +437,11 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
     if (!open) return;
     load();
     loadExtras();
+    loadJudge();
     // The countdowns and balances move while the popover stays open: re-read them every 30 s.
     const timer = window.setInterval(loadExtras, 30_000);
     return () => window.clearInterval(timer);
-  }, [open, load, loadExtras]);
+  }, [open, load, loadExtras, loadJudge]);
 
   const show = useCallback(() => {
     setOpen(true);
@@ -502,13 +539,18 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
         type="button"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Models · main model ${name}`}
+        aria-label={`Models · main model ${name}${judgeFailing(judgeStatus) ? " · judge failing" : ""}`}
         title="Switch models · /model in ⌘K"
         onClick={() => (open ? setOpen(false) : show())}
         className="inline-flex h-8 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 text-small-lg font-medium text-text transition-colors hover:border-border-strong hover:bg-panel-2"
       >
         <span aria-hidden="true" data-health={tone} className={cx("size-1.5 shrink-0 rounded-full", TONE_DOT[tone])} />
         <span className="truncate">{name}</span>
+        {judgeFailing(judgeStatus) && (
+          <span data-judge-warning title="The autonomy judge is failing — open to switch it" className="shrink-0 font-semibold text-warn">
+            !
+          </span>
+        )}
         <span aria-hidden="true" className="text-micro-lg text-faint">▾</span>
       </button>
       {open && (
@@ -535,6 +577,16 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onConfirm={() => void run(switchRequest(scope, draft, "running"))}
           onCancel={() => setStage({ step: "edit" })}
           onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, "new"))}
+          judge={{
+            module: autonomy,
+            providers,
+            status: judgeStatus,
+            models: assignments.models,
+            saving: judgeSaving,
+            error: judgeError?.message ?? null,
+            onPick: (model) => void saveJudge(model),
+            onSaveAnyway: judgeError ? () => void saveJudge(judgeError.model, true) : undefined,
+          }}
           leftovers={leftovers}
           onClearLeftovers={() => void run(clearLeftoversRequest(scope))}
           onDismissLeftovers={() => setLeftovers(null)}
@@ -606,6 +658,8 @@ export interface ModelSwitcherPanelProps {
   onSaveProfile?: (name: string) => Promise<boolean>;
   onRenameProfile?: (profile: ModelProfile, name: string) => Promise<boolean>;
   onDeleteProfile?: (profile: ModelProfile) => Promise<boolean>;
+  /** The judge row (issue #1201): the autonomy module's model, saved on pick. Absent, no row. */
+  judge?: Omit<JudgeSectionProps, "selectClass">;
   /** For the tests: the clock the countdowns read. */
   nowMs?: number;
 }
@@ -748,6 +802,8 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
           );
         })}
       </div>
+
+      {p.judge && <JudgeSection {...p.judge} selectClass={select} />}
 
       {hasLeftovers(p.leftovers) && (
         <div role="status" data-leftovers className="mt-3 rounded-lg border border-warn bg-warn-soft p-2 text-small-lg text-warn">
