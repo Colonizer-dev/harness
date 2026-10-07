@@ -1,7 +1,7 @@
 // The settings menu's data (issue #1180): where each page lives, and the search that finds a field.
 import { describe, expect, it } from "vitest";
 
-import { FIXED_PAGES, GROUPS, buildSearchIndex, groupInfo, groupOf, searchSettings, worstAttention, type SearchEntry } from "./nav";
+import { FIXED_PAGES, GROUPS, buildSearchIndex, groupInfo, groupOf, searchSettings, sectionFromSlug, settingsPath, worstAttention, type SearchEntry } from "./nav";
 import { providerMissingKey, providerNeedsKey } from "./providerCatalog";
 import { slugify } from "./flashField";
 
@@ -106,6 +106,29 @@ describe("searchSettings", () => {
 
   it("returns the breadcrumb it was asked for", () => {
     expect(find("phone")[0].crumbs[0]).toBe("Devices & access");
+  });
+});
+
+describe("every AI account lives under Models (issue #1211)", () => {
+  it("renames the connections page to GitHub and keeps the old link working", () => {
+    expect(FIXED_PAGES.find((p) => p.id === "connections")?.label).toBe("GitHub");
+    expect(settingsPath("connections")).toBe("/settings/connections/github");
+    expect(sectionFromSlug("github-claude")).toBe("connections");
+    expect(sectionFromSlug("github")).toBe("connections");
+  });
+
+  it("finds the Subscriptions rows by claude, codex and login", () => {
+    for (const word of ["claude", "codex", "login"]) {
+      const hits = find(word);
+      expect(hits.some((h) => h.entry.section === "providers"), word).toBe(true);
+    }
+    expect(find("claude")[0].entry.section).toBe("providers");
+    expect(find("codex")[0].entry.label).toBe("Codex");
+    expect(find("grok")[0].entry.section).toBe("providers");
+  });
+
+  it("no longer lists Claude as a field of the GitHub page", () => {
+    expect(find("claude").some((h) => h.entry.section === "connections")).toBe(false);
   });
 });
 

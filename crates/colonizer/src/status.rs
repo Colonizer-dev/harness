@@ -5,8 +5,8 @@ use crate::app::PROBE_LIMIT;
 use crate::config::{ModulesConfig, setting_u64};
 use crate::util::exec_within;
 use crate::{
-    Shared, StorageAlert, StorageAlertKind, auth, claude_login, config, diagnosis, gateway, github, mesh, modules, orgs,
-    providers, reclaim, resolve_guest_claude_bin, runtime, sessions,
+    Shared, StorageAlert, StorageAlertKind, agent_logins, auth, claude_login, config, diagnosis, gateway, github, mesh, modules,
+    orgs, providers, reclaim, resolve_guest_claude_bin, runtime, sessions,
 };
 use anyhow::{Result, anyhow};
 use axum::{
@@ -260,6 +260,9 @@ pub(crate) async fn status(
             json!({
                 "id": p.id,
                 "name": p.name,
+                // Presence only (issue #1211): setup asks whether this route can carry a colony.
+                "has_key": app.provider_key(&p.id).is_some(),
+                "keyless": p.auth == "none",
                 "requests": usage.requests,
                 "failure_pct": health.failure_pct,
                 "avg_latency_ms": health.avg_latency_ms,
@@ -302,8 +305,33 @@ pub(crate) async fn status(
     if let (Some(into), Some(extra)) = (sandbox_status.as_object_mut(), capacity.status_json().as_object()) {
         into.extend(extra.clone());
     }
+    // Issue #1211: which agent modules have a credential, and which model the orchestrator is set to,
+    // so setup asks for "a model colonies can use" rather than a Claude login. Presence only.
+    let agent_schema = modules::schema_for("agent", &modules.agent.provider, &app.agents);
+    let orchestrator_model = config::setting_str(&modules.agent, &agent_schema, "model");
+    let provider_facts: Vec<agent_logins::ProviderFact> = app
+        .providers()
+        .iter()
+        .map(|p| agent_logins::ProviderFact {
+            id: p.id.clone(),
+            preset: p.preset.clone(),
+            name: p.name.clone(),
+            has_key: app.provider_key(&p.id).is_some(),
+            keyless: p.auth == "none",
+        })
+        .collect();
+    let agent_list: Vec<(String, String)> = app.agents.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
+    let agent_rows = agent_logins::agent_logins(
+        &agent_list,
+        &claude,
+        &provider_facts,
+        &|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()),
+        &chrono::Utc::now().to_rfc3339(),
+    );
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "agents": agent_rows,
+        "orchestrator": {"module": modules.agent.provider, "model": orchestrator_model},
         "queue_depth": queue_depth,
         // Issue #880: whether the queue is held back while an update, a restart or an operator
         // drains in-flight colonies, so the cockpit can show a banner.

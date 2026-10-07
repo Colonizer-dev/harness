@@ -24,7 +24,7 @@ export interface GroupInfo {
 export const GROUPS: readonly GroupInfo[] = [
   { id: "general", slug: "general", label: "General", blurb: "Your cockpit, setup and updates", icon: "sliders" },
   { id: "models", slug: "models", label: "Models", blurb: "Which AI models colonies may use", icon: "spark" },
-  { id: "connections", slug: "connections", label: "Connections & secrets", blurb: "GitHub, Claude, keys and tokens", icon: "plug" },
+  { id: "connections", slug: "connections", label: "Connections & secrets", blurb: "GitHub, keys and tokens", icon: "plug" },
   { id: "runtime", slug: "runtime", label: "Colonies & runtime", blurb: "How and where colonies run", icon: "ant" },
   { id: "devices", slug: "devices", label: "Devices & access", blurb: "Your phone, remote access, alerts", icon: "user" },
   { id: "fleet", slug: "fleet", label: "Fleet & host", blurb: "Other machines and this one", icon: "mesh" },
@@ -50,9 +50,9 @@ export const FIXED_PAGES: readonly PageInfo[] = [
   { id: "setup", group: "general", slug: "setup", label: "Setup", hint: "The checklist for your first colony" },
   { id: "updates", group: "general", slug: "updates", label: "Updates", hint: "Which Colonizer this is, and whether a newer one is out" },
 
-  { id: "providers", group: "models", slug: "providers", label: "Model providers", hint: "Claude and other model endpoints, and their keys" },
+  { id: "providers", group: "models", slug: "providers", label: "Model providers", hint: "Claude, Codex and other logins, plus API providers and their keys" },
 
-  { id: "connections", group: "connections", slug: "github-claude", label: "GitHub & Claude", hint: "The two accounts colonies need" },
+  { id: "connections", group: "connections", slug: "github", label: "GitHub", hint: "The code host colonies read from and push to" },
   { id: "secrets", group: "connections", slug: "secrets", label: "Secrets", hint: "Every key and token Colonizer holds, in one place", view: "secrets" },
   { id: "tokens", group: "connections", slug: "api-tokens", label: "API tokens", hint: "Scoped keys for CLIs, agents and CI" },
 
@@ -100,6 +100,8 @@ export function pageSlug(id: SectionId): string {
 export function sectionFromSlug(slug: string): SectionId | null {
   if (slug.startsWith("module-") && slug.length > 7) return `module:${slug.slice(7)}`;
   if (slug.startsWith("org-") && slug.length > 4) return `org:${slug.slice(4)}`;
+  // The page was "GitHub & Claude" (slug github-claude) before every AI account moved to Models.
+  if (slug === "github-claude") return "connections";
   return FIXED_PAGES.find((p) => p.slug === slug)?.id ?? null;
 }
 
@@ -240,7 +242,6 @@ const field = (section: SectionId, label: string, help: string, keywords: string
 /** Fields worth jumping to on the fixed pages. Each label is the text that appears on the page. */
 export const FIELD_ENTRIES: readonly SearchEntry[] = [
   field("connections", "GitHub", "Sign in with the GitHub CLI, or give a token", ["token", "login", "gh", "account"]),
-  field("connections", "Claude", "Log in with your Claude subscription, or give an API key", ["token", "login", "api key", "subscription", "anthropic"]),
   field("remote", "Allow remote access", "Open this cockpit from your phone or another computer through the relay", ["tunnel", "relay", "https", "anywhere", "switch"]),
   field("remote", "Ask for GitHub sign-in first", "Visitors must sign in with GitHub before the pairing screen", ["login", "auth", "security"]),
   field("notifications", "Play a sound when a colony asks a question", "A short chime when a colony needs an answer", ["audio", "chime", "alert"]),
@@ -256,6 +257,10 @@ export const FIELD_ENTRIES: readonly SearchEntry[] = [
   field("tokens", "Create a token", "A scoped key for a CLI, an agent or CI, instead of the owner token", ["api key", "scope", "ci", "cli", "revoke"]),
   field("phone", "Pair a phone", "Scan a one-use code, then confirm it here", ["qr", "code", "revoke", "device"]),
   field("fleet", "Members", "Machines that joined this one", ["peer", "host", "invite", "pairing code"]),
+  field("providers", "Claude", "Log in with your Claude subscription, or give a token or API key", ["token", "login", "sign in", "api key", "subscription", "anthropic", "account"]),
+  field("providers", "Codex", "Run colonies on Codex with an OpenAI key", ["login", "sign in", "chatgpt", "openai", "api key", "subscription", "agent"]),
+  field("providers", "Grok Build", "Run colonies on Grok with an xAI key", ["login", "sign in", "grok", "xai", "api key", "subscription", "agent"]),
+  field("providers", "Subscriptions", "The AI accounts colonies sign in with: Claude, Codex, Grok and the other agents", ["login", "sign in", "claude", "codex", "grok", "opencode", "pi", "hermes", "account"]),
   field("providers", "Add a provider", "Another Anthropic-compatible endpoint", ["endpoint", "base url", "key", "gateway", "minimax", "openrouter"]),
 ];
 
@@ -290,8 +295,8 @@ export function buildSearchIndex(input: {
 const PAGE_KEYWORDS: Partial<Record<SectionId, string[]>> = {
   cockpit: ["address", "url", "bookmark", "qr", "link"],
   setup: ["checklist", "first colony", "onboarding", "start"],
-  connections: ["github", "claude", "login", "token", "api key", "account"],
-  providers: ["models", "anthropic", "minimax", "key", "endpoint", "gateway", "fallback"],
+  connections: ["github", "login", "token", "api key", "account", "git"],
+  providers: ["models", "anthropic", "claude", "codex", "grok", "login", "subscription", "minimax", "key", "endpoint", "gateway", "fallback"],
   tokens: ["api key", "secret", "scope", "ci", "cli", "agent"],
   secrets: ["keys", "token", "password", "vault", "credential", "api key"],
   runtime: ["sandbox", "microsandbox", "microvm", "mesh", "disk", "claude binary"],

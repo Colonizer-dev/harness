@@ -2,6 +2,10 @@
 export interface ModelProviderStatus {
   id: string;
   name: string;
+  /** Whether a key is saved for it (never the key); absent from older mothership builds. */
+  has_key?: boolean;
+  /** Auth `none`: a local server that needs no key; absent from older mothership builds. */
+  keyless?: boolean;
   /** Cumulative requests counted at the gateway; the denominator of `failure_pct`. */
   requests: number;
   /** `failures / requests * 100`, one decimal; 0 with no requests. */

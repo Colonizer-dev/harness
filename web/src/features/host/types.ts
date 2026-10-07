@@ -12,7 +12,24 @@ export interface Backlog {
   by_org?: Record<string, { issues: number; repos: number }>;
 }
 
+/** GET /api/status `agents` (issue #1211): one entry per installed agent module and whether it has a credential colonies can run on. Presence and an account label only, never a token. */
+export interface AgentLogin {
+  id: string;
+  name: string;
+  signed_in: boolean;
+  /** The account, or what supplies the credential ("OpenAI API key", "via 2 providers"). */
+  account?: string | null;
+  /** `subscription`: a login (Claude); `api_key`: the vendor's key; `gateway`: reaches models only through the providers. */
+  kind?: "subscription" | "api_key" | "gateway";
+  /** When the Mothership last looked (RFC3339). */
+  checked_at?: string | null;
+}
+
 export interface HarnessStatus {
+  /** Agent modules and their credentials; absent from older mothership builds. */
+  agents?: AgentLogin[];
+  /** The model the orchestrator runs on and the agent module that runs it; absent from older builds. */
+  orchestrator?: { module: string; model: string };
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
   claude: {
     configured: boolean;

@@ -1,43 +1,18 @@
-import { ClaudeLoginSection, GithubTokenForm } from "../Connections";
+import { GithubTokenForm } from "../Connections";
 import { Avatar } from "../Avatar";
-import { Badge, timeAgo } from "../ui";
 import type { HarnessStatus } from "../../types";
 import { Code, ConnectionCard, Pane } from "./ui";
 
 // ---------------------------------------------------------------------------
-// The Claude card's health badge: the background per-account check's verdict (issue
-// #983), with when it last ran. No badge for an older mothership that sends none.
-// ---------------------------------------------------------------------------
-
-const CLAUDE_HEALTH: Record<NonNullable<HarnessStatus["claude"]["health_status"]>, { tone: "ok" | "err" | "warn" | "neutral"; label: string }> = {
-  ok: { tone: "ok", label: "Reachable" },
-  auth_expired: { tone: "err", label: "Token rejected" },
-  unreachable: { tone: "warn", label: "Unreachable" },
-  unchecked: { tone: "neutral", label: "Not checked yet" },
-};
-
-function ClaudeHealth({ status, checkedAt }: { status: HarnessStatus["claude"]["health_status"]; checkedAt: string | null | undefined }) {
-  if (!status) return null;
-  const health = CLAUDE_HEALTH[status];
-  return (
-    <p className="flex flex-wrap items-center gap-2 text-small-lg text-muted">
-      <Badge tone={health.tone}>{health.label}</Badge>
-      {checkedAt ? <span>checked {timeAgo(checkedAt)}</span> : null}
-    </p>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Connections: GitHub and Claude
+// Connections: GitHub. Every AI account lives under Models → Model providers (issue #1211).
 // ---------------------------------------------------------------------------
 
 export function ConnectionsPane({ status, onStatusChanged, back }: { status: HarnessStatus | null; onStatusChanged: (fresh?: boolean) => Promise<void> | void; back?: () => void }) {
   const github = status?.github ?? null;
-  const claude = status?.claude ?? null;
   const githubViaToken = github?.source === "saved token";
 
   return (
-    <Pane title="GitHub & Claude" subtitle="The two accounts colonies need before the first one starts" back={back}>
+    <Pane title="GitHub" subtitle="The code host colonies read from and push to" back={back}>
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"
@@ -64,26 +39,6 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
           ) : (
             <GithubTokenForm onStatusChanged={onStatusChanged} />
           )}
-        </ConnectionCard>
-
-        <ConnectionCard
-          name="Claude"
-          connected={claude ? claude.configured : null}
-          detail={claude?.configured ? [claude.account ?? "account not identified", claude.source].filter(Boolean).join(" · ") : undefined}
-          info={
-            <>
-              <p>
-                Log in runs <Code>claude setup-token</Code> on the Mothership (this machine) and saves a 1-year token here.
-              </p>
-              <p className="text-muted">microVMs only ever see a placeholder; the real token is swapped in for requests to api.anthropic.com.</p>
-              <p className="text-muted">
-                Anthropic does not report an expiry, so the harness shows the documented 1-year lifetime as an estimate.
-              </p>
-            </>
-          }
-        >
-          {claude?.configured && <ClaudeHealth status={claude.health_status} checkedAt={claude.health_checked_at} />}
-          <ClaudeLoginSection claude={claude} onStatusChanged={onStatusChanged} />
         </ConnectionCard>
       </div>
     </Pane>

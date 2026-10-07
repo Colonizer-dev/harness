@@ -233,11 +233,11 @@ const GUIDES: Record<string, Guide> = {
   },
   connections: {
     icon: "plug",
-    blurb: "Links GitHub and Claude, so colonies can read code and think.",
+    blurb: "Links GitHub, so colonies can read code and push their work.",
     flow: [
       { icon: "github", label: "GitHub" },
       { icon: "mothership", label: "Mothership" },
-      { icon: "spark", label: "Claude" },
+      { icon: "ant", label: "Colony" },
     ],
     both: true,
   },
