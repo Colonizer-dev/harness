@@ -1043,7 +1043,18 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     let providers = app.providers();
     let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
     let names: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
-    let provider = provider_quota::mentioned_provider(text, &ids, &names);
+    let session = app.session(id).await;
+    // The text names no provider: attribute by the colony's routing instead (#1168), so a
+    // MiniMax-only colony's generic usage-limit error marks MiniMax, not the Claude account.
+    let provider = provider_quota::mentioned_provider(text, &ids, &names).or_else(|| {
+        let s = session.as_ref()?;
+        provider_quota::routed_provider(
+            app.gateway.last_route(id).as_deref(),
+            s.allowed_providers.as_deref(),
+            s.model_usage.as_ref(),
+            &ids,
+        )
+    });
     if let Some(pid) = &provider {
         app.gateway.mark_quota_exhausted(pid, hit.reset_at.clone(), hit.reset_unix);
     } else if hit.account_wide {
@@ -1052,7 +1063,7 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
         // providers stay healthy, and the queue pauses on the account record alone.
         app.gateway.mark_account_quota_exhausted(hit.reset_at.clone(), hit.reset_unix);
     }
-    let Some(s) = app.session(id).await else { return };
+    let Some(s) = session else { return };
     if !s.status.is_live() {
         return;
     }

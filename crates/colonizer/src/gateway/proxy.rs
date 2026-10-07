@@ -338,6 +338,7 @@ async fn proxy_to(
             None,
         );
     }
+    app.gateway.note_route(&colony, &id);
     if method != Method::POST {
         audit.fail(StatusCode::METHOD_NOT_ALLOWED.as_u16(), GatewayFailure::BadRequest);
         return api_error(

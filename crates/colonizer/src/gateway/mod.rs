@@ -424,6 +424,9 @@ pub struct Gateway {
     /// What each colony's Claude requests were last told by the account fallback (#1130), so the
     /// colony's log gets one line per switch. Colonies on Claude have no entry.
     account_notes: Mutex<HashMap<String, account_fallback::AccountRoute>>,
+    /// The provider each colony's last request through the gateway went to (#1168): what a turn's
+    /// quota error that names no provider is attributed to. In memory only.
+    last_route: Mutex<HashMap<String, String>>,
 }
 
 impl Gateway {
@@ -467,6 +470,7 @@ impl Gateway {
             quota_file,
             colony_quota: Default::default(),
             account_notes: Default::default(),
+            last_route: Default::default(),
         })
     }
 
@@ -699,6 +703,19 @@ impl Gateway {
                 );
             }
         }
+    }
+
+    /// Notes that `colony`'s latest request was routed to `provider`.
+    pub fn note_route(&self, colony: &str, provider: &str) {
+        let mut map = self.last_route.lock().unwrap();
+        if map.get(colony).is_none_or(|p| p != provider) {
+            map.insert(colony.to_string(), provider.to_string());
+        }
+    }
+
+    /// The provider `colony`'s last gateway request went to, if it made one.
+    pub fn last_route(&self, colony: &str) -> Option<String> {
+        self.last_route.lock().unwrap().get(colony).cloned()
     }
 
     /// Forgets a colony's quota block: one of its requests succeeded, or it was switched, stopped
