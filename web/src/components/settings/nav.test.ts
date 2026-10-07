@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import { FIXED_PAGES, GROUPS, buildSearchIndex, groupInfo, groupOf, searchSettings, worstAttention, type SearchEntry } from "./nav";
+import { providerMissingKey, providerNeedsKey } from "./providerCatalog";
 import { slugify } from "./flashField";
 
 const modules = [
@@ -10,8 +11,8 @@ const modules = [
   { kind: "observability", title: "Observability", schema: null },
 ];
 const providers = [
-  { name: "MiniMax", models: ["minimax-m2"], has_key: false },
-  { name: "DeepSeek", models: ["deepseek-v4"], has_key: true },
+  { name: "MiniMax", models: ["minimax-m2"], missingKey: true },
+  { name: "DeepSeek", models: ["deepseek-v4"], missingKey: false },
 ];
 
 function index(): SearchEntry[] {
@@ -112,5 +113,17 @@ describe("slugify", () => {
   it("makes dashed lower-case words", () => {
     expect(slugify("Ask for GitHub sign-in first")).toBe("ask-for-github-sign-in-first");
     expect(slugify("  Quiet hours! ")).toBe("quiet-hours");
+  });
+});
+
+describe("which providers need a key", () => {
+  const p = (auth: "x-api-key" | "bearer" | "none", preset: string, has_key: boolean) => ({ auth, preset, has_key });
+  it("is the rule the provider row's badge uses: not for no-auth or local providers", () => {
+    expect(providerMissingKey(p("x-api-key", "minimax", false))).toBe(true);
+    expect(providerMissingKey(p("bearer", "custom", false))).toBe(true);
+    expect(providerMissingKey(p("x-api-key", "minimax", true))).toBe(false);
+    expect(providerMissingKey(p("none", "custom", false))).toBe(false);
+    expect(providerMissingKey(p("bearer", "local", false))).toBe(false);
+    expect(providerNeedsKey(p("bearer", "local", false))).toBe(false);
   });
 });

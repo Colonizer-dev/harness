@@ -67,6 +67,7 @@ import {
   type Attention,
   type SearchHit,
 } from "./settings/nav";
+import { providerMissingKey } from "./settings/providerCatalog";
 import { flashField } from "./settings/flashField";
 import "../settingsFlash.css";
 import { JUDGE_ALERT_AFTER, judgeAlertTitle } from "../cockpit/Header";
@@ -382,7 +383,7 @@ export function SettingsBody({
     if (meshBroken(status.mesh)) flag("runtime", { tone: "err", text: "The private network between the mothership and colonies is not healthy. See the Mesh module." });
   }
   if (setup && setupToneValue && setupToneValue !== "ok") flag("setup", { tone: "warn", text: setup.firstActionable ? `Next step: ${setup.firstActionable.title}.` : "Your setup checklist is not finished yet." });
-  const needKey = (providers ?? []).filter((p) => !p.has_key);
+  const needKey = (providers ?? []).filter(providerMissingKey);
   if (needKey.length > 0) {
     flag("providers", {
       tone: "warn",
@@ -455,7 +456,7 @@ export function SettingsBody({
       buildSearchIndex({
         pages: groups.flatMap((g) => g.pages),
         modules: (modules ?? []).map((m) => ({ kind: m.kind, title: kindInfo(m.kind).title, schema: m.schema })),
-        providers: providers ?? [],
+        providers: (providers ?? []).map((p) => ({ name: p.name, models: p.models, missingKey: providerMissingKey(p) })),
         orgs: (orgs ?? []).filter((o) => !o.awaiting_decision).map((o) => o.org),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps

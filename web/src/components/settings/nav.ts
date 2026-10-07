@@ -263,7 +263,7 @@ export const FIELD_ENTRIES: readonly SearchEntry[] = [
 export function buildSearchIndex(input: {
   pages: readonly { id: SectionId; label: string; hint: string }[];
   modules?: readonly { kind: string; title: string; schema: { properties?: Record<string, { title?: string; description?: string }> } | null }[];
-  providers?: readonly { name: string; models: readonly string[]; has_key: boolean }[];
+  providers?: readonly { name: string; models: readonly string[]; missingKey: boolean }[];
   orgs?: readonly string[];
 }): SearchEntry[] {
   const entries: SearchEntry[] = input.pages.map((p) => page(p.id, p.label, p.hint, PAGE_KEYWORDS[p.id] ?? []));
@@ -277,7 +277,7 @@ export function buildSearchIndex(input: {
     }
   }
   for (const p of input.providers ?? []) {
-    entries.push(field("providers", p.name, p.has_key ? `A model provider: ${p.models.slice(0, 3).join(", ")}` : "A model provider that still needs its key", ["provider", "key", ...p.models]));
+    entries.push(field("providers", p.name, p.missingKey ? "A model provider that still needs its key" : `A model provider: ${p.models.slice(0, 3).join(", ")}`, ["provider", "key", ...p.models]));
   }
   for (const org of input.orgs ?? []) {
     const id = `org:${org}` as SectionId;

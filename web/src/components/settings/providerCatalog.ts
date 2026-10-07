@@ -343,3 +343,17 @@ export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest 
     disabled_tools: input.disabled_tools,
   };
 }
+
+/**
+ * Whether a provider wants a key at all: not when it takes no auth, and not a local one (a model
+ * served from this machine). The provider row's badge and the settings "Needs you" callout both read
+ * this, so they cannot disagree.
+ */
+export function providerNeedsKey(provider: Pick<ModelProvider, "auth" | "preset">): boolean {
+  return provider.auth !== "none" && provider.preset !== "local";
+}
+
+/** A provider that wants a key and has none saved. */
+export function providerMissingKey(provider: Pick<ModelProvider, "auth" | "preset" | "has_key">): boolean {
+  return providerNeedsKey(provider) && !provider.has_key;
+}
