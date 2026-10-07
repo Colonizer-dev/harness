@@ -52,6 +52,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::merge_steward::FEATURE,
     &crate::model_switch::FEATURE,
     &crate::observability::FEATURE,
+    &crate::provider_history::FEATURE,
     &crate::queue_priority::FEATURE,
     &crate::quota_cards::FEATURE,
     &crate::supply_chain_loop::FEATURE,

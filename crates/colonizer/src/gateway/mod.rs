@@ -427,6 +427,8 @@ pub struct Gateway {
     /// The provider each colony's last request through the gateway went to (#1168): what a turn's
     /// quota error that names no provider is attributed to. In memory only.
     last_route: Mutex<HashMap<String, String>>,
+    /// Per-day usage, balance samples and plan events behind the providers page's charts (#1204).
+    pub(crate) history: crate::provider_history::History,
 }
 
 impl Gateway {
@@ -471,6 +473,7 @@ impl Gateway {
             colony_quota: Default::default(),
             account_notes: Default::default(),
             last_route: Default::default(),
+            history: crate::provider_history::History::load(data_dir),
         })
     }
 
@@ -596,6 +599,7 @@ impl Gateway {
 
     /// Records a provider's plan as exhausted, with the reset the error named, if any.
     pub fn mark_quota_exhausted(&self, provider: &str, reset_at: Option<String>, reset_unix: Option<i64>) {
+        self.history.record_event(provider, "exhausted", Utc::now());
         let mut quota = self.quota.lock().unwrap();
         quota.insert(
             provider.to_string(),
@@ -682,6 +686,7 @@ impl Gateway {
         let mut quota = self.quota.lock().unwrap();
         if quota.remove(provider).is_some() {
             self.write_quota(&quota);
+            self.history.record_event(provider, "recovered", Utc::now());
         }
     }
 
