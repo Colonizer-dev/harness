@@ -862,7 +862,7 @@ export function Cockpit({
         judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
-        models={<ModelSwitcher selectedOrg={selectedOrg} />}
+        models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,

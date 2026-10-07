@@ -10,9 +10,10 @@ import { describe, expect, it } from "vitest";
 import type { Api } from "../api";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
-import type { ModelAssignments, ModelProfile, ModelSwitchReply, SwitchableModel } from "../types";
+import type { AutonomyStatus, ModelAssignments, ModelProvider, ModuleInfo, ModelProfile, ModelSwitchReply, SwitchableModel } from "../types";
 import { ColonizePane, DRAFT_START } from "./Colonize";
 import { Header } from "./Header";
+import { judgeAlternative, judgeOptions, judgeSaveBody, judgeTone } from "./JudgeModel";
 import {
   ACCOUNT_FALLBACK_NOTE,
   EMPTY_DRAFT,
@@ -494,5 +495,74 @@ describe("the account fallback role and the leftover Claude report (issue #1130)
     expect(html).toContain("org acme · subagent_model sonnet");
     expect(html).toContain("Clear these too");
     expect(render({ initialOpen: true })).not.toContain("Clear these too");
+  });
+});
+
+describe("the judge row (issue #1201)", () => {
+  const provider = (over: Partial<ModelProvider> & Pick<ModelProvider, "id" | "name">): ModelProvider =>
+    ({ base_url: "https://example.test/v1", has_key: true, models: [], ...over }) as ModelProvider;
+  const PROVIDERS = [provider({ id: "zai", name: "Z.AI", models: ["glm-5"] }), provider({ id: "strix", name: "Strix Halo", models: ["ds4-flash"] })];
+  const ANTHROPIC_API = provider({ id: "claude-api", name: "Claude API", base_url: "https://api.anthropic.com", models: ["claude-x"] });
+  const AUTONOMY = {
+    kind: "autonomy",
+    provider: "judge",
+    providers: [],
+    enabled: true,
+    settings: { model: "zai/glm-5", fallback_models: "strix/ds4-flash", answer_limit: 5 },
+    schema: null,
+  } as ModuleInfo;
+  const status = (over: Partial<AutonomyStatus> = {}): AutonomyStatus => ({
+    enabled: true,
+    model: "zai/glm-5",
+    fallback_models: [],
+    last_success: null,
+    last_error: null,
+    consecutive_failures: 0,
+    alerted: false,
+    ...over,
+  });
+  const open = (extra: Partial<ModelSwitcherProps> = {}) =>
+    render({ initialOpen: true, initialAutonomy: AUTONOMY, initialProviders: PROVIDERS, ...extra });
+
+  it("renders the current model and its health in its own section", () => {
+    const html = open({ judge: status() });
+    expect(html).toContain('aria-label="judge model"');
+    expect(html).toContain("Answers colonies&#x27; questions for you");
+    expect(html).toMatch(/<option value="zai\/glm-5" selected="">glm-5<\/option>/);
+    expect(html).toContain('data-health="ok"');
+    expect(html).toContain("answering");
+    expect(html).not.toContain("data-judge-warning");
+  });
+
+  it("shows amber after a failure and red with a chip warning once it is failing", () => {
+    expect(judgeTone(status({ consecutive_failures: 1 }))).toBe("warn");
+    expect(judgeTone(status({ consecutive_failures: 3 }))).toBe("err");
+    expect(judgeTone(null)).toBe("unknown");
+    const html = open({ judge: status({ consecutive_failures: 4 }) });
+    expect(html).toContain("data-judge-warning");
+    expect(html).toContain("judge failing");
+  });
+
+  it("suggests a healthy alternative while failing", () => {
+    const options = judgeOptions(PROVIDERS);
+    expect(judgeAlternative(options, "strix/ds4-flash", MODELS)?.id).toBe("zai/glm-5");
+    expect(judgeAlternative(options, "zai/glm-5", MODELS)).toBeNull();
+  });
+
+  it("choosing a model saves only the model and keeps the other autonomy settings", () => {
+    expect(judgeSaveBody(AUTONOMY, "strix/ds4-flash")).toEqual({
+      provider: "judge",
+      enabled: true,
+      settings: { model: "strix/ds4-flash", fallback_models: "strix/ds4-flash", answer_limit: 5 },
+    });
+    expect(AUTONOMY.settings.model).toBe("zai/glm-5");
+  });
+
+  it("offers fable and opus only with an api.anthropic.com provider that has a key", () => {
+    expect(judgeOptions(PROVIDERS).map((o) => o.id)).toEqual(["zai/glm-5", "strix/ds4-flash"]);
+    expect(judgeOptions([...PROVIDERS, ANTHROPIC_API]).map((o) => o.id)).toEqual(["fable", "opus", "zai/glm-5", "strix/ds4-flash", "claude-api/claude-x"]);
+    expect(judgeOptions([...PROVIDERS, { ...ANTHROPIC_API, has_key: false }]).map((o) => o.id)).not.toContain("opus");
+    expect(open({ judge: status() })).not.toContain('value="opus"');
+    expect(open({ judge: status(), initialProviders: [...PROVIDERS, ANTHROPIC_API] })).toContain('value="opus"');
   });
 });
