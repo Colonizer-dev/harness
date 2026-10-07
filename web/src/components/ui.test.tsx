@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
 import type { Attention, Session } from "../types";
-import { AttentionBadge, StatusBadge, attentionText, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel, supersededHeld, supersededTitle } from "./ui";
+import { AttentionBadge, StatusBadge, attentionText, autoFixLine, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel, supersededHeld, supersededTitle } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -294,5 +294,28 @@ describe("attentionText", () => {
     const held = session({ status: "waiting_for_answer", suspended, pending_answer: answered("2026-09-26T10:05:00Z"), attention: attention({ reason: "autopilot_held", detail }) });
     expect(isAnsweredWaiting(held)).toBe(true);
     expect(statusLabel(held)).toBe("Answered · resumes when a slot frees");
+  });
+});
+
+// Issue #1191: the colony header's line for what the watchdog playbook fixed by itself.
+describe("autoFixLine", () => {
+  const fix = (signature: string) => ({ signature, action: "send_message", at: "2026-10-07T10:00:00Z", detail: "sent" });
+
+  it("is absent when nothing was fixed", () => {
+    expect(autoFixLine({})).toBeNull();
+    expect(autoFixLine({ auto_fixes: [] })).toBeNull();
+  });
+
+  it("names each signature once, with a count when it repeated", () => {
+    expect(autoFixLine({ auto_fixes: [fix("pr_md_write")] })).toBe("auto-fixed: pr_md_write");
+    expect(autoFixLine({ auto_fixes: [fix("pr_md_write"), fix("provider_unavailable"), fix("pr_md_write")] })).toBe(
+      "auto-fixed: pr_md_write ×2, provider_unavailable",
+    );
+  });
+
+  it("leaves a looping stop to the attention flag", () => {
+    expect(autoFixLine({ auto_fixes: [fix("looping")] })).toBeNull();
+    const looping: Attention = { reason: "looping", since: "2026-10-07T10:00:00Z", nudges: 0, signature: "pr_md_write" };
+    expect(attentionText(looping)).toBe("Looping on pr_md_write — stopped, resume to continue");
   });
 });

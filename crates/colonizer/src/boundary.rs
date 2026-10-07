@@ -116,13 +116,17 @@ pub(crate) async fn emit(app: &Shared, id: &str, boundary: Boundary) {
 
 /// Folds one boundary event, from either side, into the colony's watchdog trail (issue #609).
 pub(crate) async fn observe(app: &Shared, id: &str, boundary: Boundary) {
+    let boundary_for_playbook = boundary.clone();
     let rt = app.runtime(id).await;
     let defeat = {
         let mut activity = rt.activity.lock().await;
         crate::watchdog::note_boundary(&mut activity.boundaries, boundary, Utc::now())
     };
-    if let Some(defeat) = defeat {
-        crate::watchdog::flag_control_defeat(app, id, defeat).await;
+    match defeat {
+        Some(defeat) => crate::watchdog::flag_control_defeat(app, id, defeat).await,
+        // A pattern that is no defeat may be a known stall: the playbook (issue #1191) answers it.
+        // Never after a defeat: that flag is a security hold, and it is a person's.
+        None => crate::playbook::on_boundary(app, id, &boundary_for_playbook).await,
     }
 }
 

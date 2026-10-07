@@ -1113,6 +1113,12 @@ pub async fn publish(
     Ok(Json(s))
 }
 
+/// Starts a publish in the background (issue #1191: the watchdog playbook's publish). A plain
+/// function, so a caller's async body does not carry `publish_session`'s future type with it.
+pub(crate) fn spawn_publish(app: Shared, id: String, grant: crate::authority::Grant) {
+    tokio::spawn(publish_session(app, id, Some(grant)));
+}
+
 /// Mints the publish grant at a real approval (issue #98): the operator's Create PR press
 /// ([`publish`]) or autopilot's confirmed verdict (`verify::after_turn`). Bound to the tree the
 /// publish would commit right now plus the pr.md bytes the approval reviewed; held in memory

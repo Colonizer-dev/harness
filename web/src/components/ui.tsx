@@ -416,11 +416,26 @@ export function attentionText(attention: Attention): string {
       return "Repo's daily PR cap reached — parked, resume to continue";
     case "control_defeat":
       return "A control may have been bypassed";
+    case "looping":
+      return attention.signature ? `Looping on ${attention.signature} — stopped, resume to continue` : "Looping — stopped, resume to continue";
     case "provider_retry":
       return attention.summary?.trim() || attention.detail?.trim() || "Retrying a provider error automatically";
     default:
       return "Needs attention";
   }
+}
+
+/**
+ * The colony header's "auto-fixed" line (issue #1191): what the watchdog playbook did by itself,
+ * the signatures once each with a count, newest last. `null` when it did nothing.
+ */
+export function autoFixLine(session: Pick<Session, "auto_fixes">): string | null {
+  const fixes = (session.auto_fixes ?? []).filter((fix) => fix.signature !== "looping");
+  if (fixes.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const fix of fixes) counts.set(fix.signature, (counts.get(fix.signature) ?? 0) + 1);
+  const names = [...counts].map(([signature, n]) => (n > 1 ? `${signature} ×${n}` : signature));
+  return `auto-fixed: ${names.join(", ")}`;
 }
 
 /** The amber marker for colonies the watchdog flagged. */

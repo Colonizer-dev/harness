@@ -717,6 +717,15 @@ async fn apply_overrides(app: &Shared, provider: &str, model: &str, plan: &[Over
     changes
 }
 
+/// Moves one colony's roles off `provider` onto `model` and restarts it there (issue #1191: the
+/// watchdog playbook's switch-to-fallback). The same override and restart a card's `switch` does.
+pub(crate) async fn switch_colony(app: &Shared, provider: &str, model: &str, s: &Session) -> Result<(), String> {
+    let modules = app.modules.read().await.clone();
+    let plan = plan_overrides(app, &modules, provider, std::slice::from_ref(s));
+    apply_overrides(app, provider, model, &plan).await;
+    restart(app, &s.id).await
+}
+
 /// Restarts every colony on the new model scope ([`restart`]).
 pub(crate) async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
     let mut out = Vec::new();

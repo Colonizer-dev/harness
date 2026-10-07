@@ -771,6 +771,14 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
             }
         }
     };
+    start_apply(&app, force).await?;
+    Ok(Json(json!({ "started": true })))
+}
+
+/// The start of an apply, shared by `POST /api/update/apply` and the auto-apply poll (issue #1191):
+/// every refusal, then the drain, install and restart in the background. Answers as soon as the
+/// work has started.
+pub(crate) async fn start_apply(app: &Shared, force: bool) -> Result<(), crate::AppError> {
     if let Some(reason) = blocker(app.cfg.assets.as_deref()) {
         return Err(crate::client_error(StatusCode::CONFLICT, &reason));
     }
@@ -886,7 +894,105 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
         }
     });
 
-    Ok(Json(json!({ "started": true })))
+    Ok(())
+}
+
+/* ------------------------------------------------------------- auto-apply */
+
+/// `updates.auto_apply` (issue #1191): whether the mothership installs a newer release by itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoApply {
+    /// Never: a person presses update. The default.
+    #[default]
+    Off,
+    /// Once the spare app slot is not in use, so the install is not refused for it (issue #1162).
+    WhenIdle,
+    /// Whenever a newer release is known; the install's own refusals still stand.
+    Always,
+}
+
+impl AutoApply {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoApply::Off => "off",
+            AutoApply::WhenIdle => "when_idle",
+            AutoApply::Always => "always",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(AutoApply::Off),
+            "when_idle" | "when-idle" => Some(AutoApply::WhenIdle),
+            "always" => Some(AutoApply::Always),
+            _ => None,
+        }
+    }
+}
+
+/// What the auto-apply poll decides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutoDecision {
+    /// Install now.
+    Apply,
+    /// Not now, and why (logged once per reason, so a long wait is not a flood).
+    Wait(String),
+    /// Nothing to do: off, or no newer release.
+    Nothing,
+}
+
+/// The gate, pure: the mode, whether a newer release is known, whether an apply is already running,
+/// the colonies still running from the spare slot (`behind`), and the install's own blocker.
+pub fn auto_apply_gate(mode: AutoApply, available: bool, applying: bool, behind: usize, blocked: Option<&str>) -> AutoDecision {
+    if mode == AutoApply::Off || !available {
+        return AutoDecision::Nothing;
+    }
+    if applying {
+        return AutoDecision::Wait("an update is already being applied".into());
+    }
+    if let Some(reason) = blocked {
+        return AutoDecision::Wait(reason.to_string());
+    }
+    if mode == AutoApply::WhenIdle && behind > 0 {
+        return AutoDecision::Wait(format!(
+            "the spare slot is in use by {behind} colon{}",
+            if behind == 1 { "y" } else { "ies" }
+        ));
+    }
+    AutoDecision::Apply
+}
+
+/// One auto-apply poll, run after each update check (the existing cadence): reads the gate and, when
+/// it is open, starts the same apply the Settings button does. The outcome is logged to the
+/// mothership's output and kept for `GET /api/update` as `auto_apply_last`.
+pub(crate) async fn auto_apply_poll(app: &Shared) {
+    let mode = app.updates.auto_apply().await;
+    let build = version::build();
+    let latest = app.updates.latest_known().await;
+    let available = latest
+        .as_deref()
+        .is_some_and(|l| version::is_newer(build.release.as_deref(), l));
+    let applying = applying(app).await;
+    let sessions = app.sessions.read().await.clone();
+    let behind = crate::update_notices::behind(&sessions, app.cfg.assets.as_deref()).len();
+    let blocked = blocker(app.cfg.assets.as_deref()).or_else(|| refusal(build, latest.as_deref(), false));
+    match auto_apply_gate(mode, available, applying, behind, blocked.as_deref()) {
+        AutoDecision::Nothing => {}
+        AutoDecision::Wait(why) => {
+            app.updates
+                .note_auto_apply(format!("waiting to install {}: {why}", latest.unwrap_or_default()), true)
+                .await;
+        }
+        AutoDecision::Apply => {
+            let version = latest.unwrap_or_default();
+            let result = match start_apply(app, false).await {
+                Ok(()) => format!("installing {version} ({})", mode.as_str()),
+                Err(e) => format!("could not start installing {version}: {}", e.message()),
+            };
+            app.updates.note_auto_apply(result, false).await;
+        }
+    }
 }
 
 /// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
@@ -901,6 +1007,49 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1191: `off` and "nothing newer" never install; `when_idle` waits for the spare slot
+    /// (and says why) and installs once no colony runs from it; `always` does not wait for colonies;
+    /// the install's own blocker and an apply already running hold every mode.
+    #[test]
+    fn auto_apply_gates_on_mode_slot_and_blockers() {
+        use AutoApply::*;
+        use AutoDecision::*;
+        assert_eq!(auto_apply_gate(Off, true, false, 0, None), Nothing);
+        assert_eq!(auto_apply_gate(WhenIdle, false, false, 0, None), Nothing, "nothing newer");
+        assert_eq!(auto_apply_gate(WhenIdle, true, false, 0, None), Apply);
+        assert_eq!(
+            auto_apply_gate(WhenIdle, true, false, 2, None),
+            Wait("the spare slot is in use by 2 colonies".into())
+        );
+        assert_eq!(
+            auto_apply_gate(WhenIdle, true, false, 1, None),
+            Wait("the spare slot is in use by 1 colony".into())
+        );
+        assert_eq!(
+            auto_apply_gate(Always, true, false, 5, None),
+            Apply,
+            "always does not wait for colonies"
+        );
+        assert_eq!(
+            auto_apply_gate(Always, true, true, 0, None),
+            Wait("an update is already being applied".into())
+        );
+        assert_eq!(
+            auto_apply_gate(WhenIdle, true, false, 0, Some("a source build")),
+            Wait("a source build".into())
+        );
+    }
+
+    #[test]
+    fn auto_apply_reads_its_three_spellings() {
+        assert_eq!(AutoApply::parse("off"), Some(AutoApply::Off));
+        assert_eq!(AutoApply::parse(" When_Idle "), Some(AutoApply::WhenIdle));
+        assert_eq!(AutoApply::parse("when-idle"), Some(AutoApply::WhenIdle));
+        assert_eq!(AutoApply::parse("always"), Some(AutoApply::Always));
+        assert_eq!(AutoApply::parse("sometimes"), None);
+        assert_eq!(AutoApply::default(), AutoApply::Off);
+    }
 
     #[test]
     fn only_a_publishing_colony_holds_the_update() {
