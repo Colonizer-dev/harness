@@ -3,6 +3,7 @@
 // It owns only what is its own — which view is showing, what the inspector is looking at, and the
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
+import { isActive } from "../redTeam";
 import { CodeView } from "./CodeView";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -115,6 +116,7 @@ export function Cockpit({
   onSessionChanged,
   onRedStart,
   onRedStop,
+  onRedCancel,
   onRedSynthesize,
   onCreated,
   onOpenSettings,
@@ -167,6 +169,8 @@ export function Cockpit({
   onSessionChanged: (session: Session) => void;
   onRedStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onRedStop?: (id: string) => Promise<void>;
+  /** Cancels a red-team run (#1145): every hunter stopped, findings kept. */
+  onRedCancel?: (id: string) => Promise<void>;
   /** (Re)launches a done run's synthesis colony (issue #309). */
   onRedSynthesize?: (id: string) => Promise<void>;
   onCreated: (session: Session) => void;
@@ -577,6 +581,7 @@ export function Cockpit({
             providers={providerSnapshots(status?.model_providers)}
             onStart={onRedStart}
             onStop={onRedStop}
+            onCancel={onRedCancel}
             onSynthesize={onRedSynthesize}
             onOpenColony={openColonyById}
             onResume={(id) => act(id, "resume", (x) => api.resumeSession(x))}
@@ -889,6 +894,8 @@ export function Cockpit({
             onClose={() => setInspector(null)}
             onOpenColony={openColonyById}
             onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
+            hunterRun={inspector?.kind === "colony" ? (redRuns.find((r) => isActive(r) && r.hunters.some((h) => h.session_id === inspector.session.id)) ?? null) : null}
+            onCancelRun={onRedCancel}
             onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
             onRetry={(id) => void retry(id)}
             onLaunch={() => setView("launch")}

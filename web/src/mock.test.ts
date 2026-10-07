@@ -80,7 +80,7 @@ describe("mock startRedTeamRun", () => {
     // The seed has a running raid on acme/webshop, so an armed create there must be refused too —
     // the server's one-active-run-per-repo check does not care how the create is armed.
     await expect(api.startRedTeamRun({ repo: "acme/webshop", arm: true })).rejects.toThrow(
-      "a red-team run is already active on this repo",
+      "is already active for acme/webshop",
     );
   });
 });

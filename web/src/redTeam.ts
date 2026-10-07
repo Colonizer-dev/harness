@@ -12,6 +12,7 @@ export const RED_TEAM_STATE: Record<RedTeamRun["state"], { label: string; tone: 
   draining: { label: "Draining", tone: "warn" },
   done: { label: "Done", tone: "ok" },
   stopped: { label: "Stopped", tone: "neutral" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
 };
 
 /** How the UI reads each synthesis state (issue #309): the merge colony's own lifecycle after a raid. */
@@ -39,7 +40,7 @@ export function isGated(run: RedTeamRun): boolean {
 
 /** Anything the ants are still part of — the two terminal states are the only ones that end them. */
 export function isActive(run: RedTeamRun): boolean {
-  return run.state !== "done" && run.state !== "stopped";
+  return run.state !== "done" && run.state !== "stopped" && run.state !== "cancelled";
 }
 
 /**

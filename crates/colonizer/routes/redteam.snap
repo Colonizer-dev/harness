@@ -1,6 +1,7 @@
 /api/redteam/runs                                    GET    unauth=401    token=owner            activity=-
 /api/redteam/runs                                    POST   unauth=401    token=owner            activity=redteam.start
 /api/redteam/runs/{id}                               GET    unauth=401    token=owner            activity=-
+/api/redteam/runs/{id}/cancel                        POST   unauth=401    token=owner            activity=redteam.cancel
 /api/redteam/runs/{id}/report                        GET    unauth=401    token=owner            activity=-
 /api/redteam/runs/{id}/stop                          POST   unauth=401    token=owner            activity=redteam.stop
 /api/redteam/runs/{id}/synthesize                    POST   unauth=401    token=owner            activity=-

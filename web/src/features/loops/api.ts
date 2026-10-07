@@ -10,6 +10,8 @@ export interface LoopsApi {
   redTeamRuns(): Promise<RedTeamRun[]>;
   startRedTeamRun(body: StartRedTeamRunRequest): Promise<RedTeamRun>;
   stopRedTeamRun(id: string): Promise<RedTeamRun>;
+  /** POST /api/redteam/runs/{id}/cancel (issue #1145): stop every hunter, keep the findings so far, file nothing after. */
+  cancelRedTeamRun(id: string): Promise<RedTeamRun>;
   /** POST /api/redteam/runs/{id}/synthesize (issue #309): (re)launch the run's synthesis colony. 409 unless the run is done; idempotent while one is pending/running. */
   synthesizeRedTeamRun(id: string): Promise<RedTeamRun>;
   /** GET /api/loops: the scheduled colonies. */
@@ -61,6 +63,7 @@ export const loopsHttp: LoopsApi = {
   redTeamRuns: () => request("/api/redteam/runs"),
   startRedTeamRun: (body) => post("/api/redteam/runs", body),
   stopRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/stop`),
+  cancelRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/cancel`),
   synthesizeRedTeamRun: (id) => post(`/api/redteam/runs/${enc(id)}/synthesize`),
   loops: () => request("/api/loops"),
   createLoop: (body) => post("/api/loops", body),

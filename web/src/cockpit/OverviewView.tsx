@@ -111,6 +111,7 @@ export function OverviewView({
   liveStorage = null,
   onStart,
   onStop,
+  onCancel,
   onSynthesize,
   onOpenColony,
   onResume,
@@ -145,6 +146,8 @@ export function OverviewView({
   liveStorage?: StorageSummary | null;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onStop?: (id: string) => Promise<void>;
+  /** Cancels a red-team run (#1145). */
+  onCancel?: (id: string) => Promise<void>;
   /** (Re)launches a done run's synthesis colony (issue #309); folded back into the runs list by the caller. */
   onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
@@ -652,6 +655,7 @@ export function OverviewView({
         sessions={sessions}
         runs={runs}
         onStart={onStart}
+        onCancel={onCancel}
         onClose={() => setRedTeam((r) => (r?.view === "wizard" ? null : r))}
         onDone={() => {}}
         onOpenHistory={(org) => setRedTeam({ org, view: "history" })}
@@ -662,6 +666,7 @@ export function OverviewView({
         sessions={sessions}
         runs={runs}
         onStop={onStop}
+        onCancel={onCancel}
         onSynthesize={onSynthesize}
         onOpenColony={onOpenColony}
         onClose={() => setRedTeam((r) => (r?.view === "history" ? null : r))}
