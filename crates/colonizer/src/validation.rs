@@ -236,7 +236,15 @@ pub(crate) async fn validate(app: &App, s: &Session, finding: &Finding) -> Resul
 pub(crate) fn is_host_chain_type(kind: &str) -> bool {
     matches!(
         kind,
-        "validated" | "rejected" | "fix_colony" | "review" | "merged" | "verification" | "screening" | "watchdog_turn_end"
+        "validated"
+            | "rejected"
+            | "fix_colony"
+            | "review"
+            | "merged"
+            | "verification"
+            | "screening"
+            | "watchdog_turn_end"
+            | "question_closed"
     )
 }
 

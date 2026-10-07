@@ -310,8 +310,12 @@ pub fn diagnose(session: &Session, tail: &[Value], now: DateTime<Utc>) -> Option
                         let id = e.get("question_id").and_then(Value::as_str);
                         let answered = id.is_some_and(|id| {
                             tail[i + 1..].iter().any(|a| {
-                                a.get("type").and_then(Value::as_str) == Some("question_answered")
-                                    && a.get("question_id").and_then(Value::as_str) == Some(id)
+                                (matches!(
+                                    a.get("type").and_then(Value::as_str),
+                                    Some("question_answered" | "question_closed")
+                                ) && a.get("question_id").and_then(Value::as_str) == Some(id))
+                                    || (a.get("type").and_then(Value::as_str) == Some("tool_result")
+                                        && a.get("tool_call_id").and_then(Value::as_str) == Some(id))
                             })
                         });
                         (!answered).then(|| question_text(e)).flatten()

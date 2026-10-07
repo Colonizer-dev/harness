@@ -183,7 +183,7 @@ impl Runtime {
         // The reconnect cursor is agentd's, not the file's: only lines the runner wrote count, each
         // at its own seq (a line `handle_agent_event` renumbered because it collided with a host
         // chain event keeps its true seq in `a_seq`). Host chain events are cut out by their type —
-        // the eight this build emits and the protocol reserves — so a restart mid-life asks agentd to
+        // the nine this build emits and the protocol reserves — so a restart mid-life asks agentd to
         // replay exactly the events it has missed, and cannot skip the ones that never landed.
         //
         // The same pass restores the open question. It is otherwise set only while live events are
@@ -203,6 +203,16 @@ impl Runtime {
             let Some(kind) = v.get("type").and_then(Value::as_str) else {
                 continue;
             };
+            if kind == "question_closed" {
+                // A host line, so it never moves the cursor, but it does close its question.
+                if let Some(id) = v.get("question_id").and_then(Value::as_str)
+                    && open_question.as_ref().is_some_and(|(open, ..)| open == id)
+                {
+                    open_question = None;
+                    holds_tool_call = false;
+                }
+                continue;
+            }
             if crate::validation::is_host_chain_type(kind) {
                 continue;
             }
@@ -226,6 +236,20 @@ impl Runtime {
                     open_question = Some((id.to_string(), questions, asked, risk));
                 }
                 ("question_answered", Some(id)) if open_question.as_ref().is_some_and(|(open, ..)| open == id) => {
+                    open_question = None;
+                    holds_tool_call = false;
+                }
+                // Repair (issue #1189): a question whose tool call already has its result is over, even
+                // when the log never recorded it closing (a ghost from before `question_closed`); a turn
+                // that ended while the question held a tool call ends it too.
+                ("tool_result", _) => {
+                    let call = v.get("tool_call_id").and_then(Value::as_str);
+                    if open_question.as_ref().is_some_and(|(open, ..)| Some(open.as_str()) == call) {
+                        open_question = None;
+                        holds_tool_call = false;
+                    }
+                }
+                ("turn_end", _) if holds_tool_call => {
                     open_question = None;
                     holds_tool_call = false;
                 }
@@ -726,6 +750,30 @@ mod tests {
         assert!(rt.open_question.try_lock().unwrap().is_none());
         assert!(rt.activity.try_lock().unwrap().question_since.is_none());
         assert_eq!(rt.agent_seq.load(Ordering::SeqCst), 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Issue #1189: the repair on load. A question whose tool call already has a result, one a
+    /// `question_closed` line names, and a blocking one whose turn ended are all closed, and the
+    /// lead's own question (no held call) survives a turn end.
+    #[test]
+    fn a_ghost_question_is_closed_on_load() {
+        let dir = std::env::temp_dir().join(format!("colonizer-ghost-question-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ask = r#"{"seq":1,"type":"question","question_id":"call_1","questions":[],"kind":"exec_policy","blocking":true}"#;
+        let result = r#"{"seq":2,"type":"tool_result","tool_call_id":"call_1","output":"x","is_error":true}"#;
+        let closed = r#"{"seq":3,"type":"question_closed","question_id":"call_1","reason":"timeout"}"#;
+        let end = r#"{"seq":4,"type":"turn_end","is_error":false}"#;
+        let lead = r#"{"seq":1,"type":"question","question_id":"lead-1","questions":[]}"#;
+        let open = |lines: &[&str]| {
+            std::fs::write(dir.join("events.jsonl"), lines.join("\n") + "\n").unwrap();
+            Runtime::load(&dir).open_question.try_lock().unwrap().is_some()
+        };
+        assert!(open(&[ask]), "unanswered and unresolved stays open");
+        assert!(!open(&[ask, result]), "a result closes it");
+        assert!(!open(&[ask, closed]), "question_closed closes it");
+        assert!(!open(&[ask, end]), "a turn end closes a held call's question");
+        assert!(open(&[lead, end]), "the lead's own question survives a turn end");
         let _ = std::fs::remove_dir_all(dir);
     }
 
