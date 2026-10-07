@@ -34,8 +34,13 @@ pub const DEFAULT_AUTO_MAX_PARALLEL: u64 = 32;
 
 /// vCPUs the host keeps for itself in auto mode.
 const RESERVE_CPUS: u64 = 2;
-/// The floor of the memory reserve, in GiB; the reserve is the larger of this and a tenth of RAM.
+/// The floor of the memory reserve on a host of 32 GiB or more, in GiB; the reserve there is the
+/// larger of this and a tenth of RAM. Below 32 GiB it is a fifth of RAM, between 2 and 8 GiB.
 const RESERVE_FLOOR_GIB: u64 = 8;
+/// What a lone colony leaves the host when it has to be squeezed in, in GiB.
+const SMALL_RESERVE_GIB: u64 = 1;
+/// The smallest colony auto mode will boot, in GiB.
+const MIN_COLONY_GIB: u64 = 2;
 /// The most vCPUs one colony is given (the Settings schema's own bound).
 const MAX_COLONY_CPUS: u64 = 64;
 /// What one colony gets where the host cannot be measured: the `node` preset's size.
@@ -53,6 +58,19 @@ pub struct HostSample {
     pub memory_available: Option<u64>,
     /// The 1-minute load average.
     pub load1: Option<f64>,
+}
+
+impl HostSample {
+    /// A reading with the impossible values dropped: a zero core count, total or available memory,
+    /// and a negative or non-finite load are a probe that failed, not a host with nothing.
+    pub fn sanitized(self) -> Self {
+        Self {
+            cores: self.cores.filter(|&n| n > 0),
+            memory_total: self.memory_total.filter(|&n| n > 0),
+            memory_available: self.memory_available.filter(|&n| n > 0),
+            load1: self.load1.filter(|n| n.is_finite() && *n >= 0.0),
+        }
+    }
 }
 
 /// Where the live host numbers come from. The real one reads `/proc` or `vm_stat`; tests feed a
@@ -177,16 +195,23 @@ pub struct AutoSize {
 impl AutoSize {
     /// Sizes colonies from a host's totals. `cap` bounds the planned slot count.
     ///
-    /// `reserve = max(8 GiB, 10% of RAM)` and 2 vCPUs stay with the host. The colonies share the rest:
-    /// `slots = clamp((RAM - reserve) / target, 1, cap)` with a target of 8 GiB under 48 GiB of RAM,
-    /// 10 GiB under 96 and 11 GiB above; then `memory = (RAM - reserve) / slots` and
+    /// Below 32 GiB of RAM, `reserve = clamp(20% of RAM, 2, 8 GiB)`; from 32 GiB,
+    /// `max(8 GiB, 10% of RAM)`. 2 vCPUs stay with the host. The colonies share the rest:
+    /// `slots = clamp((RAM - reserve) / target, 1, cap)` with a target of 4 GiB up to 16 GiB of RAM,
+    /// 6 up to 32, 8 under 48, 10 under 96 and 11 above; then `memory = (RAM - reserve) / slots` and
     /// `cpus = max(2, (cores - 2) / slots)`.
     pub fn for_host(cores: usize, memory_total: u64, cap: u64) -> Self {
         let ram = memory_total / GIB;
-        let reserve_gib = (ram / 10).max(RESERVE_FLOOR_GIB);
+        let reserve_gib = if ram < 32 {
+            (ram / 5).clamp(2, RESERVE_FLOOR_GIB)
+        } else {
+            (ram / 10).max(RESERVE_FLOOR_GIB)
+        };
         let usable = ram.saturating_sub(reserve_gib);
         let target = match ram {
-            0..=47 => 8,
+            0..=16 => 4,
+            17..=32 => 6,
+            33..=47 => 8,
             48..=95 => 10,
             _ => 11,
         };
@@ -211,6 +236,24 @@ impl AutoSize {
             reserve_gib: RESERVE_FLOOR_GIB,
             reserve_cpus: RESERVE_CPUS,
         }
+    }
+
+    /// The size of a colony that must start on this host right now: the planned size, squeezed to
+    /// what is free less a small reserve (never under 2 GiB), on at most the cores there are.
+    pub fn fit_to(self, sample: &HostSample) -> Self {
+        let mut size = self;
+        if let Some(available) = sample.memory_available {
+            let room = (available / GIB).saturating_sub(SMALL_RESERVE_GIB);
+            let fitted = size.memory_gib.min(room.max(MIN_COLONY_GIB));
+            if fitted < size.memory_gib {
+                size.slots = 1;
+            }
+            size.memory_gib = fitted;
+        }
+        if let Some(cores) = sample.cores {
+            size.cpus = size.cpus.min((cores as u64).max(1));
+        }
+        size
     }
 
     pub fn from_sample(sample: &HostSample, cap: u64) -> Option<Self> {
@@ -247,7 +290,9 @@ pub struct Admission {
 /// memory, and the load leaves its vCPUs room below the cores less the reserve. `booting` colonies
 /// have been admitted but have not taken their memory and CPU yet, so they are charged in full;
 /// without that, a burst of admissions in the seconds before the host notices them would all pass.
-/// A measurement that is missing does not gate: the cap still does.
+/// A measurement that is missing does not gate: the cap still does. When nothing is running the
+/// first colony is always admitted (sized to fit by [`AutoSize::fit_to`]), whatever memory and load
+/// say: a small host must not deadlock waiting for room it never has.
 pub fn admission(size: &AutoSize, sample: &HostSample, running: usize, booting: usize, cap: usize) -> Admission {
     let booting = booting as u64;
     let cap_room = cap.saturating_sub(running);
@@ -263,6 +308,11 @@ pub fn admission(size: &AutoSize, sample: &HostSample, running: usize, booting: 
     let room_for = cap_room
         .min(memory_room.unwrap_or(usize::MAX))
         .min(cpu_room.unwrap_or(usize::MAX));
+    let room_for = if running == 0 && cap_room > 0 {
+        room_for.max(1)
+    } else {
+        room_for
+    };
     let waiting_reason = (room_for == 0).then(|| {
         if cap_room == 0 {
             WaitReason::Cap
@@ -362,6 +412,7 @@ impl Limit {
 
 /// The limit for a given sample and the colonies now holding a slot: the pure core of [`limit`].
 pub fn evaluate(modules: &ModulesConfig, sample: HostSample, sessions: &[Session]) -> Limit {
+    let sample = sample.sanitized();
     let running = sessions.iter().filter(|s| s.holds_slot()).count();
     let fixed = Limit {
         max_parallel: orgs::global_max_parallel(modules) as usize,
@@ -422,7 +473,7 @@ impl Capacity {
     pub async fn sample(&self) -> HostSample {
         let probe = self.probe.clone();
         match tokio::time::timeout(PROBE_TIMEOUT, tokio::task::spawn_blocking(move || probe.sample())).await {
-            Ok(Ok(sample)) => sample,
+            Ok(Ok(sample)) => sample.sanitized(),
             _ => HostSample::default(),
         }
     }
@@ -473,7 +524,8 @@ pub async fn boot_size(app: &crate::app::App, modules: &ModulesConfig) -> Option
     if !is_auto(modules) {
         return None;
     }
-    AutoSize::from_sample(&app.capacity.sample().await, auto_cap(modules))
+    let sample = app.capacity.sample().await;
+    Some(AutoSize::from_sample(&sample, auto_cap(modules))?.fit_to(&sample))
 }
 
 impl AutoSize {
