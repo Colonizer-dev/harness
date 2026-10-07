@@ -64,6 +64,8 @@ export function planView(plan: PlanUsage, nowMs: number = Date.now(), timeZone?:
     figure = plan.reset_unix != null && plan.reset_unix * 1000 > nowMs ? `Out · ${untilWords(plan.reset_unix, nowMs)}` : "Out";
     const reset = resetWords(plan, nowMs, timeZone);
     details.push(`Limit reached — ${reset}`);
+    // The account fallback is carrying the work (issue #1130): say where Claude's roles run.
+    if (plan.fallback) details.push(`Claude out, running on ${plan.fallback.provider_name} (${plan.fallback.model}) until the reset`);
   } else if (balance && balance.error == null && balance.remaining != null) {
     if (balance.pct_left != null && balance.limit != null) {
       usedPct = Math.max(0, Math.min(100, 100 - balance.pct_left));

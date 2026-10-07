@@ -10,7 +10,7 @@
 import { useState, type ReactElement } from "react";
 
 import { PROVIDER_CATALOG } from "../providerCatalog";
-import { resetWords } from "../resetTime";
+import { resetClock, resetWords, untilWords } from "../resetTime";
 import type { Session, StatusQuota } from "../types";
 
 /** Which scope a quota pause covers: the whole account, or named exhausted providers. */
@@ -57,12 +57,37 @@ export function quotaParkedSessions(sessions: Session[]): Session[] {
 export const quotaBannerKey = (quota: StatusQuota): string =>
   `${quota.reset_unix ?? ""}|${quota.reset_at ?? ""}|${quotaPauseKind(quota)}`;
 
-/** The paused quota to banner, or null when there is none or the operator dismissed this one. */
+/**
+ * The quota to banner, or null when there is none or the operator dismissed this one: a pause, or
+ * the Claude account being out while its fallback model carries the work (issue #1130).
+ */
 export const visibleQuotaBanner = (
   quota: StatusQuota | null | undefined,
   dismissed: ReadonlySet<string>,
 ): StatusQuota | null =>
-  quota && quota.paused && !dismissed.has(quotaBannerKey(quota)) ? quota : null;
+  quota && (quota.paused || quota.fallback) && !dismissed.has(quotaBannerKey(quota)) ? quota : null;
+
+/**
+ * The fallback banner's words — "Claude out, running on MiniMax until 19:51" — or null when the
+ * account is not out with a fallback carrying it. The reset reads as a local time and a countdown,
+ * as the pause banner's does; nothing is paused, so the second line says what keeps running.
+ */
+export function quotaFallbackParts(
+  quota: StatusQuota,
+  nowMs: number = Date.now(),
+  timeZone?: string,
+): { title: string; effect: string } | null {
+  const fallback = quota.fallback;
+  if (!fallback || quota.paused) return null;
+  const reset = fallback.reset_unix ?? quota.reset_unix;
+  let until = "";
+  if (reset != null && reset * 1000 > nowMs) until = ` until ${resetClock(reset, nowMs, timeZone)} · in ${untilWords(reset, nowMs)}`;
+  else if (fallback.reset_at ?? quota.reset_at) until = ` until ${fallback.reset_at ?? quota.reset_at}`;
+  return {
+    title: `Claude out, running on ${fallback.provider_name}${until}`,
+    effect: `Roles that use Claude run on ${fallback.model} and go back to Claude by themselves at the reset. Restricted tasks need a trusted provider and park if it is not.`,
+  };
+}
 
 /** `dismissed` plus `quota`'s key; earlier keys stay, so a re-paused queue re-shows the banner. */
 export const dismissQuotaBanner = (dismissed: ReadonlySet<string>, quota: StatusQuota): ReadonlySet<string> =>
@@ -183,6 +208,26 @@ export function QuotaBanner({
   onDismiss: () => void;
 }): ReactElement | null {
   const [busy, setBusy] = useState(false);
+  const carried = quota ? quotaFallbackParts(quota) : null;
+  if (quota && carried) {
+    return (
+      <div className="px-6 pt-4">
+        <div
+          role="status"
+          aria-label={`${carried.title}. ${carried.effect}`}
+          className="flex flex-wrap items-start gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn"
+        >
+          <span className="min-w-0 flex-1 basis-64">
+            <strong className="font-semibold">{carried.title}</strong>
+            <span className="text-small-lg">{` · ${carried.effect}`}</span>
+          </span>
+          <button type="button" onClick={onDismiss} className="ml-auto shrink-0 cursor-pointer text-small-lg font-semibold hover:underline">
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!quota?.paused) return null;
   const parked = quotaParkedSessions(sessions);
   const resumeAll = async () => {

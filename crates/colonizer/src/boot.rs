@@ -1368,6 +1368,32 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         bail!("{message}");
     }
     let used = routing.used(&runner_env);
+    // The Claude account fallback (#1130): a colony of the Claude Code module asks the gateway, before
+    // each request that would go to Anthropic, whether the account is out and where to send it
+    // instead. The fallback's provider and model join the colony's recorded scope so the gateway
+    // carries those requests; nothing is probed or refused here, since the fallback may never be used.
+    let account_fallback = if agent.id == "claude-code" {
+        let model = setting_str(&agent_choice, &agent.schema, "account_fallback_model");
+        let model = model.trim().to_string();
+        routing
+            .providers
+            .iter()
+            .find(|p| providers::names_model_on(&model, &p.id))
+            .map(|p| (p.id.clone(), model.clone()))
+    } else {
+        None
+    };
+    if account_fallback.is_some() {
+        runner_env.insert(
+            "COLONIZER_ACCOUNT_ROUTE".into(),
+            json!({
+                "url": format!("http://host.microsandbox.internal:{}/account-route", app.cfg.gateway_bind.port()),
+                "headers": {crate::gateway::COLONY_HEADER: gateway_token},
+            })
+            .to_string()
+            .into(),
+        );
+    }
     // Recorded on the session because the gateway needs it long after boot: every proxied call is
     // checked against these sets (issue #409), so a colony's token opens only the providers — and
     // only the models — its model settings route to. Before the token is written (issue #681): the
@@ -1375,6 +1401,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.update_session(id, |x| {
         x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect());
         x.allowed_models = Some(routing.used_models(&runner_env));
+        if let Some((provider, model)) = &account_fallback {
+            if let Some(allowed) = x.allowed_providers.as_mut()
+                && !allowed.contains(provider)
+            {
+                allowed.push(provider.clone());
+            }
+            if let Some(allowed) = x.allowed_models.as_mut()
+                && !allowed.contains(model)
+            {
+                allowed.push(model.clone());
+            }
+        }
         // What the sensitivity resolution above settled on, for the cockpit to show (issue #704).
         x.model_substitutions = substitutions.clone();
     })

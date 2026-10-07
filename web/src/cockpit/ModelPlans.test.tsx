@@ -115,3 +115,22 @@ describe("PlanList", () => {
     expect(renderToStaticMarkup(<PlanList plans={null} error="403" />)).toContain("Plan usage unavailable: 403");
   });
 });
+
+describe("the account fallback on the Claude plan row (issue #1130)", () => {
+  it("says where Claude's roles run while the plan is out", () => {
+    const out = planView(
+      plan({
+        id: "anthropic",
+        name: "Claude",
+        kind: "claude",
+        exhausted: true,
+        reset_unix: NOW / 1000 + 3600,
+        fallback: { model: "minimax/MiniMax-M3.1", provider_name: "MiniMax" },
+      }),
+      NOW,
+    );
+    expect(out.details).toContain("Claude out, running on MiniMax (minimax/MiniMax-M3.1) until the reset");
+    const none = planView(plan({ id: "anthropic", name: "Claude", kind: "claude", exhausted: true, reset_unix: NOW / 1000 + 3600 }), NOW);
+    expect(none.details.join(" ")).not.toContain("running on");
+  });
+});

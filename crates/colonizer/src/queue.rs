@@ -1603,12 +1603,41 @@ pub(crate) fn quota_resume_due(
 /// anywhere, the account record included — an account-parked colony stays parked while the account
 /// record holds and resumes when it lapses.
 pub(crate) async fn resume_quota_parked(app: &Shared) {
+    // A colony the Claude account's cap parked resumes at once when the account fallback can carry
+    // its task (#1130): it reads as if the account were not out. A task the fallback may not carry
+    // (restricted work, an untrusted fallback) stays parked until the account lapses.
+    let account_parked: Vec<(String, bool)> = {
+        let sessions = app.sessions.read().await.clone();
+        let mut out = Vec::new();
+        if app.gateway.is_account_quota_exhausted() {
+            for s in sessions
+                .iter()
+                .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked))
+            {
+                let carried = matches!(
+                    crate::gateway::route_for(app, s).await,
+                    crate::gateway::AccountRoute::Fallback { .. }
+                );
+                out.push((s.id.clone(), carried));
+            }
+        }
+        out
+    };
     let (ids, kept_ids): (Vec<String>, Vec<String>) = {
         let sessions = app.sessions.read().await;
         let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
         let any_exhausted = !app.gateway.quota_exhausted().is_empty();
+        let others_exhausted = app
+            .gateway
+            .quota_exhausted()
+            .iter()
+            .any(|(id, _, _)| id != crate::gateway::ACCOUNT_QUOTA_ID);
         let now = Utc::now().timestamp();
-        let recovered = |s: &Session| quota_resume_due(s, &ids, &|pid| app.gateway.is_quota_exhausted(pid), any_exhausted, now);
+        let recovered = |s: &Session| {
+            let carried = account_parked.iter().any(|(id, carried)| *carried && *id == s.id);
+            let any = if carried { others_exhausted } else { any_exhausted };
+            quota_resume_due(s, &ids, &|pid| app.gateway.is_quota_exhausted(pid), any, now)
+        };
         let mut cold: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for s in sessions
@@ -2840,6 +2869,47 @@ mod tests {
         let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
         assert_eq!(parked.status, SessionStatus::Stopped, "the saved record still holds");
         assert!(parked.attention.is_some(), "the attention stays until recovery");
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1130: with an account fallback set, the Claude account's cap is no pause, and a colony
+    /// it parked resumes on the fallback at once — except one whose task the fallback may not carry,
+    /// which stays parked until the account lapses.
+    #[tokio::test]
+    async fn an_account_parked_colony_resumes_on_the_fallback_unless_its_task_forbids_it() {
+        let root = std::env::temp_dir().join(format!("colonizer-account-fallback-resume-{}", crate::util::short_id()));
+        write_providers(&root, &["minimax"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .agent
+            .settings
+            .insert("account_fallback_model".into(), json!("minimax/MiniMax-M3.1"));
+        app.gateway
+            .mark_account_quota_exhausted(Some("7am (UTC)".into()), Some(Utc::now().timestamp() + 3600));
+        let mut restricted = quota_parked("restricted", "provider quota exhausted (resets 7am (UTC))");
+        restricted.sensitivity = Some("restricted".into());
+        *app.sessions.write().await = vec![
+            quota_parked("plain", "provider quota exhausted (resets 7am (UTC))"),
+            restricted,
+        ];
+        let status = crate::providers::quota_status(&app).await;
+        assert!(!status.paused, "the fallback carries the work, so the queue does not pause");
+        assert_eq!(
+            status.fallback.as_ref().map(|f| f["model"].as_str()),
+            Some(Some("minimax/MiniMax-M3.1"))
+        );
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let status_of = |id: &str| sessions.iter().find(|s| s.id == id).unwrap().status;
+        assert_eq!(status_of("plain"), SessionStatus::Queued, "resumed on the fallback");
+        assert_eq!(
+            status_of("restricted"),
+            SessionStatus::Stopped,
+            "minimax is not marked trusted"
+        );
         drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }

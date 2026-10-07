@@ -467,3 +467,107 @@ async fn scoped_tokens_are_refused() {
     }
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Issue #1130: a switch off Claude says which per-colony and org overrides still name a Claude
+/// model, and `clear_leftovers` removes them. A colony the switch repoints is not a leftover.
+#[tokio::test]
+async fn a_switch_reports_the_claude_overrides_it_leaves_and_can_clear_them() {
+    let (root, app) = install("leftovers").await;
+    add_parked(&app, "g1", "gamma").await;
+    add_parked(&app, "g2", "gamma").await;
+    app.update_session("g1", |s| s.model_override = Some("opus".into())).await;
+    app.update_session("g2", |s| s.subagent_model_override = Some("claude-sonnet-5".into()))
+        .await;
+    // A provider-routed override is not a Claude name.
+    add_parked(&app, "g3", "gamma").await;
+    app.update_session("g3", |s| s.model_override = Some("zai/glm-5".into()))
+        .await;
+    let mut orgs_file: std::collections::BTreeMap<String, OrgSettings> =
+        crate::util::read_json_or_default(&app.orgs_file()).unwrap();
+    orgs_file.get_mut("gamma").unwrap().agent = Some(orgs::AgentOverrides {
+        subagent_model: Some("sonnet".into()),
+        ..Default::default()
+    });
+    std::fs::write(app.orgs_file(), serde_json::to_vec(&orgs_file).unwrap()).unwrap();
+
+    let body = json!({"scope": "install", "roles": {"subagent_model": "zai/glm-5"}, "dry_run": true});
+    let plan = act(&app, body).await.unwrap();
+    let left = &plan["leftover_claude"];
+    let colonies: Vec<(&str, &str, &str)> = left["colonies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["id"].as_str().unwrap(),
+                c["role"].as_str().unwrap(),
+                c["model"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        colonies,
+        [("g1", "model", "opus"), ("g2", "subagent_model", "claude-sonnet-5")],
+        "{plan}"
+    );
+    assert_eq!(
+        left["orgs"],
+        json!([{"org": "gamma", "role": "subagent_model", "model": "sonnet"}])
+    );
+    assert_eq!(left["cleared"], false);
+
+    // A switch that stays on Claude has nothing to report.
+    let quiet = act(
+        &app,
+        json!({"scope": "install", "roles": {"model": "sonnet"}, "dry_run": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(quiet["leftover_claude"]["colonies"], json!([]));
+
+    // Applied without the option, the report is the answer and nothing is cleared.
+    let reported = act(&app, json!({"scope": "install", "roles": {"subagent_model": "zai/glm-5"}}))
+        .await
+        .unwrap();
+    assert_eq!(reported["leftover_claude"]["cleared"], false);
+    assert_eq!(app.session("g1").await.unwrap().model_override.as_deref(), Some("opus"));
+
+    // "Clear these too".
+    let cleared = act(&app, json!({"scope": "install", "roles": {}, "clear_leftovers": true}))
+        .await
+        .unwrap();
+    assert_eq!(cleared["leftover_claude"]["cleared"], true, "{cleared}");
+    assert_eq!(app.session("g1").await.unwrap().model_override, None);
+    assert_eq!(app.session("g2").await.unwrap().subagent_model_override, None);
+    assert_eq!(
+        app.session("g3").await.unwrap().model_override.as_deref(),
+        Some("zai/glm-5"),
+        "a provider route is left alone"
+    );
+    assert_eq!(app.org_settings("gamma").agent.unwrap().subagent_model, None);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The account fallback is a role of the claude-code module, install-wide, and it names a provider.
+#[tokio::test]
+async fn the_account_fallback_role_is_install_wide_and_names_a_provider_model() {
+    let (root, app) = install("fallback-role").await;
+    let schema = json!({"type": "object", "properties": {
+        "account_fallback_model": {"type": "string", "title": "If Claude runs out, use", "default": ""},
+        "model": role(),
+    }});
+    let roles = module_roles(&schema);
+    assert_eq!(roles.last().map(|(r, _)| r.as_str()), Some("account_fallback_model"));
+
+    assert!(
+        role_error_for(&app, "sonnet").is_some(),
+        "a Claude model cannot be the fallback"
+    );
+    assert!(role_error_for(&app, "zai/glm-5").is_none());
+    assert!(role_error_for(&app, "nobody/glm-5").is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn role_error_for(app: &Shared, model: &str) -> Option<String> {
+    quota_cards::role_error(app, "account_fallback_model", model)
+}

@@ -14,13 +14,19 @@ import type { ModelAssignments, ModelProfile, ModelSwitchReply, SwitchableModel 
 import { ColonizePane, DRAFT_START } from "./Colonize";
 import { Header } from "./Header";
 import {
+  ACCOUNT_FALLBACK_NOTE,
   EMPTY_DRAFT,
   INHERIT,
   INSTALL_SCOPE,
   ModelSwitcher,
+  clearLeftoversRequest,
   confirmLine,
   draftDirty,
   groupModels,
+  groupsForRole,
+  hasLeftovers,
+  inheritOptionLabel,
+  leftoverLine,
   isModelCommand,
   modelHealth,
   modelOptionLabel,
@@ -416,7 +422,7 @@ describe("the demo", () => {
     const api = createMockApi();
     const a = await api.modelAssignments();
     expect(shortModelName(a.install.roles.find((r) => r.role === "model")!.value, a.models)).toBe("Opus 5.5");
-    expect(a.install.roles.map((r) => r.role)).toEqual(["model", "subagent_model", "background_model", "summary_model", "model_low", "model_high"]);
+    expect(a.install.roles.map((r) => r.role)).toEqual(["model", "subagent_model", "background_model", "summary_model", "model_low", "model_high", "account_fallback_model"]);
     const acme = a.orgs.find((o) => o.org === "acme")!;
     expect(acme.roles.find((r) => r.role === "model")).toMatchObject({ value: "strix/ds4-flash", source: "org" });
     expect(a.models.some((m) => m.out_of_quota), "a disabled model to show").toBe(true);
@@ -443,5 +449,50 @@ describe("the demo", () => {
     );
     expect(html).toContain('aria-label="Models · main model Sonnet"');
     expect(html).toContain('role="dialog"');
+  });
+});
+
+describe("the account fallback role and the leftover Claude report (issue #1130)", () => {
+  const withFallback: ModelAssignments = {
+    ...ASSIGNMENTS,
+    install: { ...ASSIGNMENTS.install, roles: [...ASSIGNMENTS.install.roles, row("account_fallback_model", "If Claude runs out, use", "zai/glm-5", "install", false)] },
+  };
+
+  it("offers only models on other providers, with an Off choice and a plain note", () => {
+    const providers = groupsForRole("account_fallback_model", groupModels(MODELS)).map((g) => g.provider);
+    expect(providers).toEqual(["zai", "strix", "bailian"]);
+    expect(groupsForRole("model", groupModels(MODELS)).map((g) => g.provider)).toContain("anthropic");
+    expect(inheritOptionLabel("account_fallback_model", "Module default")).toBe("Off — wait for the reset");
+    expect(inheritOptionLabel("model", "Module default")).toBe("Module default");
+
+    const html = render({ initialAssignments: withFallback, initialOpen: true });
+    expect(html).toContain('aria-label="If Claude runs out, use model"');
+    expect(html).toContain(ACCOUNT_FALLBACK_NOTE);
+    expect(html).toContain("Off — wait for the reset");
+  });
+
+  const left = {
+    colonies: [{ id: "c1", role: "model", model: "opus" }],
+    orgs: [{ org: "acme", role: "subagent_model", model: "sonnet" }],
+    cleared: false,
+  };
+
+  it("words the leftovers and clears them with a request for the same scope", () => {
+    expect(hasLeftovers(left)).toBe(true);
+    expect(hasLeftovers({ ...left, cleared: true })).toBe(false);
+    expect(hasLeftovers({ colonies: [], orgs: [], cleared: false })).toBe(false);
+    expect(hasLeftovers(undefined)).toBe(false);
+    expect(leftoverLine(left)).toBe("1 colony and 1 org override still name a Claude model (opus, sonnet), which uses the Claude plan.");
+    expect(clearLeftoversRequest(INSTALL_SCOPE)).toEqual({ scope: "install", roles: {}, apply: "new", clear_leftovers: true });
+    expect(clearLeftoversRequest({ kind: "org", org: "acme" })).toEqual({ scope: "org", org: "acme", roles: {}, apply: "new", clear_leftovers: true });
+  });
+
+  it("lists them in the popover with the clear option", () => {
+    const html = render({ initialOpen: true, initialLeftovers: left });
+    expect(html).toContain("data-leftovers");
+    expect(html).toContain("colony c1 · model opus");
+    expect(html).toContain("org acme · subagent_model sonnet");
+    expect(html).toContain("Clear these too");
+    expect(render({ initialOpen: true })).not.toContain("Clear these too");
   });
 });
