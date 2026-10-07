@@ -6,12 +6,36 @@ import { allowEntryError, type DocsLoopView, type DocsReport } from "./docsLoop"
 type DocsLoopApi = Pick<Api, "docsLoop" | "saveDocsLoop" | "setDocsLoopTarget" | "runDocsLoop">;
 
 export function mockDocsLoop(now: () => string): DocsLoopApi {
+  const finding = (file: string, message: string, kind: DocsReport["repos"][number]["findings"][number]["kind"] = "undocumented_change") => ({ kind, file, message });
   const view: DocsLoopView = {
     name: "Docs & README",
-    settings: { allow: [], interval_hours: 24, cooldown_hours: 24 },
-    enabled: false,
-    next_run_at: null,
-    last_report: null,
+    settings: { allow: ["acme/webshop", "acme/design-system", "kontinuum-ai/kontinuum"], interval_hours: 24, cooldown_hours: 24 },
+    enabled: true,
+    next_run_at: new Date(Date.now() + 9 * 3_600_000).toISOString(),
+    last_report: {
+      id: "docs_seed01",
+      at: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+      trigger: "schedule",
+      dry_run: false,
+      external_writes_blocked: false,
+      repos: [
+        {
+          repo: "acme/webshop",
+          head: "4f1c2a9e0b7d",
+          since: "9a8b7c6d5e4f",
+          findings: [
+            finding("docs/loops.md", "`src/loops.rs` changed in #128 without an update to docs/loops.md, which documents it"),
+            finding("README.md", "docs/install.md#linux: no heading or anchor #linux in docs/install.md", "broken_anchor"),
+          ],
+          more: 0,
+          action: "dispatched",
+          reason: "dispatched docs colony close0987",
+          colony: "close0987",
+        },
+        { repo: "acme/design-system", head: "b33f10c", since: "a01d9e2", findings: [finding("docs/tokens.md", "`src/tokens.ts` changed in #74 without an update to docs/tokens.md")], more: 0, action: "skipped", reason: "a docs colony went out 6 hours ago; the cooldown holds until tomorrow", colony: null },
+        { repo: "kontinuum-ai/kontinuum", head: "77aa5c1", since: "77aa5c1", findings: [], more: 0, action: "clean", reason: "nothing has drifted since the last run", colony: null },
+      ],
+    },
     history: [],
     limits: { min_interval_hours: 1, max_interval_hours: 168, max_cooldown_hours: 720 },
   };

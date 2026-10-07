@@ -3,29 +3,22 @@
 // dispatched or skipped and why.
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { Badge, Button, Spinner, cx, inputClass, type Tone } from "../components/ui";
+import { Button, Spinner, cx, inputClass } from "../components/ui";
+import { DetailSection, GroupedDetails, LoopCard, scheduleLine } from "./LoopCard";
+import { IconBook } from "./loopIcons";
+import { BUILTIN_HISTORY_ID, type DetailGroupDef, type DetailItem } from "./loopHistory";
 import {
-  DOCS_ACTION_LABEL,
   DOCS_INTERVALS,
   DOCS_KIND_LABEL,
   allowEntryError,
   describeInterval,
   findingPlace,
   summarizeReport,
-  type DocsAction,
   type DocsLoopSettings,
   type DocsLoopView,
   type DocsReport,
 } from "./docsLoop";
 import { relative } from "./loops";
-
-const ACTION_TONE: Record<DocsAction, Tone> = {
-  clean: "ok",
-  dispatched: "accent",
-  skipped: "neutral",
-  report_only: "info",
-  error: "err",
-};
 
 /** The card, loading and saving through the API. */
 export function DocsLoopCard({ onOpenColony }: { onOpenColony: (id: string) => void }): ReactElement {
@@ -93,6 +86,7 @@ export function DocsLoopPanel({
   onSave,
   onRun,
   onOpenColony,
+  open,
 }: {
   view: DocsLoopView;
   /** The last dry run's report: shown, never stored. */
@@ -103,6 +97,8 @@ export function DocsLoopPanel({
   onSave: (settings: DocsLoopSettings) => void;
   onRun: (dryRun: boolean) => void;
   onOpenColony: (id: string) => void;
+  /** Start with the detail drawer open (tests, links). */
+  open?: boolean;
 }): ReactElement {
   const [entry, setEntry] = useState("");
   const [touched, setTouched] = useState(false);
@@ -116,137 +112,134 @@ export function DocsLoopPanel({
     setTouched(false);
   };
   const report = dryRun ?? view.last_report;
+  const ready = settings.allow.length > 0;
   return (
-    <section className="mt-6 rounded-xl border border-border p-4" aria-label="Docs & README loop">
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="min-w-0 flex-1 basis-72">
-          <div className="flex items-center gap-2">
-            <h2 className="m-0 text-lead font-semibold text-text">{view.name}</h2>
-            <Badge tone="neutral">built in</Badge>
-            <Badge tone={view.enabled ? "ok" : "neutral"}>{view.enabled ? "On" : "Off"}</Badge>
-          </div>
-          <p className="mt-1 text-small-lg text-muted">
-            Finds docs that fell behind the code — merged changes their docs never caught up with, broken links and anchors, commands that are gone, changelog gaps — without a model, then sends one docs-only colony per repository.
-            {view.enabled
-              ? ` Runs ${describeInterval(settings.interval_hours)}${view.next_run_at ? `, next ${relative(view.next_run_at, now)}` : ""}.`
-              : " Off until you add a repository or org."}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+    <LoopCard
+      historyId={BUILTIN_HISTORY_ID.docs}
+      icon={<IconBook />}
+      name={view.name}
+      purpose="Finds docs that fell behind the code, with no model, and sends one docs-only colony per repository."
+      enabled={view.enabled}
+      running={false}
+      schedule={scheduleLine(describeInterval(settings.interval_hours), view.enabled, view.next_run_at, ready, now)}
+      scope={{ text: ready ? settings.allow.join(", ") : "Not set up: add a repository or an org", ready }}
+      defaultOpen={open}
+      refreshKey={view.last_report?.id}
+      onOpenColony={onOpenColony}
+      actions={
+        <>
+          <Button size="sm" variant="secondary" disabled={!view.enabled || busy} onClick={() => onRun(true)} title="Report the findings; dispatch and record nothing">
+            Dry run
+          </Button>
           <Button size="sm" variant="secondary" disabled={!view.enabled || busy} onClick={() => onRun(false)}>
             Run now
           </Button>
-          <Button size="sm" variant="ghost" disabled={!view.enabled || busy} onClick={() => onRun(true)} title="Report the findings; dispatch and record nothing">
-            Dry run
-          </Button>
+        </>
+      }
+    >
+      <DetailSection title={dryRun ? "Dry run" : "Last run"}>
+        {report ? <DocsReportView report={report} now={now} onOpenColony={onOpenColony} /> : <p className="m-0 text-body-sm text-faint">{view.enabled ? "No run yet." : "Off until you add a repository or org."}</p>}
+      </DetailSection>
+      <DetailSection title="Settings">
+        <div className="space-y-4">
+          <div>
+            <div className="mb-1.5 text-small-lg text-muted">Runs on</div>
+            <div className="flex flex-wrap items-center gap-1.5" aria-label="Runs on">
+              {settings.allow.map((a) => (
+                <span key={a} className="inline-flex items-center gap-1 rounded-full border border-border bg-panel px-2.5 py-1 font-mono text-meta-lg text-text">
+                  {a}
+                  <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-faint hover:text-text" aria-label={`stop running on ${a}`} disabled={busy} onClick={() => onTarget(a, false)}>
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+            <form
+              className="mt-2 flex flex-wrap items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                add();
+              }}
+            >
+              <input className={cx(inputClass, "w-56")} placeholder="owner or owner/name" aria-label="repository or org to run on" value={entry} onChange={(e) => setEntry(e.target.value)} />
+              <Button size="sm" variant="primary" type="submit" disabled={busy}>
+                Enable
+              </Button>
+              {entryError && <span className="text-small text-err">{entryError}</span>}
+            </form>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-small-lg text-muted">
+            <label className="flex items-center gap-2">
+              Runs
+              <select className={cx(inputClass, "w-auto")} value={settings.interval_hours} disabled={busy} onChange={(e) => onSave({ ...settings, interval_hours: Number(e.target.value) })}>
+                {DOCS_INTERVALS.some((i) => i.hours === settings.interval_hours) ? null : <option value={settings.interval_hours}>{describeInterval(settings.interval_hours)}</option>}
+                {DOCS_INTERVALS.map((i) => (
+                  <option key={i.hours} value={i.hours}>
+                    {i.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              Cooldown after a dispatch
+              <select className={cx(inputClass, "w-auto")} value={settings.cooldown_hours} disabled={busy} onChange={(e) => onSave({ ...settings, cooldown_hours: Number(e.target.value) })}>
+                {[6, 12, 24, 48, 168].includes(settings.cooldown_hours) ? null : <option value={settings.cooldown_hours}>{settings.cooldown_hours} hours</option>}
+                {[6, 12, 24, 48, 168].map((h) => (
+                  <option key={h} value={h}>
+                    {h === 168 ? "1 week" : `${h} hours`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-1.5" aria-label="Runs on">
-        {settings.allow.map((a) => (
-          <span key={a} className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 font-mono text-meta-lg text-text">
-            {a}
-            <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-faint hover:text-text" aria-label={`stop running on ${a}`} disabled={busy} onClick={() => onTarget(a, false)}>
-              ✕
-            </button>
-          </span>
-        ))}
-        <form
-          className="flex items-center gap-1.5"
-          onSubmit={(e) => {
-            e.preventDefault();
-            add();
-          }}
-        >
-          <input
-            className={cx(inputClass, "h-7 w-48 py-0 text-small-lg")}
-            placeholder="owner or owner/name"
-            aria-label="repository or org to run on"
-            value={entry}
-            onChange={(e) => setEntry(e.target.value)}
-          />
-          <Button size="sm" variant="primary" type="submit" disabled={busy}>
-            Enable
-          </Button>
-        </form>
-        {entryError && <span className="text-small text-err">{entryError}</span>}
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-3 text-small-lg text-muted">
-        <label className="flex items-center gap-1.5">
-          Runs
-          <select
-            className={cx(inputClass, "h-7 w-auto py-0 text-small-lg")}
-            value={settings.interval_hours}
-            disabled={busy}
-            onChange={(e) => onSave({ ...settings, interval_hours: Number(e.target.value) })}
-          >
-            {DOCS_INTERVALS.some((i) => i.hours === settings.interval_hours) ? null : <option value={settings.interval_hours}>{describeInterval(settings.interval_hours)}</option>}
-            {DOCS_INTERVALS.map((i) => (
-              <option key={i.hours} value={i.hours}>
-                {i.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5">
-          Cooldown after a dispatch
-          <select
-            className={cx(inputClass, "h-7 w-auto py-0 text-small-lg")}
-            value={settings.cooldown_hours}
-            disabled={busy}
-            onChange={(e) => onSave({ ...settings, cooldown_hours: Number(e.target.value) })}
-          >
-            {[6, 12, 24, 48, 168].includes(settings.cooldown_hours) ? null : <option value={settings.cooldown_hours}>{settings.cooldown_hours} hours</option>}
-            {[6, 12, 24, 48, 168].map((h) => (
-              <option key={h} value={h}>
-                {h === 168 ? "1 week" : `${h} hours`}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      {report ? <DocsReportView report={report} now={now} onOpenColony={onOpenColony} /> : view.enabled ? <p className="mt-3 text-small-lg text-faint">No run yet.</p> : null}
-    </section>
+      </DetailSection>
+    </LoopCard>
   );
 }
 
-/** One run's report: a summary, then each repository's action, reason and findings. */
+const DOCS_GROUPS: DetailGroupDef[] = [
+  { key: "dispatched", label: "Colony dispatched", tone: "accent" },
+  { key: "error", label: "Failed", tone: "err" },
+  { key: "report_only", label: "Report only", tone: "info" },
+  { key: "skipped", label: "Skipped", tone: "neutral" },
+  { key: "clean", label: "Clean", tone: "ok" },
+];
+
+/** One run's report: a summary, repositories grouped by what happened (identical reasons on one line), then the findings. */
 export function DocsReportView({ report, now = Date.now(), onOpenColony }: { report: DocsReport; now?: number; onOpenColony: (id: string) => void }): ReactElement {
+  const items: DetailItem[] = report.repos.map((r) => ({ group: r.action, repo: r.repo, reason: r.reason, colony: r.colony ?? undefined }));
+  const withFindings = report.repos.filter((r) => r.findings.length > 0);
   return (
-    <div className="mt-4 border-t border-border pt-3">
+    <div className="space-y-3">
       <div className="text-small-lg text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Dry run" : "Last run"}</span> {relative(report.at, now)} · {summarizeReport(report)}
       </div>
-      <ul className="m-0 mt-2 list-none space-y-2 p-0">
-        {report.repos.map((r) => (
-          <li key={r.repo} className="text-small-lg">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-small text-text">{r.repo}</span>
-              <Badge tone={ACTION_TONE[r.action]}>{DOCS_ACTION_LABEL[r.action]}</Badge>
-              <span className="text-muted">{r.reason}</span>
-              {r.colony && (
-                <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-accent hover:underline" onClick={() => onOpenColony(r.colony!)}>
-                  Open colony
-                </button>
-              )}
-            </div>
-            {r.findings.length > 0 && (
-              <ul className="m-0 mt-1 list-disc space-y-0.5 pl-5 text-muted">
-                {r.findings.map((f, i) => (
-                  <li key={i}>
-                    <span className="text-text">{DOCS_KIND_LABEL[f.kind]}</span>
-                    {findingPlace(f) ? <span className="font-mono text-meta-lg text-faint"> {findingPlace(f)}</span> : null}
-                    {f.advisory ? <span className="text-faint"> (advisory)</span> : null} — {f.message}
-                  </li>
-                ))}
-                {r.more > 0 && <li>…and {r.more} more</li>}
-              </ul>
-            )}
-          </li>
-        ))}
-      </ul>
+      <GroupedDetails items={items} defs={DOCS_GROUPS} unit={{ one: "repository", many: "repositories" }} onOpenColony={onOpenColony} />
+      {withFindings.length > 0 && (
+        <details className="overflow-hidden rounded-xl border border-border bg-panel">
+          <summary className="cursor-pointer list-none px-3.5 py-2.5 text-body font-medium text-text [&::-webkit-details-marker]:hidden">
+            Findings <span className="rounded-full bg-panel-2 px-2 text-small tabular-nums text-muted">{withFindings.reduce((n, r) => n + r.findings.length + r.more, 0)}</span>
+          </summary>
+          <ul className="m-0 list-none divide-y divide-border border-t border-border p-0">
+            {withFindings.map((r) => (
+              <li key={r.repo} className="px-3.5 py-2.5 text-small-lg">
+                <span className="font-mono text-small text-text">{r.repo}</span>
+                <ul className="m-0 mt-1 list-disc space-y-0.5 pl-5 text-muted">
+                  {r.findings.map((f, i) => (
+                    <li key={i}>
+                      <span className="text-text">{DOCS_KIND_LABEL[f.kind]}</span>
+                      {findingPlace(f) ? <span className="font-mono text-meta-lg text-faint"> {findingPlace(f)}</span> : null}
+                      {f.advisory ? <span className="text-faint"> (advisory)</span> : null} — {f.message}
+                    </li>
+                  ))}
+                  {r.more > 0 && <li>…and {r.more} more</li>}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }

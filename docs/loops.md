@@ -121,13 +121,13 @@ Links to the old per-loop anchors still resolve on this page:
 
 Each run is a full colony with its own microVM and model spend. A frequent loop on a large
 repository adds up: start daily, and let the loop stop itself when its goal is met. The loop's
-history lists every run with its status, pull request and cost.
+detail view charts its runs and their spend for the last 7, 30 or 90 days (`GET /api/loops/{id}/history`), and lists every run with its outcome, pull request and cost.
 
 ## API
 
 `GET/POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`,
-`GET /api/loops/{id}/runs` — see [protocol.md](protocol/loops.md). Loops are saved in
-`<config_dir>/loops.json`; the built-in disk cleanup in `<config_dir>/disk-cleanup.json`. The
+`GET /api/loops/{id}/runs`, `GET /api/loops/{id}/history?days=` — see [protocol.md](protocol/loops.md). Loops are saved in
+`<config_dir>/loops.json`; their run history for 90 days in `<config_dir>/loop-history.json`; the built-in disk cleanup in `<config_dir>/disk-cleanup.json`. The
 merge-train loop is `GET/PUT /api/merge-train/loop` and
 `POST /api/merge-train/loop/run[?dry_run=true]`, saved with its history in
 `<config_dir>/merge-train-loop.json`. The supply-chain loop has its own routes:

@@ -2,6 +2,7 @@
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, isLive, now, sleep } from "../../mockShared";
 import { mockDocsLoop } from "../../cockpit/docsLoopMock";
+import { buildHistory } from "./mockHistory";
 import type { MergeLoopReport, RedTeamRun, StartRedTeamRunRequest, SupplyChainReport, TsAnyReport } from "../../types";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
@@ -163,6 +164,7 @@ export function loopsMock(ms: MockState): LoopsApi {
       if (!body.dry_run) ms.tsAnyLoop = { ...ms.tsAnyLoop, last_report: report };
       return clone(report);
     },
+    loopHistory: (id, days) => ms.later(() => buildHistory(id, ms.loopRunHistory[id] ?? [], Math.min(90, Math.max(1, days)), -new Date().getTimezoneOffset())),
     loopRuns: (id) => ms.later(() => [...ms.sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
     ...mockDocsLoop(now),
     redTeamSchedules: () => ms.later(() => ms.redSchedules.map(clone)),

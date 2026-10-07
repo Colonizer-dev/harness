@@ -2645,6 +2645,9 @@ pub(crate) async fn execute(app: &Shared, dry_requested: bool) -> Result<Report,
         eprintln!("merge-train loop: could not save its report: {e:#}");
     }
     record(app, &report, &sessions).await;
+    if !report.dry_run {
+        crate::loop_history::record(app, crate::loop_history::from_merge_loop(&report)).await;
+    }
     // Issue #972: each CI-unavailable edge once, host-level like a provider's; a dry run's memory
     // is not kept, so it announces nothing.
     if !report.dry_run {

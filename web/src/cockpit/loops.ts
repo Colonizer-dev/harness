@@ -94,7 +94,11 @@ export function describeLoopCadence(cadence: LoopCadence, now = new Date()): str
       return `every ${cadence.days} ${cadence.days === 1 ? "day" : "days"} at ${local.time}`;
     }
     default:
-      return describeCadence(cadence, now).replace(/^Every /, "every ").replace(/^Monthly /, "monthly ");
+      // The shared cadence words use a 12-hour clock; every other loop line says "15:00".
+      return describeCadence(cadence, now)
+        .replace(/^Every /, "every ")
+        .replace(/^Monthly /, "monthly ")
+        .replace(/(\d{1,2}):(\d{2}) (AM|PM)/, (_m, h: string, m: string, ap: string) => `${String(Number(h) % 12 + (ap === "PM" ? 12 : 0)).padStart(2, "0")}:${m}`);
   }
 }
 

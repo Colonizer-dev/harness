@@ -3,7 +3,7 @@
 import { del, enc, post, put, request } from "../../http";
 import type { DocsLoopSettings, DocsLoopView, DocsReport } from "../../cockpit/docsLoop";
 import type { Session } from "../sessions/types";
-import type { DiskCleanupReport, HunterProbe, Loop, MergeLoopReport, MergeLoopSettings, MergeLoopView, MergeTrainStatus, NewLoop, NewRedTeamSchedule, RedTeamRun, RedTeamSchedule, StartRedTeamRunRequest, SupplyChainLoop, SupplyChainReport, SupplyChainSettings, TsAnyLoop, TsAnyReport, TsAnySettings } from "./types";
+import type { DiskCleanupReport, HunterProbe, Loop, LoopHistory, MergeLoopReport, MergeLoopSettings, MergeLoopView, MergeTrainStatus, NewLoop, NewRedTeamSchedule, RedTeamRun, RedTeamSchedule, StartRedTeamRunRequest, SupplyChainLoop, SupplyChainReport, SupplyChainSettings, TsAnyLoop, TsAnyReport, TsAnySettings } from "./types";
 
 export interface LoopsApi {
   /** Red-team runs: a swarm of hunter colonies raiding one repository (issue #212). 409 without `arm` when any colony is live or a run is already active for the repo. */
@@ -23,6 +23,8 @@ export interface LoopsApi {
   runLoopNow(id: string): Promise<Session>;
   /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
   loopRuns(id: string): Promise<Session[]>;
+  /** GET /api/loops/{id}/history?days=: a loop's runs for the last 1-90 days, by day and one by one, with outcome, counts, dispatched colonies and their cost (issue #1199). Built-in loops: merge-train, supply-chain, ts-any, docs, disk-cleanup. */
+  loopHistory(id: string, days: number): Promise<LoopHistory>;
   /** POST /api/loops/disk-cleanup/run-now: a disk-cleanup run, or with `dryRun` a preview that removes nothing. */
   runDiskCleanup(id: string, dryRun: boolean): Promise<DiskCleanupReport>;
   /** GET /api/docs-loop: the built-in Docs & README loop — settings, next run, last report, history. */
@@ -71,6 +73,7 @@ export const loopsHttp: LoopsApi = {
   deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
+  loopHistory: (id, days) => request(`/api/loops/${enc(id)}/history?days=${days}&tz_offset_minutes=${-new Date().getTimezoneOffset()}`),
   runDiskCleanup: (id, dryRun) => post(`/api/loops/${enc(id)}/run-now${dryRun ? "?dry_run=1" : ""}`),
   docsLoop: () => request("/api/docs-loop"),
   saveDocsLoop: (settings) => put("/api/docs-loop", settings),

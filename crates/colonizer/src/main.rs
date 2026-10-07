@@ -86,6 +86,7 @@ mod ledger;
 mod lifecycle;
 mod login_item;
 mod loop_github;
+mod loop_history;
 mod loops;
 mod maps;
 mod mcp;

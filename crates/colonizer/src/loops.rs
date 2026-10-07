@@ -763,7 +763,14 @@ pub async fn run_now(
         LoopKind::Colony | LoopKind::DiskCleanup => launch(&app, &l, Utc::now()).await.map(Some),
     };
     match started? {
-        Some(session) => Ok(Json(serde_json::to_value(session).unwrap_or(Value::Null))),
+        Some(session) => {
+            crate::loop_history::record(
+                &app,
+                crate::loop_history::RunRecord::launched(&l.id, Utc::now(), "manual", &session),
+            )
+            .await;
+            Ok(Json(serde_json::to_value(session).unwrap_or(Value::Null)))
+        }
         None => Err(client_error(
             StatusCode::CONFLICT,
             "nothing to map right now; the loop's note says why",
@@ -932,6 +939,7 @@ async fn retry_run(app: &Shared, l: &Loop, last: &LastRun, now: DateTime<Utc>) {
     }
     match start_run(app, l, l.runs, scoped).await {
         Ok(session) => {
+            crate::loop_history::record(app, crate::loop_history::RunRecord::launched(&l.id, now, "retry", &session)).await;
             let fresh = session.id.clone();
             app.loops
                 .update(&l.id, |x| {
@@ -1102,8 +1110,17 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
                     LoopKind::Map => fire_map(app, &l, now).await,
                     LoopKind::Colony | LoopKind::DiskCleanup => launch(app, &l, now).await.map(Some),
                 };
+                if let Ok(Some(session)) = &started {
+                    crate::loop_history::record(app, crate::loop_history::RunRecord::launched(&id, now, "schedule", session))
+                        .await;
+                }
                 if let Err(e) = started {
                     let message = e.message().to_string();
+                    crate::loop_history::record(
+                        app,
+                        crate::loop_history::RunRecord::refused(&id, now, &format!("could not start: {message}")),
+                    )
+                    .await;
                     app.loops
                         .update(&id, |x| {
                             // A launch that ended the loop itself — its API token was revoked —

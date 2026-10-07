@@ -9,7 +9,7 @@ describe("disk cleanup loop", () => {
   });
 
   it("defaults to hourly, a 15% trigger, and the host category off", () => {
-    expect(describeDiskCleanup(CLEANUP_LOOP)).toBe("Built in · every hour · early under 15% free · build output, worktrees, microvms");
+    expect(describeDiskCleanup(CLEANUP_LOOP)).toBe("every hour · early under 15% free");
     const s = settingsOf(CLEANUP_LOOP);
     expect(s.host_paths).toBe(false);
     expect(s.archives).toBe(false);
