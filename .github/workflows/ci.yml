@@ -113,7 +113,12 @@ jobs:
               # Its colonizer-redact comes from crates.io, which may not have this version yet: patch
               # in the one unpacked above. That moves only colonizer-redact's entry in the packaged
               # Cargo.lock, so the update is that one package and --locked still pins the rest.
-              patch="patch.crates-io.colonizer-redact.path=\"$RUNNER_TEMP/packaged/colonizer-redact-$version\""
+              # colonizer-redact can be a version ahead of the harness (a new redact API between
+              # releases), so its unpacked directory is named by its own version, not the harness's.
+              redact_version=$(cargo pkgid -p colonizer-redact)
+              redact_version="${redact_version##*@}"
+              redact_version="${redact_version##*#}"
+              patch="patch.crates-io.colonizer-redact.path=\"$RUNNER_TEMP/packaged/colonizer-redact-$redact_version\""
               (cd "$dest" && cargo update --config "$patch" -p colonizer-redact && cargo test --locked --config "$patch")
             else
               (cd "$dest" && cargo test --locked)

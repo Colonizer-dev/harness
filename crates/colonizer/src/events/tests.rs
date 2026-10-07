@@ -669,10 +669,10 @@ async fn an_account_hit_pauses_with_no_providers_configured() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// #761: a secret in `pr.md` is redacted, and autopilot holds the publish for a person with a
-/// log line naming what was redacted, instead of publishing the redacted text silently.
+/// #761, #1175: a secret in `pr.md` is redacted, and autopilot publishes the redacted text with a
+/// log line naming what was redacted: the value is already replaced, so there is nothing to hold.
 #[tokio::test]
-async fn a_secret_in_pr_md_holds_autopilot_and_says_what_was_redacted() {
+async fn a_secret_in_pr_md_is_redacted_and_autopilot_still_publishes() {
     let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
     app.update_session("abc", |x| x.autopilot = true).await;
     // The runtime remembers the description it booted with; the turn below writes a new one.
@@ -693,14 +693,45 @@ async fn a_secret_in_pr_md_holds_autopilot_and_says_what_was_redacted() {
     );
     let end = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
     handle_agent_event(&app, "abc", &rt, end).await;
-    let attention = app.session("abc").await.unwrap().attention.expect("the colony is flagged");
-    assert_eq!(attention["reason"], "autopilot_held");
+    let held = app.session("abc").await.unwrap().attention;
+    assert!(
+        held.as_ref().is_none_or(|a| a["reason"] != "autopilot_held"),
+        "a redacted description is not a hold: {held:?}"
+    );
     let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
     assert!(
-        log.contains("autopilot: not publishing, pr.md contained 1 secret (github token), redacted before publishing"),
+        log.contains(
+            "autopilot: pr.md contained 1 secret (github token), redacted before publishing; publishing the redacted text"
+        ),
         "{log}"
     );
+    assert!(
+        log.contains("verifying the claim"),
+        "the publish went on to verification: {log}"
+    );
+    assert!(!log.contains("not publishing"), "{log}");
     assert!(!log.contains(secret), "{log}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// #1175: AWS's documented example key in `pr.md` is not a secret at all: no note, no hold.
+#[tokio::test]
+async fn the_aws_example_key_in_pr_md_publishes_without_a_note() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let rt = app.runtime("abc").await;
+    let out = app.session_dir("abc").join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        out.join("pr.md"),
+        "# Redaction tests\n\nThe only literal in the tests is AWS's documented AKIAIOSFODNN7EXAMPLE.\n",
+    )
+    .unwrap();
+    let end = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(!log.contains("secret"), "{log}");
+    assert!(log.contains("verifying the claim"), "{log}");
     let _ = std::fs::remove_dir_all(root);
 }
 

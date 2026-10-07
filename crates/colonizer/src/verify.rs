@@ -1531,6 +1531,7 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
                 };
                 app.session_log(&id, "info", "autopilot: the claim checked out, publishing".into())
                     .await;
+                app.update_session(&id, |x| x.clear_hold_cause()).await;
                 crate::publish::publish_session(app.clone(), id, Some(grant)).await;
             } else {
                 app.session_log(&id, "info", "autopilot: not publishing, the colony is no longer live".into())
@@ -1548,6 +1549,7 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
             )
             .await;
             app.update_session(&id, |x| {
+                x.note_hold(&format!("verification: {detail}"));
                 x.attention =
                     Some(json!({"reason": "autopilot_held", "since": chrono::Utc::now(), "nudges": 0, "detail": detail}));
             })

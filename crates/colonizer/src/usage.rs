@@ -991,6 +991,8 @@ mod tests {
             run_end_cause: None,
             parked: None,
             hold_resumes: 0,
+            hold_cause: None,
+            hold_cause_repeats: 0,
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,
