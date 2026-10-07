@@ -18,6 +18,34 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.11] - 2026-10-07
+
+### Changed
+
+- **The audit says why `vulnerabilities` is not a required check, and what an admin has to do about
+  the branch protection that still asks for it.** The `main` branch protection is hand-set and carries
+  the supply-chain `vulnerabilities` job on top of the six CI jobs, so a newly published advisory
+  blocks every merge — including the colony pull requests the harness queues with
+  `gh pr merge --squash --auto` — with no commit to blame. `scripts/require-ci-checks.mjs` keeps
+  `vulnerabilities` out of its ruleset on purpose (the weekly run is the detection path), and a ruleset
+  layers on top of branch protection rather than replacing it, so applying the ruleset alone does not
+  drop the check. `docs/audit.md` now records the intended six-check set, the drift, and the admin
+  step: remove `vulnerabilities` from the classic protection's required status checks
+  (Settings → Branches → `main`, or `gh api` on its `required_status_checks`). ([#935])
+- **The TypeSafe (Jev) key can be set from the cockpit.** The Secrets page offered no way to enter it, so it took an edit to the systemd unit or LaunchAgent and a restart, which is out of reach on a remote host or from a phone. The key is now an editable secret saved in the keychain (or a 0600 file), and one resolver reads it for Jev routing and recovery, brief picks and compaction: the saved key first, then `JEV_API_KEY`. A key saved, replaced or removed takes effect for the next turn without a restart, and the API never returns the value. ([#1179])
+- **Settings is now one vertical menu, and every cockpit view has a real address.** The long row of settings tabs is gone. A sidebar lists eight groups (General, Models, Connections & secrets, Colonies & runtime, Devices & access, Fleet & host, Workspaces, About & privacy), each with an icon, a one-line description and a dot that shows only when something needs you (amber) or is broken (red); its pages sit indented underneath. A search box on top (press `/`) finds any page, field, provider or module setting by label, help text or a plain synonym such as key, token or secret, and jumps to it with the field highlighted. A page that needs action opens with a "Needs you" card, such as a provider with no key, a failed autonomy judge or a missing runtime. Middle widths collapse the sidebar to icons, and a phone gets a list that drills into each page with a back arrow. Pages keep a 720 px reading width, with plain-language help under each switch. Every view now has a path: `/`, `/nest`, `/chat`, `/code`, `/history`, `/loops`, `/memory`, `/host`, `/secrets`, `/settings`, `/settings/<group>/<page>`, `/colonies/<id>[/<tab>]` and `/orgs/<org>`. They bookmark, share and work with back and forward, the workspace stays in the URL as `?org=`, and the `?token=` sign-in still works on any path. ([#1180])
+- The log archive's **Clean up now** form takes hours as well as days: a unit picker beside the keep field, sent as fractional `keep_days`.
+
+### Fixed
+
+- **Automatic mode no longer admits more colonies than the host can hold.** Admission trusted live free memory, but a microVM allocates memory lazily, so a 124 GiB host took 32 colonies of 11 GB each. A colony now also has to fit the committed totals: the memory sizes of all live colonies times `auto_overcommit` (new setting, default 0.75, kept within 0.5 to 1.0) plus the host reserve must fit in RAM, and their vCPUs must stay within 1.5 times the cores, on top of the free-memory and load checks. Running colonies are never stopped; over the limit, nothing new starts. `GET /api/status` carries `sandbox.committed_gb` and `sandbox.limited_by` (`cap`, `memory-commit`, `cpu-commit`, `free` or `load`). ([#1158])
+- **Providers saved as `custom` at a known vendor's URL now show that vendor's mark.** A DeepSeek, MiniMax or BytePlus provider added through the API or a script with `preset: "custom"` got the plug glyph. The Mothership now matches the base URL (scheme, host and path, ignoring case and a trailing slash) against the built-in presets and the catalogue, reports the matched preset in the provider and chat model listings, and rewrites `custom` to it once on load in `providers.json`, keeping the key and every other field. The Alibaba presets (`qwencloud*`, `alibaba*`) use the Alibaba Cloud mark, and Z.AI/Zhipu, Meta and BytePlus get marks copied from the MIT-licensed `@lobehub/icons` (see NOTICE) instead of initials. ([#1166])
+- **A quota error that names no provider is now attributed to the provider that served the colony.** A MiniMax-only colony whose turn ended on a generic usage-limit message paused the whole queue as "Claude account quota exhausted" for hours. The park now attributes by routing instead of text: the gateway's record of the colony's last routed request, else its single `allowed_providers` entry, else the provider prefix of its `model_usage` models. That provider is marked exhausted and the banner names it; the Claude account is marked only when the colony's traffic went to Anthropic or its routing cannot be told. ([#1168])
+- **Path-policy placeholders no longer read as a control defeat.** The empty `.env`, `.netrc` and other dotfiles the path policy mounts into the worktree are now hidden from the colony's `git status` (a per-colony `core.excludesFile`), and the colony brief says they are harness placeholders to leave alone. The exec policy's `secret-paths` rule no longer refuses commands that only ask about such a path's name (`git check-ignore`, `git status`, `ls`, `test -e/-f/-d`, `[ -f x ]`, and a plain `for` loop over them), so they raise no attention; anything that can read the contents (`cat`, `source`, a redirect, a pipe, a substitution) is still refused. ([#1169])
+- **A colony no longer fails after a day of holds because its PR description quoted AWS's public example key.** AWS's documented example credentials (`AKIAIOSFODNN7EXAMPLE`, `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, and any 20-character AWS access key id ending in `EXAMPLE`) are matched exactly and no longer count as secrets; a real key beside one is still redacted. A PR description that redaction did change is now published redacted, with a log note, instead of holding autopilot: the value is already replaced, and a secret in the diff is still caught by its own check. The rewrite nudge names the line and class of each finding in the draft, never the value. A colony autopilot holds twice in a row for the same cause with nothing changed now fails fast with `publish_blocked: <cause>` and its worktree kept, instead of cycling park and resume until `abandoned_question`. ([#1175])
+- **A subagent on a provider-prefixed model no longer ends the turn as an error, and a finished colony is no longer held.** `COLONIZER_SUBAGENT_MODEL=minimax/…` now reaches Claude Code through an alias slot (`ANTHROPIC_DEFAULT_SONNET_MODEL`, or the next one the orchestrator and background model are not using) so the built-in agents accept it; an `unrecognized_model` report from a subagent on a completed turn is logged as a warning instead of failing the turn; and autopilot continues to verification and publish when a turn ended with an error but wrote a fresh `pr.md`. ([#1176])
+- **Auto mode no longer reports the stale static sandbox settings, so the Nest draws every live colony.** `/api/status` `sandbox.max_parallel`, `cpus` and `memory` now carry the effective ceiling (running + room, within `auto_max_parallel`) and the auto colony size; the configured values move to `configured_max_parallel`, `configured_cpus` and `configured_memory`. The Nest draws one chamber per live colony however the capacity reads (a crowded nest uses a grid of smaller chambers), shows "auto: N now (cap M)" in its header, Host and Launch, and parks no ant on the surface for a colony without a chamber, so every ant walks a drawn tunnel. ([#1177])
+
 ## [v0.2.10] - 2026-10-07
 
 ### Added
@@ -2807,6 +2835,16 @@ Macs. ([#74])
 [#1144]: https://github.com/Colonizer-dev/harness/issues/1144
 [#1145]: https://github.com/Colonizer-dev/harness/issues/1145
 [#1156]: https://github.com/Colonizer-dev/harness/issues/1156
+[#1158]: https://github.com/Colonizer-dev/harness/issues/1158
+[#1166]: https://github.com/Colonizer-dev/harness/issues/1166
+[#1168]: https://github.com/Colonizer-dev/harness/issues/1168
+[#1169]: https://github.com/Colonizer-dev/harness/issues/1169
+[#1175]: https://github.com/Colonizer-dev/harness/issues/1175
+[#1176]: https://github.com/Colonizer-dev/harness/issues/1176
+[#1177]: https://github.com/Colonizer-dev/harness/issues/1177
+[#1179]: https://github.com/Colonizer-dev/harness/issues/1179
+[#1180]: https://github.com/Colonizer-dev/harness/issues/1180
+[v0.2.11]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.11
 [v0.2.10]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.10
 [v0.2.9]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.9
 [v0.2.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.8

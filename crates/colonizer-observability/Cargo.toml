@@ -3,7 +3,7 @@ name = "colonizer-observability"
 # Versioned with colonizer-harness: the mothership checks the add-on's version before it spawns it
 # (docs/design/observability.md, Contract). Not published to crates.io; it ships as its own release
 # tarball, so the mothership never links OpenTelemetry or protobuf code.
-version = "0.2.10"
+version = "0.2.11"
 edition = "2024"
 description = "Colonizer's observability add-on: OTLP export of a mothership's logs, traces and metrics"
 license = "MIT"
