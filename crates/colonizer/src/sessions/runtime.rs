@@ -79,6 +79,9 @@ pub struct Runtime {
     /// sockets stay open on purpose.
     pub(crate) retired: watch::Sender<bool>,
     pub(crate) file_lock: Mutex<()>,
+    /// What the cockpit derives from the whole of this run's events, built on the first socket that
+    /// asks and kept current by every broadcast after (issue #1210).
+    pub(crate) summary: std::sync::Mutex<history::SummaryState>,
     /// Serialises findings, so the per-colony cap holds when two arrive together.
     pub(crate) findings_lock: Mutex<()>,
     /// Serialises a GitHub-needing loop's host-proxied writes (loop_github.rs), so the per-colony
@@ -318,6 +321,7 @@ impl Runtime {
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
+            summary: std::sync::Mutex::new(history::SummaryState::Cold),
             findings_lock: Mutex::new(()),
             github_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
@@ -358,6 +362,7 @@ impl Runtime {
     }
 
     pub(crate) fn broadcast(&self, seq: Option<u64>, json: String) {
+        self.note_summary(seq, &json);
         let _ = self.events.send(Arc::new(Broadcast { seq, json }));
     }
 
