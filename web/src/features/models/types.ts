@@ -77,6 +77,19 @@ export interface ModelSwitchRequest {
   apply?: "new" | "running";
   /** Plan only: which colonies would restart, nothing changed. */
   dry_run?: boolean;
+  /** Also clear the Claude names the switch leaves in colony and org overrides (the "clear these too" option). */
+  clear_leftovers?: boolean;
+}
+
+/**
+ * The Claude model names a switch leaves behind in per-colony launch overrides and org overrides
+ * (issue #1130): they still route to the Claude account after the roles moved to another provider.
+ */
+export interface LeftoverClaude {
+  colonies: { id: string; role: string; model: string }[];
+  orgs: { org: string; role: string; model: string }[];
+  /** True when the request asked to clear them and they are gone. */
+  cleared: boolean;
 }
 
 export interface ModelSwitchReply {
@@ -90,6 +103,8 @@ export interface ModelSwitchReply {
   /** The colonies restarted. */
   colonies: string[];
   failed: { id: string; ok: false; error?: string }[];
+  /** Absent from older mothership builds. */
+  leftover_claude?: LeftoverClaude;
 }
 
 /** What the mothership knows about one plan in use: GET /api/models/plans. Nothing is estimated. */
@@ -112,6 +127,8 @@ export interface PlanUsage {
   last_request_at: string | null;
   since: string | null;
   /** The provider's plan-balance probe (issue #199); null when none is configured. */
+  /** While the Claude account is out and its fallback carries the work: where its roles run (issue #1130). */
+  fallback?: { model: string; provider_name: string } | null;
   balance: {
     remaining: number | null;
     /** The plan's total, when the probe names one (`quota.limit_pointer`). */

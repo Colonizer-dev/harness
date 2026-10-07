@@ -308,6 +308,31 @@ ones whose park discarded the microVM and routing a kept-VM park through the res
 resumes it warm when it can and falls back to cold otherwise. Colonies whose provider is still
 exhausted stay parked.
 
+**Claude account fallback** ([#1130]). The Claude account's own cap is a record under the id
+`claude-account` and has no provider to give it a `fallback_model`; the Claude Code module's
+`account_fallback_model` (`<provider>/<model>`, install-wide) stands in. Claude's own traffic does not
+pass through the gateway, so a colony given the setting gets `COLONIZER_ACCOUNT_ROUTE`
+(`{"url": ".../account-route", "headers": {"x-colonizer-colony": <token>}}`) and its model router asks
+`GET /account-route` before forwarding an unrouted request to Anthropic. The answer is JSON,
+decided from the live account record, the setting and the colony's sensitivity class:
+
+| `action` | Meaning |
+| --- | --- |
+| `claude` | The account works, no usable fallback is set, or the fallback's own plan is out: the request goes to Anthropic as today. |
+| `fallback` | The account is out: `model` (`<provider>/<model>`), `provider_name`, `reset_at`, `reset_unix`. The router sends the request to that provider's route with the model rewritten. |
+| `parked` | The account is out and the fallback may not carry this task (restricted work, an untrusted provider): `reason` reads "needs a trusted provider: Claude is out until 19:51; MiniMax is not marked trusted". The request stays on Claude, the turn dies on the limit, and the colony parks with the reason added to its error. |
+
+The colony's recorded `allowed_providers`/`allowed_models` include the fallback, so the gateway carries
+the rerouted requests; every other check — sensitivity, key, budget — applies as to any request. The
+colony's log gets one line per change of answer, and the router reuses an answer for five seconds. At
+the reset the record lapses and the next answer is `claude`: no saved setting changes. While the
+fallback can carry the work, `GET /api/status` `quota` has `paused: false` and a `fallback` object
+(`{model, provider_name, reset_at, reset_unix}`) instead of an account pause, colonies the cap parked
+resume (those it may not carry stay parked until the reset), and `GET /api/models/plans` adds
+`fallback: {model, provider_name}` to the Claude row. `POST /api/models/switch` returns
+`leftover_claude` (`{colonies, orgs, cleared}`) listing the Claude names the switch left in per-colony
+and org overrides; `clear_leftovers: true` removes them.
+
 **Provider out of quota cards** ([#767]). The maintainer answers an exhausted provider on one
 dedicated card per provider, not on a free-form question from an agent. The gateway ties colonies to
 the exhaustion: a colony whose request came back quota-exhausted with no `fallback_model` retry on

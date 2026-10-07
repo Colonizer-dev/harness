@@ -35,9 +35,13 @@ use std::collections::BTreeMap;
 /// every other role is install-wide only.
 pub(crate) const ORG_ROLES: [&str; 3] = ["model", "subagent_model", "background_model"];
 
+/// The role that names the model Claude's roles run on while the account is out (#1130). Install-wide
+/// and read by the gateway per request, so a switch of it moves no colony.
+pub(crate) const ACCOUNT_FALLBACK_ROLE: &str = "account_fallback_model";
+
 /// The order roles are listed in: the orchestrator first, then the rest by how often they run.
 /// A role a module declares that is not here sorts after these, by name.
-const ROLE_ORDER: [&str; 7] = [
+const ROLE_ORDER: [&str; 8] = [
     "model",
     "subagent_model",
     "background_model",
@@ -45,6 +49,7 @@ const ROLE_ORDER: [&str; 7] = [
     "small_model",
     "model_low",
     "model_high",
+    ACCOUNT_FALLBACK_ROLE,
 ];
 
 /// Whether a module setting is a model role: a string named `model`, `*_model` or `model_*`.
@@ -279,6 +284,10 @@ pub struct SwitchRequest {
     /// Plan only: say what would change and which colonies would restart, change nothing.
     #[serde(default)]
     dry_run: bool,
+    /// Also clear the Claude model names the switch leaves behind in per-colony and org overrides
+    /// (#1130). Without it the answer only reports them.
+    #[serde(default)]
+    clear_leftovers: bool,
 }
 
 fn bad(message: &str) -> crate::AppError {
@@ -374,6 +383,118 @@ fn plan_colonies(
         .collect()
 }
 
+/// A Claude model name in an override: a non-empty value that names no `<provider>/` route. Such a
+/// name still routes to the Claude account after the roles moved to another provider.
+fn is_claude_name(model: &str) -> bool {
+    let model = model.trim();
+    !model.is_empty() && !model.contains('/')
+}
+
+/// The Claude names a switch leaves behind (#1130): per-colony launch overrides on colonies in the
+/// scope, and org overrides. Colonies the switch itself repoints are not leftovers — their override
+/// for the moved role is replaced.
+#[derive(Default)]
+struct Leftovers {
+    /// `(colony, role, model)`.
+    colonies: Vec<(String, &'static str, String)>,
+    /// `(org, role, model)`.
+    orgs: Vec<(String, &'static str, String)>,
+}
+
+impl Leftovers {
+    fn is_empty(&self) -> bool {
+        self.colonies.is_empty() && self.orgs.is_empty()
+    }
+
+    fn to_json(&self, cleared: bool) -> Value {
+        json!({
+            "colonies": self.colonies.iter().map(|(id, role, model)| json!({"id": id, "role": role, "model": model})).collect::<Vec<_>>(),
+            "orgs": self.orgs.iter().map(|(org, role, model)| json!({"org": org, "role": role, "model": model})).collect::<Vec<_>>(),
+            "cleared": cleared,
+        })
+    }
+}
+
+fn leftover_claude(
+    sessions: &[Session],
+    orgs_after: &BTreeMap<String, OrgSettings>,
+    scope_org: Option<&str>,
+    moves: &[ColonyMove],
+) -> Leftovers {
+    let mut out = Leftovers::default();
+    for s in sessions.iter().filter(|s| {
+        !s.cleaned_up
+            && (s.status.is_live() || matches!(s.status, SessionStatus::Parked | SessionStatus::Queued))
+            && scope_org.is_none_or(|o| s.org == o)
+    }) {
+        let moved = |role: &str| {
+            moves
+                .iter()
+                .any(|m| m.id == s.id && m.roles.iter().any(|(r, _, _)| r == role))
+        };
+        for (role, model) in [("model", &s.model_override), ("subagent_model", &s.subagent_model_override)] {
+            if let Some(model) = model.as_deref().filter(|m| is_claude_name(m))
+                && !moved(role)
+            {
+                out.colonies.push((s.id.clone(), role, model.to_string()));
+            }
+        }
+    }
+    for (org, settings) in orgs_after
+        .iter()
+        .filter(|(org, _)| scope_org.is_none_or(|o| o == org.as_str()))
+    {
+        for role in ORG_ROLES {
+            if let Some(model) = org_override(settings, role).filter(|m| is_claude_name(m)) {
+                out.orgs.push((org.clone(), role, model.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Clears the leftovers [`leftover_claude`] found: each colony's override for the role, and each
+/// org's, saved through the org handler like any org save.
+async fn clear_leftovers(
+    app: &Shared,
+    found: &Leftovers,
+    orgs_after: &BTreeMap<String, OrgSettings>,
+) -> Result<(), crate::AppError> {
+    for (id, role, _) in &found.colonies {
+        app.update_session(id, |x| match *role {
+            "model" => x.model_override = None,
+            _ => x.subagent_model_override = None,
+        })
+        .await;
+        app.session_log(
+            id,
+            "info",
+            format!("{role} override cleared with a model switch: it named a Claude model"),
+        )
+        .await;
+    }
+    let mut touched: Vec<&String> = found.orgs.iter().map(|(org, _, _)| org).collect();
+    touched.dedup();
+    for org in touched {
+        let mut agent = orgs_after.get(org).and_then(|o| o.agent.clone()).unwrap_or_default();
+        for (o, role, _) in found.orgs.iter().filter(|(o, _, _)| o == org) {
+            let _ = o;
+            match *role {
+                "model" => agent.model = None,
+                "subagent_model" => agent.subagent_model = None,
+                _ => agent.background_model = None,
+            }
+        }
+        let _ = orgs::put(
+            State(app.clone()),
+            Path(org.clone()),
+            Json(json!({"settings": {"agent": agent}})),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// `POST /api/models/switch`: moves the scope's agent module and role models, validated as a whole
 /// before anything is written, then — with `apply: "running"` — points the scope's colonies at the
 /// new models and restarts them through the quota card's restart path.
@@ -448,7 +569,7 @@ pub async fn switch(State(app): State<Shared>, Json(req): Json<SwitchRequest>) -
         roles.push((role.clone(), value));
     }
     let module_changes = wanted.is_some() && (module != current || scope_org.is_some());
-    if roles.is_empty() && !module_changes {
+    if roles.is_empty() && !module_changes && !req.clear_leftovers {
         return Err(bad("nothing to switch: name a module or at least one role"));
     }
 
@@ -522,7 +643,13 @@ pub async fn switch(State(app): State<Shared>, Json(req): Json<SwitchRequest>) -
     };
 
     let sessions = app.sessions.read().await.clone();
-    let role_names: Vec<String> = roles.iter().map(|(r, _)| r.clone()).collect();
+    // The account fallback is read by the gateway at request time: moving it restarts no colony and
+    // leaves no Claude name behind.
+    let role_names: Vec<String> = roles
+        .iter()
+        .map(|(r, _)| r.clone())
+        .filter(|r| r != ACCOUNT_FALLBACK_ROLE)
+        .collect();
     let moves = if running {
         plan_colonies(
             &sessions,
@@ -537,6 +664,17 @@ pub async fn switch(State(app): State<Shared>, Json(req): Json<SwitchRequest>) -
         Vec::new()
     };
     let colony_ids: Vec<&str> = moves.iter().map(|m| m.id.as_str()).collect();
+    // Claude names the switch leaves in overrides (#1130): reported whenever the switch moves a role
+    // onto another provider (or the caller asks to clear them), so nobody finds out when the account
+    // runs dry that a queued colony still names Opus.
+    let leaves_claude = roles
+        .iter()
+        .any(|(r, v)| r != ACCOUNT_FALLBACK_ROLE && v.as_deref().is_some_and(|m| m.contains('/')));
+    let leftovers = if leaves_claude || req.clear_leftovers {
+        leftover_claude(&sessions, &after_orgs, scope_org.as_deref(), &moves)
+    } else {
+        Leftovers::default()
+    };
     if req.dry_run {
         return Ok(Json(json!({
             "dry_run": true,
@@ -547,6 +685,7 @@ pub async fn switch(State(app): State<Shared>, Json(req): Json<SwitchRequest>) -
             "affected": colony_ids,
             "colonies": [],
             "failed": [],
+            "leftover_claude": leftovers.to_json(false),
         })));
     }
 
@@ -603,6 +742,10 @@ pub async fn switch(State(app): State<Shared>, Json(req): Json<SwitchRequest>) -
             targets.push(s);
         }
     }
+    let cleared = req.clear_leftovers && !leftovers.is_empty();
+    if cleared {
+        clear_leftovers(&app, &leftovers, &after_orgs).await?;
+    }
     let results = quota_cards::restart_all(&app, &targets).await;
     let failed: Vec<&Value> = results.iter().filter(|r| r["ok"] != true).collect();
     Ok(Json(json!({
@@ -614,6 +757,7 @@ pub async fn switch(State(app): State<Shared>, Json(req): Json<SwitchRequest>) -
         "affected": colony_ids,
         "colonies": results.iter().filter(|r| r["ok"] == true).map(|r| r["id"].clone()).collect::<Vec<_>>(),
         "failed": failed,
+        "leftover_claude": leftovers.to_json(cleared),
     })))
 }
 
