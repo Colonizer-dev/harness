@@ -47,7 +47,7 @@ const noop = () => {};
 const panel = (view: DocsLoopView, dryRun: DocsReport | null = null) =>
   renderToStaticMarkup(
     <ApiContext.Provider value={{} as Api}>
-      <DocsLoopPanel view={view} dryRun={dryRun} busy={false} now={NOW} open onTarget={noop} onSave={noop} onRun={noop} onOpenColony={noop} />
+      <DocsLoopPanel view={view} dryRun={dryRun} busy={false} now={NOW} open onSave={noop} onRun={noop} onOpenColony={noop} />
     </ApiContext.Provider>,
   );
 
@@ -65,8 +65,8 @@ describe("Docs & README loop settings", () => {
     const html = panel(on);
     expect(html).toContain(">On<");
     expect(html).toContain("Hourly · next in 60m");
-    expect(html).toContain('aria-label="stop running on acme/app"');
-    expect(html).toContain('aria-label="stop running on umbrella"');
+    expect(html).toContain('aria-label="remove acme/app"');
+    expect(html).toContain('aria-label="remove All in umbrella"');
     expect(html).toContain("No run yet.");
     expect(html).not.toMatch(/disabled=""[^>]*>Run now/);
   });
@@ -74,6 +74,7 @@ describe("Docs & README loop settings", () => {
   it("checks an entry the way the server does", () => {
     expect(allowEntryError("acme")).toBeNull();
     expect(allowEntryError("acme/app")).toBeNull();
+    expect(allowEntryError("*")).toBeNull();
     expect(allowEntryError("")).toContain("Name a repository");
     expect(allowEntryError("acme/app/x")).toContain("is not an owner or owner/name");
     expect(allowEntryError("not a repo")).toContain("is not an owner or owner/name");

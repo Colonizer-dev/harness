@@ -36,7 +36,7 @@ export function repoOptIn(settings: MergeLoopSettings, repo: string): RepoOptIn 
   const has = (list: string[], key: string) => list.some((t) => t.toLowerCase() === key);
   if (has(settings.never, r) || has(settings.never, owner)) return "never";
   if (has(settings.allow, r)) return "on";
-  if (has(settings.allow, owner)) return "org";
+  if (has(settings.allow, owner) || has(settings.allow, "*")) return "org";
   return "off";
 }
 

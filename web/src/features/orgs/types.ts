@@ -23,9 +23,12 @@ export interface OrgSettings {
   /**
    * Repositories of this org (full `owner/name`) whose superseded colonies' pull requests Colonizer
    * may close on GitHub when another colony's pull request merges over them (issue #673). Empty —
-   * the default — only marks the colonies superseded and leaves their pull requests open.
+   * the default — only marks the colonies superseded and leaves their pull requests open. An entry
+   * may also be an org (`acme`) or `*` for every repository of every shown org.
    */
   close_superseded_prs?: string[];
+  /** Repositories (`owner/name`, an org, or `*`) whose pull requests a colony in a GitHub loop may ask the mothership to merge. */
+  merge_prs?: string[];
   /**
    * The merge steward (issue #1172): whether Colonizer merges this org's colonies' own green pull
    * requests itself. `green` merges a clean one; `green+rebase` also brings a stale branch up to
@@ -57,6 +60,12 @@ export interface OrgSettings {
    * colonies stay listed and resumable. Absent and null mean on, like every field above.
    */
   enabled?: boolean | null;
+  /**
+   * Hide the org from Colonizer (issue #1213): out of the workspace switcher, the repository pickers
+   * and every "All repositories" scope. Nothing is deleted and its running colonies keep running.
+   * Absent and false mean shown.
+   */
+  hidden?: boolean;
   /**
    * Whether this org's colonies may consult Jev at any decision point (issue #582). False turns every
    * point off for the org's colonies — no network call — while absent, null or true follows the

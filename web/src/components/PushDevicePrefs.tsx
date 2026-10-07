@@ -5,9 +5,10 @@
 // is it known.
 import { useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { deviceTz, mergePushPrefs, minutesToTime, timeToMinutes, validScopeEntry } from "../push";
+import { deviceTz, mergePushPrefs, minutesToTime, timeToMinutes } from "../push";
 import type { OrgInfo, PushEventKind, PushPrefs, PushSubscriptionSummary } from "../types";
-import { ChipsInput, Row } from "./SettingsDialog";
+import { RepoMultiSelect } from "./RepoMultiSelect";
+import { Row } from "./SettingsDialog";
 import { Button, Spinner, Switch, cx, inputClass, timeAgo } from "./ui";
 
 /** The events a device can be told about, in the editor's order, with its plain labels. */
@@ -114,8 +115,6 @@ export function PushDeviceEditor({
   const patch = (partial: Partial<PushPrefs>) => setPrefs((previous) => ({ ...previous, ...partial }));
   const id = (key: string) => `push-${row.id}-${key}`;
 
-  const invalid = prefs.scope.filter((entry) => !validScopeEntry(entry));
-  const suggestions = (orgs ?? []).map((info) => info.org).filter((org) => !prefs.scope.includes(org)).slice(0, 6);
 
   const save = async () => {
     const start = timeToMinutes(startText);
@@ -170,28 +169,15 @@ export function PushDeviceEditor({
         <label htmlFor={id("scope")} className="text-body font-medium">
           Repositories
         </label>
-        <ChipsInput
+        <RepoMultiSelect
           id={id("scope")}
-          values={prefs.scope}
+          label="repositories this device hears about"
+          allowAll={false}
+          orgs={orgs}
+          value={prefs.scope}
           onChange={(scope) => patch({ scope })}
-          placeholder={prefs.scope.length ? "Add another" : "All repos — add an org or org/repo to narrow"}
+          placeholder="All repos — pick an org or repository to narrow"
         />
-        {invalid.length > 0 && <p className="text-meta-lg text-err">Not an org or org/repo: {invalid.join(", ")}</p>}
-        {suggestions.length > 0 && (
-          <p className="flex flex-wrap items-center gap-1.5 text-meta-lg text-faint">
-            Known orgs:
-            {suggestions.map((org) => (
-              <button
-                key={org}
-                type="button"
-                onClick={() => patch({ scope: [...prefs.scope, org] })}
-                className="cursor-pointer rounded bg-panel-3 px-1.5 py-0.5 font-mono hover:text-text"
-              >
-                {org}
-              </button>
-            ))}
-          </p>
-        )}
       </div>
 
       <Row id={id("quiet")} label="Quiet hours" help="Hold notifications between the hours you pick." inline>

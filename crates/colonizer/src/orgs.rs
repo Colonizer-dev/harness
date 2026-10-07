@@ -156,6 +156,12 @@ pub struct OrgSettings {
     /// refuses to start new colonies for it, while keeping its settings and its existing colonies.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Whether the operator hid this org from Colonizer (issue #1213). Unlike `enabled`, which stops
+    /// colonies, hiding only takes the org out of sight: it leaves the workspace switcher, the
+    /// repository pickers, the `*` ("all repositories") scope of every loop and setting, the merge
+    /// steward and the backlog count. Nothing is deleted and the org's running colonies keep running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     /// Whether this org's colonies may consult Jev at any decision point (issue #582). `Some(false)`
     /// turns every point off for the org's colonies — no network call is made — while `None` or
     /// `Some(true)` follows the module settings, point by point.
@@ -671,9 +677,7 @@ pub fn repo_max_parallel(org: &OrgSettings) -> Option<u64> {
 /// GitHub itself reads repository names. Empty — the default — never closes: the colony is only
 /// marked superseded and its pull request is left for a person.
 pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
-    org.close_superseded_prs
-        .iter()
-        .any(|named| named.trim().eq_ignore_ascii_case(repo))
+    in_list(org, &org.close_superseded_prs, repo)
 }
 
 /// Whether a colony in a GitHub loop may ask the mothership to merge a pull request in `repo` (issue
@@ -681,7 +685,19 @@ pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
 /// GitHub itself reads repository names. Empty — the default — never merges: the operator opts in
 /// per repository, and until then a merge request is refused before `gh` is reached.
 pub fn merges_prs(org: &OrgSettings, repo: &str) -> bool {
-    org.merge_prs.iter().any(|named| named.trim().eq_ignore_ascii_case(repo))
+    in_list(org, &org.merge_prs, repo)
+}
+
+/// Whether a repository-list setting of `org` names `repo`: `owner/name`, the org as `owner`, or
+/// `*` for every repository of every visible org (issue #1212). The wildcard never reaches into an
+/// org that is hidden (issue #1213); naming the repository or the org outright still counts.
+fn in_list(org: &OrgSettings, list: &[String], repo: &str) -> bool {
+    let hidden = if org.hidden {
+        BTreeSet::from([repo.split('/').next().unwrap_or_default().to_ascii_lowercase()])
+    } else {
+        BTreeSet::new()
+    };
+    crate::repo_scope::covers(list, repo, &hidden)
 }
 
 /// The org's merge steward mode (issue #1172): `off` unless the operator opted in.
@@ -929,20 +945,19 @@ pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
     if settings.repo_max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("per-repository parallel limit must be between 1 and 32".into());
     }
-    // Every entry names a repository of this org, as `owner/name` — the shape the colonies
-    // themselves carry, and what the close step compares against.
+    // Every entry is `owner/name` (the shape the colonies themselves carry), an `owner`, or `*`.
     if let Some(bad) = settings
         .close_superseded_prs
         .iter()
-        .find(|repo| !crate::util::valid_repo(repo.trim()))
+        .find(|repo| !crate::repo_scope::valid_entry(repo))
     {
         return Err(format!(
-            "close_superseded_prs entries are repositories like acme/api, and {bad:?} is not one"
+            "close_superseded_prs entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
         ));
     }
-    if let Some(bad) = settings.merge_prs.iter().find(|repo| !crate::util::valid_repo(repo.trim())) {
+    if let Some(bad) = settings.merge_prs.iter().find(|repo| !crate::repo_scope::valid_entry(repo)) {
         return Err(format!(
-            "merge_prs entries are repositories like acme/api, and {bad:?} is not one"
+            "merge_prs entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
         ));
     }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
@@ -1115,6 +1130,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     };
     if !named("enabled") {
         incoming.enabled = saved.enabled;
+    }
+    if !named("hidden") {
+        incoming.hidden = saved.hidden;
     }
     if !named("jev") {
         incoming.jev = saved.jev;
@@ -1702,6 +1720,20 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&bad).is_err(), "an entry that names no repository is refused");
+    }
+
+    #[test]
+    fn a_save_from_a_build_that_never_names_hidden_keeps_it_and_one_that_does_wins() {
+        let saved = OrgSettings {
+            hidden: true,
+            ..Default::default()
+        };
+        let mut old_build = OrgSettings::default();
+        keep_unnamed_fields(&mut old_build, &saved, Some(&json!({"enabled": true})));
+        assert!(old_build.hidden, "an old web build must not unhide an org");
+        let mut toggled = OrgSettings::default();
+        keep_unnamed_fields(&mut toggled, &saved, Some(&json!({"hidden": false})));
+        assert!(!toggled.hidden, "naming it wins, so the toggle can turn it back off");
     }
 
     #[test]

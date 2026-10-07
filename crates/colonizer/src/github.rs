@@ -2957,7 +2957,25 @@ pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
 }
 
 pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
-    Ok(Json(repos_cached(&app).await?))
+    let hidden = app.hidden_orgs();
+    let mut repos = repos_cached(&app).await?;
+    // Hidden orgs (issue #1213) are out of every picker; their colonies and settings are untouched.
+    repos.retain(|r| !repo_is_hidden(r, &hidden));
+    Ok(Json(repos))
+}
+
+/// Whether a repository row (`full_name` = `owner/name`) belongs to a hidden org.
+pub(crate) fn repo_is_hidden(repo: &Value, hidden: &std::collections::BTreeSet<String>) -> bool {
+    repo["full_name"]
+        .as_str()
+        .and_then(|name| name.split('/').next())
+        .is_some_and(|owner| hidden.contains(&owner.to_ascii_lowercase()))
+}
+
+/// The signed-in login when the viewer is already cached; never asks GitHub.
+pub(crate) async fn cached_login(app: &App) -> Option<String> {
+    let cache = app.github_viewer.lock().await;
+    cache.as_ref()?.user.as_ref().ok()?["login"].as_str().map(String::from)
 }
 
 /// The repository list, served at once from the last answer and refreshed behind it once it is a

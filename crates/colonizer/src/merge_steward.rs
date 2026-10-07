@@ -1070,6 +1070,7 @@ pub(crate) async fn tick_once(app: &Shared) {
     }
     let sessions = app.sessions.read().await.clone();
     let looped = crate::merge_loop::load(&app.cfg.config_dir).await.settings;
+    let looped = crate::merge_loop::resolve_settings(app, looped).await;
     let train = crate::merge_train::train_settings(app).await;
     let mut by_org: BTreeMap<String, Vec<Session>> = BTreeMap::new();
     for s in sessions.iter().filter(|s| s.pr_url.is_some() && !s.org.is_empty()) {
@@ -1081,7 +1082,8 @@ pub(crate) async fn tick_once(app: &Shared) {
     let mut on_orgs: HashSet<String> = HashSet::new();
     for (org, group) in by_org {
         let settings = app.org_settings(&org);
-        if orgs::auto_merge_mode(&settings) == AutoMerge::Off {
+        // A hidden org is out of the steward's sight (issue #1213), as `off` is.
+        if settings.hidden || orgs::auto_merge_mode(&settings) == AutoMerge::Off {
             continue;
         }
         on_orgs.insert(org.clone());

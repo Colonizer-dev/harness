@@ -5,6 +5,8 @@ import { HIDE_EMPTY_ORGS_KEY, orgEnabled, parseHideEmptyOrgs, serializeHideEmpty
 import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
 import { Avatar } from "./Avatar";
+import { RepoMultiSelect } from "./RepoMultiSelect";
+import { chipLabel, entryError } from "./repoSelect";
 import { IconX } from "./icons";
 import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
 import { ModelPicker } from "./ModelPicker";
@@ -21,6 +23,7 @@ type FieldKey =
   | "queue_priority"
   | "max_wait_hours"
   | "close_superseded_prs"
+  | "merge_prs"
   | "auto_merge"
   | "auto_colonize"
   | "merge_method"
@@ -57,7 +60,8 @@ const FIELDS: FieldSpec[] = [
   { key: "repo_max_parallel", group: "Colonies", label: "Per repository", hint: "Live colonies in any one of this org's repositories at once", kind: "number", min: 1, max: 32 },
   { key: "queue_priority", group: "Colonies", label: "Queue priority", hint: "Where this org's queued colonies start relative to other orgs'; higher goes first, older first within a priority", kind: "priority" },
   { key: "max_wait_hours", group: "Colonies", label: "Starvation guard", hint: "After a colony has queued this long it counts as High, so a low priority never waits for ever; unset is off", kind: "number", min: 1, max: 8760, unit: "h" },
-  { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories like acme/api whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
+  { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
+  { key: "merge_prs", group: "Pull requests", label: "Colony merge requests", hint: "Repositories where a colony in a GitHub loop may ask the mothership to merge a pull request; empty refuses every request", kind: "repos" },
   { key: "auto_merge", group: "Pull requests", label: "Auto-merge", hint: "Let Colonizer merge this org's colonies' pull requests once every check is green and GitHub calls them clean. Green+rebase also brings a stale branch up to date, and resumes the colony when it conflicts. A failing check resumes the colony twice at most; a PR that never got to run is marked CI blocked", kind: "choice" },
   { key: "merge_method", group: "Pull requests", label: "Merge method", hint: "How the steward merges", kind: "choice" },
   { key: "delete_branch", group: "Pull requests", label: "Delete branch", hint: "Remove the branch after the merge; one another pull request is stacked on is always kept", kind: "boolean" },
@@ -90,6 +94,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "close_superseded_prs":
       // One comma-separated line in the draft; an empty list reads as no override, like inherit.
       return settings.close_superseded_prs?.join(", ") ?? "";
+    case "merge_prs":
+      return settings.merge_prs?.join(", ") ?? "";
     case "auto_merge":
     case "auto_colonize":
     case "merge_method":
@@ -145,6 +151,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "close_superseded_prs":
       // Org-only, with no module setting behind it: the default is an empty list, never closing.
       return "";
+    case "merge_prs":
+      // Org-only: the default is an empty list, which refuses every merge request from a colony.
+      return "";
     case "auto_merge":
       // Org-only, with no module setting behind it: the steward is off until an org opts in.
       return "off";
@@ -174,9 +183,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
 }
 
 function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = null): string {
-  if (spec.key === "close_superseded_prs") {
+  if (spec.key === "close_superseded_prs" || spec.key === "merge_prs") {
     const list = typeof value === "string" ? parseRepoList(value) : [];
-    return list.length ? list.join(", ") : "never closes";
+    return list.length ? list.map(chipLabel).join(", ") : spec.key === "merge_prs" ? "never merges" : "never closes";
   }
   if (spec.key === "auto_merge" && typeof value === "string") return AUTO_MERGE_CHOICES.find(([id]) => id === value)?.[1] ?? value;
   if (spec.key === "auto_colonize" && typeof value === "string") return AUTO_COLONIZE_CHOICES.find(([id]) => id === value)?.[1] ?? value;
@@ -233,9 +242,9 @@ function parseRepoList(raw: string): string[] {
     .filter(Boolean);
 }
 
-/** Whether every entry reads as `owner/name`, the shape the server validates (mirrored for instant feedback). */
+/** Whether every entry is `owner/name`, an `owner` or `*`, the shapes the server validates (mirrored for instant feedback). */
 function isRepoList(raw: string): boolean {
-  return parseRepoList(raw).every((repo) => /^[^\s/]+\/[^\s/]+$/.test(repo) && !repo.split("/").includes(".."));
+  return parseRepoList(raw).every((entry) => entryError(entry) === null);
 }
 
 function toDraft(settings: OrgSettings, modules: ModuleInfo[] | null): Draft {
@@ -306,6 +315,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     max_wait_hours: pick("max_wait_hours") as number | null,
     // There is nothing to inherit: not overridden is the default empty list, which closes nothing.
     close_superseded_prs: draft.close_superseded_prs.override ? parseRepoList(String(draft.close_superseded_prs.value)) : [],
+    merge_prs: draft.merge_prs.override ? parseRepoList(String(draft.merge_prs.value)) : [],
     auto_merge: pick("auto_merge") as OrgSettings["auto_merge"],
     auto_colonize: pick("auto_colonize") as OrgSettings["auto_colonize"],
     merge_method: pick("merge_method") as OrgSettings["merge_method"],
@@ -326,7 +336,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       ? invalid.kind === "size"
         ? `${invalid.label} must be a size like 512M or 16G, or 0 for unlimited`
         : invalid.kind === "repos"
-          ? `${invalid.label} entries must be repositories like acme/api`
+          ? `${invalid.label} entries must be repositories like acme/api, an org like acme, or *`
           : numberError(invalid)
       : null,
   };
@@ -642,17 +652,13 @@ export function OrgSettingsForm({
                       />
                     )}
                     {spec.kind === "repos" && (
-                      <input
-                        type="text"
-                        value={String(draft[spec.key].value)}
-                        onChange={(e) => set(spec.key, { value: e.target.value })}
-                        placeholder="acme/api, acme/web"
-                        aria-label={`${spec.label} for ${org}`}
-                        aria-invalid={!isRepoList(String(draft[spec.key].value))}
-                        className={cx(
-                          inputClass,
-                          !isRepoList(String(draft[spec.key].value)) && "border-err focus:border-err",
-                        )}
+                      <RepoMultiSelect
+                        org={org}
+                        allowAll={false}
+                        label={`${spec.label} for ${org}`}
+                        value={parseRepoList(String(draft[spec.key].value))}
+                        onChange={(list) => set(spec.key, { value: list.join(", ") })}
+                        placeholder="None"
                       />
                     )}
                     {spec.kind === "choice" && (

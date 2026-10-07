@@ -1351,9 +1351,8 @@ pub(crate) async fn all_org_repos(app: &Shared, org: &str) -> Result<Vec<String>
 }
 
 async fn org_repos_capped(app: &Shared, org: &str, cap: Option<usize>) -> Result<Vec<String>> {
-    let Json(list) = crate::github::list_repos(State(app.clone()))
-        .await
-        .map_err(|e| anyhow::anyhow!("could not list repositories: {}", e.message()))?;
+    // The unfiltered list: a hidden org is out of pickers and `*`, but an entry that names it still lists it.
+    let list = crate::github::repos_cached(app).await?;
     let mut repos: Vec<(String, String)> = list
         .iter()
         .filter(|r| r["archived"].as_bool() != Some(true))

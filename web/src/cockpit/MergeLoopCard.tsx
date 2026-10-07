@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { Badge, Button, Switch, cx, type Tone } from "../components/ui";
+import { RepoMultiSelect } from "../components/RepoMultiSelect";
 import { Disclosure, DetailSection, GroupedDetails, LoopCard, scheduleLine } from "./LoopCard";
 import { IconMerge } from "./loopIcons";
 import { BUILTIN_HISTORY_ID, plural, type DetailGroupDef, type DetailItem } from "./loopHistory";
@@ -139,6 +140,26 @@ export function MergeLoopPanel({
       <DetailSection title="Settings">
         <div className="space-y-3">
           <Disclosure title={`Repositories · ${opted} on`} defaultOpen={!ready}>
+            <div className="mb-3 grid gap-2 text-small-lg text-muted sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                Opted-in repositories and orgs (empty: the loop merges nowhere)
+                <div className="mt-1">
+                  <RepoMultiSelect label="merge train repositories" value={draft.allow} onChange={(allow) => onChange({ ...draft, allow })} disabled={busy} placeholder="Choose repositories or orgs" />
+                </div>
+              </div>
+              <div>
+                Never merge in
+                <div className="mt-1">
+                  <RepoMultiSelect label="never merge in" allowAll={false} value={draft.never} onChange={(never) => onChange({ ...draft, never })} disabled={busy} placeholder="None" />
+                </div>
+              </div>
+              <div>
+                Local checks when CI cannot run
+                <div className="mt-1">
+                  <RepoMultiSelect label="local checks in" value={draft.local_checks} onChange={(local_checks) => onChange({ ...draft, local_checks })} disabled={busy} placeholder="None" />
+                </div>
+              </div>
+            </div>
             <ul className="m-0 list-none divide-y divide-border p-0">
               {toggleRepos(draft, repoNames).map((repo) => {
                 const state = repoOptIn(draft, repo);

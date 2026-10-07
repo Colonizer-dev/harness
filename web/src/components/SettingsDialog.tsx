@@ -37,6 +37,7 @@ import { LiveMapPane } from "./settings/LiveMapPane";
 import { UsagePane } from "./settings/UsagePane";
 import { DesktopPane } from "./settings/DesktopPane";
 import { BuiltWithPane } from "./settings/BuiltWithPane";
+import { OrgsPane } from "./settings/OrgsPane";
 import { NotificationsPane } from "./settings/NotificationsPane";
 import { ModulePane } from "./settings/ModulePane";
 import { ProvidersPane } from "./settings/ProvidersPane";
@@ -830,6 +831,7 @@ const SECTIONS: SectionEntry[] = [
   { id: "notifications", render: (c) => <NotificationsPane prefs={c.notifications} onChanged={c.onNotificationsChanged} orgs={c.orgs} back={c.back} /> },
   { id: "desktop", render: (c) => <DesktopPane back={c.back} /> },
   { id: "built-with", render: (c) => <BuiltWithPane builtWith={c.builtWith} back={c.back} /> },
+  { id: "orgs", render: (c) => <OrgsPane orgs={c.orgs ?? []} onOrgSaved={c.onOrgSaved} back={c.back} /> },
   {
     id: "providers",
     render: (c) => (
