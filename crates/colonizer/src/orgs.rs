@@ -111,6 +111,43 @@ pub struct PathPolicyOverrides {
     pub protect_paths: Option<Vec<String>>,
 }
 
+/// The merge steward's switch for an org (issue #1172, `merge_steward.rs`).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AutoMerge {
+    /// The steward leaves the org's pull requests alone.
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// Merge a colony's pull request once every check is green and GitHub reports it clean.
+    #[serde(rename = "green")]
+    Green,
+    /// As `green`, and also bring a pull request that fell behind or conflicts up to date: GitHub's
+    /// update-branch first, then the colony itself.
+    #[serde(rename = "green+rebase")]
+    GreenRebase,
+}
+
+/// How the merge steward merges a pull request.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    #[default]
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The `gh pr merge` flag.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Squash => "--squash",
+            Self::Merge => "--merge",
+            Self::Rebase => "--rebase",
+        }
+    }
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -158,6 +195,18 @@ pub struct OrgSettings {
     /// request, so merges stay off until the operator lists a repository here.
     #[serde(default)]
     pub merge_prs: Vec<String>,
+    /// The merge steward (issue #1172): whether Colonizer merges this org's colonies' own pull
+    /// requests when they are green, and rebases them when they fall behind. `None` — the default —
+    /// is `off`; the steward never calls GitHub for an org that has not opted in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge: Option<AutoMerge>,
+    /// How the steward merges (issue #1172): `None` is `squash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<MergeMethod>,
+    /// Whether the steward deletes the branch after merging (issue #1172). `None` keeps it, and a
+    /// branch another colony's pull request is stacked on is always kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch: Option<bool>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -620,6 +669,21 @@ pub fn merges_prs(org: &OrgSettings, repo: &str) -> bool {
     org.merge_prs.iter().any(|named| named.trim().eq_ignore_ascii_case(repo))
 }
 
+/// The org's merge steward mode (issue #1172): `off` unless the operator opted in.
+pub fn auto_merge_mode(org: &OrgSettings) -> AutoMerge {
+    org.auto_merge.unwrap_or_default()
+}
+
+/// How the merge steward merges for this org (issue #1172): squash unless the org says otherwise.
+pub fn merge_method(org: &OrgSettings) -> MergeMethod {
+    org.merge_method.unwrap_or_default()
+}
+
+/// Whether the merge steward deletes a merged branch (issue #1172); off unless the org says so.
+pub fn deletes_merged_branch(org: &OrgSettings) -> bool {
+    org.delete_branch.unwrap_or(false)
+}
+
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
 /// unlike cpus or memory there is no dollar figure the harness can pick for someone else's deployment,
 /// and a default that silently stopped running colonies on upgrade would be a surprise.
@@ -1069,6 +1133,15 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("merge_prs") {
         incoming.merge_prs = saved.merge_prs.clone();
+    }
+    if !named("auto_merge") {
+        incoming.auto_merge = saved.auto_merge;
+    }
+    if !named("merge_method") {
+        incoming.merge_method = saved.merge_method;
+    }
+    if !named("delete_branch") {
+        incoming.delete_branch = saved.delete_branch;
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -1601,6 +1674,34 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&bad).is_err(), "an entry that names no repository is refused");
+    }
+
+    #[test]
+    fn the_merge_steward_is_off_by_default_and_squashes() {
+        let org = OrgSettings::default();
+        assert_eq!(auto_merge_mode(&org), AutoMerge::Off);
+        assert_eq!(merge_method(&org), MergeMethod::Squash);
+        assert!(!deletes_merged_branch(&org));
+        let set: OrgSettings =
+            serde_json::from_value(json!({"auto_merge": "green+rebase", "merge_method": "rebase", "delete_branch": true}))
+                .unwrap();
+        assert_eq!(auto_merge_mode(&set), AutoMerge::GreenRebase);
+        assert_eq!(merge_method(&set).flag(), "--rebase");
+        assert!(deletes_merged_branch(&set));
+        assert_eq!(serde_json::to_value(&set).unwrap()["auto_merge"], "green+rebase");
+        assert!(serde_json::from_value::<OrgSettings>(json!({"auto_merge": "always"})).is_err());
+        // An unset steward is not written at all, so an old build reads the file unchanged.
+        assert!(serde_json::to_value(&org).unwrap().get("auto_merge").is_none());
+        // A save from a web build that predates the settings keeps them; a named null clears them.
+        let mut incoming = OrgSettings::default();
+        keep_unnamed_fields(&mut incoming, &set, Some(&json!({})));
+        assert_eq!(incoming.auto_merge, Some(AutoMerge::GreenRebase));
+        assert_eq!(incoming.merge_method, Some(MergeMethod::Rebase));
+        assert_eq!(incoming.delete_branch, Some(true));
+        let clears = json!({"auto_merge": null});
+        let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared, &set, Some(&clears));
+        assert_eq!(cleared.auto_merge, None);
     }
 
     #[test]

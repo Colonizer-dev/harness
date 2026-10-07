@@ -53,6 +53,7 @@ import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { AccountBanner } from "./AccountBanner";
 import { GitHubBanner } from "./GitHubBanner";
+import { StewardBanner } from "./StewardBanner";
 import { needCountByOrg } from "./feed";
 import { backlogBadge } from "./backlog";
 import { providerSnapshots } from "./dash";
@@ -897,6 +898,9 @@ export function Cockpit({
           {/* Issue #1074: while GitHub refuses the account (suspended, a revoked token, repeated
               secondary limits), one banner above every view names the cause and the next step. */}
           <GitHubBanner pause={status?.github_pause} onReconnect={() => onOpenSettings("connections")} />
+          {/* Issue #1172: an org whose GitHub Actions is blocked (billing or a spending limit) is one
+              banner, whatever number of its pull requests that fails. */}
+          <StewardBanner steward={status?.merge_steward} />
           {/* Issue #1097: a release whose notes flag a critical or fixes-running fix is a banner
               above every view, with how many colonies its probe found affected here; after the
               update, the affected colonies still on the previous version are offered a restart. */}
