@@ -60,6 +60,19 @@ pub(crate) trait SessionStore: Send + Sync {
     fn read_tail<'a>(&'a self, id: &'a str, name: &'a str, max: u64) -> StoreFuture<'a, Option<Vec<u8>>> {
         Box::pin(async move { Ok(self.read_file(id, name).await?.map(|bytes| whole_line_tail(&bytes, max))) })
     }
+    /// A window of one file ending at byte `end` (the end of the file when `None`): at most `max`
+    /// bytes, cut forward to a line start so only whole lines come back, plus the byte offset the
+    /// window starts at. How the chat pages an event log backwards without reading all of it
+    /// (issue #1210); a backend overrides the default (a whole read, sliced) with a seek.
+    fn read_before<'a>(
+        &'a self,
+        id: &'a str,
+        name: &'a str,
+        end: Option<u64>,
+        max: u64,
+    ) -> StoreFuture<'a, Option<(Vec<u8>, u64)>> {
+        Box::pin(async move { Ok(self.read_file(id, name).await?.map(|bytes| window_before(&bytes, end, max))) })
+    }
     /// One file's size and, where the backend keeps one, its last-modified time; `None` if absent.
     fn stat<'a>(&'a self, id: &'a str, name: &'a str) -> StoreFuture<'a, Option<FileStat>> {
         Box::pin(async move {
@@ -109,6 +122,20 @@ pub(crate) async fn event_archives(store: &dyn SessionStore, id: &str) -> io::Re
 pub(crate) struct FileStat {
     pub len: u64,
     pub modified: Option<SystemTime>,
+}
+
+/// The window of `bytes` that [`SessionStore::read_before`] answers with: whole lines, at most `max`
+/// bytes, ending at `end` (or the end of the data), and the offset it starts at.
+pub(crate) fn window_before(bytes: &[u8], end: Option<u64>, max: u64) -> (Vec<u8>, u64) {
+    let end = end.map_or(bytes.len(), |e| usize::try_from(e).unwrap_or(usize::MAX).min(bytes.len()));
+    let mut start = end.saturating_sub(usize::try_from(max).unwrap_or(usize::MAX));
+    if start > 0 && bytes[start - 1] != b'\n' {
+        start = match bytes[start..end].iter().position(|b| *b == b'\n') {
+            Some(at) => start + at + 1,
+            None => end,
+        };
+    }
+    (bytes[start..end].to_vec(), start as u64)
 }
 
 /// The last `max` bytes of `bytes`, cut forward past the first newline unless the cut already falls
@@ -346,6 +373,42 @@ impl SessionStore for LocalDirStore {
             // The same move-aside the mothership's startup does, stamp and fault seam included.
             let saved = crate::move_corrupt_aside(&self.index_path()).map_err(into_io_error)?;
             Ok(saved.file_name().map(|n| n.to_string_lossy().into_owned()))
+        })
+    }
+
+    fn read_before<'a>(
+        &'a self,
+        id: &'a str,
+        name: &'a str,
+        end: Option<u64>,
+        max: u64,
+    ) -> StoreFuture<'a, Option<(Vec<u8>, u64)>> {
+        Box::pin(async move {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            let path = self.path(id, name)?;
+            let mut file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let len = file.metadata().await?.len();
+            let end = end.map_or(len, |e| e.min(len));
+            // Seek to one byte before the budget: that byte says whether the cut is a line start.
+            let from = end.saturating_sub(max.saturating_add(1));
+            file.seek(io::SeekFrom::Start(from)).await?;
+            let mut bytes = Vec::new();
+            file.take(end - from).read_to_end(&mut bytes).await?;
+            if from == 0 {
+                return Ok(Some(window_before(&bytes, None, max)));
+            }
+            let tail = &bytes[1..];
+            if bytes[0] == b'\n' {
+                return Ok(Some((tail.to_vec(), from + 1)));
+            }
+            Ok(Some(match tail.iter().position(|b| *b == b'\n') {
+                Some(at) => (tail[at + 1..].to_vec(), from + 1 + at as u64 + 1),
+                None => (Vec::new(), end),
+            }))
         })
     }
 

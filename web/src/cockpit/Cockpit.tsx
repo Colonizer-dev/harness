@@ -20,7 +20,7 @@ import { formatRoute, isRootPath, parseRoute, type Route } from "../routes";
 import { currentLocation, navigate as pushUrl, routerBase, subscribe } from "../router";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
-import { buildThread, useSessionStream } from "../sessionStream";
+import { settlersOf, useSessionStream } from "../sessionStream";
 import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
@@ -360,7 +360,7 @@ export function Cockpit({
   // down can be reported when the mothership finally refuses it.
   const outbox = useOutbox();
   const queuedAnswers = useRef(new Set<string>());
-  const settlers = useMemo(() => Object.values(buildThread(state).subagents), [state]);
+  const settlers = useMemo(() => settlersOf(state), [state]);
   // The inspector answers the colony's question from this same stream, so the pane clears itself
   // the moment `question_answered` arrives — nothing here is cached from render to render.
   const pendingQuestions = useMemo(() => pendingQuestionsOf(state), [state]);

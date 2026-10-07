@@ -57,6 +57,7 @@ mod agentd;
 mod api;
 mod attention;
 mod files;
+mod history;
 mod launch;
 mod model;
 mod persist;
