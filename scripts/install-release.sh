@@ -364,10 +364,31 @@ verify_provenance() {
     case "$gh_help" in
       *--signer-workflow*) set -- "$@" --signer-workflow "$release_workflow" ;;
     esac
-    if out=$("$@" 2>&1); then
-      say "provenance verified: $(basename "$file") is what $release_workflow signed"
-      return
-    elif printf '%s\n' "$out" | grep -qi 'no attestations'; then
+    # gh reaches Sigstore's TUF root and the transparency log; a timeout there says nothing about the
+    # signature, so a network-looking failure is retried with backoff (COLONIZER_ATTESTATION_BACKOFF
+    # seconds, doubled each time) and, if it persists, reported as unreachable, not as "wrong".
+    net_re='tuf|timeout|timed out|deadline exceeded|connection|no such host|dial tcp|network is unreachable|temporary failure'
+    attempt=1
+    while :; do
+      if out=$("$@" 2>&1); then
+        say "provenance verified: $(basename "$file") is what $release_workflow signed"
+        return
+      fi
+      if printf '%s\n' "$out" | grep -qi 'no attestations\|gh auth login' ||
+        ! printf '%s\n' "$out" | grep -qiE "$net_re"; then
+        break
+      fi
+      [ "$attempt" -lt 3 ] || break
+      sleep $((${COLONIZER_ATTESTATION_BACKOFF:-2} * attempt))
+      attempt=$((attempt + 1))
+    done
+    if printf '%s\n' "$out" | grep -qi 'no attestations\|gh auth login'; then
+      :
+    elif printf '%s\n' "$out" | grep -qiE "$net_re"; then
+      line=$(printf '%s\n' "$out" | grep -iE "$net_re" | head -n 1)
+      fail "could not reach Sigstore to verify the build (network: $line); nothing was installed. Try again."
+    fi
+    if printf '%s\n' "$out" | grep -qi 'no attestations'; then
       # An unattested release, not a wrong one — see the comment above the function for why this is
       # not a downgrade an attacker can steer a tampered file into.
       why="$(basename "$file") carries no build provenance; that is expected for releases published before the release workflow began signing, and would mean something was wrong on a current one"

@@ -53,6 +53,9 @@ if [ "$1" = attestation ] && [ "$2" = verify ]; then
     mismatch)
       printf 'Error: the artifact subject digest does not match the attestation\n' >&2
       exit 1 ;;
+    tuf_timeout)
+      printf 'Error: failed to refresh TUF metadata: Get "https://tuf-repo-cdn.sigstore.dev/timestamp.json": context deadline exceeded\n' >&2
+      exit 1 ;;
     noatt)
       printf 'Error: no attestations found for artifact\n' >&2
       exit 1 ;;
@@ -170,5 +173,30 @@ out=$(run_verify "$file") && rc=0 || rc=$?
 [ "$rc" -eq 0 ] || bad "verified: expected exit 0, got $rc: $out"
 contains "verified" "$out" "provenance verified"
 note "ok: a verified attestation says so"
+
+# 5. A Sigstore/TUF network failure is retried, then reported as unreachable, never as "wrong".
+note "== a TUF timeout is retried, then reported as a network failure"
+GH_STUB_TAG=tuf_timeout
+: > "$gh_log"
+out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
+[ "$rc" -ne 0 ] || bad "tuf_timeout: expected a non-zero exit, got 0: $out"
+contains "tuf_timeout" "$out" "could not reach Sigstore to verify the build"
+contains "tuf_timeout" "$out" "context deadline exceeded"
+contains "tuf_timeout" "$out" "nothing was installed"
+lacks "tuf_timeout" "$out" "it is wrong"
+lacks "tuf_timeout" "$out" "COLONIZER_SKIP_ATTESTATION"
+[ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 3 ] ||
+  bad "tuf_timeout: expected 3 verify attempts"
+note "ok: retried 3 times, then the network message"
+
+note "== a real mismatch is not retried"
+GH_STUB_TAG=mismatch
+: > "$gh_log"
+out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
+[ "$rc" -ne 0 ] || bad "mismatch: expected a non-zero exit"
+contains "mismatch" "$out" "it is wrong"
+lacks "mismatch" "$out" "could not reach Sigstore"
+[ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 1 ] || bad "mismatch: expected a single verify attempt"
+note "ok: no retry for a real mismatch"
 
 note "all checks passed"
