@@ -350,6 +350,59 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
     }
 }
 
+/// Why a question closed without an answer (issue #1189), the `reason` of a `question_closed` event.
+pub(crate) const CLOSE_TOOL_RESOLVED: &str = "tool_resolved";
+pub(crate) const CLOSE_TIMEOUT: &str = "timeout";
+pub(crate) const CLOSE_TURN_END: &str = "turn_end";
+
+/// The one place a question closes without an answer (issue #1189). An exec-policy ask whose tool call
+/// got its `tool_result` (the ask timed out, or was refused) or whose turn ended is over, but no
+/// `question_answered` follows it; leaving the slot set made autopilot wait on a question the UI no
+/// longer showed. Closing clears the slot and everything that hangs off it, retires the notification
+/// tokens and records `question_closed {question_id, reason}` on the log, so a restart's replay and the
+/// cockpit read the same state. `only` limits it to that question id (a `tool_result` names one); `None`
+/// closes whichever is open. Returns whether a question was closed.
+pub(crate) async fn close_question(app: &Shared, id: &str, rt: &Arc<Runtime>, only: Option<&str>, reason: &str) -> bool {
+    let closed = {
+        let mut open = rt.open_question.lock().await;
+        match open.as_ref() {
+            Some((open_id, ..)) if only.is_none_or(|want| want == open_id) => open.take().map(|(open_id, ..)| open_id),
+            _ => None,
+        }
+    };
+    let Some(question_id) = closed else { return false };
+    rt.question_holds_tool_call.store(false, Ordering::SeqCst);
+    rt.judged_questions.lock().await.remove(&question_id);
+    {
+        let mut activity = rt.activity.lock().await;
+        activity.question_since = None;
+        activity.judge_failures = 0;
+    }
+    app.answer_tokens.revoke(id).await;
+    crate::validation::emit_chain(
+        app,
+        id,
+        json!({"type": "question_closed", "question_id": question_id, "reason": reason}),
+    )
+    .await;
+    app.session_log(
+        id,
+        "info",
+        format!("question {question_id} closed without an answer ({reason})"),
+    )
+    .await;
+    true
+}
+
+/// How a `tool_result` that resolved a held question closed it: a timed-out ask says so.
+fn tool_result_close_reason(event: &Value) -> &'static str {
+    let timed_out = event["is_error"].as_bool() == Some(true)
+        && event["output"]
+            .as_str()
+            .is_some_and(|o| o.to_ascii_lowercase().contains("time"));
+    if timed_out { CLOSE_TIMEOUT } else { CLOSE_TOOL_RESOLVED }
+}
+
 /// The mothership-log line for a colony's model-router `log` event (issue #983), `None` for any other
 /// event. The router names the provider, the failure class, the status and the elapsed time; this adds
 /// the colony and the Claude account it was launched with — the account's id, never its credential. The
@@ -566,6 +619,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // The shape of the turn, read off the raw line for the watchdog's turn-end recovery (issue
     // #878): a tool call in flight, or a final answer whose turn_end never came.
     note_turn_shape(rt, &event).await;
+    // Issue #1189: a question's id is its tool call's id (an exec-policy ask), so that call's result
+    // means the question is over whether or not anyone answered it.
+    if event["type"] == "tool_result"
+        && let Some(call_id) = event["tool_call_id"].as_str()
+    {
+        close_question(app, id, rt, Some(call_id), tool_result_close_reason(&event)).await;
+    }
 
     match deserialised.unwrap_or(AgentEvent::Other) {
         AgentEvent::Status { state, detail } => {
@@ -858,7 +918,24 @@ pub(crate) async fn finish_turn(
         if !errored && s.provider_retries != 0 {
             app.update_session(id, |x| x.provider_retries = 0).await;
         }
+        // Issue #1189: a turn that ended while a question held a tool call in flight is over for that
+        // call too; the lead's own question is not held by a call and its answer is the next message.
+        if rt.question_holds_tool_call.load(Ordering::SeqCst) {
+            close_question(app, id, rt, None, CLOSE_TURN_END).await;
+        }
+        // Autopilot waits only on a question the session shows: the open one, with the record reading
+        // `waiting_for_answer`, which is what the cockpit lists. A tracked question the record does not
+        // show is put on the record here rather than waited on silently.
         let open_question = rt.open_question.lock().await.is_some();
+        if open_question && s.status.is_live() && s.status != SessionStatus::WaitingForAnswer {
+            app.update_session(id, |x| x.status = SessionStatus::WaitingForAnswer).await;
+            app.session_log(
+                id,
+                "warn",
+                "autopilot: a question is open but the colony did not show it; set to waiting_for_answer".into(),
+            )
+            .await;
+        }
         let step = autopilot_step(errored, transient, interrupted, open_question, pr_written);
         // #761, #1175: a description that redaction changed is still published, because the
         // value is already replaced in what goes out. The note says out loud that the colony had a

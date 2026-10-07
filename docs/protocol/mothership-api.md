@@ -570,3 +570,11 @@ Independently of the kill-switch, a publish refuses to open (or reuse) a pull re
 branch's local head moved after the push step, and logs the SHA-256 of the exact PR body it sends
 (`opening the pull request; body sha256 <hex>`). The hash is only logged; nothing yet checks it
 against an approval (issue #98).
+
+A question can also end without an answer (issue #1189): an exec-policy ask holds a tool call, and
+when that call gets its `tool_result` (the ask timed out or was refused), or the turn ends while the
+call is held, the Mothership closes the question and writes a host-generated
+`question_closed {question_id, reason}` event, `reason` one of `tool_resolved`, `timeout` or
+`turn_end`. It is a §6.6 host chain event, cut out of the agentd reconnect cursor. A restart replays
+the log with the same rules, so a question whose call already has its result never comes back open.
+Autopilot waits only on a question the colony's record shows as `waiting_for_answer`.

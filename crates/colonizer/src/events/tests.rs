@@ -1632,3 +1632,88 @@ async fn a_refused_host_reached_by_a_later_call_flags_deny_then_reach() {
     assert_eq!(attention["evidence"][0]["target"], "evil.example");
     let _ = std::fs::remove_dir_all(root);
 }
+
+const EXEC_ASK: &str = r#"{"seq":1,"type":"question","question_id":"call_1","questions":[{"question":"Allow rm?"}],"kind":"exec_policy","blocking":true,"risk":"workspace_write"}"#;
+
+/// Issue #1189: an exec-policy ask whose tool call gets its `tool_result` without an answer is closed
+/// (`question_closed`, reason `tool_resolved`), so autopilot goes on to verify and publish instead of
+/// waiting on a question nobody can see.
+#[tokio::test]
+async fn a_question_whose_tool_call_resolves_unanswered_is_closed_and_autopilot_proceeds() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let rt = app.runtime("abc").await;
+    let out = app.session_dir("abc").join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("pr.md"), "# Fix\n\nBody.\n").unwrap();
+
+    handle_agent_event(&app, "abc", &rt, EXEC_ASK).await;
+    assert!(rt.open_question().await.is_some());
+    let result = r#"{"seq":2,"type":"tool_result","tool_call_id":"call_1","output":"denied","is_error":true}"#;
+    handle_agent_event(&app, "abc", &rt, result).await;
+    assert!(rt.open_question().await.is_none(), "the resolved call closed its question");
+    assert!(!rt.question_holds_tool_call.load(Ordering::SeqCst));
+    assert!(rt.activity.lock().await.question_since.is_none());
+    let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+    assert!(
+        events.contains(r#""type":"question_closed""#) && events.contains(r#""reason":"tool_resolved""#),
+        "{events}"
+    );
+
+    let end = r#"{"seq":3,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(!log.contains("a question is open"), "{log}");
+    assert!(log.contains("verifying the claim"), "autopilot went on to verify: {log}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A timed-out ask says so, a result for another call leaves the question alone, and a turn that
+/// ends while a question holds a tool call closes it with `turn_end`.
+#[tokio::test]
+async fn question_close_reasons_and_the_questions_they_leave_open() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+
+    handle_agent_event(&app, "abc", &rt, EXEC_ASK).await;
+    let other = r#"{"seq":2,"type":"tool_result","tool_call_id":"call_other","output":"ok","is_error":false}"#;
+    handle_agent_event(&app, "abc", &rt, other).await;
+    assert!(rt.open_question().await.is_some(), "another call's result closes nothing");
+    let timeout = r#"{"seq":3,"type":"tool_result","tool_call_id":"call_1","output":"the ask timed out","is_error":true}"#;
+    handle_agent_event(&app, "abc", &rt, timeout).await;
+    assert!(rt.open_question().await.is_none());
+    let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+    assert!(events.contains(r#""reason":"timeout""#), "{events}");
+
+    let ask = EXEC_ASK.replace(r#""seq":1"#, r#""seq":4"#).replace("call_1", "call_2");
+    handle_agent_event(&app, "abc", &rt, &ask).await;
+    let end = r#"{"seq":5,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert!(rt.open_question().await.is_none(), "the turn ending closed it");
+    let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+    assert!(events.contains(r#""reason":"turn_end""#), "{events}");
+
+    // The lead's own question holds no call: a turn end leaves it open for its answer.
+    let lead = r#"{"seq":6,"type":"question","question_id":"lead-1","questions":[{"question":"Which?"}]}"#;
+    handle_agent_event(&app, "abc", &rt, lead).await;
+    let end = r#"{"seq":7,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert!(rt.open_question().await.is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Autopilot never waits silently: a question it waits on is put on the record as
+/// `waiting_for_answer`, which is what the cockpit lists.
+#[tokio::test]
+async fn autopilot_waiting_on_a_question_exposes_it_on_the_record() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Idle).await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let rt = app.runtime("abc").await;
+    let lead = r#"{"seq":1,"type":"question","question_id":"lead-1","questions":[{"question":"Which?"}]}"#;
+    handle_agent_event(&app, "abc", &rt, lead).await;
+    app.update_session("abc", |x| x.status = SessionStatus::Idle).await;
+    let end = r#"{"seq":2,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::WaitingForAnswer);
+    let _ = std::fs::remove_dir_all(root);
+}
