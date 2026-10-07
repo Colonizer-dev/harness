@@ -30,8 +30,9 @@ read once at startup and cached, so macOS asks for access then, not in the middl
 - `DELETE /api/secrets/{id}` → the row; removes the keychain item and the file.
 - `POST /api/secrets/{id}/move` `{"to": "keychain"|"file"}` → the row; carries the value across and
   deletes the other copy. 409 when the keychain is unavailable or nothing is saved.
-- Not editable here (`editable: false`): the cockpit API token (the CLI reads it off disk) and keys
-  only an environment variable supplies (`JEV_API_KEY`).
+- Not editable here (`editable: false`): the cockpit API token (the CLI reads it off disk).
+- The `jev` row (TypeSafe key) is editable: the saved key wins, `JEV_API_KEY` is the fallback, and a
+  save or removal applies to the next turn without a restart.
 - `DELETE /api/secrets/colony:<ENV>` removes a colony secret's value and its registry entry, and
   answers `{"id": "colony:<ENV>", "removed": true}`.
 - Errors: **404** for an unknown id; **400** for a row that is not editable, a value that is empty,
