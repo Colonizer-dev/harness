@@ -303,6 +303,11 @@ async fn a_hidden_org_is_never_auto_colonized_and_never_asked_about() {
     };
     assert!(org_hidden(&off));
     assert!(!org_hidden(&OrgSettings::default()));
+    let concealed = OrgSettings {
+        hidden: true,
+        ..OrgSettings::default()
+    };
+    assert!(org_hidden(&concealed), "an org hidden from Colonizer is hidden here too");
     // And its scope is not swept.
     let all: BTreeMap<String, OrgSettings> = [(
         "acme".to_string(),

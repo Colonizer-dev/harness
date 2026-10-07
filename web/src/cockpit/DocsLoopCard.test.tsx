@@ -57,7 +57,7 @@ describe("Docs & README loop settings", () => {
     expect(html).toContain("Not set up: add a repository or an org");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run now<\/button>/);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Dry run<\/button>/);
-    expect(html).toContain("Enable");
+    expect(html).toContain("repositories to run on");
   });
 
   it("lists the allowlist with a way to remove each entry, and the interval", () => {
