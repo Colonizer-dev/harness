@@ -595,6 +595,67 @@ test('commands that only touch a secret path\'s name are allowed, ones that read
   }
 });
 
+// #1079: an agent checking the placeholders before it finished ran exactly this; names and sizes
+// only, with stderr folded in and the output cut short by a pipe into `head`.
+test('size and metadata commands on a secret path, piped into a stdin filter, are allowed', () => {
+  const policy = policyIn('/repo');
+  const files = '.env .netrc .git-credentials .npmrc .pypirc';
+  const allowed = [
+    `git check-ignore -v ${files} 2>&1 | head; wc -c ${files} 2>&1 | head`,
+    'git check-ignore -v .env 2>/dev/null',
+    'git check-ignore -q .env >/dev/null 2>&1 && echo ignored',
+    'wc -c .env',
+    'wc --bytes .env .netrc',
+    'stat .env',
+    'stat -c %s .env',
+    'stat --format=%s:%n .env .netrc',
+    'stat -L .netrc | head -n 5',
+    'ls -l .env | sort | uniq',
+    'ls -la .env .netrc | tail -2',
+    'test -s .env',
+    '[ -s .npmrc ] && echo has-bytes',
+    '[ -r .env ]',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
+  // Anything that reads the bytes, or hands the names to something that would, is still refused.
+  const reads = [
+    'wc .env',
+    'wc -l .env',
+    'wc -w .env',
+    'wc -m .env',
+    'wc -c .env | cat',
+    'wc -c .env; cat .env',
+    'git check-ignore -v .env 2>&1 | head .env',
+    'git check-ignore -v .env 2>&1 | head -n 1 .netrc',
+    'git check-ignore -v .env 2>&1 | xargs cat',
+    'ls .env | xargs head',
+    'ls .env | sort -o out.txt .env',
+    'head .env',
+    'head -c 100 .env',
+    'tail -n 1 .env',
+    'less .env',
+    'grep TOKEN .env',
+    'grep -c . .env',
+    'cp .env /tmp/x',
+    'source .env',
+    '. .env',
+    'base64 .env',
+    'xxd .env',
+    'od -c .env',
+    'stat -c %s .env > /tmp/x; cat .env',
+    'stat --printf=$(cat .env) .env',
+    'stat -c "%s" .env 2>&1 | cat',
+    'wc -c < .env',
+    'wc -c .env 2>&1 > /tmp/out',
+    'git check-ignore -v .env 2>&1 | head\ncat .env',
+    'test -s .env && cat .env',
+    'diff .env /dev/null',
+    'cmp .env /dev/null',
+    'sha256sum .env',
+  ];
+  for (const command of reads) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+});
+
 // #1169 follow-up: copying a repository while EXCLUDING the placeholder dotfiles is the safe thing to
 // do; the --exclude patterns of tar and rsync are not paths the command touches.
 test('tar and rsync --exclude patterns do not count as touching a secret path; reads still do', () => {

@@ -241,6 +241,11 @@ export function evaluateExecPolicy(policy, command, opts = {}) {
         : rule.writes === 'outside' ? ctx.writeReason ?? rule.reason
         : rule.reason;
       const hit = { decision: rule.decision, rule: rule.id, layer: layer.name, reason };
+      // A `touches` rule names the path it matched, as the command spelled it, so the boundary event
+      // reports the refused file and not the first path-looking word (`cd /workspace && cat .env`
+      // refuses `.env`, not the workspace root the watchdog would then see every call reach).
+      const target = touchedWord(rule, ctx);
+      if (target) hit.target = target;
       if (!best || RANK[hit.decision] > RANK[best.decision]) best = hit;
       break; // first matching rule in this layer wins
     }
@@ -337,6 +342,14 @@ function ruleMatches(rule, ctx) {
     }
   }
   return true;
+}
+
+/** The word, as the command spelled it, that made a rule's `touches` predicate match, or null. */
+function touchedWord(rule, ctx) {
+  const p = rule.predicates.find((q) => q.kind === 'touches');
+  if (!p) return null;
+  const token = ctx.tokens.find((t) => p.res.some((re) => re.test(t)) && !p.keepOut.some((re) => re.test(t)));
+  return token === undefined ? null : ctx.spelled.get(token) ?? token;
 }
 
 // --- commands ------------------------------------------------------------------
@@ -545,15 +558,29 @@ function classifyWrite(segment, cwd, hostMounts) {
 
 // --- name-only commands (#1169) ------------------------------------------------------------
 
-// Commands that can only learn a path's NAME or existence, never its bytes: `git check-ignore`,
-// `git status`, `ls`, `test -e|-f|-d` and `[ -e|-f|-d P ]`. The path policy's empty placeholders
-// (.env, .netrc, ...) show up to an agent as dotfiles, and asking git whether one is ignored is
-// not an attempt to read a secret, so such a segment does not feed the `touches` predicate.
+// Commands that can only learn a path's NAME, existence or size, never its bytes: `git
+// check-ignore`, `git status`, `ls`, `stat`, `wc -c`, `test -e|-f|-d|-s|...` and `[ -f P ]`. The
+// path policy's empty placeholders (.env, .netrc, ...) show up to an agent as dotfiles, and asking
+// git whether one is ignored, or how big it is, is not an attempt to read a secret, so such a
+// segment does not feed the `touches` predicate.
 const SHORT_FLAGS = /^-[A-Za-z]+$/;
 const LONG_FLAGS = /^--[a-z][a-z-]*$/; // no `=value`: nothing here takes an argument worth smuggling
+const NUMBER = /^-?\d+$/;
+// A `stat` format: conversions and plain punctuation, never a path or an expansion.
+const STAT_FORMAT = /^[%A-Za-z0-9_.:,+=-]+$/;
+// `test` and `[` operators that look at a path's metadata only.
+const FILE_TESTS = ['-e', '-f', '-d', '-s', '-r', '-w', '-x', '-L', '-h'];
+// Filters that, given no path, only read their stdin: what follows a pipe from a name-only
+// command, so `git check-ignore -v .env | head` sees names and nothing else.
+const STDIN_FILTERS = new Set(['head', 'tail', 'sort', 'uniq', 'wc']);
 // Anything that can feed or redirect bytes, or run another command, and so turn a name-only
 // segment into a read: pipes, redirects, substitutions, subshells, braces and backslash escapes.
 const UNSAFE_SHELL = /[|<>`$(){}\\]/;
+// The same, minus the pipe: a pipe is checked segment by segment (only into a STDIN_FILTERS
+// command with no path of its own).
+const UNSAFE_SHELL_PIPED = /[<>`$(){}\\]/;
+// Redirects that move no bytes into or out of a file: stderr onto stdout, or output thrown away.
+const HARMLESS_REDIRECT = /(^|\s)(?:2>&1|[12]?>\s*\/dev\/null|&>\s*\/dev\/null)(?=\s|;|\||&|$)/g;
 
 /** True when one segment (already split on `;`, `&&` and the like) only asks about path names. */
 function isNameOnlySegment(segment) {
@@ -569,10 +596,37 @@ function isNameOnlySegment(segment) {
   if (ws[0] === 'ls') return flags(ws.slice(1));
   // `echo` of literal words (the caller already refused every expansion) only prints its own text.
   if (ws[0] === 'echo') return true;
-  const file = ['-e', '-f', '-d'];
-  if (ws[0] === 'test') return ws.length === 3 && file.includes(ws[1]) && paths([ws[2]]);
-  if (ws[0] === '[') return ws.length === 4 && file.includes(ws[1]) && paths([ws[2]]) && ws[3] === ']';
+  // `wc -c` reports a size, the same thing `ls -l` shows; `-l`, `-w` and `-m` count what is inside.
+  if (ws[0] === 'wc') {
+    const rest = ws.slice(1);
+    return rest.some((w) => w.startsWith('-')) && rest.filter((w) => w.startsWith('-')).every((w) => w === '-c' || w === '--bytes');
+  }
+  if (ws[0] === 'stat') return statArgs(ws.slice(1));
+  if (ws[0] === 'test') return ws.length === 3 && FILE_TESTS.includes(ws[1]) && paths([ws[2]]);
+  if (ws[0] === '[') return ws.length === 4 && FILE_TESTS.includes(ws[1]) && paths([ws[2]]) && ws[3] === ']';
   return false;
+}
+
+/** `stat` arguments: flags, an optional `-c`/`--format`/`--printf` format, and paths. */
+function statArgs(rest) {
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i];
+    if (w === '-c' || w === '--format' || w === '--printf') {
+      if (!STAT_FORMAT.test(rest[i + 1] ?? '')) return false;
+      i++;
+    } else if (/^--(?:format|printf)=/.test(w)) {
+      if (!STAT_FORMAT.test(w.replace(/^--(?:format|printf)=/, ''))) return false;
+    } else if (w.startsWith('-') && !SHORT_FLAGS.test(w) && !LONG_FLAGS.test(w)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** True when a segment is a stdin filter given no path: `head`, `head -n 5`, `sort -u`, `wc -l`. */
+function isStdinFilter(segment) {
+  const ws = segment.trim().split(/\s+/);
+  return STDIN_FILTERS.has(ws[0]) && ws.slice(1).every((w) => SHORT_FLAGS.test(w) || LONG_FLAGS.test(w) || NUMBER.test(w));
 }
 
 /**
@@ -593,11 +647,20 @@ function nameOnlyFiltered(command, segments) {
     const plain = body.replace(ref, 'X');
     return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain) ? [] : segments;
   }
-  if (UNSAFE_SHELL.test(command)) return segments;
-  // All or nothing: one other segment (`alias ls=cat`, `export PATH=...`, `hash -p /bin/cat ls`)
-  // can change what a later `ls` or `test` runs, so only a command made of name-only segments
-  // and nothing else drops its tokens.
-  return segments.every((segment) => !segment.trim() || isNameOnlySegment(segment)) ? [] : segments;
+  if (!UNSAFE_SHELL.test(command)) {
+    // All or nothing: one other segment (`alias ls=cat`, `export PATH=...`, `hash -p /bin/cat ls`)
+    // can change what a later `ls` or `test` runs, so only a command made of name-only segments
+    // and nothing else drops its tokens.
+    return segments.every((segment) => !segment.trim() || isNameOnlySegment(segment)) ? [] : segments;
+  }
+  // The shape agents reach for to keep output short: `git check-ignore -v .env 2>&1 | head; wc -c
+  // .env 2>&1 | head`. With `2>&1` and `>/dev/null` gone, and no other redirect, substitution or
+  // escape left, every segment must be name-only or a stdin filter with no path of its own (`head`,
+  // not `head .env`, and never `cat` or `xargs`), so what crosses a pipe is names and sizes.
+  const plain = command.replace(HARMLESS_REDIRECT, '$1');
+  if (/[\r\n]/.test(plain.trim()) || UNSAFE_SHELL_PIPED.test(plain)) return segments;
+  const parts = splitCommands(plain);
+  return parts.length && parts.every((segment) => isNameOnlySegment(segment) || isStdinFilter(segment)) ? [] : segments;
 }
 
 /**
@@ -623,8 +686,11 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     if (text) scripts.push({ path, text });
   }
   const tokens = new Set();
+  const spelled = new Map(); // token -> the word as the command spelled it (`~/.ssh`, not /root/.ssh)
   for (const word of [...nameOnlyFiltered(command, segments).map(withoutExcludes).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
-    tokens.add(expandTilde(word));
+    const token = expandTilde(word);
+    tokens.add(token);
+    if (!spelled.has(token)) spelled.set(token, word);
   }
   const writes = segments.map((segment) => classifyWrite(segment, cwd, hostMounts)).filter(Boolean);
   const pick = (kinds) => writes
@@ -636,6 +702,7 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     command,
     segments,
     tokens: [...tokens],
+    spelled,
     scripts,
     writesOutside: outside !== null,
     writesOutsideAny: strict !== null,
