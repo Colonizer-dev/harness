@@ -176,7 +176,6 @@ export function ProvidersPane({
     >
       <div className="space-y-3">
         <ProviderQuotaCards reloadProviders={reload} />
-        <p className="text-small-lg text-muted">What is left in each plan and when it resets. Open a provider for its details.</p>
         {groups}
         {error && <p className="text-body-sm text-err">{error}</p>}
         {!providers && !error && (

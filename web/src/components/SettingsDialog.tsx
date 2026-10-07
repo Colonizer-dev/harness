@@ -41,7 +41,7 @@ import { NotificationsPane } from "./settings/NotificationsPane";
 import { ModulePane } from "./settings/ModulePane";
 import { ProvidersPane } from "./settings/ProvidersPane";
 import { draftOf, isDirty, kindInfo, type ModuleDraft } from "./settings/moduleFields";
-import { CrumbContext, HeroContext, Pane, type SectionId } from "./settings/ui";
+import { CrumbContext, HeroContext, IntroLine, Pane, type SectionId } from "./settings/ui";
 import {
   NeedsYou,
   PageChips,
@@ -641,7 +641,14 @@ export function SettingsBody({
   const hero = active ? (
     <>
       <NeedsYou items={attention[active] ?? []} />
-      <SectionHero guide={guideFor(active)} stats={heroStats(active)} flow={active === "module:source" ? sourceFlow(drafts.source?.settings, sessions) : undefined} />
+      {active === "providers" ? (
+        // The list is the point of this page: its help is one line, and the diagram waits behind the "i".
+        <IntroLine text="What is left in each plan and when it resets. Open a provider for its details." label="How requests reach a model">
+          <SectionHero guide={guideFor(active)} stats={heroStats(active)} />
+        </IntroLine>
+      ) : (
+        <SectionHero guide={guideFor(active)} stats={heroStats(active)} flow={active === "module:source" ? sourceFlow(drafts.source?.settings, sessions) : undefined} />
+      )}
     </>
   ) : null;
   const ownFrame = active === "setup" || Boolean(active?.startsWith("org:"));
