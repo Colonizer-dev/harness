@@ -250,7 +250,7 @@ export const MessageRow = memo(function MessageRow({
         ) : (
           <ChatMarkdown text={m.content || (m.error || (m.tools?.length ?? 0) > 0 ? "" : "…")} onOpenFile={onOpenFile} />
         )}
-        {!user && m.tools && m.tools.length > 0 && approvals && <ToolCalls notes={m.tools} approvals={approvals} autoFocusFirst={isLastReply} />}
+        {!user && m.tools && m.tools.length > 0 && approvals && <ToolCalls notes={m.tools} approvals={approvals} />}
         {m.error && <p className="m-0 mt-1.5 rounded-lg border border-err/30 bg-err/5 px-2.5 py-1.5 text-small-lg text-err">{m.error}</p>}
         {note && <p className="m-0 mt-1.5 text-small italic text-warn">Your note: {note}</p>}
 

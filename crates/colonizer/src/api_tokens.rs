@@ -1101,6 +1101,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The chat approvals decide whether a held write runs as the owner: no scoped token reaches them.
+    #[test]
+    fn chat_approvals_are_owner_only() {
+        for (method, path) in [
+            (Method::POST, "/api/chat/approvals"),
+            (Method::POST, "/api/chat/approvals/abc123"),
+            (Method::GET, "/api/chat/approvals"),
+        ] {
+            assert!(matches!(classify(&method, path), Need::Owner), "{method} {path}");
+        }
+    }
+
     #[test]
     fn launch_caps_refuse_at_the_concurrency_and_budget_limits() {
         let now = Utc::now();

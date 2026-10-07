@@ -464,7 +464,7 @@ function ApprovalPane({ approval, onClose }: { approval: ChatApproval; onClose: 
   const shown = approvals.byId[approval.id] ?? approval;
   return (
     <div className="scroll-thin max-h-[min(60vh,520px)] overflow-y-auto border-t border-border p-3.5 sm:p-4">
-      <ApprovalCard approval={shown} busy={approvals.busy.has(approval.id)} autoFocus onDecide={(body) => void approvals.decide(approval.id, body)} />
+      <ApprovalCard approval={shown} busy={approvals.busy.has(approval.id)} onDecide={(body) => void approvals.decide(approval.id, body)} />
       {(shown.status === "approved" || shown.status === "rejected" || shown.status === "failed") && (
         <div className="mt-3 flex justify-end">
           <button type="button" onClick={onClose} className="h-8 cursor-pointer rounded-lg border border-border bg-transparent px-3 text-small-lg text-text hover:bg-panel-2">
@@ -571,7 +571,7 @@ function AnswerPane({
           <i />
         </span>
       ) : null}
-      {tools.length > 0 && <ToolCalls notes={tools} approvals={approvals} autoFocusFirst />}
+      {tools.length > 0 && <ToolCalls notes={tools} approvals={approvals} />}
       {error && (
         <p role="alert" className="m-0 mt-2 rounded-lg border border-err/30 bg-err/5 px-2.5 py-1.5 text-small-lg text-err">
           {error}

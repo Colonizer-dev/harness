@@ -41,6 +41,11 @@ const PENDING_LIMIT: usize = 40;
 const KEEP: usize = 500;
 /// A tool's result, as far as the model and the card show it.
 const RESULT_LIMIT: usize = 12_000;
+/// Free text a write carries (a task, an answer) is shown to the user whole, so it is capped: a
+/// longer one is refused rather than summarised, because what is approved must be what runs.
+const TEXT_LIMIT: usize = 1_500;
+/// A held write nobody decided goes stale: the world it described has moved on.
+const APPROVAL_TTL_SECS: i64 = 2 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -487,15 +492,59 @@ pub async fn refusal(app: &Shared, name: &str, args: &Value) -> Option<String> {
     if let Some(org) = args["org"].as_str() {
         orgs.push(org.to_string());
     }
-    if kind_of(name) == Some(Kind::Write) && !orgs.is_empty() {
-        let saved: std::collections::BTreeMap<String, crate::orgs::OrgSettings> =
-            crate::util::read_json_or_default(&app.orgs_file()).unwrap_or_default();
-        for org in orgs {
-            if saved
-                .iter()
-                .any(|(k, v)| k.eq_ignore_ascii_case(&org) && v.enabled == Some(false))
-            {
+    // A loop's run starts a colony in the loop's own org and repository.
+    if name == "run_loop_now"
+        && let Some(id) = args["id"].as_str()
+        && let Some(l) = app.loops.get(id).await
+    {
+        orgs.push(if l.org.is_empty() {
+            l.repo.split('/').next().unwrap_or_default().to_string()
+        } else {
+            l.org.clone()
+        });
+    }
+    let saved: std::collections::BTreeMap<String, crate::orgs::OrgSettings> = if kind_of(name) == Some(Kind::Write) {
+        crate::util::read_json_or_default(&app.orgs_file()).unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let hidden = |org: &str| {
+        saved
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case(org) && v.enabled == Some(false))
+    };
+    if kind_of(name) == Some(Kind::Write) {
+        for org in &orgs {
+            if hidden(org) {
                 return Some(format!("{org} is switched off in this cockpit. Chat does not touch it."));
+            }
+        }
+    }
+    // `apply: running` stops and resumes every colony in scope, which is a resume by another route:
+    // it must not reach a colony on a security hold or one in a switched-off org.
+    if name == "switch_models" && args["apply"].as_str() == Some("running") {
+        let scope_org = (args["scope"].as_str() == Some("org")).then(|| args["org"].as_str().unwrap_or_default().to_string());
+        for s in app.sessions.read().await.iter() {
+            let org = if s.org.is_empty() {
+                s.repo.split('/').next().unwrap_or_default().to_string()
+            } else {
+                s.org.clone()
+            };
+            let in_play =
+                !s.cleaned_up && (s.status.is_live() || matches!(s.status, SessionStatus::Parked | SessionStatus::Queued));
+            if !in_play || scope_org.as_deref().is_some_and(|o| !o.eq_ignore_ascii_case(&org)) {
+                continue;
+            }
+            if crate::playbook::is_security_hold(s.attention.as_ref()) {
+                return Some(format!(
+                    "Colony {} is on a security hold and this switch would restart it. Only a person can release a hold, in the cockpit; switch for new colonies only, or release it first.",
+                    s.id
+                ));
+            }
+            if hidden(&org) {
+                return Some(format!(
+                    "{org} is switched off in this cockpit and this switch would restart its colonies. Chat does not touch it."
+                ));
             }
         }
     }
@@ -612,7 +661,11 @@ async fn run_read(app: &Shared, name: &str, args: &Value, workspace: Option<&str
 }
 
 /// Finishes a call whose request needs the world's state: an answer needs the open question.
-async fn finish_answer(app: &Shared, id: &str, answer: &str) -> Result<Plan, String> {
+/// The question a colony is waiting on, or why there is none.
+async fn pending_question(app: &Shared, id: &str) -> Result<crate::cli::PendingQuestion, String> {
+    if !plain_id(id) {
+        return Err("`id` is not a valid id".into());
+    }
     let question = call(
         app,
         &Plan {
@@ -625,8 +678,14 @@ async fn finish_answer(app: &Shared, id: &str, answer: &str) -> Result<Plan, Str
     if question.as_str().is_some() {
         return Err("no question is pending for this colony".into());
     }
-    let pending: crate::cli::PendingQuestion =
-        serde_json::from_value(question).map_err(|e| format!("the question is not in a shape chat can answer: {e}"))?;
+    serde_json::from_value(question).map_err(|e| format!("the question is not in a shape chat can answer: {e}"))
+}
+
+async fn finish_answer(app: &Shared, id: &str, answer: &str, bound: Option<&str>) -> Result<Plan, String> {
+    let pending = pending_question(app, id).await?;
+    if bound.is_none_or(|b| b != pending.question_id) {
+        return Err("the colony is asking a different question than the one this answer was approved for; ask again".into());
+    }
     let resolved = crate::cli::resolve_answer(answer, &pending).map_err(|e| e.to_string())?;
     Ok(Plan {
         method: "POST",
@@ -635,10 +694,10 @@ async fn finish_answer(app: &Shared, id: &str, answer: &str) -> Result<Plan, Str
     })
 }
 
-async fn run_write(app: &Shared, name: &str, args: &Value) -> Result<Value, String> {
+async fn run_write(app: &Shared, name: &str, args: &Value, bound: Option<&str>) -> Result<Value, String> {
     let mut p = plan(name, args)?;
     if name == "answer_colony" {
-        p = finish_answer(app, arg_id(args, "id")?, arg_str(args, "answer")?).await?;
+        p = finish_answer(app, arg_id(args, "id")?, arg_str(args, "answer")?, bound).await?;
     }
     call(app, &p).await
 }
@@ -666,6 +725,9 @@ pub struct Preview {
     pub diff: Vec<Value>,
     pub dry_run: bool,
     pub blast: Blast,
+    /// For an answer: the question the user was shown. The answer only runs against that question.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
 }
 
 struct Target {
@@ -730,11 +792,23 @@ pub async fn preview(app: &Shared, name: &str, args: &Value) -> Result<Preview, 
             out.blast = one(&t, "Creates a pull request on GitHub.");
         }
         "answer_colony" => {
+            let answer = arg_str(args, "answer")?;
+            if answer.chars().count() > TEXT_LIMIT {
+                return Err(format!("the answer is longer than {TEXT_LIMIT} characters; shorten it"));
+            }
+            // The answer is bound to the question on screen: if the colony asks something else by
+            // the time it is approved, it does not run.
+            let pending = pending_question(app, id).await?;
+            let asked = pending
+                .questions
+                .first()
+                .map(|q| crate::util::truncate(&q.question, 200).to_string())
+                .unwrap_or_default();
+            out.question_id = Some(pending.question_id);
             out.summary = format!(
-                "Answer colony {id}{}{} with “{}”.",
+                "Answer colony {id}{}{} with “{answer}”. It is asking: “{asked}”",
                 label(&t),
                 on(&t),
-                crate::util::truncate(arg_str(args, "answer")?, 120)
             );
             out.blast = one(&t, "The colony carries on with this answer.");
         }
@@ -752,12 +826,16 @@ pub async fn preview(app: &Shared, name: &str, args: &Value) -> Result<Preview, 
         }
         "launch_colony" => {
             let repo = arg_str(args, "repo")?;
-            let what = match args["issue"].as_u64() {
-                Some(n) => format!("issue #{n}"),
-                None => format!(
-                    "the task “{}”",
-                    crate::util::truncate(args["task"].as_str().unwrap_or_default(), 100)
-                ),
+            let task = args["task"].as_str().map(str::trim).filter(|t| !t.is_empty());
+            if task.is_some_and(|t| t.chars().count() > TEXT_LIMIT) {
+                return Err(format!("the task is longer than {TEXT_LIMIT} characters; shorten it"));
+            }
+            // Both an issue and a task can ride on one launch: the card says every part of it.
+            let what = match (args["issue"].as_u64(), task) {
+                (Some(n), Some(t)) => format!("issue #{n} with the extra instructions “{t}”"),
+                (Some(n), None) => format!("issue #{n}"),
+                (None, Some(t)) => format!("the task “{t}”"),
+                (None, None) => return Err("name an `issue` or a `task`".into()),
             };
             out.summary = format!("Start a colony on {repo} for {what}.");
             out.blast = Blast {
@@ -910,6 +988,13 @@ pub fn trailer(notes: &[ToolNote]) -> String {
         .join("\n")
 }
 
+/// Whether a held write has waited past its time.
+fn stale(a: &Approval, now: chrono::DateTime<Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&a.created_at)
+        .map(|t| (now - t.with_timezone(&Utc)).num_seconds() > APPROVAL_TTL_SECS)
+        .unwrap_or(true)
+}
+
 fn store_path(app: &crate::App) -> std::path::PathBuf {
     app.cfg.data_dir.join("chats").join("_approvals.json")
 }
@@ -1051,7 +1136,8 @@ async fn propose(app: &Shared, chat: &str, message: &str, call: &ToolCall) -> Re
     let preview = preview(app, &call.name, &call.input).await?;
     let _guard = STORE.lock().await;
     let mut list = load(app);
-    if list.iter().filter(|a| a.status == "pending").count() >= PENDING_LIMIT {
+    let now = Utc::now();
+    if list.iter().filter(|a| a.status == "pending" && !stale(a, now)).count() >= PENDING_LIMIT {
         return Err("Too many approvals are waiting. Decide some before asking for more.".into());
     }
     let approval = Approval {
@@ -1201,15 +1287,22 @@ async fn log_decision(app: &Shared, a: &Approval, kind: &str, detail: String) {
     entry.via = Some("cockpit".into());
     entry.target = Some(a.tool.clone());
     entry.section = Some("chat".into());
-    entry.colony = a.args["id"]
+    // What ran is what is logged: an edit's arguments, not the ones first proposed.
+    let ran = a.ran_with.as_ref().unwrap_or(&a.args);
+    entry.colony = ran["id"]
         .as_str()
         .filter(|_| a.tool.ends_with("_colony") || a.tool.starts_with("move_") || a.tool == "set_priority")
         .map(str::to_string);
-    entry.repo = a.args["repo"].as_str().map(str::to_string);
+    entry.repo = ran["repo"].as_str().map(str::to_string);
+    let edited = a
+        .ran_with
+        .as_ref()
+        .map(|r| format!(" [ran with {}]", crate::util::truncate(&r.to_string(), 300)))
+        .unwrap_or_default();
     entry.detail = Some(if a.chat.is_empty() {
-        format!("{detail} — from Spotlight")
+        format!("{detail}{edited} — from Spotlight")
     } else {
-        format!("{detail} — chat {}, message {}", a.chat, a.message)
+        format!("{detail}{edited} — chat {}, message {}", a.chat, a.message)
     });
     crate::activity::record(app, entry).await;
 }
@@ -1234,6 +1327,18 @@ pub async fn decide(State(app): State<Shared>, Path(id): Path<String>, Json(req)
             ));
         }
         let now = Utc::now();
+        if req.decision != "reject" && stale(&list[at], now) {
+            // Settled, not left pending: it can never run, and it stops counting against the limit.
+            list[at].status = "rejected".into();
+            list[at].decision = Some("reject".into());
+            list[at].decided_at = Some(now.to_rfc3339());
+            list[at].result = Some("Expired: nobody decided it in time. Ask again.".into());
+            let _ = save(&app, &list).await;
+            return Err(client_error(
+                StatusCode::GONE,
+                "this approval waited too long and has expired; ask for the change again",
+            ));
+        }
         if req.decision != "reject" {
             let recent = list
                 .iter()
@@ -1297,7 +1402,7 @@ pub async fn decide(State(app): State<Shared>, Path(id): Path<String>, Json(req)
         return Ok(Json(json!({"approval": approval})));
     }
 
-    let outcome = run_write(&app, &approval.tool, &args).await;
+    let outcome = run_write(&app, &approval.tool, &args, approval.preview.question_id.as_deref()).await;
     let (status, result) = match &outcome {
         Ok(v) => ("approved", scrub(v)),
         Err(e) => ("failed", e.clone()),
@@ -1762,6 +1867,82 @@ mod tests {
         let (entries, _) = crate::activity::read_all(&app.cfg.data_dir);
         let line = entries.iter().find(|e| e.kind == "chat.reject").unwrap();
         assert!(line.detail.as_deref().unwrap_or_default().contains("Spotlight"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_running_switch_never_restarts_a_held_colony() {
+        let root = temp("switchhold");
+        let app = crate::tests::test_app(&root);
+        app.sessions.write().await.push(crate::sessions::Session {
+            id: "held1".into(),
+            repo: "acme/web".into(),
+            org: "acme".into(),
+            status: SessionStatus::Running,
+            attention: Some(json!({"reason": "control_defeat"})),
+            ..crate::sessions::Session::default()
+        });
+        let running = json!({"scope": "install", "roles": {"model": "a/b"}, "apply": "running"});
+        let done = run_call(&app, "c", "m", None, &call_of("switch_models", running.clone())).await;
+        assert!(
+            done.approval.is_none() && done.content.contains("security hold"),
+            "{}",
+            done.content
+        );
+        // Scoped to another org it does not reach the held colony; and "new" restarts nothing.
+        let other = json!({"scope": "org", "org": "other", "roles": {"model": "a/b"}, "apply": "running"});
+        assert!(refusal(&app, "switch_models", &other).await.is_none());
+        let new_only = json!({"scope": "install", "roles": {"model": "a/b"}, "apply": "new"});
+        assert!(refusal(&app, "switch_models", &new_only).await.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_card_says_everything_that_will_run() {
+        let root = temp("card");
+        let app = crate::tests::test_app(&root);
+        let both = preview(
+            &app,
+            "launch_colony",
+            &json!({"repo": "o/r", "issue": 4, "task": "also delete the tests"}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            both.summary.contains("#4") && both.summary.contains("also delete the tests"),
+            "{}",
+            both.summary
+        );
+        let long = "x".repeat(TEXT_LIMIT + 1);
+        assert!(
+            preview(&app, "launch_colony", &json!({"repo": "o/r", "task": long}))
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_stale_approval_expires_instead_of_running() {
+        let root = temp("stale");
+        let app = crate::tests::test_app(&root);
+        let done = run_call(&app, "c", "m", None, &call_of("stop_colony", json!({"id": "nope"}))).await;
+        let id = done.approval.unwrap().id;
+        let mut list = load(&app);
+        list[0].created_at = (Utc::now() - chrono::Duration::seconds(APPROVAL_TTL_SECS + 5)).to_rfc3339();
+        save(&app, &list).await.unwrap();
+        let out = decide(
+            State(app.clone()),
+            Path(id.clone()),
+            Json(Decision {
+                decision: "approve".into(),
+                ..Decision::default()
+            }),
+        )
+        .await;
+        assert_eq!(out.err().map(|e| e.0), Some(StatusCode::GONE));
+        let stored = load(&app).into_iter().find(|a| a.id == id).unwrap();
+        assert_eq!(stored.status, "rejected", "it never ran and no longer holds a slot");
         let _ = std::fs::remove_dir_all(root);
     }
 
