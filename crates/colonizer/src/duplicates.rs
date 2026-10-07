@@ -165,6 +165,7 @@ pub(crate) fn holds_issue(s: &Session) -> bool {
     matches!(
         s.status,
         SessionStatus::Queued
+            | SessionStatus::Blocked
             | SessionStatus::Starting
             | SessionStatus::Running
             | SessionStatus::WaitingForAnswer

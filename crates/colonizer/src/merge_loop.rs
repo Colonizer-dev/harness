@@ -1773,7 +1773,7 @@ impl<'a, O: Ops> Engine<'a, O> {
     fn working(&self, colony: &str) -> bool {
         self.sessions
             .iter()
-            .any(|x| x.id == colony && (x.status.busy() || x.status == SessionStatus::Queued))
+            .any(|x| x.id == colony && (x.status.busy() || matches!(x.status, SessionStatus::Queued | SessionStatus::Blocked)))
     }
 
     /// Issue #968: a conflicted pull request gets one resolve per base commit, one at a time per

@@ -152,7 +152,7 @@ pub fn transition(last: SessionStatus, now: SessionStatus) -> Option<&'static st
     Some(match now {
         Queued | Starting | Running if back => "resumed",
         Running | Idle if last == WaitingForAnswer => "answered",
-        Queued => "queued",
+        Queued | Blocked => "queued",
         Starting => "started",
         Running => "running",
         Idle => "idle",

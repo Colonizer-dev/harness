@@ -252,7 +252,7 @@ pub fn due(loops: &[Loop], now: DateTime<Utc>) -> Vec<String> {
 
 /// Whether a colony still counts as the loop's current run: anything not finished with.
 fn in_flight(status: SessionStatus) -> bool {
-    status == SessionStatus::Queued || status.busy()
+    matches!(status, SessionStatus::Queued | SessionStatus::Blocked) || status.busy()
 }
 
 /// The loop's run that is still in flight, if any.

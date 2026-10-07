@@ -947,6 +947,8 @@ mod tests {
             rebase_orphaned: false,
             unseen_failure: false,
             queued_behind: None,
+            blocked_reason: None,
+            pr_rewrite_nudged: false,
             claim_wait: false,
             verify: None,
             verification: None,

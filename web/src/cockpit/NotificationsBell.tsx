@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState, type ReactElement, type Ref } from "react";
 
 import { store, stored } from "../components/ui";
-import { needsYou } from "../notifications";
+import { needsYouFeed } from "../notifications";
+import { OldQuestionsRow } from "./OldQuestionsRow";
 import type { Session } from "../types";
 import { feedEntries } from "./feed";
 import { KIND_DOT, READ_AT, relative } from "./InboxView";
@@ -31,7 +32,8 @@ export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenN
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
 
-  const waiting = sessions.filter(needsYou).length + decisionCount;
+  const feed = needsYouFeed(sessions);
+  const waiting = feed.rows.length + (feed.oldQuestions.length > 0 ? 1 : 0) + decisionCount;
   const unread = feedEntries(sessions).filter((e) => Date.parse(e.at) > readAt).length;
 
   const close = (refocus: boolean) => {
@@ -148,7 +150,9 @@ function InboxPanel({
   onOpenInbox: () => void;
   onOpenNotificationSettings: () => void;
 }): ReactElement {
-  const waiting = sessions.filter(needsYou);
+  const feed = needsYouFeed(sessions);
+  const waiting = feed.rows;
+  const oldQuestions = feed.oldQuestions;
   const questions = useOpenQuestions(sessions);
   const entries = feedEntries(sessions);
   const shown = entries.slice(0, PANEL_LINES);
@@ -163,7 +167,9 @@ function InboxPanel({
     >
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
         <h2 className="m-0 text-body-lg font-semibold">Notifications</h2>
-        <span className={`text-small-lg tabular-nums ${waiting.length > 0 ? "text-warn" : "text-faint"}`}>{waiting.length} need you</span>
+        <span className={`text-small-lg tabular-nums ${waiting.length + oldQuestions.length > 0 ? "text-warn" : "text-faint"}`}>
+          {waiting.length + (oldQuestions.length > 0 ? 1 : 0)} need you
+        </span>
         <div className="flex-1" />
         <button type="button" onClick={onMarkAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-small-lg text-muted hover:text-text">
           mark all read
@@ -171,6 +177,7 @@ function InboxPanel({
       </div>
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+        <OldQuestionsRow sessions={oldQuestions} compact />
         {waiting.length > 0 && (
           <section aria-label="needs you" className="border-b border-border">
             {waiting.map((session) => (
@@ -199,7 +206,7 @@ function InboxPanel({
         )}
 
         {shown.length === 0 ? (
-          <div className="px-4 py-6 text-center text-body-sm text-muted">{waiting.length === 0 ? "nothing waits on you, and nothing new" : "nothing else new"}</div>
+          <div className="px-4 py-6 text-center text-body-sm text-muted">{waiting.length === 0 && oldQuestions.length === 0 ? "nothing waits on you, and nothing new" : "nothing else new"}</div>
         ) : (
           <ul aria-label="recent" className="m-0 list-none p-0">
             {shown.map((entry) => {

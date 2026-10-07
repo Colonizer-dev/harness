@@ -73,7 +73,11 @@ pub async fn catch_up(State(app): State<Shared>, Path(id): Path<String>) -> ApiR
     }
     if matches!(
         s.status,
-        SessionStatus::Queued | SessionStatus::Starting | SessionStatus::Running | SessionStatus::Publishing
+        SessionStatus::Queued
+            | SessionStatus::Blocked
+            | SessionStatus::Starting
+            | SessionStatus::Running
+            | SessionStatus::Publishing
     ) {
         return Err(client_error(
             StatusCode::CONFLICT,

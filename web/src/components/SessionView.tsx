@@ -119,7 +119,7 @@ export function SessionView({
   const superseded = session.superseded ?? null;
   // Parked counts too: a quota-parked colony stays parked until Keep — the recovery tick holds it.
   const supersededHeld =
-    superseded != null && !superseded.kept && (live || session.status === "queued" || session.status === "pr_opened" || session.status === "parked");
+    superseded != null && !superseded.kept && (live || session.status === "queued" || session.status === "blocked" || session.status === "pr_opened" || session.status === "parked");
   /** A publish that already got somewhere is finished, not started over. */
   const finishing = session.publish_stage != null || session.status === "failed" || session.status === "no_changes";
   /** How far the last publish got, when it never reached a pull request. */
@@ -143,7 +143,7 @@ export function SessionView({
 
   /** What deleting this colony takes with it, in the words the confirmation uses. The logs are no longer gone: they land in the log archive (issue #496). */
   const deleteWarning =
-    session.status === "queued"
+    session.status === "queued" || session.status === "blocked"
       ? "Remove this colony from the queue and the list? It never started, so nothing else is lost."
       : ["pr_opened", "merged", "closed"].includes(session.status)
         ? "Delete this colony? Its chat and local worktree are removed; its logs are kept in the log archive (Storage). The pull request and its pushed branch stay on GitHub."
@@ -155,7 +155,7 @@ export function SessionView({
     if (!window.confirm(deleteWarning)) return;
     // Only a colony that ran has logs to archive, so only there is the follow-up worth asking;
     // accepting it purges the archived bundle too, declining (the default) keeps it (issue #496).
-    const purgeLogs = session.status !== "queued" && window.confirm("Also delete this colony's archived logs? Cancel keeps them in the log archive.");
+    const purgeLogs = session.status !== "queued" && session.status !== "blocked" && window.confirm("Also delete this colony's archived logs? Cancel keeps them in the log archive.");
     setBusy("delete");
     try {
       const result = (await api.deleteSession(session.id, { purgeLogs })) as { leftover?: string | null; purge_error?: string | null } | null;
@@ -363,16 +363,16 @@ export function SessionView({
               </Button>
             )}
             <Button
-              disabled={(!live && session.status !== "queued") || busy !== null}
+              disabled={(!live && session.status !== "queued" && session.status !== "blocked") || busy !== null}
               onClick={() =>
                 act(
                   "stop",
                   (a, id) => a.stopSession(id),
-                  session.status === "queued" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.",
+                  session.status === "queued" || session.status === "blocked" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.",
                 )
               }
             >
-              {busy === "stop" ? <Spinner /> : <IconPower size={15} />} {session.status === "queued" ? "Leave the queue" : "Stop"}
+              {busy === "stop" ? <Spinner /> : <IconPower size={15} />} {session.status === "queued" || session.status === "blocked" ? "Leave the queue" : "Stop"}
             </Button>
             <Button
               variant="danger"
@@ -497,12 +497,12 @@ export function SessionView({
                 >
                   {busy === "keep" ? <Spinner /> : null} Keep
                 </Button>
-                {(live || session.status === "queued") && (
+                {(live || session.status === "queued" || session.status === "blocked") && (
                   <Button
                     size="sm"
                     disabled={busy !== null}
                     onClick={() =>
-                      act("stop", (a, id) => a.stopSession(id), session.status === "queued" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.")
+                      act("stop", (a, id) => a.stopSession(id), session.status === "queued" || session.status === "blocked" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.")
                     }
                   >
                     {busy === "stop" ? <Spinner /> : <IconPower size={13} />} Stop

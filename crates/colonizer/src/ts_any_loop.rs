@@ -995,7 +995,7 @@ impl Target {
 /// Whether a colony is still working on its target: live, queued, parked, publishing, or its pull
 /// request is open.
 fn still_open(s: &Session) -> bool {
-    s.status == SessionStatus::Queued
+    matches!(s.status, SessionStatus::Queued | SessionStatus::Blocked)
         || s.status == SessionStatus::Parked
         || s.status == SessionStatus::PrOpened
         || s.status.busy()

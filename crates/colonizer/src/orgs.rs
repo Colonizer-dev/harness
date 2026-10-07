@@ -471,6 +471,16 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").clamp(1, 1440) as i64)
 }
 
+/// How long an idle, held or flagged colony with no open question and no publish in flight keeps its
+/// microVM slot before the queue parks it (issue #1140), from the watchdog module's
+/// `idle_park_minutes`. Clamped where read, for the reason [`hold_timeout`] is: modules.json is not
+/// re-validated on load and `chrono::Duration::minutes` panics out of bounds. A module config
+/// written before the setting existed reads the schema default of 15 minutes.
+pub fn idle_park(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.watchdog, &schema, "idle_park_minutes").clamp(1, 1440) as i64)
+}
+
 /// How many times autopilot retries automatically after a turn dies on a *transient* provider error
 /// before it holds the colony for a person (issue #980), from the watchdog module. Zero turns the
 /// automatic retry off: the first transient error holds at once, the pre-#980 behaviour. Clamped
@@ -1547,6 +1557,26 @@ mod tests {
         // A hand-edited 0 is no timeout at all, so it reads as the smallest real one.
         configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(0));
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
+    }
+
+    #[test]
+    fn the_idle_park_timeout_reads_the_watchdog_setting_with_a_15_minute_default() {
+        let modules = ModulesConfig::default();
+        assert_eq!(idle_park(&modules), chrono::Duration::minutes(15));
+        let mut configured = ModulesConfig::default();
+        configured.watchdog.settings.insert("idle_park_minutes".into(), json!(5));
+        assert_eq!(idle_park(&configured), chrono::Duration::minutes(5));
+        configured.watchdog.settings.insert("idle_park_minutes".into(), json!(0));
+        assert_eq!(
+            idle_park(&configured),
+            chrono::Duration::minutes(1),
+            "a hand-edited 0 reads as the smallest real one"
+        );
+        configured
+            .watchdog
+            .settings
+            .insert("idle_park_minutes".into(), json!(u64::MAX));
+        assert_eq!(idle_park(&configured), chrono::Duration::minutes(1440));
     }
 
     /// Issue #980/#1093: the automatic-retry budget reads the watchdog setting, defaults to three,

@@ -792,7 +792,11 @@ turns it off again.
 "Needs you" counts colonies with an open question (one answered while the colony was suspended no
 longer waits on you — it is queued for a slot), live colonies the watchdog has flagged (stalled or
 out of nudges; a model error only once the turn has stopped), and failed colonies nobody has opened
-yet. Answering a question clears its colony everywhere at once: the mothership pushes a silent
+yet. The list is one entry per issue (the newest colony), so a failed or stopped colony that a newer
+queued, running or merged colony for the same issue has overtaken leaves it, a failure that only
+exists because the colony it was stacked on stopped never enters it, and questions abandoned more
+than 72 hours ago fold into one "N old questions" row with Dismiss all. A colony parked for sitting
+idle does not count: it only waits to be resumed. Answering a question clears its colony everywhere at once: the mothership pushes a silent
 "resolved" note to every enrolled device that could have been told about that colony (while the
 notify module is on; with it off nothing was announced), each of which closes that colony's notification and lowers its badge. The same happens when you open a failed colony nobody has looked at yet. Nothing else
 closes a notification: the cockpit reports a colony seen only while the page is in front, and only

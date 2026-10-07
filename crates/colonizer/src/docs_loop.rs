@@ -2391,7 +2391,9 @@ pub fn open_docs_colony<'a>(sessions: &'a [Session], repo: &str) -> Option<&'a S
     sessions.iter().find(|s| {
         s.repo.eq_ignore_ascii_case(repo)
             && s.origin.as_deref() == Some(ORIGIN)
-            && (s.status == SessionStatus::Queued || s.status.busy() || s.status == SessionStatus::PrOpened)
+            && (matches!(s.status, SessionStatus::Queued | SessionStatus::Blocked)
+                || s.status.busy()
+                || s.status == SessionStatus::PrOpened)
     })
 }
 

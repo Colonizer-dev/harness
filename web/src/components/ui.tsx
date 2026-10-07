@@ -67,6 +67,7 @@ export function Badge({
 
 export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; live: boolean }> = {
   queued: { label: "Queued", tone: "neutral", live: false },
+  blocked: { label: "Blocked", tone: "warn", live: false },
   starting: { label: "Starting", tone: "info", live: true },
   running: { label: "Working", tone: "info", live: true },
   waiting_for_answer: { label: "Needs your answer", tone: "accent", live: true },
@@ -147,6 +148,7 @@ export function ordinal(n: number): string {
 const PARK_REASONS: Record<string, string> = {
   provider_quota_exhausted: "provider quota exhausted",
   hold_timeout: "hold timed out",
+  idle_timeout: "idle too long",
   provider_retry: "gateway error, retrying automatically",
   repo_pr_rate_limit: "repo's daily PR cap reached",
 };
@@ -408,6 +410,8 @@ export function attentionText(attention: Attention): string {
       return attention.detail?.trim() || "Autopilot held the PR";
     case "hold_timeout":
       return "Held too long — parked, resume to continue";
+    case "idle_timeout":
+      return "Idle with nothing to do — parked to free its slot, resume to continue";
     case "repo_pr_rate_limit":
       return "Repo's daily PR cap reached — parked, resume to continue";
     case "control_defeat":

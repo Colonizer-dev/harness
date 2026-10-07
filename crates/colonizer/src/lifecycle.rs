@@ -1419,7 +1419,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     let Some((s, was)) = app
         .update_session(&id, |x| {
             let was = x.status;
-            if was.is_live() || was == SessionStatus::Queued || was == SessionStatus::Parked {
+            if was.is_live() || matches!(was, SessionStatus::Queued | SessionStatus::Blocked) || was == SessionStatus::Parked {
                 x.status = SessionStatus::Stopped;
                 attention = x.clear_attention();
                 // A stop at the user's hand is no other cause (issue #756): a later resume does not
@@ -1450,7 +1450,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         })
     };
     // A queued colony never started, so there is no microVM to remove.
-    if was == SessionStatus::Queued {
+    if matches!(was, SessionStatus::Queued | SessionStatus::Blocked) {
         app.session_log(&id, "info", "left the queue before it started".into()).await;
         let session = app.session(&id).await.unwrap_or(s);
         // Stopped before it ever booted: it frees the issue for a retry, on GitHub as well as
@@ -1505,7 +1505,11 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
 /// an end. Stop first, which takes a queued colony out of the queue and takes back the microVM a
 /// park kept.
 fn cleanable(status: SessionStatus) -> bool {
-    !status.is_live() && status != SessionStatus::Publishing && status != SessionStatus::Queued && status != SessionStatus::Parked
+    !status.is_live()
+        && status != SessionStatus::Publishing
+        && status != SessionStatus::Queued
+        && status != SessionStatus::Blocked
+        && status != SessionStatus::Parked
 }
 
 /// The work of the `cleanup` handler, shared with the auto-reclaim tick: claim the colony as cleaned

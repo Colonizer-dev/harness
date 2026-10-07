@@ -76,5 +76,11 @@
     "name": "merged although unseen_failure is set",
     "session": { "status": "merged", "unseen_failure": true },
     "needs_you": false
-  }
+  },
+  {
+    "name": "parked for sitting idle (issue #1140): nobody has to act",
+    "session": { "status": "parked", "attention": { "reason": "idle_timeout", "since": "2026-09-26T10:00:00Z", "nudges": 0 } },
+    "needs_you": false
+  },
+  { "name": "blocked on a paused parent (issue #1140)", "session": { "status": "blocked" }, "needs_you": false }
 ]
