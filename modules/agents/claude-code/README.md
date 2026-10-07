@@ -22,6 +22,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_SUBAGENT_MODEL` | orchestrator model | Default subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`); used only when the agent delegates to one |
 | `COLONIZER_BACKGROUND_MODEL` | Claude Code default | Background model for small auxiliary calls (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1) |
+| `COLONIZER_ACCOUNT_ROUTE` | none | JSON `{url, headers}` of the mothership's `GET /account-route` (set when the module's `account_fallback_model` is): before a request that would go to Anthropic, the router asks whether the Claude account is out and, if so, sends it to the fallback model's route instead (issue #1130) |
 | `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
 | `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
 | `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
@@ -102,6 +103,13 @@ Claude Code's `ANTHROPIC_BASE_URL` points at it. A request whose `model` starts 
 else passes through to `https://api.anthropic.com` unchanged, so a subscription login keeps working for
 the orchestrator. Routed `count_tokens` calls the provider doesn't support get an estimate. Provider key
 variables are removed from Claude Code's own environment.
+
+With `COLONIZER_ACCOUNT_ROUTE` set, a request for a Claude model first asks the mothership whether the
+Claude account is out (the answer is reused for 5 s; a slow, failed or unrecognised answer means
+Claude, as without the feature). When it is out and the install names an `account_fallback_model`, the
+request goes to that model's route like any `<provider>/<model>` request, with the same stripping of the
+Anthropic credential; at the reset it goes back to Anthropic by itself. A task the fallback may not
+carry (restricted work, an untrusted provider) stays on Anthropic and parks on the limit.
 
 Responses stream through as they arrive, with no overall time limit. The router gives an upstream 30 s
 to connect and lets it stay silent for up to `router_idle_timeout_secs` (600 s by default) before its

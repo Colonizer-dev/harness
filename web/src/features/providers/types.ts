@@ -38,6 +38,22 @@ export interface StatusQuota {
    * banner covers by looking the ids up in the provider catalog.
    */
   provider_details?: QuotaProviderDetail[];
+  /**
+   * The Claude account is out but its `account_fallback_model` is carrying the work (issue #1130):
+   * the queue is not paused, and the banner says where Claude's roles run until the reset. Absent
+   * from older mothership builds and null whenever the account works or has no usable fallback.
+   */
+  fallback?: QuotaFallback | null;
+}
+
+/** Where Claude's roles run while the account is out. */
+export interface QuotaFallback {
+  /** `<provider>/<model>`. */
+  model: string;
+  /** The provider's display name, e.g. "MiniMax". */
+  provider_name: string;
+  reset_at: string | null;
+  reset_unix: number | null;
 }
 
 /** One exhausted plan in GET /api/status `quota.provider_details`. */

@@ -89,6 +89,12 @@
         "default": "",
         "env": "COLONIZER_BACKGROUND_MODEL"
       },
+      "account_fallback_model": {
+        "type": "string",
+        "title": "If Claude runs out, use",
+        "description": "When the Claude subscription hits its session or weekly limit, every role that resolves to a Claude model runs on this <provider>/<model> until the limit resets, then goes back to Claude by itself. Nothing saved changes, so there is nothing to switch back. A restricted-sensitivity task uses it only when the provider is marked trusted; otherwise it parks, saying why. Empty keeps today's behavior: colonies wait for the reset.",
+        "default": ""
+      },
       "router_idle_timeout_secs": {
         "type": "integer",
         "title": "Model request idle timeout (seconds)",

@@ -1040,6 +1040,16 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
         (None, Some(reset)) => format!("provider quota exhausted (resets {reset})"),
         (None, None) => "provider quota exhausted".to_string(),
     };
+    // The account fallback could not carry this colony's task (#1130): say why, so the card reads
+    // "needs a trusted provider: Claude is out until 19:51; MiniMax is not marked trusted".
+    let error = match app
+        .gateway
+        .account_park_reason(id)
+        .filter(|_| provider.is_none() && hit.account_wide)
+    {
+        Some(reason) => format!("{error}; {reason}"),
+        None => error,
+    };
     park_colony(
         app,
         &s,
