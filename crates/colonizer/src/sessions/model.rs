@@ -91,6 +91,23 @@ impl Session {
         self.cost_usd.unwrap_or_default() + self.routed_cost_usd.unwrap_or_default()
     }
 
+    /// Records that autopilot held this colony's publish for `cause` (issue #1175): the same cause
+    /// as the last hold counts one more repeat, a different one starts the count over at one.
+    pub(crate) fn note_hold(&mut self, cause: &str) {
+        if self.hold_cause.as_deref() == Some(cause) {
+            self.hold_cause_repeats = self.hold_cause_repeats.saturating_add(1);
+        } else {
+            self.hold_cause = Some(cause.to_string());
+            self.hold_cause_repeats = 1;
+        }
+    }
+
+    /// Forgets the hold cause: a publish went ahead, so the next hold is a first one again.
+    pub(crate) fn clear_hold_cause(&mut self) {
+        self.hold_cause = None;
+        self.hold_cause_repeats = 0;
+    }
+
     /// Drop the attention flag the watchdog or autopilot set (`stalled`, `nudges_exhausted`,
     /// `autopilot_held`) as the colony stops or fails. The flag is only meaningful while the
     /// colony is live — it says someone should look at it — and without this a stopped colony
@@ -541,6 +558,15 @@ pub struct Session {
     /// and a colony that parks again must not start the schedule over.
     #[serde(default)]
     pub hold_resumes: u32,
+    /// Why autopilot last held this colony's publish (issue #1175), e.g. `verification: <detail>`,
+    /// and how many holds in a row had exactly that cause. A hold that repeats with nothing changed
+    /// is not a question a person can answer by waiting: [`Session::note_hold`] counts it, and the
+    /// hold-park backoff fails the colony with `publish_blocked` instead of cycling park and resume.
+    /// Cleared when a publish goes ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_cause: Option<String>,
+    #[serde(default)]
+    pub hold_cause_repeats: u32,
     /// How many automatic continues have been scheduled after a transient provider error
     /// (issue #980): the 1-based attempt the colony is backing off for, so the delay already
     /// spent is `provider_retries - 1` into the schedule. Reset to 0 on a successful turn and
@@ -716,6 +742,8 @@ impl Default for Session {
             run_end_cause: None,
             parked: None,
             hold_resumes: 0,
+            hold_cause: None,
+            hold_cause_repeats: 0,
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,

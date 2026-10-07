@@ -2499,7 +2499,7 @@ pub async fn publish(
         session_dir: app.session_dir(&s.id),
     };
     // #761: a manual press publishes the redacted description, but still says out loud that the
-    // colony put a secret in it (autopilot never gets here with one: it holds for this press).
+    // colony put a secret in it (autopilot publishes it the same way, #1175).
     if let Some(note) = pr_description_secret_note(&app.session_dir(&s.id).join("out"), s) {
         log.warn(note.clone()).await;
         // A credential in the colony's own output means a secret value reached the guest, which the

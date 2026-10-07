@@ -801,7 +801,8 @@ pub(crate) async fn finish_turn(
         // gateway; checked before autopilot, which must not publish a colony the budget stopped.
         enforce_budget(app, id).await;
         let s = app.session(id).await.unwrap_or(s);
-        let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
+        let out_dir = app.session_dir(id).join("out");
+        let mark = github::pr_description_mark(&out_dir);
         let pr_written = {
             let mut last = rt.pr_mark.lock().await;
             let written = mark.is_some() && *last != mark;
@@ -857,27 +858,18 @@ pub(crate) async fn finish_turn(
         }
         let open_question = rt.open_question.lock().await.is_some();
         let step = autopilot_step(errored, transient, interrupted, open_question, pr_written);
-        // #761: a description that redaction changed is published only after a person has
-        // looked — the colony had a secret in hand, and the diff is not redacted.
+        // #761, #1175: a description that redaction changed is still published, because the
+        // value is already replaced in what goes out. The note says out loud that the colony had a
+        // secret in hand; only a secret in the diff blocks, and that is the publish path's own check.
         let secret_note = (step == Autopilot::Publish)
             .then(|| github::pr_description_secret_note(&app.session_dir(id).join("out"), &s))
             .flatten();
         if s.autopilot && s.status.is_live() {
+            if let Some(note) = secret_note.as_deref() {
+                app.session_log(id, "warn", format!("autopilot: {note}; publishing the redacted text"))
+                    .await;
+            }
             match step {
-                Autopilot::Publish if secret_note.is_some() => {
-                    let note = secret_note.as_deref().unwrap_or_default();
-                    app.session_log(
-                        id,
-                        "warn",
-                        format!("autopilot: not publishing, {note}; press Create PR when the work is ready"),
-                    )
-                    .await;
-                    app.update_session(id, |x| {
-                        x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
-                    })
-                    .await;
-                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
-                }
                 // Issue #84: the kill-switch holds the publish without flagging the colony.
                 Autopilot::Publish if crate::authority::external_writes_blocked() => {
                     app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
@@ -916,7 +908,9 @@ pub(crate) async fn finish_turn(
                                 "autopilot: asking the agent once to rewrite /harness/out/pr.md".into(),
                             )
                             .await;
-                            crate::recovery::send_user_message(rt, "pr-rewrite", crate::idle_park::PR_REWRITE_MESSAGE);
+                            let draft = github::read_regular_file(&out_dir.join("pr.md"), 256_000).unwrap_or_default();
+                            let message = crate::idle_park::pr_rewrite_message(&crate::redact::findings(&draft));
+                            crate::recovery::send_user_message(rt, "pr-rewrite", &message);
                         }
                     }
                 }

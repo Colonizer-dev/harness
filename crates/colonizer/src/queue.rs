@@ -53,6 +53,15 @@ pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
 /// backoff step (issue #876): the question was abandoned and the worktree is kept.
 pub(crate) const ABANDONED_QUESTION_REASON: &str = "abandoned_question";
 
+/// How many holds in a row for exactly the same cause end the park-resume cycle (issue #1175): the
+/// first hold may be a fluke the resume fixes, the second one with nothing changed is not.
+pub(crate) const HOLD_CAUSE_REPEAT_LIMIT: u32 = 2;
+
+/// The `error` prefix a colony is failed with when autopilot held its publish for the same cause
+/// again and again: `publish_blocked: <cause>`. The worktree is kept; Create PR publishes the
+/// redacted description by hand.
+pub(crate) const PUBLISH_BLOCKED_REASON: &str = "publish_blocked";
+
 /// The park reason a colony gets while it backs off a transient provider error (issue #980): the
 /// slot is released and [`resume_provider_retry_parked`] owns this reason alone, bringing the colony
 /// back once the attempt's delay has passed.
@@ -134,6 +143,19 @@ pub(crate) fn provider_retry_due(s: &Session, now: DateTime<Utc>, schedule: &[i6
     now >= park.at + orgs::provider_retry_delay(schedule, s.provider_retries)
 }
 
+/// The `error` a colony failed for a repeated hold carries: `publish_blocked: <kind>`, the kind
+/// being the part of the cause before any detail (`redaction`, `verification`).
+pub(crate) fn publish_blocked_error(cause: Option<&str>) -> String {
+    let kind = cause
+        .and_then(|c| c.split(':').next())
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    match kind {
+        Some(kind) => format!("{PUBLISH_BLOCKED_REASON}: {kind}"),
+        None => PUBLISH_BLOCKED_REASON.to_string(),
+    }
+}
+
 /// What the queue does with a hold-parked colony on one tick (issue #876), decided as a pure function
 /// so the backoff policy is testable apart from the tick that acts on it (the `autopilot_step` pattern).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +169,9 @@ pub(crate) enum HoldParkAction {
     NotifyOnly,
     /// Every step is spent and it parked again: give up, failing it with [`ABANDONED_QUESTION_REASON`].
     GiveUp,
+    /// It was held for the same cause [`HOLD_CAUSE_REPEAT_LIMIT`] times running (issue #1175), so
+    /// another resume would only repeat it: fail it with [`PUBLISH_BLOCKED_REASON`] and the cause.
+    PublishBlocked,
 }
 
 /// The hold-timeout backoff's verdict for one colony at `now` (issue #876). A colony parked by the
@@ -170,6 +195,9 @@ pub(crate) fn hold_park_action(session: &Session, now: DateTime<Utc>, judge: Opt
         .is_some_and(|risk| !crate::autonomy::within_ceiling(risk, judge.risk_ceiling))
     {
         return HoldParkAction::NotifyOnly;
+    }
+    if session.hold_cause.is_some() && session.hold_cause_repeats >= HOLD_CAUSE_REPEAT_LIMIT {
+        return HoldParkAction::PublishBlocked;
     }
     let Some(delay) = HOLD_RESUME_SCHEDULE.get(session.hold_resumes as usize) else {
         return HoldParkAction::GiveUp;
@@ -886,7 +914,8 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
                 })
                 .await;
             }
-            HoldParkAction::GiveUp => {
+            HoldParkAction::GiveUp | HoldParkAction::PublishBlocked => {
+                let blocked = action == HoldParkAction::PublishBlocked;
                 let mut attention = None;
                 let failed = app
                     .update_session(&id, |x| {
@@ -894,7 +923,11 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
                             return false;
                         }
                         x.status = SessionStatus::Failed;
-                        x.error = Some(ABANDONED_QUESTION_REASON.to_string());
+                        x.error = Some(if blocked {
+                            publish_blocked_error(x.hold_cause.as_deref())
+                        } else {
+                            ABANDONED_QUESTION_REASON.to_string()
+                        });
                         x.parked = None;
                         attention = x.clear_attention();
                         true
@@ -903,12 +936,13 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
                     .is_some_and(|(_, failed)| failed);
                 if failed {
                     app.note_cleared_attention(&id, attention).await;
-                    app.session_log(
-                        &id,
-                        "error",
-                        "the question stayed unanswered through every retry; the colony failed and its worktree is kept for a person to resume".into(),
-                    )
-                    .await;
+                    let message = if blocked {
+                        "autopilot held the publish for the same cause twice in a row with nothing changed; the colony failed \
+                         and its worktree is kept, press Create PR to publish the redacted description or resume it"
+                    } else {
+                        "the question stayed unanswered through every retry; the colony failed and its worktree is kept for a person to resume"
+                    };
+                    app.session_log(&id, "error", message.into()).await;
                     // A failed colony frees its issue for a retry, the same as any failure.
                     if let Some(s) = app.session(&id).await {
                         crate::claims::spawn_release_if_needed(app.clone(), &s);
@@ -3281,6 +3315,59 @@ mod tests {
             hold_park_action(&quota, at + chrono::Duration::days(2), Some(&judge)),
             HoldParkAction::Wait
         );
+    }
+
+    /// Issue #1175: a colony held twice in a row for the same cause does not cycle park and resume
+    /// for a day; it is failed with `publish_blocked: <kind>`. A different cause, or one hold, is
+    /// the ordinary backoff, and a question above the ceiling still wins.
+    #[test]
+    fn a_repeated_identical_hold_ends_in_publish_blocked() {
+        use crate::protocol::QuestionRisk::*;
+        let judge = judge_at(WorkspaceWrite);
+        let at = Utc::now();
+        let late = at + chrono::Duration::days(2);
+        let mut s = hold_parked_colony("p", None, 0, at);
+        s.note_hold("verification: tests fail");
+        assert_eq!(
+            (s.hold_cause_repeats, hold_park_action(&s, late, Some(&judge))),
+            (1, HoldParkAction::Resume)
+        );
+        s.note_hold("verification: tests fail");
+        assert_eq!(s.hold_cause_repeats, 2);
+        assert_eq!(
+            hold_park_action(&s, at, Some(&judge)),
+            HoldParkAction::PublishBlocked,
+            "no waiting for the delay"
+        );
+        // Another cause starts the count over.
+        s.note_hold("verification: other");
+        assert_eq!(s.hold_cause_repeats, 1);
+        assert_eq!(hold_park_action(&s, late, Some(&judge)), HoldParkAction::Resume);
+        // A publish that goes ahead forgets it.
+        s.note_hold("verification: other");
+        s.clear_hold_cause();
+        assert_eq!((s.hold_cause.as_deref(), s.hold_cause_repeats), (None, 0));
+        assert_eq!(publish_blocked_error(Some("redaction: pr.md")), "publish_blocked: redaction");
+        assert_eq!(publish_blocked_error(None), "publish_blocked");
+    }
+
+    /// Issue #1175: the tick fails a colony held twice for one cause, keeping its worktree.
+    #[tokio::test]
+    async fn a_colony_held_twice_for_one_cause_is_failed_with_publish_blocked() {
+        let root = std::env::temp_dir().join(format!("colonizer-hold-blocked-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        *app.modules.write().await = judging_modules(QuestionRisk::WorkspaceWrite);
+        let at = Utc::now() - chrono::Duration::minutes(1);
+        let mut p = hold_parked_colony("p", None, 0, at);
+        p.hold_cause = Some("redaction: pr.md".into());
+        p.hold_cause_repeats = 2;
+        *app.sessions.write().await = vec![p];
+        resume_hold_parked(&app).await;
+        let p = app.session("p").await.unwrap();
+        assert_eq!(p.status, SessionStatus::Failed);
+        assert_eq!(p.error.as_deref(), Some("publish_blocked: redaction"));
+        assert!(p.parked.is_none() && p.git_admin_dir.is_some(), "the worktree is kept");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A within-ceiling hold-parked question resumes itself on the first due step (issue #876): the

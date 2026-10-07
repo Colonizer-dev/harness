@@ -53,6 +53,18 @@ fn the_pr_description_message_is_sent_once_and_only_for_that_wait() {
     assert!(PR_REWRITE_MESSAGE.contains("/harness/out/pr.md"));
 }
 
+/// Issue #1175: the nudge names the line and class of each finding, never the value.
+#[test]
+fn the_pr_rewrite_nudge_names_the_finding_and_never_the_value() {
+    assert_eq!(pr_rewrite_message(&[]), PR_REWRITE_MESSAGE);
+    let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+    let draft = format!("# T\n\nok\nthe token was {secret}\n");
+    let message = pr_rewrite_message(&colonizer_redact::findings(&draft));
+    assert!(message.starts_with(PR_REWRITE_MESSAGE));
+    assert!(message.contains("line 4 matched github_token"), "{message}");
+    assert!(!message.contains(secret), "{message}");
+}
+
 #[tokio::test]
 async fn an_idle_colony_parks_after_the_timeout_and_its_slot_is_reused() {
     let root = std::env::temp_dir().join(format!("colonizer-idle-park-{}", crate::util::short_id()));

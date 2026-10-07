@@ -25,6 +25,21 @@ pub(crate) const PR_REWRITE_MESSAGE: &str = "Your last turn ended without writin
      autopilot cannot publish. Rewrite /harness/out/pr.md now so it describes this change. If an earlier draft was \
      redacted because it contained a secret, leave that value out entirely.";
 
+/// The nudge, naming what redaction found in the draft on disk (issue #1175): the line and the kind
+/// of each match, never the value. Without a finding it is [`PR_REWRITE_MESSAGE`] as it was.
+pub(crate) fn pr_rewrite_message(findings: &[(usize, String)]) -> String {
+    if findings.is_empty() {
+        return PR_REWRITE_MESSAGE.to_string();
+    }
+    let named = findings
+        .iter()
+        .take(10)
+        .map(|(line, kind)| format!("line {line} matched {kind}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("{PR_REWRITE_MESSAGE} In the draft on disk: {named}. Rewrite those sentences without the value.")
+}
+
 /// The reason `events::autopilot_step` gives for a turn that did not touch `pr.md`.
 pub(crate) const PR_NOT_WRITTEN: &str = "the agent didn't write or update its PR description this turn";
 
