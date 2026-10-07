@@ -15,7 +15,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{any, post},
+    routing::{any, get, post},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
@@ -421,6 +421,9 @@ pub struct Gateway {
     quota_file: PathBuf,
     /// Colonies blocked on an exhausted provider, by colony id (see [`ColonyQuotaHit`]).
     colony_quota: Mutex<HashMap<String, ColonyQuotaHit>>,
+    /// What each colony's Claude requests were last told by the account fallback (#1130), so the
+    /// colony's log gets one line per switch. Colonies on Claude have no entry.
+    account_notes: Mutex<HashMap<String, account_fallback::AccountRoute>>,
 }
 
 impl Gateway {
@@ -463,6 +466,7 @@ impl Gateway {
             quota: Mutex::new(quota),
             quota_file,
             colony_quota: Default::default(),
+            account_notes: Default::default(),
         })
     }
 
@@ -823,6 +827,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/providers/{id}/{*path}", any(proxy))
+        .route("/account-route", get(account_fallback::account_route))
         .route("/recall", post(recall))
         .route("/history", post(crate::history::history))
         .route("/coordinate", post(crate::coordination::coordinate))
@@ -879,6 +884,7 @@ pub(crate) fn api_error(status: StatusCode, kind: &str, message: impl Into<Strin
     response
 }
 
+mod account_fallback;
 mod probe;
 mod proxy;
 mod stream;
@@ -891,6 +897,7 @@ use self::{proxy::*, stream::*};
 // surface (boot, providers, server) whole, plus the single items the other children export.
 pub(crate) use self::probe::*;
 pub(crate) use self::{
+    account_fallback::{AccountRoute, fallback_usable, route_for},
     proxy::{MODEL_ERROR_REASON, bearer_token},
     stream::credential_header,
 };

@@ -750,6 +750,11 @@ pub(crate) fn role_error(app: &Shared, role: &str, model: &str) -> Option<String
             "{model} can't be `{role}`: provider \"{id}\" maps its models and \"{canonical}\" is not among them"
         ));
     }
+    if role == "account_fallback_model" && !app.providers().iter().any(|p| crate::providers::names_model_on(model, &p.id)) {
+        return Some(format!(
+            "{model} can't be `account_fallback_model`: it is the model Claude's roles run on while the account is out, so it must be a <provider>/<model> on a configured provider"
+        ));
+    }
     if role == "summary_model" && !model.contains('/') && !crate::summaries::claude_summaries_possible(app) {
         return Some(format!(
             "{model} can't be `summary_model`: summaries never use the Claude subscription login, and this install has no Anthropic API key or Anthropic provider"

@@ -107,6 +107,14 @@ pub async fn plans(State(app): State<Shared>) -> Json<Value> {
             usage: None,
             balance: None,
         }));
+        // While the account is out and its fallback carries the work, the row says where it runs
+        // (#1130) — the plan bars read "Claude out, running on MiniMax until 19:51".
+        if account_out
+            && let Some((model, provider_name)) = crate::gateway::fallback_usable(&app).await
+            && let Some(row) = rows.last_mut()
+        {
+            row["fallback"] = json!({"model": model, "provider_name": provider_name});
+        }
     }
     let used: Vec<(&Provider, Vec<&'static str>, bool)> = all
         .iter()

@@ -14,6 +14,7 @@ import {
   quotaBannerPlans,
   quotaBannerText,
   quotaBannerTitle,
+  quotaFallbackParts,
   quotaParkedSessions,
   quotaPauseKind,
   resumeQuotaParkedSessions,
@@ -252,5 +253,41 @@ describe("resumeQuotaParkedSessions", () => {
     });
     expect(settled).toEqual([]);
     expect(calls).toBe(0);
+  });
+});
+
+describe("the account fallback banner (issue #1130)", () => {
+  const carried = (overrides: Partial<StatusQuota> = {}): StatusQuota =>
+    accountQuota({
+      paused: false,
+      reason: null,
+      kind: "account",
+      fallback: { model: "minimax/MiniMax-M3.1", provider_name: "MiniMax", reset_at: "10-05 19:51:58", reset_unix: RESET },
+      ...overrides,
+    });
+
+  it("says where Claude's roles run and until when, with a countdown", () => {
+    const parts = quotaFallbackParts(carried(), NOW, "UTC");
+    expect(parts?.title).toBe("Claude out, running on MiniMax until 19:51 · in 2 h 10 min");
+    expect(parts?.effect).toContain("minimax/MiniMax-M3.1");
+    expect(parts?.effect).toContain("go back to Claude by themselves");
+  });
+
+  it("falls back to the provider's own reset words, and says nothing without a fallback or during a pause", () => {
+    expect(quotaFallbackParts(carried({ fallback: { model: "m/x", provider_name: "M", reset_at: "7am (UTC)", reset_unix: null }, reset_unix: null }), NOW)?.title).toBe(
+      "Claude out, running on M until 7am (UTC)",
+    );
+    expect(quotaFallbackParts(accountQuota(), NOW)).toBeNull();
+    expect(quotaFallbackParts(carried({ paused: true }), NOW)).toBeNull();
+  });
+
+  it("banners although nothing is paused, dismisses per reset, and renders its own words", () => {
+    expect(visibleQuotaBanner(carried(), new Set())).not.toBeNull();
+    expect(visibleQuotaBanner(carried(), new Set([quotaBannerKey(carried())]))).toBeNull();
+    expect(visibleQuotaBanner(quota({ paused: false }), new Set())).toBeNull();
+    const html = markup(carried(), []);
+    expect(html).toContain("Claude out, running on MiniMax");
+    expect(html).not.toContain("Resume all");
+    expect(html).toContain("Dismiss");
   });
 });

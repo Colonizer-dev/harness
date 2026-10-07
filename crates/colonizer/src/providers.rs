@@ -1008,6 +1008,11 @@ pub(crate) struct QuotaStatus {
     /// says "BytePlus plan limit reached, used by subagents" rather than an id. An account pause
     /// carries one entry for the Claude account itself, with the roles that run on Claude models.
     pub details: Vec<QuotaProviderDetail>,
+    /// The Claude account is out but its fallback (`account_fallback_model`) is carrying the work, so
+    /// the queue is not paused (issue #1130): the fallback model, its provider's display name and
+    /// the account's reset, for the banner's "Claude out, running on MiniMax until 19:51". `None`
+    /// whenever the account works or has no usable fallback.
+    pub fallback: Option<Value>,
 }
 
 /// One exhausted plan, as the cockpit banner names it.
@@ -1073,6 +1078,31 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
     // configured — and names no real provider as exhausted.
     if app.gateway.is_account_quota_exhausted() {
         let record = app.gateway.account_quota_state();
+        // With a fallback that can take the work the account's cap is not a pause: colonies keep
+        // booting and run on the fallback until the reset (#1130). A task the fallback may not
+        // carry parks on its own, with the reason the gateway names.
+        if let Some((model, provider_name)) = crate::gateway::fallback_usable(app).await {
+            let envs = runner_envs(app).await;
+            return QuotaStatus {
+                paused: false,
+                reason: None,
+                reset_at: record.as_ref().and_then(|q| q.reset_at.clone()),
+                reset_unix: record.as_ref().and_then(|q| q.reset_unix),
+                providers: Vec::new(),
+                kind: Some("account".to_string()),
+                details: vec![QuotaProviderDetail {
+                    id: "anthropic".to_string(),
+                    name: "Claude".to_string(),
+                    used_by: claude_used_by(&app.providers(), &envs),
+                }],
+                fallback: Some(json!({
+                    "model": model,
+                    "provider_name": provider_name,
+                    "reset_at": record.as_ref().and_then(|q| q.reset_at.clone()),
+                    "reset_unix": record.as_ref().and_then(|q| q.reset_unix),
+                })),
+            };
+        }
         let pause = provider_quota::account_pause(
             record.as_ref().and_then(|q| q.reset_at.clone()),
             record.as_ref().and_then(|q| q.reset_unix),
@@ -1092,6 +1122,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             providers: pause.providers,
             kind: Some("account".to_string()),
             details,
+            fallback: None,
         };
     }
     let envs = runner_envs(app).await;
@@ -1136,6 +1167,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
                 providers: pause.providers,
                 kind: Some("provider".to_string()),
                 details,
+                fallback: None,
             }
         }
         None => QuotaStatus {
@@ -1146,6 +1178,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             providers: Vec::new(),
             kind: None,
             details: Vec::new(),
+            fallback: None,
         },
     }
 }

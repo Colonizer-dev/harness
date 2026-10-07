@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
 import type { HistoryHit } from "../types";
-import { EMPTY_TRANSCRIPT_FILTERS, TranscriptSearch, openHit, searchQuery } from "./TranscriptSearch";
+import { TranscriptSearch, openHit } from "./TranscriptSearch";
 
 const api = createMockApi();
 const noop = () => {};
@@ -31,26 +31,6 @@ function hit(overrides: Partial<HistoryHit> = {}): HistoryHit {
 }
 
 const render = (node: ReactElement) => renderToStaticMarkup(<ApiContext.Provider value={api}>{node}</ApiContext.Provider>);
-
-describe("searchQuery", () => {
-  it("trims the query and drops every blank filter", () => {
-    expect(searchQuery({ ...EMPTY_TRANSCRIPT_FILTERS, q: "  flaky test  " })).toEqual({
-      q: "flaky test",
-      repo: undefined,
-      org: undefined,
-      agent: undefined,
-      status: undefined,
-      since: undefined,
-      until: undefined,
-    });
-  });
-
-  it("keeps every filled filter", () => {
-    expect(
-      searchQuery({ q: "bug", repo: "acme/webshop", org: "acme", agent: "claude-code", status: "failed", since: "2026-10-01", until: "2026-10-02" }),
-    ).toEqual({ q: "bug", repo: "acme/webshop", org: "acme", agent: "claude-code", status: "failed", since: "2026-10-01", until: "2026-10-02" });
-  });
-});
 
 describe("openHit", () => {
   it("opens the hit's colony at its turn", () => {
@@ -86,7 +66,10 @@ describe("TranscriptSearch", () => {
     expect(render(<TranscriptSearch onOpen={noop} initial={[]} />)).toContain("No turn matches this search.");
   });
 
-  it("seeds the workspace filter from the org in view", () => {
-    expect(render(<TranscriptSearch org="acme" onOpen={noop} initial={null} />)).toContain('value="acme"');
+  it("shows the filter chips, no org field and no Search button", () => {
+    const markup = render(<TranscriptSearch org="acme" onOpen={noop} initial={null} />);
+    for (const name of ["Repository", "Agent", "Status", "Date"]) expect(markup).toContain(name);
+    expect(markup).not.toContain('aria-label="Workspace"');
+    expect(markup).not.toContain(">Search</button>");
   });
 });

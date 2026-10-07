@@ -8,6 +8,7 @@ import {
   classifyUpstreamStatus,
   fallbackBody,
   isConnectionReset,
+  parseAccountRoute,
   parseRoutes,
   routeEnv,
   routingPlan,
@@ -690,4 +691,115 @@ test('only a reset with no answer received counts as the keep-alive race', () =>
   // Untagged (no byte count known, as with an injected fetchImpl): never.
   assert.equal(isConnectionReset(new TypeError('fetch failed', { cause: coded('UND_ERR_SOCKET') })), false);
   assert.equal(isConnectionReset(coded('ECONNRESET')), false);
+});
+
+/** A fake mothership account-route endpoint whose answer the test changes between requests. */
+async function accountEndpoint(answer) {
+  const state = { answer, asked: 0, headers: null };
+  const server = await upstream((req, body, res) => {
+    state.asked += 1;
+    state.headers = req.headers;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(state.answer));
+  });
+  return { state, url: `${server.url}/account-route`, close: server.close };
+}
+
+test('parseAccountRoute accepts an http(s) url with headers and ignores anything else', () => {
+  assert.deepEqual(parseAccountRoute('{"url":"http://h:1/account-route","headers":{"x-colonizer-colony":"t"}}'), {
+    url: 'http://h:1/account-route',
+    headers: { 'x-colonizer-colony': 't' },
+  });
+  for (const bad of ['', 'nope', '{}', '{"url":"ftp://h"}', '[]']) assert.equal(parseAccountRoute(bad), null, bad);
+  assert.equal(routingPlan({ COLONIZER_ACCOUNT_ROUTE: '{"url":"http://h/account-route"}' }).needsRouter, true);
+  assert.equal(routingPlan({ COLONIZER_ACCOUNT_ROUTE: 'junk' }).needsRouter, false);
+});
+
+test('with the Claude account out, a Claude request goes to the fallback route; the reset sends it back', async () => {
+  const provider = await upstream();
+  const anthropic = await upstream();
+  const endpoint = await accountEndpoint({ action: 'fallback', model: 'minimax/MiniMax-M3.1' });
+  const route = { provider: 'minimax', prefix: 'minimax/', base_url: `${provider.url}/anthropic`, auth: 'none', headers: { 'x-colonizer-colony': 'tok' } };
+  const logs = [];
+  const router = await startRouter({
+    routes: [route],
+    env: {},
+    anthropicBase: anthropic.url,
+    log: (line) => logs.push(line),
+    accountRoute: { url: endpoint.url, headers: { 'x-colonizer-colony': 'tok' } },
+  });
+  const ask = () => fetch(`${router.url}/v1/messages`, {
+    method: 'POST',
+    headers: claudeHeaders,
+    body: JSON.stringify({ model: 'claude-opus-5-5', max_tokens: 10, messages: [] }),
+  });
+  try {
+    assert.equal((await ask()).status, 200);
+    assert.equal(anthropic.requests.length, 0, 'nothing went to Anthropic while the account is out');
+    const [seen] = provider.requests;
+    assert.equal(seen.url, '/anthropic/v1/messages');
+    assert.equal(JSON.parse(seen.body).model, 'MiniMax-M3.1');
+    assert.equal(seen.headers.authorization, undefined, 'the Anthropic credential never reaches the provider');
+    assert.equal(seen.headers['x-colonizer-colony'], 'tok');
+    assert.equal(endpoint.state.headers['x-colonizer-colony'], 'tok');
+    assert.ok(logs.some((line) => /Claude account is out; Claude requests go to minimax\/MiniMax-M3\.1/.test(line.message)));
+
+    // The answer is reused for a few seconds, not asked for on every request.
+    await ask();
+    assert.equal(endpoint.state.asked, 1);
+  } finally {
+    await router.close();
+  }
+
+  // The reset: the mothership says Claude again, and the same request goes to Anthropic.
+  endpoint.state.answer = { action: 'claude' };
+  const back = await startRouter({
+    routes: [route],
+    env: {},
+    anthropicBase: anthropic.url,
+    accountRoute: { url: endpoint.url, headers: {} },
+  });
+  try {
+    const res = await fetch(`${back.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5', messages: [] }) });
+    assert.equal(res.status, 200);
+    assert.equal(anthropic.requests.length, 1);
+    assert.equal(JSON.parse(anthropic.requests[0].body).model, 'claude-opus-5-5');
+    assert.equal(anthropic.requests[0].headers.authorization, 'Bearer oauth-access-token');
+  } finally {
+    await back.close();
+    await endpoint.close();
+    await provider.close();
+    await anthropic.close();
+  }
+});
+
+test('a parked answer, a missing route or an unreachable mothership leave the request on Anthropic', async () => {
+  const provider = await upstream();
+  const anthropic = await upstream();
+  const route = { provider: 'minimax', prefix: 'minimax/', base_url: provider.url, auth: 'none' };
+  const cases = [
+    { action: 'parked', reason: 'needs a trusted provider' },
+    { action: 'fallback', model: 'elsewhere/model' },
+    null,
+  ];
+  for (const answer of cases) {
+    const endpoint = answer ? await accountEndpoint(answer) : null;
+    const router = await startRouter({
+      routes: [route],
+      env: {},
+      anthropicBase: anthropic.url,
+      accountRoute: { url: endpoint?.url ?? 'http://127.0.0.1:1/account-route', headers: {} },
+    });
+    try {
+      const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'sonnet', messages: [] }) });
+      assert.equal(res.status, 200, JSON.stringify(answer));
+    } finally {
+      await router.close();
+      await endpoint?.close();
+    }
+  }
+  assert.equal(provider.requests.length, 0);
+  assert.equal(anthropic.requests.length, cases.length);
+  await provider.close();
+  await anthropic.close();
 });

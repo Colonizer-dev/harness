@@ -285,7 +285,8 @@ jobs:
           {
             node ../scripts/changelog.mjs notices --release "$TAG"
             if [ -f "../docs/release-notes/$TAG.md" ]; then
-              cat "../docs/release-notes/$TAG.md"
+              # Drop the HTML comment the file opens with (it would show in the release body).
+              perl -0pe 's/<!--.*?-->\s*//gs' "../docs/release-notes/$TAG.md"
               echo
             fi
           } > notes.md

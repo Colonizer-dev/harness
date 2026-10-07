@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, store, stored } from "../components/ui";
 import { untilWords } from "../resetTime";
-import type { ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
+import type { LeftoverClaude, ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
 import { PlanList } from "./ModelPlans";
 import { ProfileBar } from "./ModelProfiles";
 import { formatResetUtc } from "./ProviderQuotaCard";
@@ -218,6 +218,53 @@ export function switchSummary(reply: ModelSwitchReply): string {
   return parts.join(" · ");
 }
 
+/** The role that names the model Claude's roles run on while the account is out (issue #1130). */
+export const ACCOUNT_FALLBACK_ROLE = "account_fallback_model";
+
+/**
+ * The groups a role's select offers: every model, except for the account fallback, which must be a
+ * model on another provider — a Claude model would be out with the account.
+ */
+export function groupsForRole(role: string, groups: readonly ModelGroup[]): ModelGroup[] {
+  return role === ACCOUNT_FALLBACK_ROLE ? groups.filter((g) => g.provider !== "anthropic") : [...groups];
+}
+
+/** The "no value" option's words for a row: the account fallback's is "off", not "module default". */
+export function inheritOptionLabel(role: string, fallbackLabel: string): string {
+  return role === ACCOUNT_FALLBACK_ROLE ? "Off — wait for the reset" : fallbackLabel;
+}
+
+/** The line under the account fallback's select, so it reads as what it does. */
+export const ACCOUNT_FALLBACK_NOTE =
+  "When the Claude plan runs out, roles that use Claude run on this model until the reset, then go back to Claude by themselves. Restricted tasks need a trusted provider.";
+
+/** True when a switch left Claude names in colony or org overrides, and they are not cleared yet. */
+export function hasLeftovers(left: LeftoverClaude | null | undefined): left is LeftoverClaude {
+  return !!left && !left.cleared && left.colonies.length + left.orgs.length > 0;
+}
+
+/** "2 colonies and 1 org override still name a Claude model: opus (2), sonnet (acme)." */
+export function leftoverLine(left: LeftoverClaude): string {
+  const colonies = left.colonies.length;
+  const orgs = left.orgs.length;
+  const parts: string[] = [];
+  if (colonies) parts.push(`${colonies} ${colonies === 1 ? "colony" : "colonies"}`);
+  if (orgs) parts.push(`${orgs} org ${orgs === 1 ? "override" : "overrides"}`);
+  const names = [...new Set([...left.colonies.map((c) => c.model), ...left.orgs.map((o) => o.model)])];
+  return `${parts.join(" and ")} still ${colonies + orgs === 1 ? "names" : "name"} a Claude model (${names.join(", ")}), which uses the Claude plan.`;
+}
+
+/** The request that clears the leftovers a switch reported, for the same scope. */
+export function clearLeftoversRequest(scope: ModelScope): ModelSwitchRequest {
+  return {
+    scope: scope.kind,
+    ...(scope.kind === "org" ? { org: scope.org } : null),
+    roles: {},
+    apply: "new",
+    clear_leftovers: true,
+  };
+}
+
 /** The recent list: model ids, newest first, five at most, kept in this browser only. */
 export const RECENT_KEY = "colonizer.models.recent";
 export const RECENT_MAX = 5;
@@ -306,6 +353,7 @@ export interface ModelSwitcherProps {
   initialRecent?: string[];
   initialPlans?: PlanUsage[];
   initialProfiles?: ModelProfile[];
+  initialLeftovers?: LeftoverClaude;
   /** The cockpit's chosen workspace: the popover opens on it. */
   selectedOrg?: string | null;
 }
@@ -326,6 +374,7 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   const [profiles, setProfiles] = useState<ModelProfile[] | null>(props.initialProfiles ?? null);
   const [profileMessage, setProfileMessage] = useState<{ text: string; tone: "info" | "err" } | null>(null);
   const [profileBusy, setProfileBusy] = useState(false);
+  const [leftovers, setLeftovers] = useState<LeftoverClaude | null>(props.initialLeftovers ?? null);
   const root = useRef<HTMLDivElement>(null);
 
   const loadExtras = useCallback(() => {
@@ -402,6 +451,8 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
       const now = body.roles.model;
       remember(now ? [before, now] : [before]);
       toast({ title: "Models switched", body: switchSummary(reply), kind: reply.failed.length ? "error" : "success" });
+      // The Claude names the switch left in overrides stay on screen until cleared or dismissed.
+      setLeftovers(hasLeftovers(reply.leftover_claude) ? reply.leftover_claude : null);
       setDraft(EMPTY_DRAFT);
       setStage({ step: "edit" });
       load();
@@ -484,6 +535,9 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onConfirm={() => void run(switchRequest(scope, draft, "running"))}
           onCancel={() => setStage({ step: "edit" })}
           onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, "new"))}
+          leftovers={leftovers}
+          onClearLeftovers={() => void run(clearLeftoversRequest(scope))}
+          onDismissLeftovers={() => setLeftovers(null)}
           onClose={() => setOpen(false)}
           plans={plans}
           plansError={plansError}
@@ -537,6 +591,10 @@ export interface ModelSwitcherPanelProps {
   onCancel: () => void;
   onRecent: (id: string) => void;
   onClose: () => void;
+  /** Claude names the last switch left in colony and org overrides (issue #1130), with the option to clear them. */
+  leftovers?: LeftoverClaude | null;
+  onClearLeftovers?: () => void;
+  onDismissLeftovers?: () => void;
   /** Plan usage (GET /api/models/plans): null while loading. */
   plans?: PlanUsage[] | null;
   plansError?: string | null;
@@ -645,10 +703,12 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
           const known = value === INHERIT || a.models.some((m) => m.id === value);
           const effective = value === INHERIT ? row.value : value;
           const badge = roleQuotaBadge(effective, a.models, p.nowMs);
-          const inheritLabel =
+          const inheritLabel = inheritOptionLabel(
+            row.role,
             scope.kind === "org"
               ? `Use install default${row.source !== "org" && row.value ? ` (${shortModelName(row.value, a.models)})` : ""}`
-              : "Module default";
+              : "Module default",
+          );
           return (
             <div key={row.role} data-role={row.role}>
               <div className="mb-0.5 flex items-center justify-between gap-2 text-meta-lg">
@@ -673,7 +733,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
               >
                 <option value={INHERIT}>{inheritLabel}</option>
                 {!known && <option value={value}>{value}</option>}
-                {groups.map((g) => (
+                {groupsForRole(row.role, groups).map((g) => (
                   <optgroup key={g.provider} label={g.name}>
                     {g.models.map((m) => (
                       <option key={m.id} value={m.id} disabled={m.out_of_quota}>
@@ -683,10 +743,37 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
                   </optgroup>
                 ))}
               </select>
+              {row.role === ACCOUNT_FALLBACK_ROLE && <p className="m-0 mt-0.5 text-meta leading-snug text-faint">{ACCOUNT_FALLBACK_NOTE}</p>}
             </div>
           );
         })}
       </div>
+
+      {hasLeftovers(p.leftovers) && (
+        <div role="status" data-leftovers className="mt-3 rounded-lg border border-warn bg-warn-soft p-2 text-small-lg text-warn">
+          <p className="m-0">{leftoverLine(p.leftovers)}</p>
+          <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-meta-lg">
+            {p.leftovers.colonies.map((c) => (
+              <li key={`${c.id}:${c.role}`}>
+                colony {c.id} · {c.role} {c.model}
+              </li>
+            ))}
+            {p.leftovers.orgs.map((o) => (
+              <li key={`${o.org}:${o.role}`}>
+                org {o.org} · {o.role} {o.model}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-2 flex justify-end gap-2">
+            <button type="button" onClick={p.onDismissLeftovers} className="cursor-pointer rounded-md border border-warn bg-transparent px-2.5 py-1 text-small-lg text-warn hover:underline">
+              Leave them
+            </button>
+            <button type="button" disabled={busy} onClick={p.onClearLeftovers} className="cursor-pointer rounded-md border-0 bg-accent px-2.5 py-1 text-small-lg font-semibold text-on-accent hover:brightness-110 disabled:opacity-50">
+              Clear these too
+            </button>
+          </div>
+        </div>
+      )}
 
       <fieldset className="m-0 mt-3 border-0 p-0">
         <legend className="mb-1 p-0 text-meta-lg text-muted">Apply to</legend>

@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import type { UpdateStatus } from "../../types";
 import { Badge, Button, Spinner, Switch } from "../ui";
+import { ReleaseNotes } from "../ReleaseNotes";
 import { IconExternal } from "../icons";
 import { Code, Pane, Row } from "./ui";
-import { pendingNotices, restartOnNewVersion } from "../../cockpit/UpdateBanner";
+import { restartOnNewVersion } from "../../cockpit/UpdateBanner";
 
 // ---------------------------------------------------------------------------
 // Updates: which Colonizer this is, and whether a newer release is out (#45)
@@ -139,25 +140,11 @@ export function UpdatesPane({
               {behindLabel(update.installed.built_at, update.latest.published_at) && (
                 <p className="text-muted">{behindLabel(update.installed.built_at, update.latest.published_at)}</p>
               )}
-              {pendingNotices(update).length > 0 && (
-                <ul className="mt-1.5 space-y-1">
-                  {pendingNotices(update).map((n) => (
-                    <li key={`${n.version}-${n.line}`} className={n.severity === "critical" ? "text-err" : "text-warn"}>
-                      <span className="font-semibold">{n.severity === "critical" ? "Critical" : "Fixes running colonies"}:</span> {n.line}
-                      {n.version !== update.latest?.version ? ` (${n.version})` : ""}
-                      {n.affected
-                        ? n.affected.count > 0
-                          ? ` — ${n.affected.count} of your colonies ${n.affected.count === 1 ? "is" : "are"} affected.`
-                          : " — none of your colonies is affected right now."
-                        : ""}
-                    </li>
-                  ))}
-                </ul>
-              )}
               {update.latest.notes && (
-                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-small-lg text-muted">
-                  {update.latest.notes}
-                </pre>
+                <ReleaseNotes
+                  source={update.latest.notes}
+                  className="scroll-thin mt-1.5 max-h-48 space-y-1 overflow-auto text-small-lg text-muted"
+                />
               )}
               <a className="mt-1.5 inline-flex items-center gap-1 text-accent hover:underline" href={update.latest.url} target="_blank" rel="noreferrer">
                 Release notes <IconExternal size={12} />
@@ -213,7 +200,11 @@ export function UpdatesPane({
 
           {update.switch_to_releases && (
             <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg">
-              <p className="font-semibold text-body-sm">Update is not available from here</p>
+              <p className="font-semibold text-body-sm">
+                {update.switch_to_releases.reason.includes("development build")
+                  ? "This is a development build"
+                  : "Update is not available from here"}
+              </p>
               <p className="mt-1 text-muted">{update.switch_to_releases.reason}.</p>
               <p className="mt-1.5">
                 To switch to releases, run <Code>{update.switch_to_releases.command}</Code>
