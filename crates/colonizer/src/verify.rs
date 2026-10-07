@@ -929,9 +929,44 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner, delays: &[Durat
                         all_green = false;
                         let evidence = ran.tail.clone().filter(|t| !t.trim().is_empty());
                         match base_run(app, s, admin, &cwd, &merge_base, check, runner, delays).await {
-                            BaseOut::FailsToo => record
-                                .inconclusive
-                                .push(format!("`{}` fails on the base commit as well", check.command)),
+                            // Issue #1231: the base check failing says nothing about WHICH tests
+                            // fail. Where both runs name their failing tests, only the ones the
+                            // base shares predate the change; a test failing on this branch alone
+                            // is the colony's, whatever else the base trips over.
+                            BaseOut::FailsToo(base_tests) => {
+                                let head_tests = failing_test_names(evidence.as_deref().unwrap_or_default());
+                                match compare_failures(&head_tests, &base_tests) {
+                                    Compared::New { new, shared } => {
+                                        record.failures.push(Failure {
+                                            command: check.command.clone(),
+                                            tests: new.clone(),
+                                            tail: evidence.clone().unwrap_or_default(),
+                                        });
+                                        let mut msg = head_failure(&cwd, check, code, ran.tail).await;
+                                        msg.push_str(&format!(
+                                            "; the base commit fails this check too, but not {}",
+                                            capped_names(&new)
+                                        ));
+                                        if !shared.is_empty() {
+                                            msg.push_str(&format!(" (failing on the base as well: {})", capped_names(&shared)));
+                                        }
+                                        contradictions.push(msg);
+                                    }
+                                    Compared::AllShared(shared) => record.inconclusive.push(format!(
+                                        "`{}` fails on the base commit as well (the same tests fail there: {})",
+                                        check.command,
+                                        capped_names(&shared)
+                                    )),
+                                    Compared::Unnamed => record.inconclusive.push(match base_tests.is_empty() {
+                                        true => format!("`{}` fails on the base commit as well", check.command),
+                                        false => format!(
+                                            "`{}` fails on the base commit as well (failing there: {})",
+                                            check.command,
+                                            capped_names(&base_tests)
+                                        ),
+                                    }),
+                                }
+                            }
                             BaseOut::Passes => {
                                 record.failures.push(failure_of(check, evidence));
                                 contradictions.push(head_failure(&cwd, check, code, ran.tail).await)
@@ -1042,15 +1077,51 @@ fn classify(ran: &Ran) -> Outcome {
 enum BaseOut {
     /// Green on the base: the failure is new, and contradicts the claim.
     Passes,
-    /// Red on the base too: inconclusive, not contradicted.
-    FailsToo,
+    /// Red on the base too, with the failing tests its output names (empty when it names none):
+    /// inconclusive for the tests the head shares, never for a test failing on the head alone.
+    FailsToo(Vec<String>),
     /// The base could not be judged (infra): the head failure still contradicts, caveated.
     Unchecked(String),
 }
 
 /// Base-check answers, keyed by worktree, image, merge-base, dir and command, so the same failing
-/// branch need not pay for a second base VM. Exit codes only — infra trouble is never cached.
-static BASE_RESULTS: LazyLock<Mutex<HashMap<String, i32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// branch need not pay for a second base VM: the exit code and the failing tests the base run
+/// named. Infra trouble is never cached.
+type BaseAnswer = (i32, Vec<String>);
+static BASE_RESULTS: LazyLock<Mutex<HashMap<String, BaseAnswer>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How a head failure compares with the base's, test by test (issue #1231).
+#[derive(Debug, PartialEq)]
+enum Compared {
+    /// Tests that fail on the head and not on the base: the change's own, sent for a fix round.
+    New { new: Vec<String>, shared: Vec<String> },
+    /// Every test failing on the head fails on the base as well: preexisting.
+    AllShared(Vec<String>),
+    /// One side names no tests (a build error, a runner whose output is not read): only the check
+    /// can be compared, and a check the base fails too stays inconclusive, as before.
+    Unnamed,
+}
+
+fn compare_failures(head: &[String], base: &[String]) -> Compared {
+    if head.is_empty() || base.is_empty() {
+        return Compared::Unnamed;
+    }
+    let (shared, new): (Vec<String>, Vec<String>) = head.iter().cloned().partition(|t| base.contains(t));
+    if new.is_empty() {
+        Compared::AllShared(shared)
+    } else {
+        Compared::New { new, shared }
+    }
+}
+
+/// Up to [`NAME_CAP`] test names, then "and N more".
+fn capped_names(names: &[String]) -> String {
+    let mut out = names.iter().take(NAME_CAP).cloned().collect::<Vec<_>>().join(", ");
+    if names.len() > NAME_CAP {
+        out.push_str(&format!(" and {} more", names.len() - NAME_CAP));
+    }
+    out
+}
 
 /// What running one check came to once network failures were retried (issue #1117).
 enum Checked {
@@ -1120,14 +1191,18 @@ async fn base_run(
         .unwrap_or_else(|| crate::sandbox::configured_image(app, &modules));
     let key = format!("{}\0{image}\0{merge_base}\0{}\0{}", s.worktree, check.dir, check.command);
     let cache = || BASE_RESULTS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(code) = cache().get(&key).copied() {
-        return if code == 0 { BaseOut::Passes } else { BaseOut::FailsToo };
+    if let Some((code, tests)) = cache().get(&key).cloned() {
+        return if code == 0 {
+            BaseOut::Passes
+        } else {
+            BaseOut::FailsToo(tests)
+        };
     }
     let out = match run_check(app, s, admin, cwd, merge_base, check, runner, delays).await {
         Ok(Checked::Network(cause)) => BaseOut::Unchecked(format!("the base run could not reach the network ({cause})")),
         Ok(Checked::Ran(ran)) => match classify(&ran) {
             Outcome::Green => BaseOut::Passes,
-            Outcome::Failed(_) => BaseOut::FailsToo,
+            Outcome::Failed(_) => BaseOut::FailsToo(failing_test_names(ran.tail.as_deref().unwrap_or_default())),
             Outcome::MissingTool => BaseOut::Unchecked("the base image is missing the tool the check needs".into()),
             Outcome::Absent => BaseOut::Unchecked("the base image does not carry the command".into()),
             Outcome::NoReport => BaseOut::Unchecked("the base run did not report an exit code".into()),
@@ -1135,13 +1210,17 @@ async fn base_run(
         },
         Err(e) => BaseOut::Unchecked(format!("could not run it: {e:#}")),
     };
-    if let BaseOut::Passes | BaseOut::FailsToo = out {
-        let code = i32::from(matches!(out, BaseOut::FailsToo));
+    let answer = match &out {
+        BaseOut::Passes => Some((0, Vec::new())),
+        BaseOut::FailsToo(tests) => Some((1, tests.clone())),
+        BaseOut::Unchecked(_) => None,
+    };
+    if let Some(answer) = answer {
         let mut results = cache();
         if results.len() >= 256 {
             results.clear();
         }
-        results.insert(key, code);
+        results.insert(key, answer);
     }
     out
 }
@@ -1226,19 +1305,27 @@ pub(crate) fn fix_message(failures: &[Failure], round: u32) -> String {
 pub(crate) enum FixStep {
     /// Send the agent this fix round.
     Send(u32),
-    /// A check also fails on the base commit: not the agent's to fix; held with `preexisting_failure`.
+    /// Every failing check also fails on the base commit, test for test: not the agent's to fix;
+    /// held with `preexisting_failure`.
     Preexisting,
     /// The rounds are spent, or there is no evidence to send; held with `verify_failed_repeatedly`.
     Exhausted,
 }
 
+/// A failure of the change's own (`failures`, which never holds a test the base shares) gets its
+/// fix round even when another check is inconclusive (issue #1231); only a contradiction with
+/// nothing of its own to fix and a base-shared failure beside it is preexisting.
 pub(crate) fn fix_step(v: &Verification, rounds_used: u32) -> FixStep {
-    if !v.inconclusive.is_empty() {
+    if !v.failures.is_empty() {
+        if rounds_used >= FIX_ROUNDS_MAX {
+            FixStep::Exhausted
+        } else {
+            FixStep::Send(rounds_used + 1)
+        }
+    } else if !v.inconclusive.is_empty() {
         FixStep::Preexisting
-    } else if v.failures.is_empty() || rounds_used >= FIX_ROUNDS_MAX {
-        FixStep::Exhausted
     } else {
-        FixStep::Send(rounds_used + 1)
+        FixStep::Exhausted
     }
 }
 
@@ -1271,6 +1358,12 @@ async fn handle_contradicted(app: &Shared, id: &str, v: &Verification, detail: &
             "the automatic fix rounds are spent or there is nothing to send",
         ),
     };
+    // A preexisting hold says which checks and tests fail on the base, so the reason is checkable.
+    let detail = match step {
+        FixStep::Preexisting => format!("{detail}; on the base commit: {}", v.inconclusive.join("; ")),
+        _ => detail.to_string(),
+    };
+    let detail = detail.as_str();
     app.session_log(
         id,
         "warn",
@@ -1325,21 +1418,48 @@ fn strip_ansi(text: &str) -> String {
 }
 
 /// The failing tests a run's output names, deduplicated in order, capped at [`NAME_CAP`] with the
-/// count of the rest: cargo's `test <path> ... FAILED` lines and vitest/jest's `FAIL  file >
-/// suite` and `×`/`✕`/`✗` marks.
+/// count of the rest.
 fn failing_tests(output: &str) -> (Vec<String>, usize) {
+    let names = failing_test_names(output);
+    let extra = names.len().saturating_sub(NAME_CAP);
+    (names.into_iter().take(NAME_CAP).collect(), extra)
+}
+
+/// Every failing test a run's output names, deduplicated in order: cargo's `test <path> ...
+/// FAILED` lines and its closing `failures:` list, vitest/jest's `FAIL  file > suite` and
+/// `×`/`✕`/`✗` marks, and node --test's `✖` marks. A trailing duration (`12ms`, `(1.5ms)`) is
+/// dropped, so the same test reads the same on the head and the base.
+fn failing_test_names(output: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for line in strip_ansi(output).lines() {
-        let line = line.trim();
+    let mut in_failures = false;
+    for raw in strip_ansi(output).lines() {
+        let line = raw.trim();
+        // cargo's closing list: `failures:`, then one indented test path per line.
+        if line == "failures:" {
+            in_failures = true;
+            continue;
+        }
+        if in_failures {
+            let listed = raw.starts_with("    ") && !line.is_empty() && !line.contains(char::is_whitespace);
+            if listed {
+                if !names.iter().any(|n| n == line) {
+                    names.push(line.to_string());
+                }
+                continue;
+            }
+            if !line.is_empty() {
+                in_failures = false;
+            }
+        }
         let name = line
             .strip_prefix("test ")
             .and_then(|rest| rest.strip_suffix(" ... FAILED"))
             .map(|name| name.trim().to_string())
             .or_else(|| {
-                ["FAIL ", "×", "✕", "✗"].iter().find_map(|mark| {
+                ["FAIL ", "×", "✕", "✗", "✖"].iter().find_map(|mark| {
                     line.strip_prefix(mark)
-                        .map(str::trim)
-                        .filter(|n| !n.is_empty())
+                        .map(without_duration)
+                        .filter(|n| !n.is_empty() && *n != "failing tests:")
                         .map(str::to_string)
                 })
             })
@@ -1348,8 +1468,21 @@ fn failing_tests(output: &str) -> (Vec<String>, usize) {
             names.push(name);
         }
     }
-    let extra = names.len().saturating_sub(NAME_CAP);
-    (names.into_iter().take(NAME_CAP).collect(), extra)
+    names
+}
+
+/// A test line without its trailing duration: `case 12ms` and `case (1.5ms)` are `case`.
+fn without_duration(text: &str) -> &str {
+    let text = text.trim();
+    let Some((rest, last)) = text.rsplit_once(' ') else {
+        return text;
+    };
+    let unit = last.trim_start_matches('(').trim_end_matches(')');
+    let number = unit.strip_suffix("ms").or_else(|| unit.strip_suffix('s'));
+    match number {
+        Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.') => rest.trim_end(),
+        _ => text,
+    }
 }
 
 /// The last `lines` lines of a file — the evidence a failing run leaves. `None` when there is
@@ -1681,19 +1814,29 @@ pub(crate) mod tests {
     use crate::sessions::{SessionStatus, tests::app_with_colony};
     use std::path::PathBuf;
 
-    fn failing_verification(inconclusive: bool) -> Verification {
+    /// A contradicted verification. `inconclusive` adds a check that fails on the base as well,
+    /// test for test, beside the change's own failure; `own` keeps that failure (without it the
+    /// only failing tests are the base's).
+    fn failing_verification_with(inconclusive: bool, own: bool) -> Verification {
         let mut v = Verification::blank();
         v.verdict = Verdict::Contradicted;
         v.contradictions = vec!["`cargo test` exited 101 in a fresh checkout".into()];
         if inconclusive {
-            v.inconclusive = vec!["`cargo test` fails on the base commit as well".into()];
+            v.inconclusive =
+                vec!["`cargo test -p other` fails on the base commit as well (the same tests fail there: other::flaky)".into()];
         }
-        v.failures = vec![Failure {
-            command: "cargo test".into(),
-            tests: vec!["api::reconnects".into()],
-            tail: "test api::reconnects ... FAILED\ntoken ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked".into(),
-        }];
+        if own {
+            v.failures = vec![Failure {
+                command: "cargo test".into(),
+                tests: vec!["api::reconnects".into()],
+                tail: "test api::reconnects ... FAILED\ntoken ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked".into(),
+            }];
+        }
         v
+    }
+
+    fn failing_verification(inconclusive: bool) -> Verification {
+        failing_verification_with(inconclusive, !inconclusive)
     }
 
     /// Issue #1186: a contradicted verify sends the agent a fix message with the test name and a
@@ -1732,10 +1875,27 @@ pub(crate) mod tests {
         let mut rx = app.runtime("abc").await.commands_rx.lock().await.take().unwrap();
         handle_contradicted(&app, "abc", &failing_verification(true), "boom").await;
         assert!(rx.try_recv().is_err());
-        assert_eq!(
-            app.session("abc").await.unwrap().attention.unwrap()["reason"],
-            "preexisting_failure"
-        );
+        let attention = app.session("abc").await.unwrap().attention.unwrap();
+        assert_eq!(attention["reason"], "preexisting_failure");
+        // The hold names what fails on the base, so the reason can be checked.
+        let detail = attention["detail"].as_str().unwrap();
+        assert!(detail.starts_with("boom; on the base commit: "), "{detail}");
+        assert!(detail.contains("other::flaky"), "{detail}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1231: a failure of the change's own gets its fix round even when another check fails
+    /// on the base as well.
+    #[tokio::test]
+    async fn an_own_failure_beside_a_base_failure_gets_a_fix_round() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let mut rx = app.runtime("abc").await.commands_rx.lock().await.take().unwrap();
+        handle_contradicted(&app, "abc", &failing_verification_with(true, true), "boom").await;
+        let sent = rx.try_recv().expect("a fix message is sent");
+        assert!(sent["text"].as_str().unwrap().contains("api::reconnects"), "{sent}");
+        let s = app.session("abc").await.unwrap();
+        assert!(s.attention.is_none(), "{:?}", s.attention);
+        assert_eq!(s.verify_fix_rounds, 1);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1745,6 +1905,9 @@ pub(crate) mod tests {
         assert_eq!(fix_step(&failing_verification(false), 1), FixStep::Send(2));
         assert_eq!(fix_step(&failing_verification(false), 2), FixStep::Exhausted);
         assert_eq!(fix_step(&failing_verification(true), 0), FixStep::Preexisting);
+        // Issue #1231: an inconclusive check beside a failure of the change's own still sends it.
+        assert_eq!(fix_step(&failing_verification_with(true, true), 0), FixStep::Send(1));
+        assert_eq!(fix_step(&failing_verification_with(true, true), 2), FixStep::Exhausted);
         assert_eq!(fix_step(&Verification::blank(), 0), FixStep::Exhausted);
     }
 
@@ -1830,6 +1993,17 @@ pub(crate) mod tests {
         head: (i32, Option<i32>),
         head_output: &'static str,
     ) -> VmRunner {
+        phased_runner_outputs(marker, base, head, head_output, "")
+    }
+
+    /// [`phased_runner`], with output for the base run as well.
+    fn phased_runner_outputs(
+        marker: &'static str,
+        base: (i32, Option<i32>),
+        head: (i32, Option<i32>),
+        head_output: &'static str,
+        base_output: &'static str,
+    ) -> VmRunner {
         Arc::new(move |spec| {
             assert_eq!(spec.net_profiles, ["public"]);
             Box::pin(async move {
@@ -1848,8 +2022,9 @@ pub(crate) mod tests {
                     .expect("the report mount")
                     .source
                     .clone();
-                if head_run && !head_output.is_empty() {
-                    tokio::fs::write(report.join("output"), head_output).await?;
+                let output = if head_run { head_output } else { base_output };
+                if !output.is_empty() {
+                    tokio::fs::write(report.join("output"), output).await?;
                 }
                 if let Some(code) = reported {
                     tokio::fs::write(report.join("exit"), code.to_string()).await?;
@@ -2911,7 +3086,7 @@ pub(crate) mod tests {
                     "a::b".to_string(),
                     "c::d".to_string(),
                     "web/src/a.test.ts > suite > name".to_string(),
-                    "other > case 12ms".to_string(),
+                    "other > case".to_string(),
                     "jest style".to_string(),
                 ],
                 1
@@ -2965,6 +3140,82 @@ pub(crate) mod tests {
         assert_eq!(v.contradictions, vec!["`exit 3` exited 3 in a fresh checkout".to_string()]);
         assert!(v.inconclusive.is_empty(), "{v:?}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1231 (Cratefield #835): the base check fails, but for another test. The test failing
+    /// on this branch alone is the change's own: contradicted, and sent for a fix round. The same
+    /// test failing on both stays inconclusive, and says which tests fail there.
+    #[tokio::test]
+    async fn a_head_only_test_failure_is_the_changes_even_when_the_base_check_fails() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("exit 101"), "did the work", true).await;
+        let base_out = "test wallet::flaky_clock ... FAILED\n\nfailures:\n\n---- wallet::flaky_clock stdout ----\n\
+                        boom\n\nfailures:\n    wallet::flaky_clock\n\ntest result: FAILED. 9 passed; 1 failed\n";
+        let head_out = "failures:\n    facade::the_readme_lists_every_feature_once\n    wallet::flaky_clock\n\n\
+                        test result: FAILED. 8 passed; 2 failed\n";
+        let v = verify(
+            &app,
+            &phased_runner_outputs("uncommitted.txt", (101, Some(101)), (101, Some(101)), head_out, base_out),
+        )
+        .await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert!(v.inconclusive.is_empty(), "{v:?}");
+        assert_eq!(
+            v.failures[0].tests,
+            vec!["facade::the_readme_lists_every_feature_once".to_string()],
+            "only the head-only test is sent"
+        );
+        assert!(
+            v.contradictions[0].ends_with(
+                "; the base commit fails this check too, but not facade::the_readme_lists_every_feature_once \
+                 (failing on the base as well: wallet::flaky_clock)"
+            ),
+            "{v:?}"
+        );
+        assert_eq!(fix_step(&v, 0), FixStep::Send(1));
+
+        // The same failing test on both (another repository: the base answer is cached per repo).
+        worktree_fixture(&app, Some("exit 101"), "did the work", true).await;
+        let both = "test wallet::flaky_clock ... FAILED\n";
+        let v = verify(
+            &app,
+            &phased_runner_outputs("uncommitted.txt", (101, Some(101)), (101, Some(101)), both, both),
+        )
+        .await;
+        assert_eq!(v.verdict, Verdict::Inconclusive, "{v:?}");
+        assert!(v.failures.is_empty() && v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(
+            v.inconclusive,
+            vec!["`exit 101` fails on the base commit as well (the same tests fail there: wallet::flaky_clock)".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failures_compare_test_by_test_and_fall_back_to_the_check() {
+        let names = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            compare_failures(&names(&["a", "b"]), &names(&["b", "c"])),
+            Compared::New {
+                new: names(&["a"]),
+                shared: names(&["b"])
+            }
+        );
+        assert_eq!(
+            compare_failures(&names(&["b"]), &names(&["b", "c"])),
+            Compared::AllShared(names(&["b"]))
+        );
+        // A side that names nothing (a build error) compares by check only.
+        assert_eq!(compare_failures(&names(&["a"]), &[]), Compared::Unnamed);
+        assert_eq!(compare_failures(&[], &names(&["a"])), Compared::Unnamed);
+        // cargo's closing list, node --test's marks with their durations, vitest's durations.
+        let cargo = "failures:\n\n---- x::y stdout ----\npanicked\n\nfailures:\n    x::y\n    z::w\n\ntest result: FAILED\n";
+        assert_eq!(failing_test_names(cargo), names(&["x::y", "z::w"]));
+        let node = "✖ reads the config (1.25ms)\nℹ fail 1\n✖ failing tests:\n\n✖ reads the config (0.9ms)\n";
+        assert_eq!(failing_test_names(node), names(&["reads the config"]));
+        assert_eq!(failing_test_names(" × a > b 12ms\n × a > b 3ms\n"), names(&["a > b"]));
+        assert_eq!(without_duration("ends in 2s"), "ends in");
+        assert_eq!(without_duration("version 2"), "version 2");
     }
 
     /// The base answer is paid for once: a second verification of the same branch re-asks only the
