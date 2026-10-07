@@ -1,1 +1,0 @@
-Exec policy: `tar` and `rsync` `--exclude` patterns no longer count as touching a secret path, so copying a repository while excluding the placeholder dotfiles is no longer refused or flagged as a control bypass. `--exclude-from` and every other word still count.
