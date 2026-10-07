@@ -169,6 +169,8 @@ export type ActivityKind =
   | "colony.answer"
   | "chat.colony"
   | "chat.issue"
+  | "chat.approve"
+  | "chat.reject"
   | "colonize.issue"
   | "colonize.colony"
   | "decision.shadow"

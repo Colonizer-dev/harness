@@ -31,6 +31,7 @@ mod cache_store;
 mod capacity;
 mod chat;
 mod chat_images;
+mod chat_tools;
 mod claims;
 mod claude_accounts;
 mod claude_login;

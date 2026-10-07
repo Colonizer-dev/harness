@@ -63,8 +63,10 @@ export function Header(props: {
   onOpenCockpit?: () => void;
   /** The model switcher's chip and popover (issue #1051); absent in static tests, which have no API. */
   models?: ReactElement;
+  /** Spotlight's "Ask or search…" pill (issue #1218), centred in the bar; absent in static tests. */
+  search?: ReactElement;
 }): ReactElement {
-  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit, models } =
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit, models, search } =
     props;
 
   return (
@@ -109,7 +111,7 @@ export function Header(props: {
         </span>
       )}
 
-      <div className="min-w-0 flex-1" />
+      <div className="flex min-w-0 flex-1 justify-center">{search}</div>
 
       {models}
 

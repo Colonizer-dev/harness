@@ -70,6 +70,59 @@ export interface ChatMessage {
   /** A compare reply not picked yet; the model's history leaves it out. */
   candidate?: boolean;
   lane?: number;
+  /** The tool calls this reply made, with what became of each (#1217). */
+  tools?: ChatToolNote[];
+}
+
+/** What one tool call of a reply came to: a read that ran, or a write held for approval. */
+export interface ChatToolNote {
+  tool: string;
+  kind?: "read" | "write";
+  status: "ran" | "failed" | "refused" | "pending" | "approved" | "rejected";
+  summary: string;
+  /** The approval a held write waits on. */
+  approval?: string;
+  result?: string;
+}
+
+/** How far a held write reaches. */
+export interface ChatBlast {
+  colonies: number;
+  orgs: number;
+  repos: number;
+  note: string;
+}
+
+/** A held write's card: the words, the diff the API's dry run planned, and the blast radius. */
+export interface ChatPreview {
+  summary: string;
+  /** Before → after rows from `dry_run`; empty when the API has none. */
+  diff: { scope?: string; target?: string; key: string; was?: string | null; now: string }[];
+  dry_run: boolean;
+  blast: ChatBlast;
+}
+
+/** A write the model (or Spotlight) proposed; nothing runs until it is decided, once. */
+export interface ChatApproval {
+  id: string;
+  chat: string;
+  message: string;
+  tool: string;
+  args: Record<string, unknown>;
+  preview: ChatPreview;
+  status: "pending" | "running" | "approved" | "rejected" | "failed";
+  created_at: string;
+  decided_at?: string;
+  decision?: "approve" | "edit" | "reject";
+  ran_with?: Record<string, unknown>;
+  result?: string;
+}
+
+export interface ChatDecision {
+  decision: "approve" | "edit" | "reject";
+  /** With `edit`: the arguments to run instead. */
+  args?: Record<string, unknown>;
+  reason?: string;
 }
 
 export interface ChatProvider {
@@ -108,6 +161,8 @@ export type ChatStreamEvent = (
   | { type: "delta"; text: string }
   | { type: "done"; message: ChatMessage; chat?: ChatMeta }
   | { type: "error"; message: string; message_record?: ChatMessage }
+  /** A tool call of the reply: a read that ran, or a write held (with its approval card). */
+  | { type: "tool"; note: ChatToolNote; approval?: ChatApproval }
 ) & { lane?: number };
 
 export interface ChatSendRequest {
@@ -117,6 +172,8 @@ export interface ChatSendRequest {
   model?: string;
   context?: { colony?: string; file?: { repo: string; path: string; ref?: string } };
   attachments?: ChatAttachment[];
+  /** `false` keeps the Colonizer tools from this reply; they are on by default. */
+  tools?: boolean;
 }
 
 export interface ChatCompareRequest {
