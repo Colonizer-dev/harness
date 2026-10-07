@@ -2662,6 +2662,7 @@ pub async fn run_once(
             &format!("could not save the report: {e:#}"),
         )
     })?;
+    crate::loop_history::record(app, crate::loop_history::from_docs(&report)).await;
     for r in &report.repos {
         let mut entry = Entry::new("loop.docs", "colony");
         entry.org = r.repo.split('/').next().map(str::to_string);

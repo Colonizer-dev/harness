@@ -2281,6 +2281,7 @@ pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger
         entry.org = report.repos[0].repo.split('/').next().map(str::to_string);
     }
     crate::activity::record(app, entry).await;
+    crate::loop_history::record(app, crate::loop_history::from_ts_any(&report)).await;
     for item in &report.attention {
         eprintln!("ts-any loop: attention: {}", item.reason);
     }

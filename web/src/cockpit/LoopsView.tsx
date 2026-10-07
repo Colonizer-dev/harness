@@ -2,21 +2,23 @@
 // weekly, monthly, or self-paced (each run names the next with loop_next). The page lists them with
 // when they run next and how the last run went; "New loop" builds one from a template or scratch;
 // a loop's history lists every colony it launched.
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { Avatar } from "../components/Avatar";
 import { ModelPicker } from "../components/ModelPicker";
 import { Button, SESSION_STATUS, Spinner, Switch, cx } from "../components/ui";
 import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
 import { TsAnyLoopCard } from "./TsAnyLoop";
-import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, endAtError, endAtFromInput, endAtInputValue, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoopCadence, endDate, endAtError, endAtFromInput, endAtInputValue, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
 import { DocsLoopCard } from "./DocsLoopCard";
 import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
-import { DiskCleanupDialog, DiskCleanupRow, type DiskCleanupTab } from "./DiskCleanupLoop";
-import { diskCleanupBody, isDiskCleanup, reportSummary, toggleAction } from "./diskCleanup";
+import { DiskCleanupCard } from "./DiskCleanupLoop";
+import { isDiskCleanup } from "./diskCleanup";
+import { DetailSection, LoopCard, scheduleLine } from "./LoopCard";
+import { IconLoop } from "./loopIcons";
+import { plural } from "./loopHistory";
 import { SupplyChainLoopCard } from "./SupplyChainLoop";
 
 export const LOOP_ORIGIN = "loop:";
@@ -41,7 +43,6 @@ export function LoopsView({
   orgs,
   repos,
   sessions,
-  avatarFor,
   onOpenColony,
 }: {
   org: string | null;
@@ -49,32 +50,27 @@ export function LoopsView({
   orgs: readonly OrgInfo[];
   repos: readonly Repo[];
   sessions: readonly Session[];
-  avatarFor: (org: string) => string | null;
+  avatarFor?: (org: string) => string | null;
   onOpenColony: (id: string) => void;
 }): ReactElement {
   const api = useApi();
   const toast = useToast();
   const [loops, setLoops] = useState<Loop[] | null>(null);
   const [editing, setEditing] = useState<Loop | "new" | null>(null);
-  const [history, setHistory] = useState<Loop | null>(null);
-  const [cleanup, setCleanup] = useState<DiskCleanupTab | null>(null);
-  const [now, setNow] = useState(() => Date.now());
+  const [template, setTemplate] = useState<number | undefined>(undefined);
 
   const load = useCallback(() => {
     api.loops().then(setLoops, (e) => toast(errorMessage(e), "error"));
   }, [api, toast]);
   useEffect(() => {
     load();
-    const t = setInterval(() => {
-      load();
-      setNow(Date.now());
-    }, 30_000);
+    const t = setInterval(load, 30_000);
     return () => clearInterval(t);
   }, [load]);
 
-  // The built-in disk cleanup belongs to the host, not an org: it gets its own row above the list.
+  // The built-in disk cleanup belongs to the host, not an org: it is one of the built-in cards.
   const builtin = useMemo(() => (loops ?? []).find(isDiskCleanup) ?? null, [loops]);
-  const shown = useMemo(
+  const mine = useMemo(
     () =>
       (loops ?? [])
         .filter((l) => !isDiskCleanup(l))
@@ -82,31 +78,6 @@ export function LoopsView({
         .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name)),
     [loops, org],
   );
-
-  // Turning disk cleanup on for the first time shows what it would remove before anything runs.
-  const toggleCleanup = async (l: Loop, on: boolean) => {
-    if (toggleAction(l, on) === "preview") {
-      setCleanup("preview");
-      return;
-    }
-    try {
-      await api.updateLoop(l.id, diskCleanupBody(l, { enabled: on }));
-      load();
-    } catch (e) {
-      toast(errorMessage(e), "error");
-    }
-  };
-
-  const runCleanupNow = async () => {
-    if (!builtin) return;
-    try {
-      const report = await api.runDiskCleanup(builtin.id, false);
-      toast(`Disk cleanup: ${reportSummary(report)}`);
-      load();
-    } catch (e) {
-      toast(errorMessage(e), "error");
-    }
-  };
 
   const save = async (id: string | null, body: NewLoop) => {
     const saved = id ? await api.updateLoop(id, body) : await api.createLoop(body);
@@ -144,95 +115,138 @@ export function LoopsView({
     }
   };
 
+  const newLoop = (t?: number) => {
+    setTemplate(t);
+    setEditing("new");
+  };
+
   return (
     <Page>
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="min-w-0 flex-1">
-            <h1 className="m-0 text-display-xl font-semibold tracking-[-0.035em] text-text">Loops</h1>
-            <p className="mt-2 text-body-lg text-muted">
-              A prompt on a repository that launches a colony on a schedule — or lets each run pick the next. One run at a time. Tip: type{" "}
-              <code className="rounded bg-panel-3 px-1 font-mono text-small-lg">/loop 1h check CI and fix flakes</code> in the composer (⌘K).
-            </p>
-          </div>
-          <Button variant="primary" onClick={() => setEditing("new")}>
-            New loop
-          </Button>
+      <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+        <div className="min-w-0 flex-1 basis-80">
+          <h1 className="m-0 text-display-xl font-semibold tracking-[-0.035em] text-text">Loops</h1>
+          <p className="mt-2 text-body-lg text-muted">
+            Work that runs on a schedule, without you. Built-in loops look after your repositories; your own loops launch a colony from a prompt. Tip: type{" "}
+            <code className="rounded bg-panel-3 px-1 font-mono text-small-lg">/loop 1h check CI and fix flakes</code> in the composer (⌘K).
+          </p>
         </div>
+        <Button variant="primary" onClick={() => newLoop()}>
+          New loop
+        </Button>
+      </div>
 
+      <LoopSection title="Built-in" label="Built-in loops" meta="Always here, and yours to switch on.">
         <MergeLoopCard repos={repos} />
-
         <SupplyChainLoopCard onOpenColony={onOpenColony} />
-
-        {builtin && (
-          <ul className="m-0 mt-6 list-none overflow-hidden rounded-xl border border-border p-0" aria-label="Built-in loops">
-            <DiskCleanupRow loop={builtin} now={now} onToggle={(on) => void toggleCleanup(builtin, on)} onOpen={setCleanup} onRunNow={() => void runCleanupNow()} />
-          </ul>
-        )}
-
-        <div className="mt-6 overflow-hidden rounded-xl border border-border">
-          {loops === null ? (
-            <p className="flex items-center gap-2 px-4 py-6 text-body-sm text-muted">
-              <Spinner /> Loading loops…
-            </p>
-          ) : shown.length === 0 ? (
-            <div className="px-4 py-10 text-center text-body text-muted">
-              No loops{org ? ` in ${org}` : ""} yet. Start with a template: triage new issues, keep dependencies current, fix last night's flaky tests.
-            </div>
-          ) : (
-            <ul className="m-0 list-none divide-y divide-border p-0">
-              {shown.map((l) => {
-                const last = l.last_run ? sessions.find((s) => s.id === l.last_run?.session) : undefined;
-                return (
-                  <li key={l.id} className={cx("flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3", !l.enabled && "opacity-70")}>
-                    <Avatar name={l.org} src={avatarFor(l.org) ?? undefined} size={28} rounded="full" />
-                    <div className="min-w-0 flex-1 basis-64">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-body-lg font-medium text-text">{l.name}</span>
-                        <span className="truncate font-mono text-meta-lg text-faint">{l.repo}</span>
-                      </div>
-                      <div className="mt-0.5 truncate text-small-lg text-muted" title={l.last_note ?? undefined}>
-                        {describeLoop(l)}
-                        {l.enabled && l.next_run_at ? ` · next ${relative(l.next_run_at, now)}` : l.ended_reason ? ` · ${l.ended_reason}` : " · paused"}
-                        {l.last_note && !l.ended_reason ? ` · ${l.last_note}` : ""}
-                      </div>
-                    </div>
-                    <div className="w-[170px] shrink-0 text-small-lg">
-                      {l.last_run ? (
-                        <button type="button" onClick={() => onOpenColony(l.last_run!.session)} className="cursor-pointer border-0 bg-transparent p-0 text-left text-muted hover:text-text">
-                          run {l.runs} · {last ? SESSION_STATUS[last.status]?.label.toLowerCase() : "…"} · {relative(l.last_run.at, now)}
-                        </button>
-                      ) : (
-                        <span className="text-faint">not run yet</span>
-                      )}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <Switch checked={l.enabled} onChange={(on) => void toggle(l, on)} label={`${l.name} enabled`} />
-                      <Button size="sm" variant="secondary" onClick={() => void runNow(l)}>
-                        Run now
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setHistory(l)}>
-                        History
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setEditing(l)}>
-                        Edit
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => void remove(l)} aria-label={`delete ${l.name}`}>
-                        ✕
-                      </Button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-
         <TsAnyLoopCard onOpenColony={onOpenColony} />
-      <DocsLoopCard onOpenColony={onOpenColony} />
-      {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
-      {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
-      {cleanup && builtin && <DiskCleanupDialog loop={builtin} tab={cleanup} onSaved={load} onClose={() => setCleanup(null)} />}
+        <DocsLoopCard onOpenColony={onOpenColony} />
+        {builtin && <DiskCleanupCard loop={builtin} onChanged={load} />}
+      </LoopSection>
+
+      <LoopSection title="Your loops" label="Your loops" meta={loops && mine.length > 0 ? plural(mine.length, "loop") : undefined}>
+        {loops === null ? (
+          <p className="flex items-center gap-2 text-body-sm text-muted">
+            <Spinner /> Loading loops…
+          </p>
+        ) : mine.length === 0 ? (
+          <div className="col-span-full rounded-xl border border-dashed border-border-strong px-5 py-8 text-center">
+            <p className="m-0 text-body-lg font-medium text-text">No loops{org ? ` in ${org}` : ""} yet</p>
+            <p className="mx-auto mt-1 max-w-[46ch] text-body-sm text-muted">A loop is a prompt on a repository that runs on a schedule. Start from a template, or write your own.</p>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              {LOOP_TEMPLATES.map((t, i) => (
+                <button key={t.label} type="button" onClick={() => newLoop(i)} className="cursor-pointer rounded-full border border-border bg-panel px-3 py-1.5 text-small-lg text-text hover:border-border-strong">
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <Button className="mt-4" variant="primary" onClick={() => newLoop()}>
+              New loop
+            </Button>
+          </div>
+        ) : (
+          mine.map((l) => <CustomLoopCard key={l.id} loop={l} session={sessions.find((s) => s.id === l.last_run?.session)} onToggle={(on) => void toggle(l, on)} onRun={() => void runNow(l)} onEdit={() => setEditing(l)} onDelete={() => void remove(l)} onOpenColony={onOpenColony} />)
+        )}
+      </LoopSection>
+
+      {editing && <LoopDialog loop={editing === "new" ? null : editing} template={template} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
     </Page>
+  );
+}
+
+/** A titled group of loop cards: one grid for the built-in loops, one for the user's own. */
+function LoopSection({ title, label, meta, children }: { title: string; label: string; meta?: string; children: ReactNode }): ReactElement {
+  return (
+    <section aria-label={label} className="mt-10">
+      <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h2 className="m-0 text-title font-semibold text-text">{title}</h2>
+        {meta && <span className="text-body-sm text-faint">{meta}</span>}
+      </div>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">{children}</div>
+    </section>
+  );
+}
+
+/** One of the user's own loops, on the same card as every built-in one. */
+export function CustomLoopCard({
+  loop: l,
+  session,
+  onToggle,
+  onRun,
+  onEdit,
+  onDelete,
+  onOpenColony,
+}: {
+  loop: Loop;
+  session?: Session;
+  onToggle: (on: boolean) => void;
+  onRun: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onOpenColony: (id: string) => void;
+}): ReactElement {
+  const map = (l.kind ?? "colony") === "map";
+  const orgWide = l.repo.endsWith("/*");
+  const cadence = describeLoopCadence(l.cadence);
+  const ended = l.ended_reason;
+  return (
+    <LoopCard
+      historyId={l.id}
+      custom
+      icon={<IconLoop />}
+      name={l.name}
+      purpose={map ? (orgWide ? `Keeps the architecture map of every repository in ${l.repo.slice(0, -2)} fresh.` : `Keeps the architecture map of ${l.repo} fresh.`) : nameFromPrompt(l.prompt)}
+      enabled={l.enabled}
+      onToggle={onToggle}
+      schedule={ended ? `Ended · ${ended}` : scheduleLine(`${cadence}${l.end_at ? ` · ends ${endDate(l.end_at)}` : ""}`, l.enabled, l.next_run_at)}
+      scope={{ text: orgWide ? `Every repository in ${l.repo.slice(0, -2)}` : l.repo, ready: true }}
+      lastNote={l.last_run ? `Run ${l.runs}${session ? ` · ${SESSION_STATUS[session.status]?.label ?? session.status}` : ""}` : undefined}
+      attention={ended ? null : l.last_note && /could not|refus|fail/i.test(l.last_note) ? l.last_note : null}
+      refreshKey={l.last_run?.session}
+      onOpenColony={onOpenColony}
+      actions={
+        <>
+          <Button size="sm" variant="secondary" onClick={onRun}>
+            Run now
+          </Button>
+          <Button size="sm" variant="secondary" onClick={onEdit}>
+            Edit
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onDelete} aria-label={`delete ${l.name}`}>
+            Delete
+          </Button>
+        </>
+      }
+    >
+      {!map && (
+        <DetailSection title="Prompt">
+          <p className="m-0 whitespace-pre-wrap rounded-lg border border-border bg-panel px-3.5 py-3 text-small-lg text-muted [overflow-wrap:anywhere]">{l.prompt}</p>
+          {l.last_note && <p className="m-0 mt-2 text-small-lg text-muted">Last note: {l.last_note}</p>}
+        </DetailSection>
+      )}
+      <DetailSection title="Colonies" meta="launched by this loop">
+        <LoopColonies loop={l} onOpenColony={onOpenColony} />
+      </DetailSection>
+    </LoopCard>
   );
 }
 
@@ -258,6 +272,7 @@ export function bodyOf(l: Loop, change: Partial<NewLoop> = {}): NewLoop {
 
 export function LoopDialog({
   loop,
+  template,
   org,
   orgs,
   repos,
@@ -265,6 +280,8 @@ export function LoopDialog({
   onClose,
 }: {
   loop: Loop | null;
+  /** The index in LOOP_TEMPLATES a new loop starts from. */
+  template?: number;
   org: string | null;
   orgs: readonly OrgInfo[];
   repos: readonly Repo[];
@@ -287,8 +304,9 @@ export function LoopDialog({
   }, [api]);
   const scoped = useMemo(() => repos.filter((r) => !org || r.full_name.split("/")[0].toLowerCase() === org.toLowerCase()), [repos, org]);
   const [repo, setRepo] = useState((loop?.repo ?? scoped[0]?.full_name ?? "").replace(/\/\*$/, ""));
-  const [prompt, setPrompt] = useState(loop?.prompt ?? "");
-  const [name, setName] = useState(loop?.name ?? "");
+  const start = !loop && template != null ? LOOP_TEMPLATES[template] : undefined;
+  const [prompt, setPrompt] = useState(loop?.prompt ?? start?.prompt ?? "");
+  const [name, setName] = useState(loop?.name ?? start?.label ?? "");
   // What a run starts: a colony from the prompt, or the repository's architecture map (`owner/*`
   // covers every repository in the org).
   // The built-in disk cleanup never opens this form (it has its own dialog).
@@ -296,8 +314,8 @@ export function LoopDialog({
   const [allRepos, setAllRepos] = useState(loop?.kind === "map" && loop.repo.endsWith("/*"));
   // Whether the loop's work is GitHub's (issue #778): the run then waits for the repository to be
   // reachable and gets the read-only context and the host-proxied write tools. Colony loops only.
-  const [needsGithub, setNeedsGithub] = useState(loop?.needs_github ?? false);
-  const [choice, setChoice] = useState<LoopChoice>(loop ? toLocalChoice(loop.cadence) : { every: "daily", time: "09:00" });
+  const [needsGithub, setNeedsGithub] = useState(loop?.needs_github ?? start?.needsGithub ?? false);
+  const [choice, setChoice] = useState<LoopChoice>(loop ? toLocalChoice(loop.cadence) : (start?.choice ?? { every: "daily", time: "09:00" }));
   const [model, setModel] = useState(loop?.model ?? "");
   const [subagentModel, setSubagentModel] = useState(loop?.subagent_model ?? "");
   const [autopilot, setAutopilot] = useState(loop?.autopilot ?? true);
@@ -613,58 +631,38 @@ export function LoopDialog({
   );
 }
 
-function LoopHistory({ loop, onOpenColony, onClose }: { loop: Loop; onOpenColony: (id: string) => void; onClose: () => void }): ReactElement {
-  const ref = useRef<HTMLDialogElement>(null);
+/** The colonies a loop launched, newest first, with their state, cost and pull request. */
+function LoopColonies({ loop, onOpenColony }: { loop: Loop; onOpenColony: (id: string) => void }): ReactElement {
   const api = useApi();
   const [runs, setRuns] = useState<Session[] | null>(null);
   useEffect(() => {
-    const d = ref.current;
-    if (d && !d.open) d.showModal?.();
     api.loopRuns(loop.id).then(setRuns, () => setRuns([]));
   }, [api, loop.id]);
+  if (runs === null) {
+    return (
+      <p className="flex items-center gap-2 text-body-sm text-muted">
+        <Spinner /> Loading colonies…
+      </p>
+    );
+  }
+  if (runs.length === 0) return <p className="m-0 text-body-sm text-faint">No colonies yet.</p>;
   return (
-    <dialog ref={ref} onClose={onClose} aria-labelledby="loop-history-title" className="m-auto w-[min(720px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
-      <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="loop-history-title" className="min-w-0 flex-1 truncate text-title-sm font-semibold">
-          {loop.name} · history
-        </h2>
-        <button type="button" onClick={() => ref.current?.close()} aria-label="Close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
-          ✕
-        </button>
-      </div>
-      <div className="px-5 py-3 text-small-lg text-muted">
-        {describeLoopCadence(loop.cadence)} · {loop.runs} {loop.runs === 1 ? "run" : "runs"}
-        {loop.last_note ? ` · ${loop.last_note}` : ""}
-      </div>
-      <div className="scroll-thin max-h-[60vh] overflow-y-auto border-t border-border">
-        {runs === null ? (
-          <p className="flex items-center gap-2 px-5 py-4 text-body-sm text-muted">
-            <Spinner /> Loading runs…
-          </p>
-        ) : runs.length === 0 ? (
-          <p className="px-5 py-6 text-body-sm text-faint">No runs yet.</p>
-        ) : (
-          <ul className="m-0 list-none divide-y divide-border p-0">
-            {runs.map((s) => (
-              <li key={s.id} className="flex items-center gap-3 px-5 py-2.5 text-body-sm">
-                <button type="button" onClick={() => onOpenColony(s.id)} className="min-w-0 flex-1 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-text hover:underline">
-                  {s.summary || s.issue_title || s.id}
-                </button>
-                <span className="w-24 shrink-0 text-muted">{SESSION_STATUS[s.status]?.label ?? s.status}</span>
-                <span className="w-16 shrink-0 text-right tabular-nums text-muted">{formatCost(sessionCost(s))}</span>
-                <span className="w-16 shrink-0 text-right text-faint">{relative(s.created_at)}</span>
-                {s.pr_url ? (
-                  <a href={s.pr_url} target="_blank" rel="noreferrer" className="shrink-0 text-accent">
-                    PR ↗
-                  </a>
-                ) : (
-                  <span className="w-8 shrink-0" />
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </dialog>
+    <ul className="m-0 list-none divide-y divide-border overflow-hidden rounded-xl border border-border bg-panel p-0">
+      {runs.slice(0, 20).map((s) => (
+        <li key={s.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3.5 py-2.5 text-small-lg">
+          <button type="button" onClick={() => onOpenColony(s.id)} className="min-w-0 flex-1 basis-48 cursor-pointer border-0 bg-transparent p-0 text-left text-text hover:underline [overflow-wrap:anywhere]">
+            {s.summary || s.issue_title || s.id}
+          </button>
+          <span className="text-muted">{SESSION_STATUS[s.status]?.label ?? s.status}</span>
+          <span className="tabular-nums text-muted">{formatCost(sessionCost(s))}</span>
+          <span className="text-faint">{relative(s.created_at)}</span>
+          {s.pr_url && (
+            <a href={s.pr_url} target="_blank" rel="noreferrer" className="text-accent">
+              PR ↗
+            </a>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

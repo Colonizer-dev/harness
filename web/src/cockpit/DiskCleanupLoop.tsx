@@ -1,8 +1,11 @@
-// The built-in Disk cleanup loop's row on the Loops page and its dialog: a dry-run preview (shown
-// before the first enable), its settings, and its run history. The rules live in diskCleanup.ts.
-import { useEffect, useRef, useState, type ReactElement } from "react";
+// The built-in Disk cleanup loop on the Loops page: its card, a dry-run preview (shown before the
+// first enable), its last run and its settings. The rules live in diskCleanup.ts.
+import { useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { Button, Spinner, Switch, cx } from "../components/ui";
+import { DetailSection, LoopCard, scheduleLine } from "./LoopCard";
+import { IconDisk } from "./loopIcons";
+import { BUILTIN_HISTORY_ID } from "./loopHistory";
 import type { DiskCleanupReport, DiskCleanupSettings, Loop } from "../types";
 import { formatBytes } from "./host";
 import { relative } from "./loops";
@@ -13,72 +16,11 @@ import {
   describeDiskCleanup,
   diskCleanupBody,
   heldReason,
+  toggleAction,
   parseExtraPaths,
   reportSummary,
   settingsOf,
 } from "./diskCleanup";
-
-export type DiskCleanupTab = "preview" | "settings" | "history";
-
-/** The built-in loop's row in the Loops list. */
-export function DiskCleanupRow({
-  loop,
-  now,
-  onToggle,
-  onOpen,
-  onRunNow,
-}: {
-  loop: Loop;
-  now: number;
-  onToggle: (on: boolean) => void;
-  onOpen: (tab: DiskCleanupTab) => void;
-  onRunNow: () => void;
-}): ReactElement {
-  const last = loop.disk_cleanup?.history[0];
-  const attention = loop.disk_cleanup?.attention;
-  return (
-    <li className={cx("flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3", !loop.enabled && "opacity-80")} data-loop="disk-cleanup">
-      <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-full border border-border text-body-sm text-muted">
-        ⌫
-      </span>
-      <div className="min-w-0 flex-1 basis-64">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-body-lg font-medium text-text">{loop.name}</span>
-          <span className="truncate font-mono text-meta-lg text-faint">this host</span>
-        </div>
-        <div className="mt-0.5 truncate text-small-lg text-muted" title={loop.last_note ?? undefined}>
-          {describeDiskCleanup(loop)}
-          {loop.enabled && loop.next_run_at ? ` · next ${relative(loop.next_run_at, now)}` : " · off"}
-        </div>
-        {attention && <div className="mt-1 text-small-lg text-warn">{attention}</div>}
-      </div>
-      <div className="w-[170px] shrink-0 text-small-lg">
-        {last ? (
-          <button type="button" onClick={() => onOpen("history")} className="cursor-pointer border-0 bg-transparent p-0 text-left text-muted hover:text-text">
-            {reportSummary(last)} · {relative(last.at, now)}
-          </button>
-        ) : (
-          <span className="text-faint">not run yet</span>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <Switch checked={loop.enabled} onChange={onToggle} label={`${loop.name} enabled`} />
-        <Button size="sm" variant="secondary" onClick={() => onOpen("preview")}>
-          Preview
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onRunNow}>
-          Run now
-        </Button>
-        <Button size="sm" variant="ghost" onClick={() => onOpen("history")}>
-          History
-        </Button>
-        <Button size="sm" variant="ghost" onClick={() => onOpen("settings")}>
-          Settings
-        </Button>
-      </div>
-    </li>
-  );
-}
 
 /** One report — a dry run or a stored run — category by category, with every path and size. */
 export function DiskCleanupReportView({ report }: { report: DiskCleanupReport }): ReactElement {
@@ -193,41 +135,36 @@ export function DiskCleanupSettingsForm({
   );
 }
 
-/** The dialog behind the row: preview (a dry run), settings, history. */
-export function DiskCleanupDialog({ loop, tab: initialTab, onClose, onSaved }: { loop: Loop; tab: DiskCleanupTab; onClose: () => void; onSaved: () => void }): ReactElement {
-  const ref = useRef<HTMLDialogElement>(null);
+/** The loop's card: its switch, a preview before the first enable, its last run and its settings. */
+export function DiskCleanupCard({ loop, onChanged }: { loop: Loop; onChanged: () => void }): ReactElement {
   const api = useApi();
   const toast = useToast();
-  const [tab, setTab] = useState<DiskCleanupTab>(initialTab);
   const [preview, setPreview] = useState<DiskCleanupReport | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   const [settings, setSettings] = useState<DiskCleanupSettings>(() => settingsOf(loop));
   const [minutes, setMinutes] = useState(loop.cadence.every === "interval" ? loop.cadence.minutes : 60);
   const [busy, setBusy] = useState(false);
+  const [openSignal, setOpenSignal] = useState(0);
+  const last = loop.disk_cleanup?.history[0];
 
-  useEffect(() => {
-    const d = ref.current;
-    if (d && !d.open) d.showModal?.();
-  }, []);
-  useEffect(() => {
-    if (tab !== "preview") return;
-    let live = true;
-    setPreview(null);
-    api.runDiskCleanup(loop.id, true).then(
-      (r) => live && setPreview(r),
-      (e) => live && toast(errorMessage(e), "error"),
-    );
-    return () => {
-      live = false;
-    };
-  }, [api, loop.id, tab, toast]);
+  const runPreview = async () => {
+    setPreviewing(true);
+    try {
+      setPreview(await api.runDiskCleanup(loop.id, true));
+      onChanged();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setPreviewing(false);
+    }
+  };
 
   const save = async (change: { enabled?: boolean }) => {
     setBusy(true);
     try {
       await api.updateLoop(loop.id, diskCleanupBody(loop, { ...change, minutes, settings }));
-      toast(change.enabled ? "Disk cleanup is on" : "Disk cleanup saved");
-      onSaved();
-      ref.current?.close();
+      toast(change.enabled ? "Disk cleanup is on" : change.enabled === false ? "Disk cleanup is off" : "Disk cleanup saved");
+      onChanged();
     } catch (e) {
       toast(errorMessage(e), "error");
     } finally {
@@ -235,75 +172,90 @@ export function DiskCleanupDialog({ loop, tab: initialTab, onClose, onSaved }: {
     }
   };
 
-  const history = loop.disk_cleanup?.history ?? [];
+  // Turning it on before the owner has seen a dry run shows what it would remove first.
+  const toggle = (on: boolean) => {
+    if (toggleAction(loop, on) === "preview") {
+      setOpenSignal((n) => n + 1);
+      void runPreview();
+      return;
+    }
+    void save({ enabled: on });
+  };
+
+  const runNow = async () => {
+    setBusy(true);
+    try {
+      const report = await api.runDiskCleanup(loop.id, false);
+      toast(`Disk cleanup: ${reportSummary(report)}`);
+      onChanged();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <dialog ref={ref} onClose={onClose} aria-labelledby="disk-cleanup-title" className="m-auto w-[min(720px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
-      <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="disk-cleanup-title" className="min-w-0 flex-1 text-title-sm font-semibold">
-          Disk cleanup
-        </h2>
-        <button type="button" onClick={() => ref.current?.close()} aria-label="Close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
-          ✕
-        </button>
-      </div>
-      <div className="flex gap-1.5 border-b border-border px-5 py-2">
-        {(
-          [
-            ["preview", "Preview"],
-            ["settings", "Settings"],
-            ["history", "History"],
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            aria-pressed={tab === key}
-            onClick={() => setTab(key)}
-            className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-small-lg", tab === key ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      <div className="scroll-thin max-h-[65vh] overflow-y-auto px-5 py-4">
-        {tab === "preview" &&
-          (preview ? (
-            <DiskCleanupReportView report={preview} />
+    <LoopCard
+      historyId={BUILTIN_HISTORY_ID.diskCleanup}
+      icon={<IconDisk />}
+      name={loop.name}
+      purpose="Clears build output, finished worktrees and stopped microVMs before the disk fills up."
+      enabled={loop.enabled}
+      onToggle={toggle}
+      busy={busy}
+      schedule={scheduleLine(describeDiskCleanup(loop), loop.enabled, loop.next_run_at)}
+      scope={{ text: "This computer", ready: true }}
+      attention={loop.disk_cleanup?.attention}
+      refreshKey={last?.at}
+      openSignal={openSignal}
+      actions={
+        <>
+          <Button size="sm" variant="secondary" disabled={busy || previewing} onClick={() => void runPreview()}>
+            {previewing ? "Working it out…" : "Preview"}
+          </Button>
+          <Button size="sm" variant="secondary" disabled={busy || !loop.enabled} onClick={() => void runNow()}>
+            Run now
+          </Button>
+        </>
+      }
+    >
+      {(preview || previewing) && (
+        <DetailSection title="Preview" meta="what a run would remove now">
+          {preview ? (
+            <>
+              <DiskCleanupReportView report={preview} />
+              {!loop.enabled && (
+                <Button className="mt-3" variant="primary" disabled={busy} onClick={() => void save({ enabled: true })}>
+                  Turn on disk cleanup
+                </Button>
+              )}
+            </>
           ) : (
             <p className="flex items-center gap-2 text-body-sm text-muted">
               <Spinner /> Working out what a run would remove…
             </p>
-          ))}
-        {tab === "settings" && <DiskCleanupSettingsForm settings={settings} minutes={minutes} onChange={setSettings} onMinutes={setMinutes} />}
-        {tab === "history" &&
-          (history.length === 0 ? (
-            <p className="text-body-sm text-faint">No runs yet.</p>
-          ) : (
-            <ul className="m-0 list-none space-y-4 p-0">
-              {history.map((r) => (
-                <li key={r.at}>
-                  <div className="mb-1 text-small text-faint">
-                    {relative(r.at)} · {r.trigger === "low_disk" ? "low disk" : r.trigger}
-                  </div>
-                  <DiskCleanupReportView report={r} />
-                </li>
-              ))}
-            </ul>
-          ))}
-      </div>
-      <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
-        <Button onClick={() => ref.current?.close()}>Close</Button>
-        {tab === "settings" && (
-          <Button variant="secondary" disabled={busy} onClick={() => void save({})}>
-            {busy && <Spinner />} Save
-          </Button>
+          )}
+        </DetailSection>
+      )}
+      <DetailSection title="Last run">
+        {last ? (
+          <>
+            <p className="mb-2 text-small-lg text-muted">
+              {relative(last.at)} · {last.trigger === "low_disk" ? "low disk" : last.trigger}
+            </p>
+            <DiskCleanupReportView report={last} />
+          </>
+        ) : (
+          <p className="m-0 text-body-sm text-faint">Not run yet. Preview shows what the first run would remove.</p>
         )}
-        {!loop.enabled && tab !== "history" && (
-          <Button variant="primary" disabled={busy || (tab === "preview" && !preview)} onClick={() => void save({ enabled: true })}>
-            {busy && <Spinner />} Turn on disk cleanup
-          </Button>
-        )}
-      </div>
-    </dialog>
+      </DetailSection>
+      <DetailSection title="Settings">
+        <DiskCleanupSettingsForm settings={settings} minutes={minutes} onChange={setSettings} onMinutes={setMinutes} />
+        <Button className="mt-4" size="sm" variant="primary" disabled={busy} onClick={() => void save({})}>
+          Save changes
+        </Button>
+      </DetailSection>
+    </LoopCard>
   );
 }

@@ -723,6 +723,7 @@ export function RangePicker({
   compare,
   onCompare,
   emptyPrevious = false,
+  hideCompare = false,
 }: {
   range: RangeDays;
   onRange: (range: RangeDays) => void;
@@ -730,6 +731,8 @@ export function RangePicker({
   onCompare: () => void;
   /** Nothing happened in the previous period, so comparing shows flat zeros; the switch says so. */
   emptyPrevious?: boolean;
+  /** For a chart with no previous period to compare to (a loop's history is kept for 90 days only). */
+  hideCompare?: boolean;
 }): ReactElement {
   return (
     <div className="flex items-center gap-2">
@@ -746,6 +749,7 @@ export function RangePicker({
           </button>
         ))}
       </div>
+      {!hideCompare && (
       <button
         type="button"
         role="switch"
@@ -757,6 +761,7 @@ export function RangePicker({
         <Switch on={compare} />
         Compare
       </button>
+      )}
     </div>
   );
 }

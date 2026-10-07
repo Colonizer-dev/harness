@@ -190,6 +190,8 @@ pub struct App {
     pub disk_cleanup: crate::disk_cleanup::Runtime,
     /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
     pub loops: crate::loops::LoopStore,
+    /// Every loop's runs for 90 days (loop_history.rs), saved to `<config_dir>/loop-history.json`.
+    pub loop_history: crate::loop_history::HistoryStore,
     pub memory: crate::memory::MemoryStore,
     /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
@@ -306,6 +308,7 @@ impl App {
             login: Default::default(),
             disk_cleanup: Default::default(),
             loops: crate::loops::LoopStore::new(&cfg.config_dir),
+            loop_history: crate::loop_history::HistoryStore::new(&cfg.config_dir),
             memory: crate::memory::MemoryStore::new(cfg.data_dir.join("memory")),
             backlog: Default::default(),
             new_orgs: RwLock::new(BTreeMap::new()),
