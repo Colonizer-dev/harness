@@ -265,4 +265,4 @@ no workflow here has a `merge_group` trigger and a queued pull request would nev
 script keeps `vulnerabilities` out of its list on purpose, because it can go red on a newly
 published advisory with no commit at all (the weekly run is the detection path); the live branch
 protection requires it anyway, so such an advisory blocks every merge until it is fixed
-([#935](https://github.com/Colonizer-dev/harness/issues/935)).
+([#935](https://github.com/Colonizer-dev/harness/issues/935)). Fixing it needs a repository admin, who removes `vulnerabilities` from the classic protection's required status checks (Settings → Branches → `main`).

@@ -15,7 +15,11 @@
 // one and are flipped by hand in Settings → General: "Allow auto-merge" must be on — the harness
 // queues a colony pull request held for required checks with `gh pr merge --squash --auto`, which
 // GitHub refuses without it — and no merge queue must be configured, because no workflow here has a
-// `merge_group` trigger, so a queued pull request would wait forever.
+// `merge_group` trigger, so a queued pull request would wait forever. A third is not a setting but an
+// absence: the classic branch protection on `main` must carry no required status checks of its own
+// (today it carries `vulnerabilities` besides the six, which this ruleset does not ask for). A ruleset
+// layers on top of branch protection rather than replacing it, so those checks keep applying and every
+// pull request still waits on them; an admin removes them in Settings → Branches → `main` (issue #935).
 
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
