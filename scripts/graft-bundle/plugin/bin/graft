@@ -1,0 +1,34 @@
+#!/bin/sh
+# graft inside a colony (the graft skillset, docs/skill-packs.md). The skillset is mounted read-only, so the
+# graph goes outside the worktree — never into a commit — and outside the mount. Built on first use, kept in
+# sync by every later query. Offline by construction: no model key reaches graft, its telemetry is closed,
+# and its background registry check is answered from a cache that never expires.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+state=${COLONIZER_GRAFT_STATE:-/var/tmp/colonizer-graft}
+graph="$state/graph"
+home="$state/home"
+mkdir -p "$home/.graft"
+[ -f "$home/.graft/update-check.json" ] || printf '{"latest":null,"checkedAt":4102444800000}\n' > "$home/.graft/update-check.json"
+
+# The bundle's own Node 22 (vendor/graft/node.lock): graft's native grammars are built against it, so
+# node-guest (Node 24) cannot load them.
+node="$here/node/bin/node"
+[ -x "$node" ] || { echo "graft: the bundle's node runtime is missing; download the graft skillset again" >&2; exit 127; }
+cli="$here/runtime/node_modules/@nanonets/graft/dist/cli.js"
+
+run() {
+  env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u OPENAI_API_KEY -u GRAFT_API_KEY -u GRAFT_BASE_URL \
+    HOME="$home" DO_NOT_TRACK=1 CI=1 "$node" "$cli" --dir "$graph" "$@"
+}
+
+case "${1:-}" in
+  ""|-h|--help|-v|--version|help|version|build) ;;
+  *)
+    if [ ! -f "$graph/INDEX.md" ]; then
+      echo "graft: building the code map for $(pwd) (first use)…" >&2
+      run build >&2
+    fi
+    ;;
+esac
+run "$@"

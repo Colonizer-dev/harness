@@ -1,0 +1,2 @@
+/api/archive                                         GET    unauth=401    token=owner            activity=-
+/api/archive/retention                               POST   unauth=401    token=owner            activity=-

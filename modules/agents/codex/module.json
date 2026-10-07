@@ -1,0 +1,85 @@
+{
+  "kind": "agent",
+  "id": "codex",
+  "name": "Codex",
+  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It can ask the user questions through the colonizer MCP server; the runner fetches the pinned codex binary into its cache on first boot, so nothing needs to be staged into the colony image.",
+  "protocol": "colonizer-runner/1",
+  "loop_tools": true,
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "codex"
+    ],
+    "fetched_by_runner": [
+      "codex"
+    ],
+    "image": "glibc + node >= 20; the runner fetches the pinned @openai/codex CLI itself",
+    "pins": {
+      "codex": {
+        "version": "0.156.1",
+        "source_rev": "81e8e29b2956dfe9b092c63953a9ed282781e77c"
+      }
+    }
+  },
+  "session_resume": {
+    "dir": "/root/.codex",
+    "description": "Codex keeps every session rollout under CODEX_HOME and can resume any thread given its id, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact; the runner strips the mounted dir back to the rollout store on every boot."
+  },
+  "secrets": [
+    {
+      "env": [
+        "CODEX_API_KEY"
+      ],
+      "hosts": [
+        "api.openai.com"
+      ]
+    }
+  ],
+  "egress": {
+    "api": ["api.openai.com"],
+    "auth": [],
+    "telemetry": [],
+    "extra": ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "Model for the colony as openai/<model> or a bare OpenAI model id, passed to codex exec -m. Empty (the default) passes no -m: Codex runs on the CLI's own default model. A <provider>/<model> whose prefix matches a connection from Settings → Model providers rides the mothership's gateway on its openai wire instead — tokens and spend are accounted host-side and no OpenAI key is needed in the colony. Anthropic-wire connections and providers with no route are refused: codex speaks the OpenAI wire only.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "subagent_model": {
+        "type": "string",
+        "title": "Subagent model",
+        "description": "Accepted for parity with the other agent modules, but unused: headless codex exec has no subagent split, every turn runs on the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_MODEL"
+      },
+      "background_model": {
+        "type": "string",
+        "title": "Background model",
+        "description": "Accepted for parity with the other agent modules, but unused: headless codex exec has no background-worker split, every turn runs on the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_BACKGROUND_MODEL"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Codex tool names this colony never gets: shell (the shell tool), web_search or view_image. Each rides every turn as a -c config override, behind --strict-config so a key codex stops recognising fails the turn instead of silently keeping the tool. apply_patch (Codex's own file-editing tool) and MCP tools cannot be turned off. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "shell",
+          "web_search",
+          "view_image"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,484 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeSpans": [
+        {
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          },
+          "spans": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.question.risk",
+                  "value": {
+                    "stringValue": "workspace_write"
+                  }
+                },
+                {
+                  "key": "colonizer.question.options",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.answered_by",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242271000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "question",
+              "parentSpanId": "6db007a902258ab7",
+              "spanId": "bd7d42e67e7fc2e1",
+              "startTimeUnixNano": "1790242269000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "colonizer.tool.output_bytes",
+                  "value": {
+                    "intValue": "200"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242275000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "execute_tool Bash",
+              "parentSpanId": "6db007a902258ab7",
+              "spanId": "abdd960e22592c23",
+              "startTimeUnixNano": "1790242274000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_fetch"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "colonizer.denial.class",
+                  "value": {
+                    "stringValue": "egress"
+                  }
+                },
+                {
+                  "key": "colonizer.tool.output_bytes",
+                  "value": {
+                    "intValue": "90"
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "tool_error"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242279000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "execute_tool Bash",
+              "parentSpanId": "6db007a902258ab7",
+              "spanId": "27587827e2c6eee5",
+              "startTimeUnixNano": "1790242278000000000",
+              "status": {
+                "code": 2,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "boundary"
+                  }
+                },
+                {
+                  "key": "colonizer.boundary.kind",
+                  "value": {
+                    "stringValue": "egress_denied"
+                  }
+                },
+                {
+                  "key": "colonizer.boundary.control",
+                  "value": {
+                    "stringValue": "egress"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242280000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step boundary",
+              "parentSpanId": "29aa1092c5335101",
+              "spanId": "b83a7e7cc59d3c36",
+              "startTimeUnixNano": "1790242280000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "path_policy"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.access",
+                  "value": {
+                    "stringValue": "read"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.policy",
+                  "value": {
+                    "stringValue": "masked"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.tool",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242282000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step path_policy",
+              "parentSpanId": "29aa1092c5335101",
+              "spanId": "eaf4071d5077e6f9",
+              "startTimeUnixNano": "1790242282000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_read"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                },
+                {
+                  "key": "colonizer.tool.output_bytes",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242283000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "execute_tool Read",
+              "parentSpanId": "6db007a902258ab7",
+              "spanId": "cd308ac9c2752431",
+              "startTimeUnixNano": "1790242281000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.origin",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "fake-model"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "1200"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "90000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "colonizer.cost_usd",
+                  "value": {
+                    "doubleValue": 0.42
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242284000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "turn 1",
+              "parentSpanId": "29aa1092c5335101",
+              "spanId": "6db007a902258ab7",
+              "startTimeUnixNano": "1790242261000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "c1a0dec0"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c1a0dec0"
+                  }
+                },
+                {
+                  "key": "colonizer.outcome",
+                  "value": {
+                    "stringValue": "merged"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "1200"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "90000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "colonizer.cost_usd",
+                  "value": {
+                    "doubleValue": 0.42
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "claude_code"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.origin",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "colonizer.pr.url",
+                  "value": {
+                    "stringValue": "https://github.com/acme/widgets/pull/7"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "fake-model"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242320000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "invoke_agent acme/widgets",
+              "parentSpanId": "",
+              "spanId": "29aa1092c5335101",
+              "startTimeUnixNano": "1790242200000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

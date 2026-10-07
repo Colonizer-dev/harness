@@ -1,0 +1,9 @@
+{
+  "name": "colonizer-graft-bundle",
+  "private": true,
+  "description": "The graft skillset's runtime: @nanonets/graft and its production dependencies, installed with `npm ci` from the lock beside this file (scripts/graft-bundle/build.sh).",
+  "license": "MIT",
+  "dependencies": {
+    "@nanonets/graft": "0.19.0"
+  }
+}

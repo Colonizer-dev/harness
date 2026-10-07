@@ -1,0 +1,681 @@
+//! The agent event contract as a Rust type. `docs/protocol.md` §2 keeps the prose and
+//! `docs/agent-events.schema.json` the machine-readable schema for every event type; this
+//! enum is the slice of that contract the harness itself acts on (#73 item 4), and the committed
+//! fixture `modules/agents/claude-code/test/fixtures/events.jsonl` proves the runner's real output
+//! deserialises into it.
+//!
+//! Events the harness only forwards to the browser (`assistant_text_delta`, `assistant_text`,
+//! `thinking`, `tool_call`, `tool_result`, `log`, `model_changed`) are deliberately not variants:
+//! together with any type a newer runner adds they land on [`AgentEvent::Other`], so a new event
+//! type can never make a line fail to deserialise. That matters because the browser receives every
+//! line regardless — pass-through happens before this dispatch (`events.rs`).
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+/// The `state` of a `status` event (docs/protocol.md §2). A state a newer runner knows still
+/// deserialises, as [`AgentState::Unknown`], so a status change can never be a contract error —
+/// it is just no news for this build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentState {
+    Idle,
+    Working,
+    WaitingForAnswer,
+    Error,
+    Exited,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentState {
+    /// The wire spelling, for messages such as `agent exited: exit code 1`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::WaitingForAnswer => "waiting_for_answer",
+            Self::Error => "error",
+            Self::Exited => "exited",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// The risk class a runner stamps on a `question` (§2), ordered lowest to highest: the autonomy
+/// judge answers a question only at or below its ceiling. A question with no field — an older
+/// runner's — reads as [`QuestionRisk::WorkspaceWrite`], the default ceiling, and a value outside
+/// the vocabulary — a future runner's — reads as [`QuestionRisk::Unknown`], which is ordered above
+/// every known class and so is never answered automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionRisk {
+    ReadOnly,
+    WorkspaceWrite,
+    PublishAffecting,
+    CredentialAdjacent,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The question `kind` an exec-policy `ask` carries (issue #759; modules/agents/*/execpolicy.mjs).
+pub(crate) const EXEC_POLICY_QUESTION_KIND: &str = "exec_policy";
+
+/// Whether a question holds a tool call in flight inside the live agent (issue #759). Such a colony
+/// must keep its microVM while it waits: suspending it kills the call and the agent that made it,
+/// and a resumed transcript cannot pick the call back up. The runner says so with `blocking: true`
+/// — a subagent's AskUserQuestion, any ACP permission request, an exec-policy ask — and an
+/// exec-policy `kind` says so on its own, for runners from before the flag. Anything else is the
+/// lead's own question, which a suspension resumes cleanly.
+pub(crate) fn question_holds_tool_call(kind: Option<&str>, blocking: Option<bool>) -> bool {
+    blocking == Some(true) || kind == Some(EXEC_POLICY_QUESTION_KIND)
+}
+
+impl QuestionRisk {
+    /// The wire spelling, for log lines.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::PublishAffecting => "publish_affecting",
+            Self::CredentialAdjacent => "credential_adjacent",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The class a question on the wire is treated as: its `risk` value. Absent or null — an older
+    /// runner's question — counts as a workspace write; anything else outside the vocabulary, a
+    /// string this build does not know or a value that is not a string at all, counts as
+    /// [`QuestionRisk::Unknown`], above every ceiling. The restart replay (`sessions.rs`) reads
+    /// the raw stored event, so it folds through here too: never more permissively than the live
+    /// parse (`events.rs`), which drops a body it cannot parse outright.
+    pub(crate) fn from_wire(risk: Option<&Value>) -> Self {
+        match risk {
+            None | Some(Value::Null) => Self::WorkspaceWrite,
+            Some(risk) => serde_json::from_value(risk.clone()).unwrap_or(Self::Unknown),
+        }
+    }
+}
+
+/// Who caused a line in a colony's `events.jsonl` or `harness.jsonl`: an envelope field the host
+/// stamps at write time (docs/protocol.md §3), a sibling of agentd's `seq`/`ts` and never part of
+/// the runner contract body. Unlike the event types, the vocabulary is closed — a value outside it
+/// is a writer's bug, which [`Origin::parse_logged`] names out loud instead of ignoring — and
+/// writing is enforced here, by the type: only these values can be stamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// A person drove it: a message typed into the colony, or their answer to a question.
+    User,
+    /// The colony's orchestrator agent — most runner lines, its questions included.
+    Agent,
+    /// A subagent inside the colony; the line also carries the `agent` ref (§2 rules).
+    Subagent,
+    /// The watchdog nudging a stalled colony (§6.3).
+    Watchdog,
+    /// The autonomy judge answering a question in autonomous mode (§6.2b).
+    Autonomy,
+    /// The burn-down scheduler, on a colony it launched (§6.2c).
+    BurnDown,
+    /// A red-team hunter colony (§6.7).
+    Redteam,
+    /// The notification dispatcher, about a dispatch it made or failed.
+    Notify,
+    /// The host itself: its validation chain, verification, lifecycle and bookkeeping.
+    System,
+}
+
+impl Origin {
+    /// The wire spelling, for stamping a line's `origin` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Subagent => "subagent",
+            Self::Watchdog => "watchdog",
+            Self::Autonomy => "autonomy",
+            Self::BurnDown => "burn_down",
+            Self::Redteam => "redteam",
+            Self::Notify => "notify",
+            Self::System => "system",
+        }
+    }
+
+    /// Reads a stored line's `origin`: `None` for a line from before the field existed, which is
+    /// legacy, not a bug — but a value outside the vocabulary is a writer's bug, so unlike an
+    /// unknown event type (which is ignored for forward compatibility, §2) it is logged loudly and
+    /// the line reads as unstamped rather than folding into some default.
+    pub(crate) fn parse_logged(wire: Option<&str>) -> Option<Self> {
+        match wire {
+            None => None,
+            Some(wire) => match serde_json::from_value(json!(wire)) {
+                Ok(origin) => Some(origin),
+                Err(_) => {
+                    eprintln!("events: unknown origin \"{wire}\" on a stored line; reading it as legacy");
+                    None
+                }
+            },
+        }
+    }
+}
+
+/// What Jev compaction decided to do with one tool-call chunk (#475), on the `jev_ladder` event's
+/// `decisions` array. Closed vocabulary with the usual forward-compatibility escape: an action a
+/// newer plugin knows still parses, as [`JevAction::Unknown`], so one unknown chunk can never be a
+/// broken event — the other decisions in the pass still land in the ledger.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JevAction {
+    /// The chunk stayed in the transcript whole.
+    Keep,
+    /// The chunk's result was removed; the tool call itself stayed.
+    DropResult,
+    /// The tool call and its result were removed together.
+    DropCall,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl JevAction {
+    /// The wire spelling, for the ledger row's `action` field.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::DropResult => "drop_result",
+            Self::DropCall => "drop_call",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One entry of a `jev_ladder` event's `decisions` (docs/agent-events.schema.json): the chunk, what
+/// the pass did to it, and the plugin's own relevance scores for the call and its result. The scores
+/// are optional on the read side the way every contract field is: a body without one is a chunk the
+/// plugin did not score, which the ledger records as unscored rather than scored zero.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub(crate) struct JevDecision {
+    pub(crate) tool_call_id: String,
+    #[serde(default)]
+    pub(crate) tool: String,
+    #[serde(default)]
+    pub(crate) action: JevAction,
+    #[serde(default)]
+    pub(crate) keep_call: Option<f64>,
+    #[serde(default)]
+    pub(crate) keep_result: Option<f64>,
+}
+
+/// A runner event the harness acts on, tagged on its `type` field exactly as the runner writes it.
+/// Fields the harness only forwards — a question's `questions`, the subagent's `agent` ref, a
+/// finding's prose — are still modelled so the type is the whole contract for these events, not
+/// just the fields this dispatch happens to read (the browser is their consumer, §4/§5).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum AgentEvent {
+    /// The agent's own state machine; agentd emits the same shape when the runner exits (§3).
+    Status {
+        state: AgentState,
+        /// Optional human detail: the pre-flight scan's block reason, an exit code.
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    /// The echo of an accepted message; the watchdog recognises its own nudges by their `watchdog-` id (§6.3).
+    UserMessage { id: String, text: String },
+    /// A question that needs the user's answer; the innards of `questions` are the choice card's
+    /// business (§5) and the schema pins them, the harness only opens the question. The risk class
+    /// travels with it: autonomous mode answers only at or below its ceiling (§6.2b).
+    Question {
+        question_id: String,
+        #[serde(default)]
+        questions: Vec<Value>,
+        #[serde(default)]
+        message_id: Option<String>,
+        #[serde(default)]
+        risk: Option<QuestionRisk>,
+        /// What raised the question, when it is not the agent asking of its own accord (issue #759).
+        /// `exec_policy` is an exec-policy `ask`: a tool call is blocked in flight on the answer.
+        #[serde(default)]
+        kind: Option<String>,
+        /// Whether the answer is awaited by a tool call blocked in flight inside a live agent (issue
+        /// #759): a subagent's AskUserQuestion, an ACP permission request, an exec-policy ask. Absent
+        /// means the lead asked and a resumed session can take the answer as its next message.
+        #[serde(default)]
+        blocking: Option<bool>,
+    },
+    /// The user's answer travelled the four hops back (§2); the harness only closes the question.
+    QuestionAnswered {
+        question_id: String,
+        answers: Value,
+        #[serde(default)]
+        response: Option<String>,
+    },
+    /// The runner's own agent-session id (issue #562): what a resumed boot continues when a colony
+    /// suspended while it waited on its user comes back. Acted on — the id is kept on the record.
+    AgentSession { session_id: String },
+    /// A turn ended: the trigger for cost accounting and the autopilot's publish decision (§6.3).
+    TurnEnd {
+        is_error: bool,
+        result: Option<String>,
+        cost_usd: Option<f64>,
+        duration_ms: Option<f64>,
+        /// Tokens per model of the last turn (§2 rules); only objects are stored, as before.
+        #[serde(default)]
+        model_usage: Option<Value>,
+    },
+    /// A proposed shared-memory note (§6.2). An absent or null `scope` means `repo`, the schema's
+    /// default, and absent `tags` mean none. `origin` names who asked — `orchestrator`, a
+    /// `subagent:<name>`, a `background:<name>` — and absent means a runner from before the field
+    /// existed, which could only have been the orchestrator. `kind` is one of the memory kinds
+    /// (issue #766; absent means `convention`) and `confidence` how sure the colony is, 0 to 1
+    /// (absent means 0: it can never promote a global note).
+    MemoryProposal {
+        #[serde(default)]
+        scope: Option<String>,
+        title: String,
+        content: String,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        origin: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        confidence: Option<f64>,
+    },
+    /// A note proposed for the operator vault (issue #777): a relative `path` under the vault's
+    /// inbox folder, a `title`, the Markdown `body` and the `reason` it is worth keeping. Nothing is
+    /// written inside the colony or the vault; `vault.rs` queues it for the operator's review.
+    VaultProposal {
+        path: String,
+        title: String,
+        body: String,
+        reason: String,
+    },
+    /// A confirmed problem outside the task (§6.6). The harness files it on the host; validation
+    /// and every outcome's log line stay in `findings.rs`, which still reads the raw event.
+    Finding { title: String, body: String, evidence: String },
+    /// A GitHub write a colony of a GitHub-needing loop asks the host to make (issue #778, §6.12).
+    /// The token never enters a colony, so the guest only proposes: `tool` names the action
+    /// (`issue_label`, `issue_comment`, `issue_close_duplicate`, and since issue #807 the pull-request
+    /// tools `pr_comment`, `pr_label`, `pr_merge`), the issue or pull-request number is the colony's
+    /// own repository's, and everything else is validated, capped and scoped in `loop_github.rs`,
+    /// which still reads the raw event. Every field but `tool` is optional, so one type reads both
+    /// the issue and the pull-request bodies: `issue`/`pr` name which, `duplicate_of` closes one as
+    /// a duplicate of another, and `head_sha`/`reason` carry a merge request's pinned head and why.
+    GithubAction {
+        tool: String,
+        #[serde(default)]
+        issue: Option<u64>,
+        #[serde(default)]
+        pr: Option<u64>,
+        #[serde(default)]
+        labels: Vec<String>,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        duplicate_of: Option<u64>,
+        #[serde(default)]
+        head_sha: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// A self-paced loop's colony names its next run (loops.rs): minutes from now, and why.
+    LoopNext {
+        delay_minutes: u64,
+        #[serde(default)]
+        reason: String,
+    },
+    /// A loop's colony ends its loop (loops.rs).
+    LoopStop {
+        #[serde(default)]
+        reason: String,
+    },
+    /// Jev compaction reported one pass's per-chunk decisions with the plugin's own relevance scores
+    /// (#475). Pure telemetry: the dispatch logs them to the shadow `jev_ladder.jsonl` ledger and
+    /// arms the reread watch, and nothing else — [`AgentEvent::is_acted_on`] answers `false` for the
+    /// type, so a malformed body is never announced as contract drift. `applied: false` marks a pass
+    /// the plugin computed but did not apply (the fallback path): defaulting the field to false means
+    /// a body that does not carry it is read as the case that must persist nothing.
+    JevLadder {
+        #[serde(default)]
+        applied: bool,
+        #[serde(default)]
+        pre_tokens: Option<u64>,
+        #[serde(default)]
+        post_tokens: Option<u64>,
+        /// What started the pass ("auto" when the context filled); open-ended on purpose.
+        #[serde(default)]
+        trigger: Option<String>,
+        #[serde(default)]
+        decisions: Vec<JevDecision>,
+    },
+    /// The agent reached for a path the path policy masks or write-protects (issue #647): the
+    /// runner judges each path-taking tool call against the same bind list the guest booted with.
+    /// Reporting only — the mount enforced before this ran; the dispatch turns the event into a
+    /// colony log line and an activity entry, once per distinct (access, path) per colony.
+    PathPolicy {
+        /// `read` or `write` — what the agent was trying to do.
+        access: String,
+        /// Which side of the policy: `masked` or `protected`.
+        policy: String,
+        /// Workspace-relative, as the runner resolved it through any symlink.
+        path: String,
+        /// The tool that made the attempt ("Read", an ACP `fs/write_text_file`, …); absent on a
+        /// runner from before the field existed.
+        #[serde(default)]
+        tool: String,
+    },
+    /// A control refused something (issue #609): an exec-policy deny or a refused ask asked again,
+    /// an egress or read-only refusal, a path-policy bind agentd could not apply. Reporting only —
+    /// the control decided before this ran; the dispatch folds it into the watchdog's
+    /// control-defeat signature (`boundary.rs`), which reads the raw event so the untrusted fields
+    /// are cleaned in one place. `kind` is open here: an unknown one is ignored there.
+    Boundary {
+        kind: String,
+        control: String,
+        #[serde(default)]
+        detail: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        at: String,
+    },
+    /// Everything the harness only forwards, and any type a newer runner adds (§2: unknown types
+    /// must be ignored). A known body with broken fields lands here too: it was forwarded, it just
+    /// triggers no side effects.
+    #[serde(other)]
+    Other,
+}
+
+impl AgentEvent {
+    /// The wire tag of the [`AgentEvent::JevLadder`] telemetry event, named once so this helper and
+    /// its test agree on the one informational-but-parsed exception.
+    pub(crate) const JEV_LADDER: &str = "jev_ladder";
+
+    /// Whether a wire `type` tag names one of the variants above, i.e. a type this build acts on.
+    /// The enum is that set's single source — no second list of tags to keep in step with the
+    /// variants: a body carrying only the tag deserialises to a variant when the tag is known (to
+    /// the variant itself when all its fields are optional, otherwise to an error over the fields
+    /// still required) and to [`AgentEvent::Other`] only when it names no variant. So a variant
+    /// added later is picked up here without touching this helper.
+    ///
+    /// The one exception is [`AgentEvent::JevLadder`]: the dispatch reads it, but it is telemetry
+    /// with no side effect beyond a shadow ledger, so it must never read as acted on — and it is
+    /// named by tag here because the parse-based path below cannot tell a malformed `jev_ladder`
+    /// body from a malformed acted-on one, and telemetry stays quiet either way.
+    pub(crate) fn is_acted_on(tag: &str) -> bool {
+        if tag == Self::JEV_LADDER {
+            return false;
+        }
+        !matches!(serde_json::from_value::<Self>(json!({"type": tag})), Ok(Self::Other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression guard for browser pass-through: a type a newer runner adds, or a known body
+    /// with broken fields, must land on the catch-all rather than error out, so dispatching can
+    /// never drop the line — it was already forwarded to the browser before this point (§2: unknown
+    /// types must be ignored).
+    #[test]
+    fn an_event_outside_the_contract_lands_on_the_catch_all_rather_than_erroring() {
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(r#"{"type":"brand_new","payload":{}}"#).unwrap(),
+            AgentEvent::Other
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(r#"{"type":"status"}"#).unwrap_or(AgentEvent::Other),
+            AgentEvent::Other
+        );
+    }
+
+    /// The acted-on set is read off the enum, so the forwarded-only types and anything a newer
+    /// runner adds are not acted on — even though the browser forwards every one of them — and a
+    /// variant added later is acted on without a second tag list being edited. The one exception is
+    /// `jev_ladder` (#475): a variant the dispatch reads, but pure telemetry, so it keeps company
+    /// with the forwarded-only types here.
+    #[test]
+    fn the_acted_on_set_is_read_off_the_enum_not_a_second_tag_list() {
+        for tag in [
+            "status",
+            "user_message",
+            "question",
+            "question_answered",
+            "agent_session",
+            "turn_end",
+            "memory_proposal",
+            "vault_proposal",
+            "finding",
+            "github_action",
+            "loop_next",
+            "loop_stop",
+            "path_policy",
+        ] {
+            assert!(AgentEvent::is_acted_on(tag), "{tag} is a variant of this enum");
+        }
+        for tag in [
+            "log",
+            "assistant_text",
+            "assistant_text_delta",
+            "thinking",
+            "tool_call",
+            "tool_result",
+            "model_changed",
+            "jev_ladder",
+            "brand_new",
+        ] {
+            assert!(
+                !AgentEvent::is_acted_on(tag),
+                "{tag} is forwarded only, telemetry, or not known at all"
+            );
+        }
+    }
+
+    /// The #475 telemetry event: the contract's example body deserialises field for field, an
+    /// unknown action is the unknown action rather than a broken event, and the type reads as
+    /// informational even when its body is broken — so the dispatcher can never announce contract
+    /// drift over a telemetry line.
+    #[test]
+    fn a_jev_ladder_event_parses_field_for_field_but_never_reads_as_acted_on() {
+        let event = serde_json::from_str::<AgentEvent>(
+            r#"{"type":"jev_ladder","applied":true,"pre_tokens":12000,"post_tokens":8000,"trigger":"auto",
+                "decisions":[{"tool_call_id":"toolu_abc123","tool":"Bash","action":"keep","keep_call":0.98,"keep_result":0.87},
+                             {"tool_call_id":"toolu_def456","tool":"Read","action":"drop_call","keep_call":0.12,"keep_result":0.05}]}"#,
+        )
+        .unwrap();
+        match event {
+            AgentEvent::JevLadder {
+                applied,
+                pre_tokens,
+                post_tokens,
+                trigger,
+                decisions,
+            } => {
+                assert!(applied);
+                assert_eq!((pre_tokens, post_tokens), (Some(12000), Some(8000)));
+                assert_eq!(trigger.as_deref(), Some("auto"));
+                assert_eq!(decisions.len(), 2);
+                assert_eq!(decisions[0].tool_call_id, "toolu_abc123");
+                assert_eq!(decisions[0].action, JevAction::Keep);
+                assert_eq!((decisions[0].keep_call, decisions[0].keep_result), (Some(0.98), Some(0.87)));
+                assert_eq!(decisions[1].action, JevAction::DropCall);
+                assert_eq!(decisions[1].keep_result, Some(0.05));
+            }
+            other => panic!("the contract's example body is a jev_ladder, got {other:?}"),
+        }
+        // An action a newer plugin knows is that decision reading as unknown, never a failed parse.
+        let futuristic = serde_json::from_str::<AgentEvent>(
+            r#"{"type":"jev_ladder","applied":true,"decisions":[{"tool_call_id":"t","action":"rehydrate"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(futuristic, AgentEvent::JevLadder { decisions, .. } if decisions.len() == 1 && decisions[0].action == JevAction::Unknown)
+        );
+        // Informational whichever way the body is: well-formed (the parse lands on the variant) or
+        // broken (the parse fails, and the tag alone decides the acted-on question).
+        assert!(!AgentEvent::is_acted_on(AgentEvent::JEV_LADDER));
+        assert!(
+            serde_json::from_str::<AgentEvent>(r#"{"type":"jev_ladder","applied":"yes"}"#).is_err()
+                && !AgentEvent::is_acted_on(AgentEvent::JEV_LADDER),
+            "a broken telemetry body stays quiet"
+        );
+    }
+
+    /// A `status` whose state this build does not know is still a `Status`: the watchdog must keep
+    /// treating it as no progress news, exactly as it treats the states it knows.
+    #[test]
+    fn a_status_with_an_unknown_state_is_still_a_status() {
+        let event = serde_json::from_str::<AgentEvent>(r#"{"type":"status","state":"teleporting"}"#).unwrap();
+        assert_eq!(
+            event,
+            AgentEvent::Status {
+                state: AgentState::Unknown,
+                detail: None
+            }
+        );
+    }
+
+    /// agentd stamps `seq`/`ts` onto every event (crates/colonizer-agentd/src/store.rs),
+    /// subagent events carry `agent`, and the host stamps `origin` onto every line it appends
+    /// (§3); none of these is part of the runner contract body (§2), so none may change what the
+    /// body deserialises to.
+    #[test]
+    fn agentds_envelope_around_the_body_does_not_change_the_variant() {
+        let stored = r#"{"type":"turn_end","is_error":false,"result":"done","cost_usd":0.42,"duration_ms":81234,
+            "model_usage":{"claude-opus-5":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":90000,"cache_write_tokens":8000}},
+            "agent":{"id":"toolu_1","name":"Explore","description":null},"seq":41,"ts":"2026-09-18T10:00:00.000Z","origin":"agent"}"#;
+        match serde_json::from_str::<AgentEvent>(stored).unwrap() {
+            AgentEvent::TurnEnd {
+                cost_usd,
+                model_usage: Some(usage),
+                ..
+            } => {
+                assert_eq!(cost_usd, Some(0.42));
+                assert!(usage.is_object());
+            }
+            other => panic!("the envelope must not change the variant, got {other:?}"),
+        }
+    }
+
+    /// The risk vocabulary is ordered lowest to highest, a question without the field counts as a
+    /// workspace write (an older runner's), and a value outside the vocabulary still deserialises —
+    /// as the class above every ceiling, never answered automatically. The wire parse and the
+    /// replay parse (`QuestionRisk::from_wire`) must agree, since a restart moves a question
+    /// between them.
+    /// Issue #759: only an exec-policy ask marks a question as holding a tool call in flight; a
+    /// question without a kind, or with one this build does not know, is an ordinary question.
+    #[test]
+    fn a_question_kind_says_whether_a_tool_call_is_in_flight() {
+        let holds = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {
+            AgentEvent::Question { kind, blocking, .. } => question_holds_tool_call(kind.as_deref(), blocking),
+            other => panic!("a question, got {other:?}"),
+        };
+        assert!(holds(r#"{"type":"question","question_id":"q","kind":"exec_policy"}"#));
+        assert!(!holds(r#"{"type":"question","question_id":"q"}"#));
+        assert!(!holds(r#"{"type":"question","question_id":"q","kind":"something_newer"}"#));
+        // A subagent's AskUserQuestion carries no kind, only the flag.
+        assert!(holds(r#"{"type":"question","question_id":"q","blocking":true}"#));
+        assert!(!holds(r#"{"type":"question","question_id":"q","blocking":false}"#));
+    }
+
+    #[test]
+    fn a_question_risk_is_ordered_and_tolerant_of_the_field_being_absent_or_unknown() {
+        let risk = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {
+            AgentEvent::Question { risk, .. } => risk.unwrap_or(QuestionRisk::WorkspaceWrite),
+            other => panic!("a question, got {other:?}"),
+        };
+        // A question without the field — or with it null — is an older runner's: a workspace write.
+        assert_eq!(risk(r#"{"type":"question","question_id":"q"}"#), QuestionRisk::WorkspaceWrite);
+        assert_eq!(
+            risk(r#"{"type":"question","question_id":"q","risk":null}"#),
+            QuestionRisk::WorkspaceWrite
+        );
+        // A value outside the vocabulary — a future runner's — is not a contract error: it is the
+        // class above every ceiling, never answered automatically.
+        assert_eq!(
+            risk(r#"{"type":"question","question_id":"q","risk":"teleport_the_repo"}"#),
+            QuestionRisk::Unknown
+        );
+        // The replay parse (sessions.rs, over the raw log lines) lands in the same places — and a
+        // risk that is not even a string is never read as absent, which would answer it.
+        assert_eq!(QuestionRisk::from_wire(None), QuestionRisk::WorkspaceWrite);
+        assert_eq!(QuestionRisk::from_wire(Some(&Value::Null)), QuestionRisk::WorkspaceWrite);
+        assert_eq!(
+            QuestionRisk::from_wire(Some(&json!("teleport_the_repo"))),
+            QuestionRisk::Unknown
+        );
+        assert_eq!(QuestionRisk::from_wire(Some(&json!(3))), QuestionRisk::Unknown);
+        assert_eq!(
+            QuestionRisk::from_wire(Some(&json!("credential_adjacent"))),
+            QuestionRisk::CredentialAdjacent
+        );
+
+        // The whole point of the order: a class a newer runner knows sits above every known
+        // ceiling, so the at-or-below check the judge reads never answers it by accident.
+        assert!(QuestionRisk::ReadOnly < QuestionRisk::WorkspaceWrite);
+        assert!(QuestionRisk::WorkspaceWrite < QuestionRisk::PublishAffecting);
+        assert!(QuestionRisk::PublishAffecting < QuestionRisk::CredentialAdjacent);
+        assert!(QuestionRisk::CredentialAdjacent < QuestionRisk::Unknown);
+    }
+
+    /// The origin vocabulary round-trips through its wire spelling, and a value outside it is not
+    /// the ignorable-unknown of an event type but a writer's bug: the deserialise refuses, and the
+    /// reading helper says so out loud and reports the line as unstamped instead of guessing.
+    #[test]
+    fn the_origin_vocabulary_round_trips_and_rejects_unknown_values_loudly() {
+        for (wire, origin) in [
+            ("user", Origin::User),
+            ("agent", Origin::Agent),
+            ("subagent", Origin::Subagent),
+            ("watchdog", Origin::Watchdog),
+            ("autonomy", Origin::Autonomy),
+            ("burn_down", Origin::BurnDown),
+            ("redteam", Origin::Redteam),
+            ("notify", Origin::Notify),
+            ("system", Origin::System),
+        ] {
+            assert_eq!(serde_json::from_value::<Origin>(json!(wire)).unwrap(), origin);
+            assert_eq!(origin.as_str(), wire);
+            assert_eq!(Origin::parse_logged(Some(wire)), Some(origin));
+        }
+        assert!(
+            serde_json::from_value::<Origin>(json!("the_runner_itself")).is_err(),
+            "outside a closed vocabulary is a bug, not a forward-compatibility case"
+        );
+        assert_eq!(Origin::parse_logged(None), None, "no origin is a legacy line, not a bug");
+        assert_eq!(Origin::parse_logged(Some("the_runner_itself")), None);
+    }
+
+    /// The schema's defaults, held by the type: a proposal without `scope` or `tags` proposes for
+    /// the repository with no tags, and `detail` may be absent or null on a `status`.
+    #[test]
+    fn optional_contract_fields_are_tolerated_absent_or_null() {
+        let bare = serde_json::from_str::<AgentEvent>(r#"{"type":"memory_proposal","title":"t","content":"c"}"#).unwrap();
+        assert_eq!(
+            bare,
+            AgentEvent::MemoryProposal {
+                scope: None,
+                title: "t".into(),
+                content: "c".into(),
+                tags: vec![],
+                origin: None,
+                kind: None,
+                confidence: None
+            }
+        );
+        let nulled =
+            serde_json::from_str::<AgentEvent>(r#"{"type":"memory_proposal","scope":null,"title":"t","content":"c"}"#).unwrap();
+        assert!(matches!(nulled, AgentEvent::MemoryProposal { scope: None, tags, .. } if tags.is_empty()));
+        let status = serde_json::from_str::<AgentEvent>(r#"{"type":"status","state":"error","detail":null}"#).unwrap();
+        assert_eq!(
+            status,
+            AgentEvent::Status {
+                state: AgentState::Error,
+                detail: None
+            }
+        );
+    }
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Colonizer · not running</title>
+    <link rel="icon" href="/icons/mark.svg" />
+    <style>
+      :root { color-scheme: dark light; --bg: #08080a; --text: #ededed; --muted: #9a9aa2; --accent: #ff6b35; --panel: #111114; --border: #26262b; }
+      @media (prefers-color-scheme: light) { :root { --bg: #f7f7f8; --text: #111114; --muted: #5b5b63; --accent: #e0551f; --panel: #fff; --border: #e3e3e7; } }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, sans-serif; }
+      main { max-width: 440px; padding: 28px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); margin: 16px; }
+      img { width: 44px; height: 44px; }
+      h1 { font-size: 20px; margin: 14px 0 6px; }
+      p { color: var(--muted); margin: 8px 0; }
+      code { font-family: ui-monospace, monospace; color: var(--text); background: color-mix(in oklab, var(--accent) 12%, transparent); padding: 1px 5px; border-radius: 5px; }
+      button { margin-top: 14px; padding: 8px 14px; border-radius: 9px; border: 0; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icons/mark.svg" alt="" />
+      <h1>The mothership isn't running</h1>
+      <p>Start it with <code>colonizer</code> in a terminal, or enable <code>colonizer login-item enable</code> so it starts when you log in.</p>
+      <p>Your colonies keep running in their microVMs while it is down.</p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

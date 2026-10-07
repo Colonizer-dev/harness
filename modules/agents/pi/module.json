@@ -1,0 +1,66 @@
+{
+  "kind": "agent",
+  "id": "pi",
+  "name": "Pi",
+  "description": "The Pi coding agent driven over its RPC mode. Pi reaches models only through the provider gateway, so it needs a provider configured under Settings → Providers and no Claude login.",
+  "protocol": "colonizer-runner/1",
+  "loop_tools": true,
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "image": "glibc + node >= 22.19"
+  },
+  "egress": {
+    "api": [],
+    "auth": [],
+    "telemetry": [],
+    "extra": []
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Model",
+        "description": "The model Pi runs on, as <provider>/<model> for a provider configured under Settings → Providers. Pi reaches models only through the provider gateway, so there is no working default; an empty value stops the colony with instructions.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "effort": {
+        "type": "string",
+        "title": "Thinking level",
+        "description": "Reasoning effort passed to Pi as --thinking: minimal to max. Empty runs the model without thinking; off is the same, stated explicitly.",
+        "enum": [
+          "",
+          "off",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default": "",
+        "env": "COLONIZER_EFFORT"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Pi tool names this colony never gets, such as bash or write, passed to Pi as --exclude-tools against its default read, bash, edit, write set. grep, find and ls are accepted names but are never enabled in a colony, so listing them disables nothing. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "read",
+          "bash",
+          "edit",
+          "write",
+          "grep",
+          "find",
+          "ls"
+        ]
+      }
+    }
+  }
+}

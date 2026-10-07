@@ -1,0 +1,93 @@
+[package]
+# Published as colonizer-harness: `colonizer` on crates.io is another project. The command is still `colonizer`.
+name = "colonizer-harness"
+version = "0.2.11"
+edition = "2024"
+description = "The Colonizer harness: coding agents in private microVMs, linked by a private mesh, returning pull requests"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
+homepage = "https://colonizer.dev"
+readme = "README.md"
+# `src/main.rs` is the lib root below, so cargo's binary auto-discovery must not also build it as
+# a bin.
+autobins = false
+
+# The library root is `src/main.rs` on purpose: sibling pull requests each add a `mod` line to it,
+# so it stays the crate root. The checks that need the whole repository live in the unpublished
+# `crates/repo-contracts`, which links this crate as a library; the `colonizer` binary below is a
+# thin wrapper over `main`.
+[lib]
+name = "colonizer_harness"
+path = "src/main.rs"
+
+[[bin]]
+name = "colonizer"
+path = "src/bin/colonizer.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+# Web Push (push.rs): base64url for VAPID JWTs, push keys and subscription secrets.
+base64 = "0.23"
+axum = { version = "0.8.9", features = ["ws"] }
+# The `colonizer` command line: parsing (`clap`), shell completions, the man page.
+clap = { version = "4.5", features = ["derive", "env", "string"] }
+clap_complete = "4.5"
+clap_mangen = "0.3"
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10"
+# Secret redaction (crate::redact): its own crate so the observability add-on shares the detectors.
+# The version is required to publish this crate; the two are released together.
+colonizer-redact = { version = "0.2.11", path = "../colonizer-redact" }
+# Cratefield's module-telemetry (Cratefield/harness#413): the payload grammar the usage batch is
+# validated with (`payload::Batch::parse`) and the consent helpers. Published on crates.io, so
+# colonizer can publish too (#741); the wire contract is docs/usage-data.md. The collector half runs on
+# the venture's side; this crate composes the client half only (docs/usage-data.md).
+cratefield-module-telemetry = "0.2.1"
+futures-util = "0.3.34"
+# Response body frame iteration, so tunnelled answers stream back to the relay in chunks (remote.rs).
+http-body-util = "0.1"
+# `O_NOFOLLOW`/`O_NONBLOCK` for reading VM-written files through a handle a swapped symlink cannot redirect.
+libc = "0.2"
+# Already built for rustls; used directly to check the Headroom bundle's sha256 while it downloads.
+ring = "0.17.14"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2"] }
+# The official Rust MCP SDK: `colonizer mcp` serves the harness to MCP clients over stdio.
+rmcp = { version = "3.4.1", features = ["server", "transport-io", "macros", "client"] }
+# rmcp's `JsonSchema` derive emits `schemars::` paths, so it must be linked beside it.
+schemars = "1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# The log archive (archive.rs): one tar per revision of a colony's session directory, zstd-compressed.
+tar = "0.4.44"
+zstd = "0.14.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-socks = "0.5.3"
+tokio-stream = "0.1.19"
+# `client_async` for tunnelled websockets (remote.rs, sessions.rs); rustls so the `wss://` relay dial works.
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+toml = "1.1.6"
+# `ServiceExt::oneshot` answers tunnelled requests by calling the cockpit router in-process
+# (remote.rs); the auth tests drive it the same way.
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["fs"] }
+# Native agent session transcripts (issue #736, transcript.rs): read a colony's own Claude Code,
+# Codex, OpenCode, Grok or Hermes session off disk and normalize it to one shape. Minimal feature
+# set — the file-backed readers plus the two SQLite ones; no live HTTP sources or WASM. Also
+# converts a session between agent modules when a colony switches agent mid-task (switch_agent.rs,
+# issue #737).
+txcript = { version = "=0.14.4", default-features = false, features = ["opencode", "hermes"] }
+uuid = { version = "1.26.1", features = ["v4"] }
+
+# The system keychain for saved secrets (secrets.rs): Keychain on macOS, the Secret Service
+# (GNOME Keyring, KWallet) on Linux. libdbus is vendored so a build host needs no dbus headers.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+# The OpenCode transcript fixture (transcript.rs tests) is loaded from SQL: the same rusqlite
+# txcript already pulls (bundled SQLite), so it unifies rather than building a second copy.
+rusqlite = { version = "0.40.1", features = ["bundled"] }

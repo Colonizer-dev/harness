@@ -1,0 +1,156 @@
+// The demo build (issue #682): the MODE=demo flag alone forces the mock api on — no `?mock=1` in
+// the address bar — and driving it touches none of the browser's network primitives, so the hosted
+// page at colonizer.dev/demo makes no /api calls. The flag is a build-time constant, so the tests
+// re-import the modules under a stubbed env instead of going through `?mock=1`.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const PRIMITIVES = ["fetch", "WebSocket", "EventSource", "XMLHttpRequest"] as const;
+let touched: string[] = [];
+
+beforeEach(() => {
+  vi.resetModules();
+  // The test environment has no DOM: a bare location is enough — the mock reads only `?mesh=`,
+  // `?runtime=` and `?quota=` off it, and none of those are set here.
+  vi.stubGlobal("location", new URL("https://colonizer.dev/demo"));
+  touched = [];
+  for (const primitive of PRIMITIVES) {
+    vi.stubGlobal(
+      primitive,
+      vi.fn(() => {
+        touched.push(primitive);
+        throw new Error(`${primitive} must not be reached in the demo`);
+      }),
+    );
+  }
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
+});
+
+/** loadApi as the demo build's bundle has it: MODE=demo baked in, no query string involved. */
+async function demoLoadApi() {
+  vi.stubEnv("MODE", "demo");
+  const { loadApi } = await import("./api");
+  return loadApi();
+}
+
+describe("demo build", () => {
+  it("flips the flag off again outside --mode demo, where ?mock=1 stays the only way in", async () => {
+    const { DEMO } = await import("./demo");
+    expect(DEMO).toBe(false);
+    const { loadApi } = await import("./api");
+    expect((await loadApi()).mock).toBe(false);
+  });
+
+  it("returns the mock api with no ?mock in the address bar", async () => {
+    const api = await demoLoadApi();
+    expect(api.mock).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
+  it("serves sessions, a session detail, issues and the repo map without a network primitive", async () => {
+    const api = await demoLoadApi();
+    const sessions = await api.sessions();
+    expect(sessions.length).toBeGreaterThan(0);
+    await api.session("demo1234");
+    const issues = await api.issues("acme/webshop");
+    expect(issues.length).toBeGreaterThan(0);
+    const map = await api.repoMap("acme/webshop");
+    expect(map.map).not.toBeNull();
+    api.openEvents("demo1234", 0);
+    api.openTerminal("demo1234", 80, 24);
+    api.openStream();
+    expect(touched).toEqual([]);
+  });
+
+  it("serves the header's model switcher and a switch without the network (issue #1051)", async () => {
+    const api = await demoLoadApi();
+    const assignments = await api.modelAssignments();
+    expect(assignments.install.roles.length).toBeGreaterThan(0);
+    expect(assignments.orgs.length).toBeGreaterThan(0);
+    const plan = await api.switchModels({ scope: "install", roles: { model: "sonnet" }, apply: "running", dry_run: true });
+    expect(plan.dry_run).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
+  it("shows the \"Added to …\" notification from the mock orgs and answers it without the network", async () => {
+    const api = await demoLoadApi();
+    const { pendingOrgPrompts } = await import("./orgs");
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { ApiContext } = await import("./context");
+    const { OrgNotices } = await import("./components/OrgNotice");
+    const render = (orgs: Parameters<typeof OrgNotices>[0]["orgs"]) =>
+      renderToStaticMarkup(createElement(ApiContext.Provider, { value: api }, createElement(OrgNotices, { orgs, onAnswered: () => {} })));
+
+    const pending = pendingOrgPrompts(await api.orgs(), new Set());
+    expect(pending.map((o) => o.org)).toEqual(["hooli", "initech"]);
+    expect(render(pending)).toContain("Added to 2 organisations");
+
+    // Not now on hooli, as its button does: the mock remembers it and the row is gone.
+    const { answerNewOrg } = await import("./components/OrgNotice");
+    await answerNewOrg(api, "hooli", false);
+    const left = pendingOrgPrompts(await api.orgs(), new Set());
+    expect(left.map((o) => o.org)).toEqual(["initech"]);
+    expect(render(left)).toContain(">initech</span>");
+    expect(render(left)).toContain(">Add workspace</button>");
+
+    await answerNewOrg(api, "initech", true);
+    const orgs = await api.orgs();
+    expect(pendingOrgPrompts(orgs, new Set())).toEqual([]);
+    expect(orgs.find((o) => o.org === "initech")?.settings.enabled).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
+  it("renders the decisions inbox's demo cards with the real components and answers one without the network", async () => {
+    vi.useFakeTimers();
+    const api = await demoLoadApi();
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { InboxView } = await import("./cockpit/InboxView");
+    const read = async () => {
+      const pending = api.decisions();
+      await vi.advanceTimersByTimeAsync(500);
+      return pending;
+    };
+    const decisions = await read();
+    expect(decisions.decisions.length).toBeGreaterThan(0);
+    expect(new Set(decisions.prs.map((p) => p.reason))).toEqual(new Set(["policy_hold", "conflicted", "red_ci", "review_requested"]));
+    const html = renderToStaticMarkup(
+      createElement(InboxView, { sessions: [], onOpenColony: () => {}, onOpenNotificationSettings: () => {}, decisions }),
+    );
+    expect(html).toContain(">Decisions<");
+    expect(html).toContain(decisions.decisions[0].question);
+    expect(html).toContain("Re-run failed jobs");
+    expect(html).toContain("Dispatch redo colony");
+    expect(html).toContain(`${decisions.count} need you`);
+
+    const answered = api.answerDecision({ id: decisions.decisions[0].id, choice: decisions.decisions[0].options[0] });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await answered).comment.startsWith("Decision (maintainer): ")).toBe(true);
+    expect((await read()).decisions.map((d) => d.id)).not.toContain(decisions.decisions[0].id);
+    expect(touched).toEqual([]);
+  });
+
+  it("answers the demo colony's question once its intro gets to it", async () => {
+    vi.useFakeTimers();
+    const api = await demoLoadApi();
+    const frames: Array<{ type?: string }> = [];
+    const socket = api.openEvents("demo1234", 0);
+    socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)));
+    // The mock socket opens 150 ms in; the colony's scripted intro then runs to its question.
+    await vi.advanceTimersByTimeAsync(200);
+    for (let i = 0; i < 60 && !frames.some((f) => f.type === "question"); i += 1) {
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(frames.some((f) => f.type === "question")).toBe(true);
+    socket.send(JSON.stringify({ type: "answer", question_id: "toolu_q1", answers: {}, response: "Guest cart by email" }));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(frames.some((f) => f.type === "question_answered")).toBe(true);
+    socket.close();
+    expect(touched).toEqual([]);
+  });
+});

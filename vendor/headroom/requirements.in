@@ -1,0 +1,3 @@
+# What the Headroom bundle installs. scripts/headroom-bundle/lock.sh turns this into requirements.txt,
+# every package pinned with the hashes of all its distributions, so both architectures install exactly it.
+headroom-ai[proxy]==0.37.0

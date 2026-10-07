@@ -1,0 +1,914 @@
+// Contract tests for the codex runner: they boot the real runner.mjs as a child process and drive
+// it over the colonizer-runner/1 protocol against test/fake-codex.mjs standing in for the codex
+// CLI (COLONIZER_CODEX_BIN is the seam). The happy path's events are also checked against the
+// required fields of docs/agent-events.schema.json.
+
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { CODEX_HOME, archPlatform, createBridge, defaultCacheDir, mcpArgs, parseRoutes, parseVersion, resolveCodex, resolveModel, turnArgs } from '../runner.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const moduleDir = join(here, '..');
+const fakeCodex = join(here, 'fake-codex.mjs');
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** The [flag, value] pair an argv carries, or null when the flag is absent. */
+const pair = (args, flag) => (args.includes(flag) ? args.slice(args.indexOf(flag), args.indexOf(flag) + 2) : null);
+
+/** The runner as a child process, with its protocol output collected into `events`. */
+function startRunner(env = {}) {
+  // A scratch dir plus a `codex` on it that is the fake, so COLONIZER_CODEX_BIN needs no PATH games.
+  const binDir = mkdtempSync(join(tmpdir(), 'codex-test-bin-'));
+  const bin = join(binDir, 'codex');
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${JSON.stringify(fakeCodex)} "$@"\n`, { mode: 0o755 });
+  const scratch = mkdtempSync(join(tmpdir(), 'codex-test-'));
+  const home = join(scratch, 'codex-home'); // COLONIZER_CODEX_HOME keeps the tests off /root/.codex
+  const record = join(scratch, 'record.jsonl');
+  const child = spawn(process.execPath, [join(moduleDir, 'runner.mjs')], {
+    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, COLONIZER_CODEX_HOME: home, CODEX_API_KEY: 'codex-test-key', COLONIZER_CODEX_BIN: bin, CODEX_FAKE_RECORD: record, ...env },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const events = [];
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  lines.on('line', (line) => {
+    if (line.trim()) {
+      try {
+        events.push(JSON.parse(line));
+      } catch {
+        events.push({ type: 'unparseable', line });
+      }
+    }
+  });
+
+  const send = (command) => child.stdin.write(`${JSON.stringify(command)}\n`);
+  // `check` sees the whole event list, so a test can wait on a count, not just a first match.
+  const waitUntil = async (check, what, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = check(events);
+      if (found) return found;
+      if (child.exitCode !== null || Date.now() > deadline) {
+        assert.fail(`timed out waiting for ${what}; runner exit ${child.exitCode}; events: ${JSON.stringify(events)}`);
+      }
+      await sleep(25);
+    }
+  };
+  let exitCode = null;
+  child.on('exit', (code) => (exitCode = code));
+  const waitExit = async (timeoutMs = 10000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (exitCode === null && Date.now() < deadline) await sleep(10);
+    return exitCode ?? 'timeout';
+  };
+  const records = () => (existsSync(record) ? readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  // Only the turn invocations carry --json; the records also hold the preflight's `--version` call.
+  const turns = () => records().filter((r) => r.argv.includes('--json'));
+  return { child, events, send, waitUntil, waitExit, records, turns, home };
+}
+
+const stop = (runner) => (runner.send({ type: 'shutdown' }), runner.waitExit());
+
+// docs/agent-events.schema.json, reduced to the required fields per event type we emit.
+const schema = JSON.parse(readFileSync(join(moduleDir, '..', '..', '..', 'docs', 'agent-events.schema.json'), 'utf8'));
+const required = Object.fromEntries(Object.entries(schema.$defs ?? {}).map(([name, def]) => [name, def.required ?? []]));
+
+function assertSchema(events) {
+  for (const event of events) {
+    for (const field of required[event.type] ?? []) {
+      assert.ok(event[field] !== undefined, `${event.type} is missing the schema-required field "${field}"`);
+    }
+  }
+}
+
+const first = (type) => (events) => events.find((e) => e.type === type);
+const count = (type, n) => (events) => {
+  const matches = events.filter((e) => e.type === type);
+  return matches.length >= n ? matches[n - 1] : undefined;
+};
+
+test('module.json declares the codex binary as runner-fetched, and persists CODEX_HOME as the session_resume dir', () => {
+  const manifest = JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8'));
+  assert.equal(manifest.session_resume.dir, CODEX_HOME, 'the mounted dir and the runner’s CODEX_HOME must not drift');
+  assert.deepEqual(manifest.requires.fetched_by_runner, ['codex'], 'the harness must not refuse a stock-image launch for a binary the runner fetches');
+});
+
+// The routes a boot would push (docs/protocol.md §6.5), one per wire; keys are obviously fake.
+const ROUTES = parseRoutes(
+  JSON.stringify([
+    {
+      provider: 'strix',
+      prefix: 'strix/',
+      base_url: 'http://host.microsandbox.internal:41750/providers/strix',
+      auth: 'none',
+      headers: { 'x-colonizer-colony': 'colony-token-1' },
+      wire: 'openai',
+    },
+    {
+      provider: 'anth',
+      prefix: 'anth/',
+      base_url: 'http://host.microsandbox.internal:41750/providers/anth',
+      auth: 'none',
+      headers: { 'x-colonizer-colony': 'colony-token-1' },
+    },
+  ]),
+);
+const ROUTES_JSON = JSON.stringify(ROUTES.routes);
+
+test('parseVersion takes the first semver, wherever it sits', () => {
+  assert.equal(parseVersion('codex-cli 0.156.1'), '0.156.1');
+  assert.equal(parseVersion('1.2.3'), '1.2.3');
+  assert.equal(parseVersion('no digits here'), null);
+  assert.equal(parseVersion(undefined), null);
+});
+
+test('resolveCodex prefers env and PATH, fetches and caches the pinned build, refuses a bad sha256', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-test-fetch-'));
+  const fakeBytes = Buffer.from('fake-tgz-bytes');
+  const good = createHash('sha256').update(fakeBytes).digest('hex');
+  const lock = (sha) => `codex  0.156.1  linux-arm64  agent  ${sha}  https://example.invalid/codex-aarch64-unknown-linux-musl.tar.gz`;
+  let fetched = 0;
+  const fetchImpl = async () => { fetched++; return { ok: true, arrayBuffer: async () => fakeBytes }; };
+  let tarCalled = 0;
+  const runTar = async (args) => { tarCalled++; const dest = args[args.indexOf('-C') + 1]; writeFileSync(join(dest, args.at(-1)), '#!/bin/sh\n'); }; // the single binary at the archive root
+  assert.equal(await resolveCodex({ env: { COLONIZER_CODEX_BIN: '/custom/codex' }, lockText: '' }), '/custom/codex');
+  mkdirSync(join(dir, 'pathdir'), { recursive: true });
+  writeFileSync(join(dir, 'pathdir', 'codex'), 'x');
+  assert.equal(await resolveCodex({ env: { PATH: join(dir, 'pathdir') }, lockText: '', arch: 'arm64' }), join(dir, 'pathdir', 'codex'));
+  assert.equal(await resolveCodex({ env: { PATH: join(dir, 'pathdir'), COLONIZER_CODEX_BIN: '   ' }, lockText: '', arch: 'arm64' }), join(dir, 'pathdir', 'codex'), 'an all-whitespace override counts as unset and falls through to the PATH');
+  await assert.rejects(resolveCodex({ env: {}, lockText: lock('0'.repeat(64)), arch: 'arm64', fetchImpl, runTar, cacheDir: join(dir, 'bad') }), /sha256 mismatch/);
+  assert.equal(tarCalled, 0, 'nothing is extracted before the hash checks out');
+  const bin = await resolveCodex({ env: {}, lockText: lock(good), arch: 'arm64', fetchImpl, runTar, cacheDir: join(dir, 'good') });
+  assert.equal(bin, join(dir, 'good', '0.156.1', 'linux-arm64', 'codex'));
+  assert.ok(existsSync(bin), 'the extracted binary is where the next boot looks for it');
+  assert.ok(!existsSync(join(dir, 'good', '0.156.1', 'linux-arm64', 'pkg.tgz')), 'the tarball is not left behind on the tmpfs');
+  assert.equal(fetched, 2, 'the bad hash fetched once, the good build once');
+  // A second call reuses the cache: the binary is present, so nothing is fetched or extracted again.
+  assert.equal(await resolveCodex({ env: {}, lockText: lock(good), arch: 'arm64', fetchImpl, runTar, cacheDir: join(dir, 'good') }), bin);
+  assert.equal(fetched, 2);
+  assert.equal(tarCalled, 1);
+  // A platform with no lock row is refused by name, and nothing is downloaded.
+  await assert.rejects(resolveCodex({ env: {}, lockText: lock(good), arch: 'riscv64', fetchImpl, runTar, cacheDir: join(dir, 'other') }), /no pinned Codex 0\.156\.1 build for platform riscv64/);
+  assert.equal(fetched, 2);
+  assert.equal(archPlatform('x64'), 'linux-x64');
+  assert.equal(archPlatform('arm64'), 'linux-arm64');
+  assert.equal(archPlatform('ia32'), null);
+  assert.equal(defaultCacheDir({ XDG_CACHE_HOME: '/x' }), '/x/colonizer/codex');
+  assert.equal(defaultCacheDir({ HOME: '/h' }), '/h/.cache/colonizer/codex');
+  assert.ok(defaultCacheDir({ PATH: '/bin' }).endsWith('colonizer-codex'));
+});
+
+test('resolveModel accepts openai and bare ids, keeps empties for the CLI default, and refuses other providers by name', () => {
+  assert.deepEqual(resolveModel('openai/gpt-5.2'), { model: 'gpt-5.2' });
+  assert.deepEqual(resolveModel('  gpt-5.3-codex '), { model: 'gpt-5.3-codex' });
+  assert.deepEqual(resolveModel(''), {});
+  assert.match(resolveModel('deepseek/deepseek-flash').error, /^CODEX_MODEL_PROVIDER:/);
+});
+
+test('parseRoutes validates the route array like the hermes and pi runners do, defaulting the wire to anthropic', () => {
+  assert.deepEqual(parseRoutes('not json'), { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: not valid JSON'] });
+  assert.equal(parseRoutes('{}').routes.length, 0);
+  assert.match(parseRoutes('{}').warnings[0], /expected a JSON array/);
+  const bad = parseRoutes(JSON.stringify([{ prefix: 'x', base_url: 'ftp://x' }, { prefix: 'ok/', base_url: 'http://ok', wire: 'websocket' }]));
+  assert.equal(bad.routes.length, 0);
+  assert.equal(bad.warnings.length, 2, 'a bad prefix and an unknown wire each drop their route');
+  const good = parseRoutes(JSON.stringify([{ prefix: 'p/', base_url: 'http://p', headers: { 'X-Colonizer-Colony': 'tok', bad_name: 'dropped' } }]));
+  assert.deepEqual(good.routes, [{ provider: 'p', prefix: 'p/', base_url: 'http://p', headers: { 'x-colonizer-colony': 'tok' }, wire: 'anthropic' }]);
+});
+
+test('resolveModel sends an openai-wire route through the gateway, keeps openai and bare ids direct, and refuses the rest', () => {
+  const routed = resolveModel('strix/gpt-5.2', ROUTES.routes);
+  assert.equal(routed.model, 'gpt-5.2', 'the prefix is stripped before -m');
+  assert.equal(routed.route.wire, 'openai');
+  assert.deepEqual(resolveModel('gpt-5.3-codex', ROUTES.routes), { model: 'gpt-5.3-codex' }, 'bare ids stay direct');
+  assert.deepEqual(resolveModel('openai/gpt-5.2', ROUTES.routes), { model: 'gpt-5.2' }, 'openai/ with no openai/ route stays direct');
+  assert.match(resolveModel('anth/claude-sonnet-5', ROUTES.routes).error, /^CODEX_MODEL_PROVIDER:.*anthropic wire/);
+  assert.match(resolveModel('deepseek/deepseek-flash', ROUTES.routes).error, /Settings → Model providers/);
+});
+
+test('turnArgs adds the custom provider for a routed model, as TOML -c values', () => {
+  const args = turnArgs({ model: 'gpt-5.2', threadId: 'thread-1', route: ROUTES.routes[0] });
+  assert.deepEqual(pair(args, '-c'), ['-c', 'check_for_update_on_startup=false'], 'the nesting overrides stay first');
+  const overrides = args.flatMap((arg, i) => (arg === '-c' ? [args[i + 1]] : []));
+  assert.ok(overrides.includes('model_provider="colonizer"'));
+  assert.ok(overrides.includes('model_providers.colonizer.name="colonizer"'));
+  assert.ok(overrides.includes('model_providers.colonizer.base_url="http://host.microsandbox.internal:41750/providers/strix/v1"'));
+  assert.ok(overrides.includes('model_providers.colonizer.wire_api="responses"'));
+  assert.ok(overrides.includes('model_providers.colonizer.http_headers={x-colonizer-colony="colony-token-1"}'));
+  assert.deepEqual(pair(args, '-m'), ['-m', 'gpt-5.2']);
+  const direct = turnArgs({ model: 'gpt-5.2' });
+  assert.equal(direct.filter((arg) => arg.startsWith('model_provider')).length, 0, 'a direct model carries no provider overrides');
+});
+
+test('turnArgs carries the --json framing, the nesting overrides, and the resume subcommand order', () => {
+  const args = turnArgs({ model: 'gpt-5.2', threadId: 'thread-1' });
+  for (const flag of ['--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox']) {
+    assert.ok(args.includes(flag), `missing ${flag}`);
+  }
+  assert.deepEqual(pair(args, '-c'), ['-c', 'check_for_update_on_startup=false'], 'the -c overrides ride exec level, before resume');
+  assert.deepEqual(pair(args, '-m'), ['-m', 'gpt-5.2']);
+  assert.ok(args.indexOf('-m') < args.indexOf('resume'), 'exec-level options come before the resume subcommand');
+  assert.deepEqual(args.slice(args.indexOf('resume')), ['resume', 'thread-1', '-'], 'resume names the thread, then the stdin prompt');
+  const fresh = turnArgs({});
+  assert.ok(!fresh.includes('-m') && !fresh.includes('resume'), 'no model and nothing to resume means neither');
+  assert.ok(!fresh.includes('--strict-config'), 'no disabled tools means no --strict-config');
+  assert.equal(fresh[fresh.length - 1], '-', 'the prompt is always stdin');
+});
+
+test('turnArgs turns disabled_tools names into -c overrides behind --strict-config, exec level', () => {
+  const args = turnArgs({ model: 'gpt-5.2', threadId: 'thread-1', disabledTools: ['shell', 'web_search', 'view_image'] });
+  assert.ok(args.includes('--strict-config'), 'a non-empty list arms --strict-config');
+  for (const override of ['features.shell_tool=false', 'web_search="disabled"', 'features.view_image=false']) {
+    assert.ok(args.includes(override), `missing the ${override} override`);
+  }
+  assert.ok(args.indexOf('--strict-config') < args.indexOf('resume'), 'the overrides ride exec level, before the resume subcommand');
+  for (const override of ['features.shell_tool=false', 'web_search="disabled"', 'features.view_image=false']) {
+    assert.equal(args[args.indexOf(override) - 1], '-c', `${override} rides its own -c`);
+  }
+});
+
+test('a turn streams mapped events and the child carries the nesting env', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'openai/gpt-5.2' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'initial', text: 'do the thing' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  assert.deepEqual(runner.events[0], { type: 'status', state: 'idle' });
+  assert.deepEqual(first('user_message')(runner.events), { type: 'user_message', id: 'initial', text: 'do the thing' });
+  const order = runner.events.map((e) => `${e.type}:${e.state ?? ''}`);
+  assert.ok(order.indexOf('user_message:') < order.indexOf('status:working'), 'working follows the echo');
+  assert.ok(order.indexOf('status:working') < order.indexOf('turn_end:'), 'the turn ends inside working');
+  assert.ok(order.indexOf('turn_end:') < order.indexOf('status:idle', 1), 'idle follows the turn end');
+  assert.deepEqual(first('model_changed')(runner.events), { type: 'model_changed', model: 'gpt-5.2', previous: null });
+  assert.deepEqual(first('thinking')(runner.events), { type: 'thinking', message_id: 'msg-1', block_index: 1, text: 'weighing the options' });
+  assert.deepEqual(first('assistant_text')(runner.events), { type: 'assistant_text', message_id: 'msg-1', block_index: 0, text: 'Hello, colony' });
+  assert.equal(runner.events.filter((e) => e.type === 'assistant_text_delta').length, 0, 'codex --json has no deltas; the message arrives whole');
+  assert.deepEqual(first('tool_call')(runner.events), {
+    type: 'tool_call',
+    message_id: 'msg-1',
+    tool_call_id: 'item_1',
+    name: 'command_execution',
+    input: { command: 'bash -lc ls' },
+  });
+  assert.deepEqual(first('tool_result')(runner.events), { type: 'tool_result', tool_call_id: 'item_1', output: 'src\nREADME.md', is_error: false });
+  assert.equal(runner.events.filter((e) => e.type === 'tool_result').length, 1, 'the in_progress item emits no tool_result');
+
+  const turnEnd = first('turn_end')(runner.events);
+  assert.equal(turnEnd.is_error, false);
+  assert.equal(turnEnd.result, 'Hello, colony');
+  assert.equal(turnEnd.cost_usd, null, 'codex reports tokens, never cost');
+  assert.equal(typeof turnEnd.duration_ms, 'number');
+  assert.deepEqual(turnEnd.model_usage, { 'gpt-5.2': { input_tokens: 10, output_tokens: 5, cache_read_tokens: 2, cache_write_tokens: 0 } });
+  assertSchema(runner.events);
+
+  const [invocation] = runner.turns();
+  assert.equal(invocation.prompt, 'do the thing', 'the prompt travels on stdin');
+  assert.ok(!invocation.argv.includes('login'), 'the runner never logs in');
+  assert.ok(!invocation.argv.includes('--ephemeral'), 'the session rollout persists: resume needs it');
+  assert.deepEqual(pair(invocation.argv, '-m'), ['-m', 'gpt-5.2']);
+  assert.ok(!invocation.argv.includes('resume'), 'the first turn starts a fresh thread');
+  assert.equal(invocation.argv[invocation.argv.length - 1], '-', 'the prompt is the stdin sentinel');
+  assert.equal(invocation.env.BROWSER, '/bin/false');
+  assert.equal(invocation.env.CODEX_API_KEY, 'set');
+  assert.equal(invocation.env.CODEX_HOME, runner.home, 'CODEX_HOME is the injected, persisted colony path');
+
+  runner.send({ type: 'shutdown' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
+  assert.equal(await runner.waitExit(), 0);
+});
+
+test('an OPENAI_API_KEY colony reaches codex as CODEX_API_KEY, the only name codex exec reads', async (t) => {
+  const runner = startRunner({ CODEX_API_KEY: '', OPENAI_API_KEY: 'openai-fallback-key' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.equal(runner.turns()[0].env.CODEX_API_KEY, 'set', 'the fallback credential rides under the real name');
+
+  await stop(runner);
+});
+
+test('a routed openai-wire model rides the gateway: provider overrides, no key, resume keeps the config', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'strix/gpt-5.2', COLONIZER_MODEL_ROUTES: ROUTES_JSON, CODEX_API_KEY: '' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  const second = await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+  assert.equal(second.is_error, false);
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  for (const [i, invocation] of turns.entries()) {
+    const overrides = invocation.argv.flatMap((arg, j) => (arg === '-c' ? [invocation.argv[j + 1]] : []));
+    assert.ok(overrides.includes('model_provider="colonizer"'), `turn ${i + 1} selects the gateway provider`);
+    assert.ok(
+      overrides.some((arg) => arg.startsWith('model_providers.colonizer.base_url="http://host.microsandbox.internal:41750/providers/strix/v1"')),
+      `turn ${i + 1} points the provider at the gateway passthrough`,
+    );
+    assert.ok(overrides.includes('model_providers.colonizer.wire_api="responses"'), `turn ${i + 1} speaks the responses wire`);
+    assert.ok(
+      overrides.includes('model_providers.colonizer.http_headers={x-colonizer-colony="colony-token-1"}'),
+      `turn ${i + 1} carries the colony header`,
+    );
+    assert.deepEqual(pair(invocation.argv, '-m'), ['-m', 'gpt-5.2'], `turn ${i + 1} passes the bare model id`);
+    assert.equal(invocation.env.CODEX_API_KEY, 'unset', 'a routed turn needs no OpenAI key');
+  }
+  assert.deepEqual(pair(turns[1].argv.slice(0, turns[1].argv.indexOf('-')), 'resume'), ['resume', 'thread-fake-1'], 'the second turn still resumes');
+  assert.equal(runner.records().some((r) => r.argv.includes('login')), false, 'the runner never logs in');
+
+  await stop(runner);
+});
+
+test('an anthropic-wire route and an unknown prefix are refused by name, and codex never runs', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'anth/claude-sonnet-5', COLONIZER_MODEL_ROUTES: ROUTES_JSON });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello?' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the refused turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /^CODEX_MODEL_PROVIDER:/);
+  assert.match(turnEnd.result, /anthropic wire/);
+
+  runner.send({ type: 'set_model', model: 'deepseek/deepseek-flash' });
+  const refusal = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the unrouted refusal');
+  assert.match(refusal.message, /no gateway route/, 'set_model is refused too');
+  assert.equal(runner.turns().length, 0, 'no codex process may run for a refused model');
+
+  await stop(runner);
+});
+
+test('malformed route JSON is warned about and the bare model runs direct', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'gpt-5.2', COLONIZER_MODEL_ROUTES: 'not json' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  const warning = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn'), 'the routes warning');
+  assert.match(warning.message, /ignoring COLONIZER_MODEL_ROUTES: not valid JSON/);
+  runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(pair(runner.turns()[0].argv, '-m'), ['-m', 'gpt-5.2'], 'the turn runs direct, as without routes');
+  assert.equal(runner.turns()[0].env.CODEX_API_KEY, 'set', 'the direct path still uses the credential');
+
+  await stop(runner);
+});
+
+test('the second turn resumes the first turn’s thread, with cumulative token totals', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'openai/gpt-5.2' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  const second = await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  assert.ok(!turns[0].argv.includes('resume'), 'the first turn starts a fresh thread');
+  assert.deepEqual(turns[1].argv.slice(turns[1].argv.indexOf('resume'), -1), ['resume', 'thread-fake-1'], 'the second turn resumes thread.started’s id');
+  assert.deepEqual(second.model_usage, { 'gpt-5.2': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 0 } }, 'model_usage is cumulative for the colony');
+  assert.equal(runner.events.filter((e) => e.type === 'agent_session').length, 1, 'the resumed turn does not re-announce the id');
+
+  await stop(runner);
+});
+
+test('a restarted runner resumes the thread it announced, off the persisted CODEX_HOME', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-resume-'));
+  const firstRun = startRunner({ COLONIZER_CODEX_HOME: home });
+  t.after(() => firstRun.child.kill('SIGKILL'));
+
+  firstRun.send({ type: 'user_message', id: 'u-1', text: 'begin' });
+  await firstRun.waitUntil(count('turn_end', 1), 'the first process’s turn to finish');
+  assert.deepEqual(first('agent_session')(firstRun.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'the thread id is announced');
+  const firstOrder = firstRun.events.map((e) => e.type);
+  assert.ok(firstOrder.indexOf('agent_session') < firstOrder.indexOf('turn_end'), 'the id is announced inside the turn, before its turn_end');
+
+  // The VM is gone; the harness boots a fresh one with COLONIZER_RESUME_SESSION set (§2, issue #562)
+  // and the colony's persisted home mounted back in at the same path.
+  const secondRun = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-fake-1' });
+  t.after(() => secondRun.child.kill('SIGKILL'));
+
+  secondRun.send({ type: 'user_message', id: 'u-2', text: 'continue' });
+  await secondRun.waitUntil(count('turn_end', 1), 'the resumed turn to finish');
+
+  const turns = secondRun.turns();
+  assert.equal(turns.length, 1, 'the conversation continues without a fallback');
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-fake-1', '-'], 'the first turn of the new process resumes the announced thread');
+  assert.deepEqual(turns[0].prompt, 'continue');
+  const commandAt = turns[0].argv.findIndex((arg) => arg.startsWith('mcp_servers.colonizer.command='));
+  assert.ok(commandAt > -1 && turns[0].argv[commandAt - 1] === '-c', 'the resumed turn registers the colonizer MCP server');
+  assert.ok(commandAt < turns[0].argv.indexOf('resume'), 'the registration rides exec level, before the resume subcommand');
+  assert.deepEqual(first('agent_session')(secondRun.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'a new process announces the id once, like claude-code');
+  const order = secondRun.events.map((e) => e.type);
+  assert.ok(order.indexOf('agent_session') < order.indexOf('turn_end'), 'the id is announced inside the turn, before its turn_end');
+  assertSchema([...firstRun.events, ...secondRun.events]);
+
+  await stop(firstRun);
+  await stop(secondRun);
+});
+
+test('a resumed thread whose rollout is gone falls back to a fresh thread once', async (t) => {
+  const runner = startRunner({ COLONIZER_RESUME_SESSION: 'thread-gone' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick it up' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the retried turn to finish');
+  assert.equal(runner.events.filter((e) => e.type === 'turn_end').length, 1, 'the failed attempt emits no turn_end of its own');
+  assert.ok(
+    runner.events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('no rollout for thread thread-gone')),
+    'the failed resume is logged as a warning',
+  );
+  assert.equal(turnEnd.is_error, false, 'the colony is not failed by the missing rollout');
+  assert.equal(turnEnd.result, 'Hello, colony');
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-gone', '-'], 'the seeded thread is attempted first');
+  assert.ok(!turns[1].argv.includes('resume'), 'the retry starts a fresh thread');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'the fresh thread is what gets announced');
+  assertSchema(runner.events);
+
+  runner.send({ type: 'user_message', id: 'u-2', text: 'carry on' });
+  await runner.waitUntil(count('turn_end', 2), 'the next turn to finish');
+  assert.deepEqual(runner.turns()[2].argv.slice(runner.turns()[2].argv.indexOf('resume')), ['resume', 'thread-fake-1', '-'], 'the next message resumes the fresh thread the fallback started');
+
+  await stop(runner);
+});
+
+test('a routed model keeps its gateway provider on the fresh-thread fallback', async (t) => {
+  // The fallback retry is its own codex invocation: it must ride the same route as the seeded
+  // attempt, or a restored routed colony would fall back straight to api.openai.com without a key.
+  const runner = startRunner({ COLONIZER_RESUME_SESSION: 'thread-gone', COLONIZER_MODEL: 'strix/gpt-5.2', COLONIZER_MODEL_ROUTES: ROUTES_JSON, CODEX_API_KEY: '' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick it up' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the retried turn to finish');
+  assert.equal(turnEnd.is_error, false);
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  assert.ok(!turns[1].argv.includes('resume'), 'the retry starts a fresh thread');
+  for (const [i, invocation] of turns.entries()) {
+    const overrides = invocation.argv.flatMap((arg, j) => (arg === '-c' ? [invocation.argv[j + 1]] : []));
+    assert.ok(overrides.includes('model_provider="colonizer"'), `attempt ${i + 1} selects the gateway provider`);
+    assert.deepEqual(pair(invocation.argv, '-m'), ['-m', 'gpt-5.2'], `attempt ${i + 1} passes the bare model id`);
+  }
+
+  await stop(runner);
+});
+
+test('a fallback that also ends before naming a thread leaves no dead seed behind', async (t) => {
+  // The retry is given time to start (the fake sleeps before emitting; the seeded attempt exits
+  // before the sleep, on the missing rollout), then interrupted: it names no thread either.
+  const runner = startRunner({ COLONIZER_RESUME_SESSION: 'thread-gone', CODEX_FAKE_SLEEP_MS: '1500' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick it up' });
+  await runner.waitUntil(() => runner.turns().length >= 2, 'the fallback retry to start');
+  runner.send({ type: 'interrupt' });
+  const interrupted = await runner.waitUntil(first('turn_end'), 'the interrupted retry to end');
+  assert.match(interrupted.result, /interrupted/);
+
+  runner.send({ type: 'user_message', id: 'u-2', text: 'try again' });
+  const next = await runner.waitUntil(count('turn_end', 2), 'the next turn to finish');
+  assert.equal(next.is_error, false);
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 3);
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-gone', '-'], 'the dead seed is attempted first');
+  assert.ok(!turns[1].argv.includes('resume'), 'the fallback retry starts a fresh thread');
+  assert.ok(!turns[2].argv.includes('resume'), 'the next message starts fresh too, not the dead seed');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'only the fresh thread is ever announced');
+  assertSchema(runner.events);
+
+  await stop(runner);
+});
+
+test('a persisted home whose rollout store is not a real directory is rebuilt, not kept', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-home-'));
+  writeFileSync(join(home, 'sessions'), 'a file where the store belongs');
+  symlinkSync(mkdtempSync(join(tmpdir(), 'codex-test-elsewhere-')), join(home, 'archived_sessions'));
+  const runner = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-gone' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'carry on' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the retried turn to finish');
+  assert.equal(turnEnd.is_error, false, 'the colony recovers onto a fresh thread');
+  const store = lstatSync(join(home, 'sessions'));
+  assert.ok(store.isDirectory() && !store.isSymbolicLink(), 'sessions is a real directory again, holding the fresh rollout');
+  assert.ok(existsSync(join(home, 'sessions', 'thread-fake-1.jsonl')));
+  assert.throws(() => lstatSync(join(home, 'archived_sessions')), 'a symlinked store is removed, not followed');
+
+  await stop(runner);
+});
+
+test('a boot strips the persisted home down to its rollout store before any codex runs', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-home-'));
+  writeFileSync(join(home, 'config.toml'), 'model = "sneaky"');
+  writeFileSync(join(home, 'auth.json'), '{"OPENAI_API_KEY":"stale"}');
+  writeFileSync(join(home, 'AGENTS.md'), 'instructions a previous boot left behind');
+  mkdirSync(join(home, 'prompts'), { recursive: true });
+  writeFileSync(join(home, 'prompts', 'custom.md'), 'a planted custom prompt');
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  writeFileSync(join(home, 'sessions', 'thread-kept.jsonl'), 'thread\n');
+  const runner = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-kept' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'carry on' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the resumed turn to finish');
+  assert.ok(!existsSync(join(home, 'config.toml')), 'config.toml does not survive a boot');
+  assert.ok(!existsSync(join(home, 'auth.json')), 'auth.json does not survive a boot');
+  assert.ok(!existsSync(join(home, 'AGENTS.md')), 'global instructions do not survive a boot');
+  assert.ok(!existsSync(join(home, 'prompts')), 'custom prompts do not survive a boot');
+  assert.ok(existsSync(join(home, 'sessions', 'thread-kept.jsonl')), 'the rollout store does survive');
+  assert.equal(runner.events.filter((e) => e.type === 'turn_end').length, 1, 'the seeded resume worked, so no fallback ran');
+  assert.equal(turnEnd.is_error, false);
+  const [invocation] = runner.turns();
+  assert.deepEqual(invocation.argv.slice(invocation.argv.indexOf('resume')), ['resume', 'thread-kept', '-'], 'the seeded thread resumed off the surviving rollout');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-kept' });
+
+  await stop(runner);
+});
+
+test('a disabled_tools colony passes the -c overrides on every turn, resume included', async (t) => {
+  const runner = startRunner({ COLONIZER_DISABLED_TOOLS: 'shell, web_search' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  const turns = runner.turns();
+  for (const [i, invocation] of turns.entries()) {
+    assert.ok(invocation.argv.includes('--strict-config'), `turn ${i + 1} arms --strict-config`);
+    assert.ok(invocation.argv.includes('features.shell_tool=false'), `turn ${i + 1} switches the shell tool off`);
+    assert.ok(invocation.argv.includes('web_search="disabled"'), `turn ${i + 1} switches web search off`);
+    assert.ok(!invocation.argv.includes('features.view_image=false'), `turn ${i + 1} leaves view_image alone`);
+  }
+  assert.ok(turns[1].argv.indexOf('--strict-config') < turns[1].argv.indexOf('resume'), 'the second turn rides the overrides exec level, before resume');
+
+  await stop(runner);
+});
+
+test('set_model switches the next turn and announces it; other providers are refused by name', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'openai/gpt-5.2' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'set_model', model: 'deepseek/deepseek-flash' });
+  const refusal = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the provider refusal');
+  assert.match(refusal.message, /^CODEX_MODEL_PROVIDER:/);
+
+  runner.send({ type: 'set_model', model: 'openai/gpt-5.3-codex' });
+  await runner.waitUntil(first('model_changed'), 'model_changed');
+  runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  assert.deepEqual(first('model_changed')(runner.events), { type: 'model_changed', model: 'gpt-5.3-codex', previous: null });
+  assert.equal(runner.events.filter((e) => e.type === 'model_changed').length, 1, 'a set_model already announced suppresses the first-turn announcement');
+  assert.deepEqual(pair(runner.turns()[0].argv, '-m'), ['-m', 'gpt-5.3-codex']);
+
+  await stop(runner);
+});
+
+test('interrupt fails the running turn, and the runner keeps serving turns', async (t) => {
+  const runner = startRunner({ CODEX_FAKE_SLEEP_MS: 1500, CODEX_FAKE_SLEEP_FIRST: '1' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'slow turn' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'working'), 'the slow turn to start');
+  runner.send({ type: 'interrupt' });
+  const interrupted = await runner.waitUntil(first('turn_end'), 'the interrupted turn to end');
+  assert.equal(interrupted.is_error, true);
+  assert.match(interrupted.result, /interrupted/);
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'idle after the interrupt');
+
+  runner.send({ type: 'user_message', id: 'u-2', text: 'quick turn' });
+  const recovered = await runner.waitUntil(count('turn_end', 2), 'the next turn to finish');
+  assert.equal(recovered.is_error, false);
+  assert.equal(recovered.result, 'Hello, colony');
+
+  await stop(runner);
+});
+
+test('shutdown mid-turn exits cleanly with code 0', async (t) => {
+  const runner = startRunner({ CODEX_FAKE_SLEEP_MS: 60000 });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'endless turn' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'working'), 'the turn to start');
+  runner.send({ type: 'shutdown' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
+  assert.equal(await runner.waitExit(), 0);
+});
+
+test('an answer without an open question warns; stdin EOF exits like shutdown', async (t) => {
+  const runner = startRunner();
+  t.after(() => runner.child.kill('SIGKILL'));
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'the runner to come up');
+  runner.send({ type: 'answer', question_id: 'q-1', answers: {}, response: 'yes' });
+  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && /no open question/.test(e.message)), 'the answer to be warned about');
+  assert.equal(logged.level, 'warn');
+  runner.child.stdin.end();
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
+  assert.equal(await runner.waitExit(), 0);
+});
+
+test('without CODEX_API_KEY: a named error, and codex is never invoked', async (t) => {
+  const runner = startRunner({ CODEX_API_KEY: '' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  const problem = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the credential error');
+  assert.match(problem.message, /^CODEX_CREDENTIAL_MISSING:/);
+  assert.match(problem.message, /colony secret named CODEX_API_KEY/);
+  const error = await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'error'), 'the error status');
+  assert.equal(error.detail, 'CODEX_CREDENTIAL_MISSING');
+
+  runner.send({ type: 'user_message', id: 'initial', text: 'hello?' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the refused turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /^CODEX_CREDENTIAL_MISSING:/);
+  assert.equal(turnEnd.cost_usd, null);
+
+  assert.equal(runner.records().length, 0, 'not even codex --version may run without a key');
+  await stop(runner);
+});
+
+test('a missing binary is a named error carrying the pinned install command', async (t) => {
+  const runner = startRunner({ COLONIZER_CODEX_BIN: '/nonexistent/codex' });
+  t.after(() => runner.child.kill('SIGKILL'));
+  const problem = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the binary error');
+  assert.match(problem.message, /^CODEX_BINARY_MISSING:/);
+  assert.match(problem.message, /npm install -g @openai\/codex@0\.156\.1/);
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'error' && e.detail === 'CODEX_BINARY_MISSING'), 'the error status');
+  await stop(runner);
+});
+
+test('a codex that is not the pinned version is a named drift error', async (t) => {
+  const runner = startRunner({ CODEX_FAKE_VERSION: '0.99.0' });
+  t.after(() => runner.child.kill('SIGKILL'));
+  const problem = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the drift error');
+  assert.match(problem.message, /^CODEX_VERSION_DRIFT:/);
+  assert.match(problem.message, /0\.99\.0/);
+  assert.match(problem.message, /0\.156\.1/);
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'error' && e.detail === 'CODEX_VERSION_DRIFT'), 'the error status');
+
+  runner.send({ type: 'user_message', id: 'initial', text: 'hello?' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the refused turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /^CODEX_VERSION_DRIFT:/);
+  assert.equal(runner.records().filter((r) => !r.argv.includes('--version')).length, 0, 'no prompt may run on a drifted binary');
+  await stop(runner);
+});
+
+test('unknown event types, non-JSON lines and a turn.failed are survived or surfaced', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-test-script-'));
+  const scriptPath = join(dir, 'events.ndjson');
+  writeFileSync(
+    scriptPath,
+    [
+      JSON.stringify({ type: 'mystery', payload: 1 }),
+      'not json at all',
+      JSON.stringify({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: 'still fine' } }),
+      JSON.stringify({ type: 'turn.failed', error: { message: 'unexpected status 401 Unauthorized' } }),
+    ].join('\n'),
+  );
+  const runner = startRunner({ CODEX_FAKE_SCRIPT: scriptPath });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'odd stream' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('mystery')), 'the unknown-event warning');
+  await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('not JSON')), 'the non-JSON line warning');
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the failed turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /401 Unauthorized/, 'turn.failed names the upstream error');
+
+  await stop(runner);
+});
+
+test('a child that exits without turn.completed fails the turn with the exit code and stderr tail', async (t) => {
+  const runner = startRunner({ CODEX_FAKE_NO_COMPLETE: '1', CODEX_FAKE_EXIT: '1', CODEX_FAKE_STDERR: 'boom: stream broke' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'doomed' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the failed turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /without a turn\.completed event/);
+  assert.match(turnEnd.result, /exit code 1/);
+  assert.match(turnEnd.result, /boom: stream broke/);
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'idle after the failed turn');
+  await stop(runner);
+});
+
+test('the colonizer MCP tools work end to end: findings, memory and wait', async (t) => {
+  const memory = mkdtempSync(join(tmpdir(), 'codex-test-mem-'));
+  mkdirSync(join(memory, 'repo', 'notes'), { recursive: true });
+  writeFileSync(join(memory, 'repo', 'notes', 'waiting.md'), '# Wait rooms\nThe waitrooms convention: call wait instead of polling.\n');
+  const calls = [
+    { name: 'finding_file', arguments: { title: 'Stale doc', body: 'The README lies about X.', evidence: 'read README.md twice' } },
+    { name: 'memory_propose', arguments: { scope: 'repo', title: 'Run npm ci', content: 'The lockfile drifts without it.', tags: ['node'] } },
+    { name: 'memory_search', arguments: { query: 'waitrooms' } },
+    { name: 'wait', arguments: { reason: 'settling', seconds: 0 } },
+  ];
+  const runner = startRunner({
+    COLONIZER_MODEL: 'openai/gpt-5.2',
+    COLONIZER_FINDINGS: 'true',
+    COLONIZER_MEMORY_DIR: memory,
+    CODEX_FAKE_MCP_CALLS: JSON.stringify(calls),
+  });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'use the colonizer tools' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  // finding_file and memory_propose crossed the bridge and left the colony as protocol events.
+  assert.deepEqual(first('finding')(runner.events), { type: 'finding', title: 'Stale doc', body: 'The README lies about X.', evidence: 'read README.md twice' });
+  assert.deepEqual(first('memory_proposal')(runner.events), { type: 'memory_proposal', origin: 'orchestrator', scope: 'repo', title: 'Run npm ci', content: 'The lockfile drifts without it.', tags: ['node'] });
+  assertSchema(runner.events);
+
+  const { mcp } = runner.turns()[0];
+  assert.deepEqual(mcp.tools, ['ask_user', 'finding_file', 'memory_briefing', 'memory_changes', 'memory_search', 'memory_propose', 'wait']);
+  assert.deepEqual(mcp.calls[0], { name: 'finding_file', isError: false, text: '{"filed":true}', error: null });
+  assert.deepEqual(mcp.calls[1], { name: 'memory_propose', isError: false, text: '{"ok":true}', error: null });
+  assert.equal(mcp.calls[2].isError, false);
+  assert.match(mcp.calls[2].text, /\[repo\] Wait rooms \(/);
+  assert.match(mcp.calls[2].text, /waitrooms convention/);
+  assert.match(mcp.calls[3].text, /^Waited .* \(settling\)\.$/);
+
+  const mcpCalls = runner.events.filter((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call');
+  assert.equal(mcpCalls.length, calls.length, 'the codex stream carries the calls as mcp_tool_call items');
+
+  await stop(runner);
+});
+
+test('finding_file and the memory tools are only offered when the mothership switched them on', async (t) => {
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: '[]' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['ask_user', 'wait'], 'no findings switch and no memory dir leave ask_user and wait');
+
+  await stop(runner);
+});
+
+test('ask_user asks the user over the bridge, and the answer finishes the turn', async (t) => {
+  const calls = [{ name: 'ask_user', arguments: { questions: [{ question: 'Which color?', header: 'Paint', options: [{ label: 'Blue' }, { label: 'Red' }] }] } }];
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: JSON.stringify(calls) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick a paint color' });
+  const question = await runner.waitUntil(first('question'), 'the question event');
+  assert.deepEqual(question, {
+    type: 'question',
+    question_id: 'q-1',
+    message_id: null,
+    questions: [{ question: 'Which color?', header: 'Paint', multi_select: false, options: [{ label: 'Blue', description: '', preview: null }, { label: 'Red', description: '', preview: null }] }],
+  });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'the waiting-for-answer status');
+
+  runner.send({ type: 'answer', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+  const answered = await runner.waitUntil(first('question_answered'), 'the question_answered event');
+  assert.deepEqual(answered, { type: 'question_answered', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.equal(turnEnd.is_error, false);
+
+  const { mcp } = runner.turns()[0];
+  assert.equal(mcp.tools[0], 'ask_user', 'ask_user rides the colonizer registration every turn already carries');
+  assert.deepEqual(mcp.calls[0], { name: 'ask_user', isError: false, text: JSON.stringify({ answers: { Paint: 'Blue' }, response: 'blue, please' }), error: null });
+  assert.equal(runner.events.some((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call'), false, 'a question is never also a tool_call (§2)');
+  assert.equal(runner.events.some((e) => e.type === 'tool_result' && String(e.tool_call_id ?? '').startsWith('item_mcp_')), false);
+  assertSchema(runner.events);
+
+  await stop(runner);
+});
+
+test('an interrupt during a parked ask cancels it: no answer, and the interrupted turn ends', async (t) => {
+  const calls = [{ name: 'ask_user', arguments: { questions: [{ question: 'Proceed?', options: [{ label: 'Yes' }] }] } }];
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: JSON.stringify(calls), CODEX_FAKE_SLEEP_MS: 30000, CODEX_FAKE_SLEEP_FIRST: '1' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'ask away' });
+  await runner.waitUntil(first('question'), 'the question event');
+  runner.send({ type: 'interrupt' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the interrupted turn to end');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /interrupted/);
+  assert.equal(runner.events.some((e) => e.type === 'question_answered'), false, 'a cancelled ask is never an answer');
+  assert.equal(runner.events.some((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call'), false, 'the ask never became a tool_call');
+
+  await stop(runner);
+});
+
+/** The `env` table mcpArgs hands the colonizer server, pulled back out of its `-c` JSON. */
+const mcpServerEnv = (args) =>
+  JSON.parse(args.find((arg) => arg.startsWith('mcp_servers.colonizer.env=')).slice('mcp_servers.colonizer.env='.length));
+
+test('mcpArgs forwards the loop switches into the colonizer server env; undefined drops out', () => {
+  const on = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: { COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' } }));
+  assert.equal(on.COLONIZER_LOOP, 'true');
+  assert.equal(on.COLONIZER_LOOP_SELF_PACED, 'true');
+  // The end-to-end loop test below inherits the runner's env anyway, so this unit check is what
+  // pins the forwarding: without the switches in the table, mcp.mjs never offers the loop tools.
+  const off = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: {} }));
+  assert.ok(!('COLONIZER_LOOP' in off) && !('COLONIZER_LOOP_SELF_PACED' in off));
+});
+
+test('the bridge turns /loop_next and /loop_stop into protocol events and refuses malformed ones', async () => {
+  const events = [];
+  const bridge = await createBridge({ emit: (event) => events.push(event) });
+  const post = (path, body) =>
+    fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 90, reason: 'review comments are due' }), { ok: true });
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 3.5, reason: 'soon' }), { ok: true }, 'a fractional delay is rounded to the protocol\'s integer');
+    assert.deepEqual(await post('/loop_next', {}), { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 30 }), { error: 'loop_next needs a reason: what the next run should find or do' });
+    assert.deepEqual(await post('/loop_stop', { reason: 'the goal is met' }), { ok: true });
+    assert.deepEqual(await post('/loop_stop', { reason: '  ' }), { error: 'loop_stop needs a reason: why the loop should stop' });
+    assert.deepEqual(events, [
+      { type: 'loop_next', delay_minutes: 90, reason: 'review comments are due' },
+      { type: 'loop_next', delay_minutes: 4, reason: 'soon' },
+      { type: 'loop_stop', reason: 'the goal is met' },
+    ]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('the bridge parks /ask until answer, and cancelAll releases a parked ask as cancelled', async () => {
+  const events = [];
+  const states = [];
+  const bridge = await createBridge({ emit: (event) => events.push(event), setStatus: (state) => states.push(state), isWorking: () => true });
+  const post = (path, body) =>
+    fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    const parked = post('/ask', { questions: [{ question: 'Which color?', header: 'Paint', multiSelect: true, options: [{ label: 'Blue', description: 'the calm one' }] }] });
+    assert.equal(await Promise.race([parked.then(() => 'settled'), sleep(100).then(() => 'parked')]), 'parked', 'the ask holds until an answer or a cancel');
+    assert.deepEqual(events[0], {
+      type: 'question',
+      question_id: 'q-1',
+      message_id: null,
+      questions: [{ question: 'Which color?', header: 'Paint', multi_select: true, options: [{ label: 'Blue', description: 'the calm one', preview: null }] }],
+    });
+    assert.equal(bridge.pending(), 1);
+    assert.deepEqual(states, ['waiting_for_answer']);
+    assert.ok(bridge.answer('q-1', { Paint: 'Blue' }, 'blue, please'));
+    assert.deepEqual(await parked, { answers: { Paint: 'Blue' }, response: 'blue, please' });
+    assert.deepEqual(events[1], { type: 'question_answered', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+    assert.deepEqual(states, ['waiting_for_answer', 'working'], 'the answer hands the status back to the running turn');
+    assert.equal(bridge.answer('q-9', {}, ''), false, 'an unknown question id is not an answer');
+
+    const second = post('/ask', { questions: [{ question: 'Still there?' }] });
+    assert.equal(await Promise.race([second.then(() => 'settled'), sleep(100).then(() => 'parked')]), 'parked');
+    assert.equal(bridge.pending(), 1);
+    bridge.cancelAll();
+    assert.deepEqual(await second, { cancelled: true }, 'cancelAll releases the parked HTTP response');
+    assert.equal(bridge.pending(), 0);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('a loop colony reports its pacing: loop_next with a clamped delay, and loop_stop', async (t) => {
+  const calls = [
+    { name: 'loop_next', arguments: { delay_minutes: 5, reason: 'review comments are due' } },
+    { name: 'loop_stop', arguments: { reason: 'the goal is met' } },
+  ];
+  const runner = startRunner({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true', CODEX_FAKE_MCP_CALLS: JSON.stringify(calls) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'wrap up this run' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  // Both calls crossed the bridge and left the colony as protocol events, the delay clamped to the
+  // mothership's 15-minute floor.
+  assert.deepEqual(first('loop_next')(runner.events), { type: 'loop_next', delay_minutes: 15, reason: 'review comments are due' });
+  assert.deepEqual(first('loop_stop')(runner.events), { type: 'loop_stop', reason: 'the goal is met' });
+  assertSchema(runner.events);
+
+  const { mcp } = runner.turns()[0];
+  assert.deepEqual(mcp.tools, ['ask_user', 'loop_next', 'loop_stop', 'wait']);
+  assert.deepEqual(mcp.calls[0], { name: 'loop_next', isError: false, text: 'Next run scheduled in 15 minutes.', error: null });
+  assert.deepEqual(mcp.calls[1], { name: 'loop_stop', isError: false, text: 'The loop is stopped; this is its last run.', error: null });
+
+  await stop(runner);
+});
+
+test('a loop colony on a fixed schedule gets loop_stop but no loop_next', async (t) => {
+  const runner = startRunner({ COLONIZER_LOOP: 'true', CODEX_FAKE_MCP_CALLS: '[]' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['ask_user', 'loop_stop', 'wait'], 'only a self-paced loop schedules its next run');
+
+  await stop(runner);
+});

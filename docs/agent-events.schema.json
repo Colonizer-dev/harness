@@ -1,0 +1,375 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colonizer.dev/agent-events.schema.json",
+  "title": "Colonizer agent event",
+  "description": "The runner→agentd event contract of docs/protocol.md §2, plus the §6.2 memory_proposal and vault_proposal, §6.6 finding, §6.12 github_action and Loops loop_next/loop_stop additions and the boundary record (#609), as one machine-readable document. One source of truth for three hand-kept sides (#73 item 4), only two of which this schema actually covers: the Claude Code runner (modules/agents/claude-code) is tested against the committed fixture modules/agents/claude-code/test/fixtures/events.jsonl, and the Rust harness deserialises the events it acts on into the AgentEvent enum (crates/colonizer/src/protocol.rs). The browser's hand-written AgentEventBody (web/src/types.ts) is not generated or checked from this schema: it declares every event type this schema defines, memory_proposal and finding included — the exceptions are agent_session (#562), subagent_end (#756), loop_next, loop_stop, github_action (§6.12) and vault_proposal (#777), consumed by the harness alone, which the web's stream ignores as unknown types. jev_ladder (#475) is pure telemetry: the web types it like the rest but renders nothing. Events a subagent produced may carry the agent ref, and events stored by agentd carry seq and ts (docs/protocol.md §3); neither is part of the runner contract body, so this schema does not enumerate them. The host stamps an envelope origin onto every line it appends (docs/protocol.md §3 Origins), defined at #/$defs/origin and likewise outside every body definition. Unknown fields and unknown types must be ignored for forward compatibility (the rule at the top of docs/protocol.md), which is why additionalProperties is deliberately left open.",
+  "oneOf": [
+    { "$ref": "#/$defs/status" },
+    { "$ref": "#/$defs/user_message" },
+    { "$ref": "#/$defs/assistant_text_delta" },
+    { "$ref": "#/$defs/assistant_text" },
+    { "$ref": "#/$defs/thinking" },
+    { "$ref": "#/$defs/tool_call" },
+    { "$ref": "#/$defs/tool_result" },
+    { "$ref": "#/$defs/question" },
+    { "$ref": "#/$defs/question_answered" },
+    { "$ref": "#/$defs/agent_session" },
+    { "$ref": "#/$defs/turn_end" },
+    { "$ref": "#/$defs/log" },
+    { "$ref": "#/$defs/model_changed" },
+    { "$ref": "#/$defs/memory_proposal" },
+    { "$ref": "#/$defs/vault_proposal" },
+    { "$ref": "#/$defs/finding" },
+    { "$ref": "#/$defs/github_action" },
+    { "$ref": "#/$defs/jev_ladder" },
+    { "$ref": "#/$defs/path_policy" },
+    { "$ref": "#/$defs/boundary" },
+    { "$ref": "#/$defs/loop_next" },
+    { "$ref": "#/$defs/loop_stop" },
+    { "$ref": "#/$defs/subagent_end" }
+  ],
+  "$defs": {
+    "origin": {
+      "type": "string",
+      "description": "Envelope-only field the host stamps onto every line it appends to a colony's events.jsonl and harness.jsonl at write time (docs/protocol.md §3 Origins): which subsystem caused the line. Not part of the runner contract body, which this schema defines unchanged. The vocabulary is closed: unlike the event types, a value outside it is a bug in the writer and is logged loudly, not ignored. Lines written before the field existed omit it. Exception: memory_proposal's body origin names the proposer (§6.2) and predates the envelope, so those lines are not stamped and keep the proposer's value.",
+      "enum": ["user", "agent", "subagent", "watchdog", "autonomy", "burn_down", "redteam", "notify", "system"]
+    },
+    "agent_ref": {
+      "type": "object",
+      "description": "The subagent that produced the event: the Task tool call that started it (docs/protocol.md §2 rules). Omitted entirely on the orchestrator's own events, never null.",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "description": "The subagent type, or its task description when the type was not named." },
+        "description": { "type": ["string", "null"] }
+      },
+      "required": ["id", "name"]
+    },
+    "option": {
+      "type": "object",
+      "properties": {
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "preview": { "type": ["string", "null"], "description": "Markdown or HTML, rendered monospace or sandboxed (§5)." }
+      },
+      "required": ["label", "description"]
+    },
+    "question_shape": {
+      "type": "object",
+      "properties": {
+        "question": { "type": "string" },
+        "header": { "type": "string" },
+        "multi_select": { "type": "boolean" },
+        "options": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/option" },
+          "description": "Whatever the model produced, which the runner forwards unvalidated. The model is asked for 2-4 options and UIs always add 'Other' (§2 rules), but that count is a rule for the model, not a guarantee of this wire format."
+        }
+      },
+      "required": ["question", "header", "multi_select", "options"]
+    },
+    "model_tokens": {
+      "type": "object",
+      "description": "Cumulative tokens one model spent as of the last turn end.",
+      "properties": {
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "cache_read_tokens": { "type": "integer" },
+        "cache_write_tokens": { "type": "integer" }
+      },
+      "required": ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]
+    },
+    "status": {
+      "type": "object",
+      "description": "The agent's own state machine; must be emitted on every state change. agentd emits the same shape with detail set when the runner exits (§3).",
+      "properties": {
+        "type": { "const": "status" },
+        "state": { "enum": ["idle", "working", "waiting_for_answer", "error", "exited"] },
+        "detail": { "type": ["string", "null"] }
+      },
+      "required": ["type", "state"]
+    },
+    "user_message": {
+      "type": "object",
+      "description": "The echo of an accepted message. Watchdog nudges are user_message echoes whose id starts with watchdog- (§6.3).",
+      "properties": {
+        "type": { "const": "user_message" },
+        "id": { "type": "string" },
+        "text": { "type": "string" }
+      },
+      "required": ["type", "id", "text"]
+    },
+    "assistant_text_delta": {
+      "type": "object",
+      "description": "Optional streaming; the final assistant_text supersedes the deltas.",
+      "properties": {
+        "type": { "const": "assistant_text_delta" },
+        "message_id": { "type": "string" },
+        "block_index": { "type": "integer" },
+        "delta": { "type": "string" }
+      },
+      "required": ["type", "message_id", "block_index", "delta"]
+    },
+    "assistant_text": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "assistant_text" },
+        "message_id": { "type": "string" },
+        "block_index": { "type": "integer" },
+        "text": { "type": "string" }
+      },
+      "required": ["type", "message_id", "block_index", "text"]
+    },
+    "thinking": {
+      "type": "object",
+      "description": "Optional summary of the agent's thinking.",
+      "properties": {
+        "type": { "const": "thinking" },
+        "message_id": { "type": "string" },
+        "block_index": { "type": "integer" },
+        "text": { "type": "string" }
+      },
+      "required": ["type", "message_id", "block_index", "text"]
+    },
+    "tool_call": {
+      "type": "object",
+      "description": "AskUserQuestion never appears here: questions travel as question events (§2 rules).",
+      "properties": {
+        "type": { "const": "tool_call" },
+        "message_id": { "type": "string" },
+        "tool_call_id": { "type": "string" },
+        "name": { "type": "string" },
+        "input": { "type": "object" }
+      },
+      "required": ["type", "message_id", "tool_call_id", "name", "input"]
+    },
+    "tool_result": {
+      "type": "object",
+      "description": "Output is capped at 20 000 characters (§2).",
+      "properties": {
+        "type": { "const": "tool_result" },
+        "tool_call_id": { "type": "string" },
+        "output": { "type": "string" },
+        "is_error": { "type": "boolean" },
+        "background": { "type": "boolean", "description": "Present and true on the immediate launch ack of an Agent/Task call the runner started in the background (issue #756): the subagent is still running, so this result does not end it — its subagent_end does. Absent on a foreground call's own report." },
+        "denial": {
+          "type": "object",
+          "description": "Present when the output reads as a sandbox or colony refusal. Guidance only: it never changes is_error and never grants anything (§2).",
+          "properties": {
+            "class": { "type": "string", "enum": ["egress", "read_only", "tool_disabled", "policy"] },
+            "hint": { "type": "string" }
+          },
+          "required": ["class", "hint"]
+        }
+      },
+      "required": ["type", "tool_call_id", "output", "is_error"]
+    },
+    "question": {
+      "type": "object",
+      "description": "A question that needs the user's answer; UIs always add a free-text 'Other' choice (§2 rules).",
+      "properties": {
+        "type": { "const": "question" },
+        "question_id": { "type": "string" },
+        "message_id": { "type": ["string", "null"] },
+        "risk": { "type": "string", "enum": ["read_only", "workspace_write", "publish_affecting", "credential_adjacent"], "description": "The question's risk class (§2 rules), assigned by the runner and enforced by the Mothership's autonomy judge (§6.2b). Absent means workspace_write; a value outside the vocabulary is treated as above every ceiling and is never answered automatically." },
+        "kind": { "type": "string", "description": "What raised the question, when the agent did not ask of its own accord. exec_policy: an exec-policy ask, whose tool call is blocked in flight on the answer, so the Mothership never suspends the colony while it waits (issue #759). Absent means the agent asked; an unknown value is treated as absent." },
+        "blocking": { "type": "boolean", "description": "True when a tool call is blocked in flight on the answer inside a live agent, which a resumed transcript cannot finish: a subagent's AskUserQuestion, an ACP permission request, an exec-policy ask. The Mothership does not suspend the colony while such a question waits, up to a two-hour cap (issue #759). Absent or false means the lead agent asked and its turn resumes cleanly with the answer as the next message." },
+        "questions": { "type": "array", "items": { "$ref": "#/$defs/question_shape" }, "description": "Forwarded as the model produced them, so it can be empty or hold fewer options than the §2 rules ask the model for." }
+      },
+      "required": ["type", "question_id", "questions"]
+    },
+    "question_answered": {
+      "type": "object",
+      "description": "The answer travelled browser ⇄ harness ⇄ agentd ⇄ runner (§2).",
+      "properties": {
+        "type": { "const": "question_answered" },
+        "question_id": { "type": "string" },
+        "answers": { "type": "object" },
+        "response": { "type": ["string", "null"] }
+      },
+      "required": ["type", "question_id", "answers"]
+    },
+    "agent_session": {
+      "type": "object",
+      "description": "The runner's own agent-session id (§2), announced as soon as the runner knows its conversation id — the same once-only rule model_changed follows for the model. The mothership keeps it on the colony's record; a colony suspended while it waited on its user boots again with COLONIZER_RESUME_SESSION set to it and the runner continues that conversation. A runner that cannot resume a session never emits this.",
+      "properties": {
+        "type": { "const": "agent_session" },
+        "session_id": { "type": "string", "description": "Opaque to the harness: whatever id the agent's own session store answers to." }
+      },
+      "required": ["type", "session_id"]
+    },
+    "turn_end": {
+      "type": "object",
+      "description": "A turn ended. cost_usd and model_usage are cumulative for the colony; cost_usd sums only the Claude models in model_usage (keys without a '/') (§2 rules).",
+      "properties": {
+        "type": { "const": "turn_end" },
+        "is_error": { "type": "boolean" },
+        "result": { "type": ["string", "null"] },
+        "cost_usd": { "type": ["number", "null"] },
+        "duration_ms": { "type": ["number", "null"] },
+        "model_usage": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/model_tokens" }
+        }
+      },
+      "required": ["type", "is_error", "result", "cost_usd", "duration_ms"]
+    },
+    "log": {
+      "type": "object",
+      "description": "Runner diagnostics (stderr, routing warnings, pre-flight scan findings); agentd uses the same shape for its own (§3).",
+      "properties": {
+        "type": { "const": "log" },
+        "level": { "enum": ["info", "warn", "error"] },
+        "message": { "type": "string" },
+        "source": { "type": "string", "description": "Which part of the runner wrote it; \"model_router\" lines are also written to the mothership's own log (#983)." }
+      },
+      "required": ["type", "level", "message"]
+    },
+    "model_changed": {
+      "type": "object",
+      "description": "The orchestrator model the session runs on (§2): announced when Claude Code's init first names it, and after each set_model command the SDK accepted. The conversation, VM and worktree stay the same across a switch.",
+      "properties": {
+        "type": { "const": "model_changed" },
+        "model": { "type": "string", "description": "The model in effect from the next response on, as requested and set (the CLI may substitute one unreported; the next init corrects it): a Claude alias or ID, or <provider>/<model>." },
+        "previous": { "type": ["string", "null"], "description": "The model announced before this one; null on the first announcement of the run." }
+      },
+      "required": ["type", "model", "previous"]
+    },
+    "memory_proposal": {
+      "type": "object",
+      "description": "A proposed shared-memory note (§6.2); nothing is written inside the colony. Absent scope means repo; absent tags mean none. The mothership refuses any proposal whose origin is not the orchestrator's, before it touches a store.",
+      "properties": {
+        "type": { "const": "memory_proposal" },
+        "scope": { "enum": ["repo", "org", "global"], "default": "repo" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." },
+        "kind": { "enum": ["plan", "decision", "file_change", "failure", "architecture", "convention"], "default": "convention", "description": "What the entry is (issue #766)." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure the colony is that the entry holds beyond its task (issue #766). A global proposal is promoted to fleet-wide memory only when colonies in two distinct repositories propose it at 0.8 or more; absent counts as 0." }
+      },
+      "required": ["type", "title", "content"]
+    },
+    "vault_proposal": {
+      "type": "object",
+      "description": "A note proposed for the operator vault (issue #777; docs/colonies.md, Operator vault); nothing is written inside the colony or the vault. The mothership refuses a subagent's proposal and one from a colony no vault folder reaches, scrubs the secret values it knows, checks the caps and queues the rest for the operator, who accepts it into the vault's inbox folder as a new file or rejects it.",
+      "properties": {
+        "type": { "const": "vault_proposal" },
+        "path": { "type": "string", "description": "Where under the vault's inbox folder: relative, at most 4 parts and 200 characters, no .. or dot-named parts; .md is added when missing." },
+        "title": { "type": "string", "description": "One line, at most 200 characters." },
+        "body": { "type": "string", "description": "The note in Markdown, at most 64 KiB." },
+        "reason": { "type": "string", "description": "Why the operator should keep it, at most 2000 characters." }
+      },
+      "required": ["type", "path", "title", "body", "reason"]
+    },
+    "finding": {
+      "type": "object",
+      "description": "A confirmed problem outside the task (§6.6); the mothership files it as a GitHub issue because the token never enters the colony.",
+      "properties": {
+        "type": { "const": "finding" },
+        "title": { "type": "string", "description": "One line, at most 200 characters." },
+        "body": { "type": "string", "description": "Markdown, at most 20 000 characters." },
+        "evidence": { "type": "string", "description": "How the finding was confirmed, at most 5 000 characters; a finding without evidence is not filed." }
+      },
+      "required": ["type", "title", "body", "evidence"]
+    },
+    "github_action": {
+      "type": "object",
+      "description": "A GitHub write a colony of a GitHub-needing loop asks the host to make (issue #778, PR actions issue #807, docs/protocol.md §6.12). The token never enters a colony: the guest proposes, the host validates against bounded fields, caps per colony and makes the `gh` call on the colony's own repository (the guest only supplies issue or pull request numbers).",
+      "properties": {
+        "type": { "const": "github_action" },
+        "tool": { "enum": ["issue_label", "issue_comment", "issue_close_duplicate", "pr_comment", "pr_label", "pr_merge"], "description": "The action asked for. issue_* carry `issue`; pr_* carry `pr`; only pr_merge carries `head_sha` and `reason` and is refused unless the operator enabled merges for the repository." },
+        "issue": { "type": "integer", "minimum": 1, "description": "The issue number, on the colony's own repository, for the issue_* tools." },
+        "pr": { "type": "integer", "minimum": 1, "description": "The pull request number, on the colony's own repository, for the pr_* tools." },
+        "labels": { "type": "array", "items": { "type": "string" }, "description": "issue_label or pr_label: the labels to add, at most ten." },
+        "body": { "type": "string", "description": "issue_comment or pr_comment: the comment, up to 20 000 characters. issue_close_duplicate's comment is the host's." },
+        "duplicate_of": { "type": "integer", "minimum": 1, "description": "issue_close_duplicate: the issue this one duplicates." },
+        "head_sha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$", "description": "pr_merge: the full 40-character hex SHA of the head commit the colony reviewed (either case; the host lowercases it); the merge is refused if the pull request has moved on." },
+        "reason": { "type": "string", "description": "pr_merge: one short line, up to 500 characters, saying why the merge is safe now." }
+      },
+      "required": ["type", "tool"]
+    },
+    "jev_ladder": {
+      "type": "object",
+      "description": "Jev compaction's per-chunk decisions for one compaction pass, as shadow telemetry for the harness's visibility-ladder measurement (#475): the harness grades them into the data-dir-wide jev_ladder.jsonl against rereads it observes later. Never a decision input — measurement does not change what compaction keeps or drops. applied=false marks a pass the plugin computed but did not apply (the fallback path); the harness persists nothing for it.",
+      "properties": {
+        "type": { "const": "jev_ladder" },
+        "applied": { "type": "boolean", "description": "Whether the pass actually rewrote the transcript. false: computed but not applied, shadow of a shadow — nothing is measured." },
+        "pre_tokens": { "type": "integer", "description": "Transcript size before the pass." },
+        "post_tokens": { "type": "integer", "description": "Transcript size after the pass." },
+        "trigger": { "type": "string", "description": "What started the pass, e.g. \"auto\" when the context filled." },
+        "decisions": { "type": "array", "items": { "$ref": "#/$defs/jev_ladder_decision" } }
+      },
+      "required": ["type", "applied", "decisions"]
+    },
+    "jev_ladder_decision": {
+      "type": "object",
+      "description": "One chunk's keep/drop decision with the plugin's own relevance scores (docs/protocol.md, Token savings).",
+      "properties": {
+        "tool_call_id": { "type": "string" },
+        "tool": { "type": "string" },
+        "action": { "type": "string", "enum": ["keep", "drop_result", "drop_call"] },
+        "keep_call": { "type": "number", "description": "The plugin's relevance score for the tool call itself, in [0,1]." },
+        "keep_result": { "type": "number", "description": "The plugin's relevance score for the call's result, in [0,1]." }
+      },
+      "required": ["tool_call_id", "tool", "action", "keep_call", "keep_result"]
+    },
+    "loop_next": {
+      "type": "object",
+      "description": "A self-paced loop's colony names when the loop's next run should start (docs/protocol.md, Loops). The runner offers the loop_next tool only when the mothership sets COLONIZER_LOOP_SELF_PACED, and only to the orchestrator. The mothership acts on it only for a colony a loop launched; a fixed-schedule loop only notes it.",
+      "properties": {
+        "type": { "const": "loop_next" },
+        "delay_minutes": { "type": "integer", "minimum": 15, "maximum": 1440, "description": "Minutes from now; the runner clamps the model's value to 15-1440, and the mothership clamps it again." },
+        "reason": { "type": "string", "description": "Why then, one short line. Absent reads as empty." }
+      },
+      "required": ["type", "delay_minutes"]
+    },
+    "path_policy": {
+      "type": "object",
+      "description": "The agent reached for a path the path policy masks or write-protects (docs/path-policy.md, issue #647), reported by the runner from the same bind list the guest booted with. Reporting only: the mount enforced before this ran, so the event carries no decision and no permission field, and the mothership's only act is to log it — one colony log line and one activity entry per distinct (access, path).",
+      "properties": {
+        "type": { "const": "path_policy" },
+        "access": { "type": "string", "enum": ["read", "write"], "description": "What the agent was trying to do. A read is reported only for a masked path; reads of protected paths are allowed." },
+        "policy": { "type": "string", "enum": ["masked", "protected"], "description": "Which side of the policy the path falls on." },
+        "path": { "type": "string", "description": "The workspace-relative path, as the runner resolved it through any symlink." },
+        "tool": { "type": "string", "description": "The tool that made the attempt (\"Read\", an ACP `fs/write_text_file`). Absent on a runner from before the field existed." }
+      },
+      "required": ["type", "access", "policy", "path"]
+    },
+    "boundary": {
+      "type": "object",
+      "description": "A control refused something (issue #609, docs/boundaries.md \"Watchdog signatures\"): a typed record the mothership's watchdog reads for its control-defeat signature. Reporting only: the control decided before the event exists, so it carries no permission and grants nothing. The runner emits the kinds it sees (an exec-policy deny or a refused ask asked again, an egress or read-only refusal on a tool result), agentd the path-policy binds it could not apply, and the mothership appends the rest to the colony's events itself (a path-policy attempt, a publish-time rewrite or refusal), stamped with the system origin.",
+      "properties": {
+        "type": { "const": "boundary" },
+        "kind": {
+          "type": "string",
+          "enum": ["exec_policy_deny", "exec_policy_ask_bypass_attempt", "path_policy_denied", "path_policy_unbound", "egress_denied", "publish_rewrite_refused", "sandbox_denied"],
+          "description": "exec_policy_deny: an exec-policy rule denied a command, or a person refused its ask. exec_policy_ask_bypass_attempt: a rule whose ask was refused earlier in the run asked again. path_policy_denied: the agent reached for a masked or protected path. path_policy_unbound: agentd could not bind a path-policy path (a nested checkout, a symlink, no bind mounts off Linux). egress_denied: the network refused a host. publish_rewrite_refused: publish replaced a .git the colony had changed, or refused a tree that moved after its approval. sandbox_denied: a read-only mount refused a write. An unknown kind is forwarded and ignored by the watchdog."
+        },
+        "control": { "type": "string", "description": "The control or rule that decided: exec_policy:<rule id>, egress, path_policy:masked|protected, read_only_mount, gitfile, publish_grant. At most 80 characters." },
+        "detail": { "type": "string", "description": "What was refused, on one line, redacted and capped at 300 characters." },
+        "target": { "type": "string", "description": "The host or path the control refused, when the reporter can name one: what the watchdog matches a later successful tool call against. Absent otherwise." },
+        "at": { "type": "string", "format": "date-time", "description": "When the control decided (RFC 3339), on the reporter's clock. The watchdog times its windows on the host's own receive time, not this." }
+      },
+      "required": ["type", "kind", "control", "detail", "at"]
+    },
+    "loop_stop": {
+      "type": "object",
+      "description": "A loop's colony ends its loop: the mothership disables the loop and records ended_reason \"stopped by the colony: <reason>\" (docs/protocol.md, Loops). Orchestrator only; acted on only for a colony a loop launched.",
+      "properties": {
+        "type": { "const": "loop_stop" },
+        "reason": { "type": "string", "description": "Why the loop should stop. Absent reads as empty." }
+      },
+      "required": ["type"]
+    },
+    "subagent_end": {
+      "type": "object",
+      "description": "A background subagent ended (issue #756). The Claude Code SDK reports a backgrounded Agent/Task call's real outcome as a task_notification, keyed by the tool call that started it, which the runner relays here so the harness can tell a subagent a suspension or restart interrupted from one that finished on its own. The subagent's launch is an ordinary tool_result carrying background: true. completed and failed end the call; stopped does not — the harness reports it like the pinned runner's \"stopped by the user\", because that is what a resumed orchestrator sees when its subagents are gone.",
+      "properties": {
+        "type": { "const": "subagent_end" },
+        "tool_call_id": { "type": "string", "description": "The Agent/Task tool call that started the subagent." },
+        "status": { "type": "string", "enum": ["completed", "failed", "stopped"], "description": "How it ended, as the SDK's task_notification reported it." }
+      },
+      "required": ["type", "tool_call_id", "status"]
+    }
+  }
+}

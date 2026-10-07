@@ -1,0 +1,77 @@
+{
+  "database": {"advisory-count": 812, "last-commit": "0f4b1e2", "last-updated": "2026-09-29T08:00:00Z"},
+  "lockfile": {"dependency-count": 214},
+  "settings": {"target_arch": [], "target_os": [], "severity": null, "ignore": [], "informational_warnings": ["unmaintained", "unsound", "yanked"]},
+  "vulnerabilities": {
+    "found": true,
+    "count": 2,
+    "list": [
+      {
+        "advisory": {
+          "id": "RUSTSEC-2026-0012",
+          "package": "hyper",
+          "title": "Request smuggling through malformed chunked encoding",
+          "description": "hyper accepts ...",
+          "date": "2026-03-02",
+          "aliases": ["GHSA-aaaa-bbbb-cccc", "CVE-2026-1111"],
+          "related": [],
+          "collection": "crates",
+          "categories": ["http"],
+          "keywords": [],
+          "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          "informational": null,
+          "references": [],
+          "source": null,
+          "url": "https://github.com/hyperium/hyper/security/advisories/GHSA-aaaa-bbbb-cccc",
+          "withdrawn": null,
+          "license": "CC0-1.0"
+        },
+        "versions": {"patched": ["^0.14.32", ">=1.4.2"], "unaffected": ["<0.14.0"]},
+        "affected": null,
+        "package": {"name": "hyper", "version": "0.14.28", "source": "registry+https://github.com/rust-lang/crates.io-index", "checksum": "abc", "dependencies": [], "replace": null}
+      },
+      {
+        "advisory": {
+          "id": "RUSTSEC-2026-0044",
+          "package": "ancient-tls",
+          "title": "Certificate chain not validated",
+          "description": "...",
+          "date": "2026-05-10",
+          "aliases": [],
+          "related": [],
+          "collection": "crates",
+          "categories": ["crypto-failure"],
+          "keywords": [],
+          "cvss": null,
+          "informational": null,
+          "references": [],
+          "source": null,
+          "url": null,
+          "withdrawn": null,
+          "license": "CC0-1.0"
+        },
+        "versions": {"patched": [], "unaffected": []},
+        "affected": null,
+        "package": {"name": "ancient-tls", "version": "0.3.1", "source": "registry+https://github.com/rust-lang/crates.io-index", "checksum": "def", "dependencies": [], "replace": null}
+      }
+    ]
+  },
+  "warnings": {
+    "unmaintained": [
+      {
+        "kind": "unmaintained",
+        "package": {"name": "atty", "version": "0.2.14", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+        "advisory": {"id": "RUSTSEC-2024-0375", "package": "atty", "title": "`atty` is unmaintained", "informational": "unmaintained", "url": null, "cvss": null},
+        "versions": {"patched": [], "unaffected": []}
+      }
+    ],
+    "yanked": [
+      {
+        "kind": "yanked",
+        "package": {"name": "futures-util", "version": "0.3.29", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+        "advisory": null,
+        "versions": null
+      }
+    ]
+  }
+}

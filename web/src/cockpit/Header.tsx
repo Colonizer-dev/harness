@@ -1,0 +1,196 @@
+// The cockpit's top bar: the workspaces that have colonies running right now, as avatars at the
+// right, each a filter, then the model switcher's chip (issue #1051) and the notifications bell (the
+// inbox) at the far right. (Issues are handed
+// off from Colonize: the sidebar's button, the dashboard's, or ⌘K.) Navigation and the rest of the
+// state live in the sidebar and the views; the bar only speaks up otherwise when something is wrong
+// (the mothership unreachable, the live feed down), plus the one persistent marker: remote access
+// being on (issue #535).
+import { useEffect, useRef, useState, type ReactElement } from "react";
+
+import { Avatar } from "../components/Avatar";
+import { IconNetwork } from "../components/icons";
+import { sameOrg } from "../components/ui";
+import type { OrgEntry } from "../orgs";
+import type { LiveConnection } from "../liveStream";
+import type { AutonomyStatus } from "../types";
+import { NotificationsBell, type InboxActions } from "./NotificationsBell";
+
+export type { CockpitView } from "./NavRail";
+
+/** How many consecutive judge failures before the bar says so (issue #875): a couple of blips are noise. */
+export const JUDGE_ALERT_AFTER = 3;
+
+/** The judge chip's tooltip: the run length and the last error, when there is one. */
+export function judgeAlertTitle(judge: AutonomyStatus): string {
+  const error = judge.last_error;
+  const detail = error
+    ? [error.kind.replace(/_/g, " "), error.status !== null ? `HTTP ${error.status}` : null, error.message || null].filter(Boolean).join(" · ")
+    : null;
+  return `The autonomy judge has failed ${judge.consecutive_failures} times in a row${detail ? `: ${detail}` : ""}`;
+}
+
+/** The workspaces with colonies running, busiest first — the avatars the bar shows. The chosen
+ *  workspace stays in the row even when it goes quiet, so its filter can always be cleared. */
+export function runningOrgs(orgs: readonly OrgEntry[], selectedOrg: string | null): OrgEntry[] {
+  return orgs
+    .filter((o) => o.live > 0 || sameOrg(o.org, selectedOrg))
+    .sort((a, b) => b.live - a.live || a.org.localeCompare(b.org));
+}
+
+export function Header(props: {
+  /** Workspaces only: orgEntries() has already dropped the undecided and the switched-off. */
+  orgs: OrgEntry[];
+  selectedOrg: string | null;
+  /** null is every workspace; a second click on the chosen avatar clears the filter. */
+  onSelectOrg: (org: string | null) => void;
+  /** Keyed lowercase (needCountByOrg). */
+  needByOrg: Record<string, number>;
+  /** The status poll is failing: said aloud, since nothing else on the bar would show it. */
+  statusError: boolean;
+  /** The realtime feed's connection; only a dropped feed is shown. */
+  connection?: LiveConnection;
+  /** The inbox behind the bell; absent, the bar has no bell (static tests). */
+  inbox?: InboxActions;
+  /** The signed-in GitHub user, shown as the one avatar at the right with its menu. */
+  user?: UserMenuProps;
+  /** The remote-access switch (issue #535): while on, a small persistent badge. */
+  remoteOn?: boolean;
+  /** Opens Settings → Remote access from the badge. */
+  onOpenRemote: () => void;
+  /** The autonomy judge's health (issue #875); a chip appears once it has failed repeatedly. */
+  judge?: AutonomyStatus | null;
+  /** Opens Settings → Your cockpit: the address to bookmark (issue #867). */
+  onOpenCockpit?: () => void;
+  /** The model switcher's chip and popover (issue #1051); absent in static tests, which have no API. */
+  models?: ReactElement;
+}): ReactElement {
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit, models } =
+    props;
+
+  return (
+    <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)] max-sm:gap-2 max-sm:px-4">
+      {statusError && (
+        <span role="status" className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-body-sm text-err">
+          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-err" />
+          <span className="truncate">Mothership unreachable</span>
+        </span>
+      )}
+      {!statusError && connection !== undefined && connection !== "open" && (
+        <span role="status" title="the live feed dropped — polls cover until it reconnects" className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-body-sm text-faint">
+          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-faint" />
+          <span className="truncate">reconnecting…</span>
+        </span>
+      )}
+      {/* One compact badge for the tunnel being up, quieter than the fault spans beside it: a
+          shorter label at phone width, and the full name kept for screen readers either way. */}
+      {remoteOn && (
+        <button
+          type="button"
+          onClick={onOpenRemote}
+          aria-label="Remote access on"
+          title="Remote access is on — open its settings"
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-ok-soft px-2 py-0.5 text-small font-medium text-ok"
+        >
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-ok" />
+          <span className="max-sm:hidden">Remote access ON</span>
+          <span className="sm:hidden">Remote</span>
+        </button>
+      )}
+      {/* The autonomy judge failing over and over (issue #875): a quiet warning, with the last
+          error in the tooltip, so a judge that has silently stopped answering is still visible. */}
+      {judge && judge.consecutive_failures >= JUDGE_ALERT_AFTER && (
+        <span
+          role="status"
+          title={judgeAlertTitle(judge)}
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-warn-soft px-2 py-0.5 text-small font-medium text-warn"
+        >
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />
+          Judge failing
+        </span>
+      )}
+
+      <div className="min-w-0 flex-1" />
+
+      {models}
+
+      {onOpenCockpit && (
+        <button
+          type="button"
+          onClick={onOpenCockpit}
+          aria-label="Your cockpit address"
+          title="Your cockpit address — bookmark it on any device"
+          className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-muted transition-colors hover:bg-panel-2 hover:text-text"
+        >
+          <IconNetwork size={17} />
+        </button>
+      )}
+      {inbox && <NotificationsBell {...inbox} />}
+      {user && <UserMenu {...user} />}
+    </header>
+  );
+}
+
+export interface UserMenuProps {
+  /** GitHub login; null when GitHub is not connected. */
+  login: string | null;
+  name?: string | null;
+  avatarUrl?: string | null;
+  onOpenSettings: () => void;
+  onOpenSecrets: () => void;
+}
+
+/** The one avatar at the right of the bar: the signed-in GitHub user, with a small menu. */
+export function UserMenu({ login, name, avatarUrl, onOpenSettings, onOpenSecrets }: UserMenuProps): ReactElement {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === "Escape" : !root.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", close);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", close);
+    };
+  }, [open]);
+  const label = login ? `${name || login} (@${login})` : "GitHub not connected";
+  const item = "flex w-full cursor-pointer items-center gap-2 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-body-sm text-text hover:bg-panel-2";
+  return (
+    <div ref={root} className="relative shrink-0">
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`account · ${label}`}
+        title={label}
+        onClick={() => setOpen((o) => !o)}
+        className="grid h-8 w-8 cursor-pointer place-items-center rounded-full border-0 bg-transparent p-0 transition-shadow hover:shadow-[0_0_0_2px_var(--bg),0_0_0_3.5px_var(--border-strong)]"
+      >
+        <Avatar name={login ?? "?"} src={avatarUrl ?? (login ? `https://github.com/${login}.png?size=64` : undefined)} size={28} rounded="full" />
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 top-10 z-50 w-56 rounded-xl border border-border-strong bg-panel p-1.5 shadow-[0_16px_48px_rgb(0_0_0/0.35)]">
+          <div className="border-b border-border px-2.5 pb-2 pt-1">
+            <div className="truncate text-body-sm font-medium text-text">{name || login || "Not signed in"}</div>
+            {login && <div className="truncate text-small text-faint">@{login} · GitHub</div>}
+          </div>
+          <div className="pt-1">
+            <button type="button" role="menuitem" className={item} onClick={() => (setOpen(false), onOpenSettings())}>
+              Settings
+            </button>
+            <button type="button" role="menuitem" className={item} onClick={() => (setOpen(false), onOpenSecrets())}>
+              Secrets
+            </button>
+            {login && (
+              <a role="menuitem" className={item + " no-underline"} href={`https://github.com/${login}`} target="_blank" rel="noreferrer">
+                GitHub profile ↗
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

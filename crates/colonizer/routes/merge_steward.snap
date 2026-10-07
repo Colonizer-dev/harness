@@ -1,0 +1,2 @@
+/api/merge-steward                                   GET    unauth=401    token=owner            activity=-
+/api/merge-steward/merge                             POST   unauth=401    token=owner            activity=publish.merge_steward

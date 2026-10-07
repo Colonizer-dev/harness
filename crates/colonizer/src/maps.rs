@@ -1,0 +1,1798 @@
+//! Architecture maps: a repository drawn as an archify architecture diagram (github.com/tt-a1i/archify,
+//! MIT, vendored as the `archify` skillset), which the cockpit renders as a nest — components as
+//! chambers, boundaries as mounds, connections as tunnels — with each live colony's ants in the
+//! chambers whose source files it is touching.
+//!
+//! A map is made by a colony, not by the mothership: `POST /api/maps/{owner}/{repo}` launches an
+//! ordinary colony (origin `map`, autopilot on) whose instructions are to write a source-backed
+//! architecture JSON to `/harness/out/architecture.json` and leave the repository untouched, so its
+//! publish ends in `no_changes` and no pull request is opened. When it ends, the mothership reads the
+//! file from the colony's out directory, keeps only the fields the cockpit draws after checking them,
+//! and stores it at `<data>/maps/<owner>/<repo>.json`. `GET /api/maps/{owner}/{repo}` returns it,
+//! picking up a finished mapping colony's file the first time it is asked if publish did not.
+//!
+//! `GET /api/touched` is where the ants go: for every live colony, the paths its worktree has changed
+//! (uncommitted, plus committed against its base), read host-side the way the sibling brief does.
+
+use crate::{
+    ApiResult, App, Shared, client_error, github,
+    sessions::{self, Session, SessionStatus},
+    stale,
+    util::{exec_within, valid_repo, write_atomic},
+};
+use anyhow::{Context, Result, bail};
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
+};
+use chrono::Utc;
+use serde_json::{Map, Value, json};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::{Path as FsPath, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+/// The `origin` a mapping colony carries, so its end is recognised and the UI can label it.
+pub const MAP_ORIGIN: &str = "map";
+/// The `origin` prefix a map-refresh loop's colonies carry (`loops.rs`), naming the loop.
+pub const LOOP_ORIGIN: &str = "map:loop:";
+/// The skillset a mapping colony loads, whatever its org has switched on.
+pub const ARCHIFY_SKILLSET: &str = "archify";
+
+/// The origin of a map-refresh loop's colonies: `map:loop:<loop id>`.
+pub fn loop_origin(loop_id: &str) -> String {
+    format!("{LOOP_ORIGIN}{loop_id}")
+}
+
+/// The map-refresh loop a colony belongs to, from its origin. A hand-launched mapping colony has
+/// none.
+fn refresh_loop_of(origin: &str) -> Option<&str> {
+    origin.strip_prefix(LOOP_ORIGIN).filter(|id| !id.is_empty())
+}
+
+/// Whether a colony was launched to draw a map: by hand from the Map view (`map`) or by a refresh
+/// loop (`map:loop:<id>`). Either way it ingests, idles out and reads as `mapping` the same.
+pub fn is_map_origin(origin: &str) -> bool {
+    origin == MAP_ORIGIN || origin.starts_with(LOOP_ORIGIN)
+}
+
+/// The agent settings a mapping colony runs with, over the install's own: one agent (no
+/// delegation), medium effort, on Sonnet for every tier. Mapping is read-heavy and bounded, so the
+/// orchestrator-plus-subagents shape only adds hand-off waits.
+pub const MAP_AGENT_SETTINGS: &[(&str, &str)] = &[
+    ("delegate", "off"),
+    ("effort", "medium"),
+    ("model", "claude-sonnet-5"),
+    ("model_low", ""),
+    ("model_high", ""),
+];
+/// Where the colony writes the map, as the colony sees it.
+const OUT_FILE: &str = "architecture.json";
+
+const MAX_BYTES: usize = 1024 * 1024;
+const MAX_COMPONENTS: usize = 120;
+const MAX_CONNECTIONS: usize = 400;
+const MAX_BOUNDARIES: usize = 40;
+const MAX_SOURCES: usize = 40;
+const MAX_TEXT: usize = 160;
+/// Files reported per colony: enough to place its ants, bounded so one colony rewriting a vendored
+/// tree cannot bloat every poll.
+const MAX_TOUCHED: usize = 200;
+const TOUCHED_TTL: Duration = Duration::from_secs(4);
+const PROBE_LIMIT: Duration = Duration::from_secs(2);
+
+/// The instructions a mapping colony runs on. The repository must stay untouched: the publish that
+/// follows then finds nothing to push and the colony ends in `no_changes`, with no pull request.
+pub fn map_prompt(repo: &str) -> String {
+    format!(
+        "Map the architecture of {repo} as it is at HEAD, using the archify skill (loaded from \
+/opt/colonizer/plugins/{ARCHIFY_SKILLSET}/skills/archify — read its SKILL.md first and follow its fast \
+authoring path for the `architecture` type).\n\n\
+Requirements:\n\
+1. Read the repository before drawing: entry points, the main modules and services, storage, external \
+systems and how they call each other. Every component except `external` ones must carry `sources` — \
+repository-relative FILE paths (archify checks each is a file at the pinned revision; a directory \
+fails), with a line where it helps: the files where that component really lives, its entry point \
+first. 6 to 20 components, grouped with `boundaries` where the code has real seams. Set \
+`meta.repository` to the repository URL and the revision `git -C /workspace rev-parse HEAD` prints.\n\
+2. Write the diagram JSON to /harness/out/{OUT_FILE} and nowhere else. Validate it with \
+`node /opt/colonizer/plugins/{ARCHIFY_SKILLSET}/skills/archify/bin/archify.mjs validate architecture \
+/harness/out/{OUT_FILE} --repo-root /workspace --json` and fix what it reports until it passes.\n\
+3. Do not change anything in /workspace: no edits, no new files, no commits, and do not write \
+/harness/out/pr.md. Keep any scratch files under /tmp. This colony's output is the map alone; a \
+change to the repository would open a pull request nobody asked for.\n\
+4. Do not ask questions; make reasonable calls and note them in the diagram's `cards`."
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+fn text(v: &Value, field: &str) -> Option<String> {
+    let s = v.get(field)?.as_str()?.trim();
+    (!s.is_empty()).then(|| s.chars().take(MAX_TEXT).collect())
+}
+
+fn pair(v: &Value, field: &str) -> Option<[f64; 2]> {
+    let a = v.get(field)?.as_array()?;
+    match (a.first()?.as_f64(), a.get(1)?.as_f64(), a.len()) {
+        (Some(x), Some(y), 2) if x.is_finite() && y.is_finite() && x.abs() < 1e5 && y.abs() < 1e5 => Some([x, y]),
+        _ => None,
+    }
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+}
+
+/// A repository-relative source path: no absolute path, no `..`, no backslashes, no control characters.
+pub fn valid_source_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 400
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|part| part != "..")
+}
+
+/// Checks an archify architecture document and keeps only what the cockpit draws. Refuses anything
+/// that is not an architecture diagram, has duplicate or malformed ids, dangling connections or
+/// boundary members, unsafe source paths, or no source-backed component at all.
+pub fn validate_map(doc: &Value) -> Result<Value> {
+    if doc.get("diagram_type").and_then(Value::as_str) != Some("architecture") {
+        bail!("not an archify architecture diagram (diagram_type must be \"architecture\")");
+    }
+    let components = doc
+        .get("components")
+        .and_then(Value::as_array)
+        .context("the diagram has no components")?;
+    if components.is_empty() || components.len() > MAX_COMPONENTS {
+        bail!("the diagram must have between 1 and {MAX_COMPONENTS} components");
+    }
+    let mut ids = HashSet::new();
+    let mut out_components = Vec::new();
+    let mut sourced = 0;
+    for c in components {
+        let id = c.get("id").and_then(Value::as_str).unwrap_or_default();
+        if !valid_id(id) {
+            bail!("component id {id:?} is not a plain id");
+        }
+        if !ids.insert(id.to_string()) {
+            bail!("component id {id:?} appears twice");
+        }
+        let pos = pair(c, "pos").with_context(|| format!("component {id:?} has no valid pos"))?;
+        let size = pair(c, "size").unwrap_or([160.0, 60.0]);
+        if size[0] <= 0.0 || size[1] <= 0.0 {
+            bail!("component {id:?} has a non-positive size");
+        }
+        let mut sources = Vec::new();
+        if let Some(list) = c.get("sources").and_then(Value::as_array) {
+            for s in list.iter().take(MAX_SOURCES) {
+                let path = s
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_start_matches("./");
+                if !valid_source_path(path) {
+                    bail!("component {id:?} has an unsafe source path {path:?}");
+                }
+                let mut src = Map::new();
+                src.insert("path".into(), json!(path));
+                if let Some(line) = s.get("line").and_then(Value::as_u64).filter(|l| *l > 0) {
+                    src.insert("line".into(), json!(line));
+                }
+                if let Some(label) = text(s, "label") {
+                    src.insert("label".into(), json!(label));
+                }
+                sources.push(Value::Object(src));
+            }
+        }
+        if !sources.is_empty() {
+            sourced += 1;
+        }
+        let mut comp = Map::new();
+        comp.insert("id".into(), json!(id));
+        comp.insert("type".into(), json!(text(c, "type").unwrap_or_else(|| "backend".into())));
+        comp.insert("label".into(), json!(text(c, "label").unwrap_or_else(|| id.to_string())));
+        if let Some(sub) = text(c, "sublabel") {
+            comp.insert("sublabel".into(), json!(sub));
+        }
+        comp.insert("pos".into(), json!(pos));
+        comp.insert("size".into(), json!(size));
+        comp.insert("sources".into(), Value::Array(sources));
+        out_components.push(Value::Object(comp));
+    }
+    if sourced == 0 {
+        bail!("no component carries sources: the map must be source-backed");
+    }
+    let mut out_connections = Vec::new();
+    for c in doc
+        .get("connections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_CONNECTIONS)
+    {
+        let from = c.get("from").and_then(Value::as_str).unwrap_or_default();
+        let to = c.get("to").and_then(Value::as_str).unwrap_or_default();
+        if !ids.contains(from) || !ids.contains(to) {
+            bail!("connection {from:?} → {to:?} names a component that does not exist");
+        }
+        let mut conn = Map::new();
+        conn.insert("from".into(), json!(from));
+        conn.insert("to".into(), json!(to));
+        if let Some(label) = text(c, "label") {
+            conn.insert("label".into(), json!(label));
+        }
+        out_connections.push(Value::Object(conn));
+    }
+    let mut out_boundaries = Vec::new();
+    for b in doc
+        .get("boundaries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_BOUNDARIES)
+    {
+        let wraps: Vec<&str> = b
+            .get("wraps")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if wraps.is_empty() {
+            continue;
+        }
+        if let Some(missing) = wraps.iter().find(|id| !ids.contains(**id)) {
+            bail!("boundary wraps {missing:?}, which is not a component");
+        }
+        out_boundaries.push(json!({"label": text(b, "label").unwrap_or_default(), "wraps": wraps}));
+    }
+    let meta = doc.get("meta").cloned().unwrap_or(Value::Null);
+    Ok(json!({
+        "title": text(&meta, "title").unwrap_or_else(|| "Architecture".into()),
+        "subtitle": text(&meta, "subtitle"),
+        "components": out_components,
+        "connections": out_connections,
+        "boundaries": out_boundaries,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+/// `<data>/maps/<owner>/<repo>.json`; `None` for anything that is not a plain `owner/repo`.
+pub fn map_path(data_dir: &FsPath, repo: &str) -> Option<PathBuf> {
+    if !valid_repo(repo) {
+        return None;
+    }
+    let (owner, name) = repo.split_once('/')?;
+    Some(data_dir.join("maps").join(owner).join(format!("{name}.json")))
+}
+
+pub(crate) fn read_stored(app: &App, repo: &str) -> Option<Value> {
+    let path = map_path(&app.cfg.data_dir, repo)?;
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Reads a mapping colony's `architecture.json` from its out directory, checks it and stores it.
+pub async fn ingest(app: &App, s: &Session) -> Result<Value> {
+    let file = app.session_dir(&s.id).join("out").join(OUT_FILE);
+    let bytes = tokio::fs::read(&file)
+        .await
+        .with_context(|| format!("the mapping colony wrote no {OUT_FILE}"))?;
+    if bytes.len() > MAX_BYTES {
+        bail!("{OUT_FILE} is larger than 1 MB");
+    }
+    let doc: Value = serde_json::from_slice(&bytes).with_context(|| format!("{OUT_FILE} is not JSON"))?;
+    let map = validate_map(&doc)?;
+    let revision = match s.git_admin_dir.as_deref() {
+        Some(admin) => {
+            let mut cmd = app.git(FsPath::new(admin));
+            cmd.arg("--work-tree").arg(&s.worktree).args(["rev-parse", "HEAD"]);
+            exec_within(PROBE_LIMIT, &mut cmd).await.ok().map(|r| r.trim().to_string())
+        }
+        None => None,
+    }
+    .or_else(|| {
+        doc.pointer("/meta/repository/revision")
+            .and_then(Value::as_str)
+            .filter(|r| r.len() <= 64 && r.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(String::from)
+    });
+    let stored = json!({
+        "repo": s.repo,
+        "revision": revision,
+        "generated_at": Utc::now().to_rfc3339(),
+        "session": s.id,
+        "map": map,
+    });
+    let path = map_path(&app.cfg.data_dir, &s.repo).context("invalid repository name")?;
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    write_atomic(&path, &serde_json::to_vec_pretty(&stored)?).await?;
+    Ok(stored)
+}
+
+/// Called when a colony's publish finishes, whatever the outcome: a mapping colony's map is picked
+/// up, and a map-refresh loop's colony reports back to its loop and to the activity log.
+pub async fn on_colony_end(app: &App, s: &Session) {
+    if !s.origin.as_deref().is_some_and(is_map_origin) {
+        return;
+    }
+    let outcome = ingest(app, s).await;
+    match &outcome {
+        Ok(_) => {
+            app.session_log(&s.id, "info", format!("architecture map stored for {}", s.repo))
+                .await
+        }
+        Err(e) => app.session_log(&s.id, "error", format!("no architecture map: {e:#}")).await,
+    }
+    note_refresh_outcome(app, s, &outcome).await;
+}
+
+/// A map-refresh loop's colony finished its refresh: the loop's note says how it went and History
+/// records `map.refresh`. A hand-drawn map (origin `map`) has no loop to tell. Called wherever a
+/// mapping colony ends — usually the idle path below, since a mapping colony publishes nothing.
+async fn note_refresh_outcome(app: &App, s: &Session, outcome: &Result<Value>) {
+    let Some(loop_id) = s.origin.as_deref().and_then(refresh_loop_of) else {
+        return;
+    };
+    let mut entry = crate::activity::Entry::new("map.refresh", "colony").colony(s);
+    match outcome {
+        Ok(_) => crate::loops::note_refresh(app, loop_id, &format!("map of {} refreshed", s.repo)).await,
+        Err(e) => {
+            // The stored map is untouched — ingest only writes a valid map — so the old one stands.
+            crate::loops::note_refresh(app, loop_id, &format!("map refresh of {} failed: {e:#}", s.repo)).await;
+            entry.detail = Some(format!("{e:#}"));
+        }
+    }
+    crate::activity::record(app, entry).await;
+}
+
+/// How long a mapping colony may sit idle without a valid map before it gives its slot back: the
+/// watchdog's default stall window, so an agent that ended a turn mid-fix still gets the time a stalled
+/// colony gets.
+pub(crate) const MAP_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A mapping colony's turn ended (it went idle). Its product is the map, not a pull request, so an idle
+/// mapping colony holding a parallel slot is waste: a valid `architecture.json` is stored and the
+/// colony stops itself; without one it may still be fixing the file, so it is left idle and, if it is
+/// still idle with no valid map after [`MAP_IDLE_GRACE`], stopped with an error that says so.
+pub async fn on_idle(app: Shared, id: String) {
+    on_idle_after(app, id, MAP_IDLE_GRACE).await;
+}
+
+pub(crate) async fn on_idle_after(app: Shared, id: String, grace: std::time::Duration) {
+    let Some(s) = app.session(&id).await else { return };
+    if !s.origin.as_deref().is_some_and(is_map_origin) || s.status != SessionStatus::Idle {
+        return;
+    }
+    if finish_if_drawn(&app, &s).await {
+        return;
+    }
+    // Not drawn yet: give the colony the grace window, then take the slot back if nothing changed.
+    let idle_since = s.updated_at;
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        let Some(s) = app.session(&id).await else { return };
+        if s.status != SessionStatus::Idle || s.updated_at != idle_since {
+            return;
+        }
+        if finish_if_drawn(&app, &s).await {
+            return;
+        }
+        let stopped = crate::lifecycle::stop_colony(
+            &app,
+            &s,
+            |x| x.status == SessionStatus::Idle && x.updated_at == idle_since,
+            "mapping colony went idle without a valid map".into(),
+            format!(
+                "mapping colony went idle without a valid map for {} minutes; stopping it to free its slot (Redraw map starts a new one)",
+                grace.as_secs() / 60
+            ),
+        )
+        .await;
+        if stopped {
+            // A refresh loop's usual failure: the old map stands and the loop's note says why.
+            let outcome = Err(anyhow::anyhow!("went idle without a valid architecture.json"));
+            note_refresh_outcome(&app, &s, &outcome).await;
+        }
+    });
+}
+
+/// Stores the colony's map and stops it when its `architecture.json` is valid. Returns whether it did.
+async fn finish_if_drawn(app: &Shared, s: &Session) -> bool {
+    let outcome = ingest(app, s).await;
+    if outcome.is_err() {
+        return false;
+    }
+    // The usual end of a mapping colony — nothing is published, so the refresh loop hears here.
+    note_refresh_outcome(app, s, &outcome).await;
+    let idle_since = s.updated_at;
+    crate::lifecycle::finish_colony(
+        app,
+        s,
+        |x| x.status == SessionStatus::Idle && x.updated_at == idle_since,
+        format!(
+            "map drawn; stopping the mapping colony (architecture map stored for {})",
+            s.repo
+        ),
+    )
+    .await
+}
+
+fn is_ended(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::NoChanges
+            | SessionStatus::PrOpened
+            | SessionStatus::Merged
+            | SessionStatus::Closed
+            | SessionStatus::Stopped
+            | SessionStatus::Failed
+            | SessionStatus::Idle
+    )
+}
+
+// ---------------------------------------------------------------------------
+// HTTP
+// ---------------------------------------------------------------------------
+
+fn mapping_json(s: &Session) -> Value {
+    json!({"id": s.id, "status": s.status, "created_at": s.created_at})
+}
+
+/// `GET /api/maps/{owner}/{repo}`: `{map, mapping}` — the stored map (or `null`) and the newest
+/// mapping colony for the repository (or `null`), so the cockpit can show one in progress.
+pub async fn get(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let sessions = app.sessions.read().await.clone();
+    let newest = sessions
+        .iter()
+        .filter(|s| s.repo == repo && s.origin.as_deref().is_some_and(is_map_origin))
+        .max_by_key(|s| s.created_at)
+        .cloned();
+    let mut stored = read_stored(&app, &repo);
+    // A mapping colony that ended newer than the stored map — or with none stored — is picked up here,
+    // for the colonies publish never reached (stopped, idle, or ended before a restart).
+    if let Some(s) = newest.as_ref().filter(|s| is_ended(s.status)) {
+        let newer = stored
+            .as_ref()
+            .and_then(|m| m.get("session").and_then(Value::as_str))
+            .is_none_or(|id| id != s.id);
+        if newer && let Ok(fresh) = ingest(&app, s).await {
+            stored = Some(fresh);
+        }
+    }
+    Ok(Json(json!({
+        "repo": repo,
+        "map": stored,
+        "mapping": newest.as_ref().map(mapping_json),
+    })))
+}
+
+/// Most paths the file tree sends; a larger repository is cut off with `truncated: true`.
+const TREE_LIMIT: usize = 20_000;
+
+/// `GET /api/maps/{owner}/{repo}/files`: every file path in the repository at the stored map's
+/// revision (else the mothership's cached HEAD), read with `git ls-tree` from the local bare clone —
+/// no GitHub call. The cockpit draws it as an explorer tree with the chosen component's files marked.
+pub async fn files(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let revision = read_stored(&app, &repo)
+        .and_then(|m| m.get("revision").and_then(Value::as_str).map(str::to_string))
+        .filter(|r| r.chars().all(|c| c.is_ascii_hexdigit()) && !r.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+    let bare = app.bare_repo(&repo);
+    if !bare.is_dir() {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "this repository has no local clone yet; launch a colony on it first",
+        ));
+    }
+    let mut cmd = app.git(&bare);
+    cmd.args(["ls-tree", "-r", "--name-only", "-z", &revision]);
+    let out = exec_within(Duration::from_secs(10), &mut cmd)
+        .await
+        .map_err(|e| client_error(StatusCode::NOT_FOUND, &format!("could not list {repo} at {revision}: {e:#}")))?;
+    let mut paths: Vec<&str> = out.split('\0').filter(|p| !p.is_empty()).collect();
+    let truncated = paths.len() > TREE_LIMIT;
+    paths.truncate(TREE_LIMIT);
+    Ok(Json(
+        json!({"repo": repo, "revision": revision, "paths": paths, "truncated": truncated}),
+    ))
+}
+
+/// Launches a mapping colony for `repo` through the ordinary admission path, with the same prompt
+/// and skillset whoever asks: the Map view by hand (`origin` `map`) or a map-refresh loop
+/// (`map:loop:<id>`, `loops.rs`). Returns the mapping colony already running for the repository, if
+/// there is one, rather than a duplicate.
+pub async fn launch(app: &Shared, repo: &str, origin: &str) -> Result<Session, crate::AppError> {
+    if crate::plugins::resolve(&app.cfg, ARCHIFY_SKILLSET).is_err() {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "the archify skillset is not installed with this app (scripts/fetch-vendor.sh stages it)",
+        ));
+    }
+    if let Some(s) = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .find(|s| s.repo == repo && s.origin.as_deref().is_some_and(is_map_origin) && !is_ended(s.status))
+        .cloned()
+    {
+        return Ok(s);
+    }
+    let body = json!({
+        "repo": repo,
+        "title": "Map the architecture",
+        "instructions": map_prompt(repo),
+        "autopilot": true,
+        "allow_duplicate": true,
+        "origin": origin,
+    });
+    let new_session: sessions::NewSession =
+        serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
+    let Json(session) = sessions::create(State(app.clone()), None, Json(new_session)).await?;
+    Ok(session)
+}
+
+/// `POST /api/maps/{owner}/{repo}`: launches a mapping colony through the ordinary admission path.
+pub async fn create(State(app): State<Shared>, Path((owner, name)): Path<(String, String)>) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let session = launch(&app, &repo, MAP_ORIGIN).await?;
+    Ok(Json(json!({"repo": repo, "mapping": mapping_json(&session)})))
+}
+
+/// Adds the archify skillset to a mapping colony's plugin list (the comma-separated `plugins`).
+pub fn with_archify(plugins: &str) -> String {
+    let mut names = crate::plugins::parse_list(plugins);
+    if !names.iter().any(|n| n == ARCHIFY_SKILLSET) {
+        names.push(ARCHIFY_SKILLSET.to_string());
+    }
+    names.join(",")
+}
+
+// ---------------------------------------------------------------------------
+// Touched files
+// ---------------------------------------------------------------------------
+
+/// Every path from `git diff --name-only -z` output.
+pub fn name_only_paths(out: &str) -> Vec<String> {
+    out.split('\0')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Merges the uncommitted and committed change sets, first seen first, capped.
+pub fn merge_touched(uncommitted: Vec<String>, committed: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    uncommitted
+        .into_iter()
+        .chain(committed)
+        .filter(|p| valid_source_path(p) && seen.insert(p.clone()))
+        .take(MAX_TOUCHED)
+        .collect()
+}
+
+async fn touched_for(app: &App, s: &Session) -> Option<Vec<String>> {
+    let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let base = base_ref(app, admin, s).await;
+    let mut status = app.git(admin);
+    status
+        .arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"]);
+    let uncommitted = exec_within(PROBE_LIMIT, &mut status)
+        .await
+        .map(|out| github::porcelain_paths(&out))
+        .unwrap_or_default();
+    let mut diff = app.git(admin);
+    diff.arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["diff", "--name-only", "-z", &format!("{base}...HEAD")]);
+    let committed = exec_within(PROBE_LIMIT, &mut diff)
+        .await
+        .map(|out| name_only_paths(&out))
+        .unwrap_or_default();
+    Some(merge_touched(uncommitted, committed))
+}
+
+static TOUCHED_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+
+/// How much of a colony's `events.jsonl` the reading probe looks at: the tail only.
+const READ_TAIL_BYTES: u64 = 256 * 1024;
+/// How many of a colony's most recent tool calls count as "reading now".
+const READ_RECENT_CALLS: usize = 40;
+/// Most paths reported per colony.
+const READ_LIMIT: usize = 20;
+
+/// The repository-relative paths a colony's most recent tool calls looked at, newest first and
+/// deduplicated: `file_path`/`notebook_path`/`path` inputs (Read, Edit, Write, Glob, Grep, …) and
+/// `/workspace/…` tokens in Bash commands. Paths outside the worktree are dropped. Pure over the
+/// parsed event lines, so it is tested without a colony.
+pub(crate) fn recent_reads(events: &[Value]) -> Vec<String> {
+    let calls = events
+        .iter()
+        .rev()
+        .filter(|e| e["type"] == "tool_call")
+        .take(READ_RECENT_CALLS);
+    let mut out: Vec<String> = Vec::new();
+    for call in calls {
+        for rel in call_paths(&call["input"]) {
+            if !out.iter().any(|p| p == &rel) {
+                out.push(rel);
+            }
+        }
+    }
+    out.truncate(READ_LIMIT);
+    out
+}
+
+/// The repository-relative paths one tool call's input names, in order, deduplicated.
+fn call_paths(input: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let Some(rel) = workspace_relative(raw) else { return };
+        if !out.iter().any(|p| p == &rel) {
+            out.push(rel);
+        }
+    };
+    for key in ["file_path", "notebook_path", "path"] {
+        if let Some(p) = input[key].as_str() {
+            push(p);
+        }
+    }
+    if let Some(cmd) = input["command"].as_str() {
+        let in_worktree = cmd.contains("/workspace");
+        for token in
+            cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '"' | '\'' | '(' | ')' | '>' | '<' | '='))
+        {
+            let token = token.trim_end_matches([':', ',']);
+            if token.starts_with("/workspace/") {
+                push(token);
+            } else if in_worktree && looks_like_repo_path(token) {
+                // `cd /workspace && grep -n x crates/colonizer/src/…`: relative paths count too.
+                push(token);
+            }
+        }
+    }
+    out
+}
+
+/// Most activity entries a file's detail lists per colony.
+const FILE_ACTIVITY_LIMIT: usize = 15;
+/// Largest diff a file's detail sends per colony; past it the diff is cut and flagged.
+const FILE_DIFF_LIMIT: usize = 200 * 1024;
+/// How long one colony's diff may take before the detail answers without it.
+const FILE_DIFF_TIME: Duration = Duration::from_secs(5);
+
+/// A `?path=` for the file detail: repository-relative, no `..`, no leading `/`, at most 1024
+/// characters. Returns the normalised path (a leading `./` dropped), or `None` when it is refused.
+pub(crate) fn valid_file_query(raw: &str) -> Option<String> {
+    let path = raw.trim();
+    let path = path.strip_prefix("./").unwrap_or(path).trim_end_matches('/');
+    let ok = !path.is_empty()
+        && path.len() <= 1024
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|part| !part.is_empty() && part != ".." && part != ".");
+    ok.then(|| path.to_string())
+}
+
+/// The last path segment, for short summaries.
+fn base_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Counts lines the way a diff does: an empty string is none, a trailing newline adds none.
+fn line_count(text: &str) -> usize {
+    if text.is_empty() { 0 } else { text.lines().count().max(1) }
+}
+
+/// One line saying what a tool call did to `path`: "Read gateway.rs:120-180", "Edit (−3 +7)",
+/// "Grep \"reserve\" in gateway.rs", "Bash: cargo test gateway".
+fn call_summary(tool: &str, input: &Value, path: &str) -> String {
+    let file = base_name(path);
+    let short = |s: &str, n: usize| {
+        let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if s.chars().count() > n {
+            format!("{}…", s.chars().take(n).collect::<String>())
+        } else {
+            s
+        }
+    };
+    match tool {
+        "Read" => match (input["offset"].as_u64(), input["limit"].as_u64()) {
+            (Some(o), Some(l)) => format!("Read {file}:{o}-{}", o + l),
+            (Some(o), None) => format!("Read {file}:{o}-"),
+            _ => format!("Read {file}"),
+        },
+        "Edit" => format!(
+            "Edit (\u{2212}{} +{})",
+            line_count(input["old_string"].as_str().unwrap_or_default()),
+            line_count(input["new_string"].as_str().unwrap_or_default())
+        ),
+        "MultiEdit" => format!("Edit ×{}", input["edits"].as_array().map_or(0, Vec::len)),
+        "Write" => format!(
+            "Write {file} ({} lines)",
+            line_count(input["content"].as_str().unwrap_or_default())
+        ),
+        "NotebookEdit" => format!("Edit notebook {file}"),
+        "Grep" => format!(
+            "Grep \"{}\" in {file}",
+            short(input["pattern"].as_str().unwrap_or_default(), 40)
+        ),
+        "Glob" => format!("Glob {}", short(input["pattern"].as_str().unwrap_or(file), 50)),
+        "Bash" => format!(
+            "Bash: {}",
+            short(
+                input["command"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim_start_matches("cd /workspace && "),
+                70
+            )
+        ),
+        other => format!("{other} {file}"),
+    }
+}
+
+/// A colony's most recent tool calls that name `path`, newest first: `{ts, tool, summary, agent}`,
+/// where `agent` is the subagent (settler) the call ran in, when the event says. Pure over the
+/// parsed event lines, so it is tested without a colony.
+pub(crate) fn file_activity(events: &[Value], path: &str) -> Vec<Value> {
+    events
+        .iter()
+        .rev()
+        .filter(|e| e["type"] == "tool_call")
+        .filter(|e| call_paths(&e["input"]).iter().any(|p| p == path))
+        .take(FILE_ACTIVITY_LIMIT)
+        .map(|e| {
+            let tool = e["name"].as_str().unwrap_or("tool");
+            let agent = e["agent"]["description"].as_str().or_else(|| e["agent"]["name"].as_str());
+            json!({"ts": e["ts"], "tool": tool, "summary": call_summary(tool, &e["input"], path), "agent": agent})
+        })
+        .collect()
+}
+
+/// A diff cut to at most `limit` bytes, on a line boundary; the flag says whether it was cut.
+fn cap_diff(diff: String, limit: usize) -> (String, bool) {
+    if diff.len() <= limit {
+        return (diff, false);
+    }
+    let mut cut = limit;
+    while !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let end = diff[..cut].rfind('\n').map_or(cut, |i| i + 1);
+    (diff[..end].to_string(), true)
+}
+
+/// A unified "new file" diff for an untracked file's text, as `git diff` would print it.
+fn new_file_diff(path: &str, text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The branch a colony's changes are measured against: `origin/<base>` when it is here, else the
+/// local `<base>` — a stacked colony's base is another colony's branch, which has no `origin/` ref
+/// until it is pushed, so the same order `stale::catch_up` merges by — else `origin/HEAD`.
+async fn base_ref(app: &App, admin: &FsPath, s: &Session) -> String {
+    let Some(b) = s.base.as_deref().filter(|b| !b.is_empty()) else {
+        return "origin/HEAD".to_string();
+    };
+    let origin = format!("origin/{b}");
+    if stale::ref_exists(app, admin, &origin).await {
+        origin
+    } else if stale::ref_exists(app, admin, b).await {
+        b.to_string()
+    } else {
+        origin
+    }
+}
+
+/// The commit a colony's work started from: the merge-base of its base branch and HEAD, read
+/// through the admin dir (never the worktree's `.git`, which the VM controls). `None` on any failure.
+async fn merge_base(app: &App, s: &Session) -> Option<String> {
+    let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let base = base_ref(app, admin, s).await;
+    let mut cmd = app.git(admin);
+    cmd.arg("--work-tree").arg(&s.worktree).args(["merge-base", &base, "HEAD"]);
+    let from = exec_within(FILE_DIFF_TIME, &mut cmd).await.ok()?.trim().to_string();
+    (!from.is_empty() && from.chars().all(|c| c.is_ascii_hexdigit())).then_some(from)
+}
+
+/// What a colony changed in `path` since it branched: committed and uncommitted edits together
+/// (`git diff <merge-base>` against the work tree), or the whole file for a new untracked one.
+/// `None` when it has not changed the file, or the probe fails or times out.
+async fn file_diff(app: &App, s: &Session, path: &str) -> Option<String> {
+    let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let from = merge_base(app, s).await?;
+    let mut diff = app.git(admin);
+    diff.arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["diff", "--no-color", "--no-ext-diff", &from, "--", path]);
+    let out = exec_within(FILE_DIFF_TIME, &mut diff).await.ok()?;
+    if !out.trim().is_empty() {
+        return Some(out);
+    }
+    // An untracked file has no diff; show it as new. Only a regular file: the work tree is
+    // colony-written, so a symlink there must not read a host file into the cockpit.
+    let mut status = app.git(admin);
+    status
+        .arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["status", "--porcelain", "--untracked-files=all", "--", path]);
+    let porcelain = exec_within(FILE_DIFF_TIME, &mut status).await.ok()?;
+    if !porcelain.starts_with("??") {
+        return None;
+    }
+    let full = FsPath::new(&s.worktree).join(path);
+    let meta = tokio::fs::symlink_metadata(&full).await.ok()?;
+    if !meta.is_file() || meta.len() as usize > FILE_DIFF_LIMIT {
+        return None;
+    }
+    let text = tokio::fs::read_to_string(&full).await.ok()?;
+    Some(new_file_diff(path, &text))
+}
+
+/// The untracked (`??`) paths in a `git status --porcelain -z` output. An untracked entry is
+/// never a rename, so there is no second field to skip like [`github::porcelain_paths`] does.
+pub(crate) fn untracked_paths(out: &str) -> Vec<String> {
+    out.split('\0')
+        .filter(|entry| entry.starts_with("?? "))
+        .filter_map(|entry| entry.get(3..))
+        .filter(|path| !path.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// The path of a symmetric `diff --git a/X b/X` header — the seed for sections that carry no
+/// `+++` header of their own (binary files, pure renames).
+fn symmetric_header_path(header: &str) -> Option<&str> {
+    let (a, b) = header.split_once(" b/")?;
+    (a.strip_prefix("a/")? == b).then_some(b)
+}
+
+/// Per-file line counts for a whole-colony diff, read off the unified diff text: the `+`/`-` lines
+/// inside each `diff --git` section's hunks. File headers (`+++`/`---`/`rename to`) count only
+/// before the section's first `@@`; headerless sections fall back to the symmetric header and count
+/// 0/0. A truncated diff's stat covers exactly what is shown. Pure, so it is tested without a colony.
+pub(crate) fn diff_stat(diff: &str) -> Vec<(String, usize, usize)> {
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            files.push((symmetric_header_path(header).unwrap_or_default().to_string(), 0, 0));
+            in_hunk = false;
+            continue;
+        }
+        let Some((path, added, removed)) = files.last_mut() else {
+            continue;
+        };
+        if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk {
+            // Inside a hunk, "+"/"-" are content: a "+++ b/x" line here is an added line.
+            *added += usize::from(line.starts_with('+'));
+            *removed += usize::from(line.starts_with('-'));
+        } else if let Some(rest) = line.strip_prefix("+++ b/") {
+            *path = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("--- a/") {
+            if path.is_empty() {
+                *path = rest.to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("rename to ") {
+            *path = rest.to_string();
+        }
+    }
+    files.retain(|(path, ..)| !path.is_empty());
+    files
+}
+
+/// `GET /api/sessions/{id}/diff`: everything the colony changed against the merge-base with its
+/// base branch — committed and uncommitted tracked edits plus synthesised untracked new files —
+/// as one unified diff with per-file counts, capped at [`FILE_DIFF_LIMIT`]. Needs a worktree, not
+/// a live colony; a stopped one keeps its worktree, a never-booted or cleaned-up one has nothing.
+pub async fn session_diff(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let Some(admin) = s
+        .git_admin_dir
+        .as_deref()
+        .filter(|_| !s.cleaned_up && FsPath::new(&s.worktree).is_dir())
+    else {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this colony has no worktree to diff: it never booted, or it was cleaned up",
+        ));
+    };
+    let admin = FsPath::new(admin);
+    let Some(from) = merge_base(&app, &s).await else {
+        let base = base_ref(&app, admin, &s).await;
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            &format!("could not find where this colony branched from {base}"),
+        ));
+    };
+    let mut cmd = app.git(admin);
+    cmd.arg("--work-tree")
+        .arg(&s.worktree)
+        // Files past the cap diff as "Binary files … differ" instead of streaming into memory.
+        .args(["-c", &format!("core.bigFileThreshold={FILE_DIFF_LIMIT}")])
+        .args(["diff", "--no-color", "--no-ext-diff", "--no-textconv", &from]);
+    let mut diff = exec_within(FILE_DIFF_TIME, &mut cmd)
+        .await
+        .map_err(|e| client_error(StatusCode::CONFLICT, &format!("the colony's diff failed: {e:#}")))?;
+    // Untracked files have no diff against the merge-base; each is synthesised as new. The
+    // worktree is colony-written, so nothing outside it may be read: `read_regular_file` opens
+    // with O_NOFOLLOW and reads through that one handle, and the canonicalize check is defence
+    // in depth against a directory component swapped for a symlink.
+    let mut status = app.git(admin);
+    status
+        .arg("--work-tree")
+        .arg(&s.worktree)
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"]);
+    let untracked = exec_within(FILE_DIFF_TIME, &mut status)
+        .await
+        .map(|out| untracked_paths(&out))
+        .unwrap_or_default();
+    let untracked_cut = untracked.len() > MAX_TOUCHED;
+    let root = tokio::fs::canonicalize(&s.worktree).await.ok();
+    for path in untracked.iter().take(MAX_TOUCHED) {
+        let full = FsPath::new(&s.worktree).join(path);
+        let inside = match (&root, tokio::fs::canonicalize(&full).await) {
+            (Some(root), Ok(real)) => real.starts_with(root),
+            _ => false,
+        };
+        if !inside {
+            continue;
+        }
+        let Ok(text) = github::read_regular_file(&full, FILE_DIFF_LIMIT as u64) else {
+            continue; // a symlink, a FIFO, a binary or an oversized file is no readable diff
+        };
+        diff.push_str(&new_file_diff(path, &text));
+    }
+    let (diff, truncated) = cap_diff(diff, FILE_DIFF_LIMIT);
+    let truncated = truncated || untracked_cut;
+    let files = diff_stat(&diff);
+    let (added, removed) = files.iter().fold((0, 0), |(a, r), (_, fa, fr)| (a + fa, r + fr));
+    Ok(Json(json!({
+        "id": s.id,
+        "repo": s.repo,
+        "base": s.base,
+        "files": files
+            .iter()
+            .map(|(path, added, removed)| json!({"path": path, "added": added, "removed": removed}))
+            .collect::<Vec<_>>(),
+        "added": added,
+        "removed": removed,
+        "diff": diff,
+        "truncated": truncated,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileQuery {
+    path: String,
+}
+
+/// `GET /api/maps/{owner}/{repo}/file?path=…`: every live colony on the repository that is changing
+/// or reading `path` — its recent tool calls on the file and its diff of it — for the map's
+/// explorer pane. Live, so not cached.
+pub async fn file(
+    State(app): State<Shared>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(query): Query<FileQuery>,
+) -> ApiResult<Value> {
+    let repo = format!("{owner}/{name}");
+    if !valid_repo(&repo) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
+    }
+    let Some(path) = valid_file_query(&query.path) else {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "path must be repository-relative, without '..'",
+        ));
+    };
+    let live: Vec<Session> = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.repo == repo && (s.status.is_live() || s.status == SessionStatus::Publishing))
+        .cloned()
+        .collect();
+    let probes = live.iter().map(|s| {
+        let app = app.clone();
+        let path = path.clone();
+        async move {
+            let events = crate::diagnosis::tail_events_within(app.store(), &s.id, "events.jsonl", READ_TAIL_BYTES).await;
+            let activity = file_activity(&events, &path);
+            let diff = file_diff(&app, s, &path).await;
+            (s, activity, diff)
+        }
+    });
+    let mut colonies = Vec::new();
+    for (s, activity, diff) in futures_util::future::join_all(probes).await {
+        if activity.is_empty() && diff.is_none() {
+            continue;
+        }
+        let (diff, truncated) = match diff {
+            Some(d) => {
+                let (d, cut) = cap_diff(d, FILE_DIFF_LIMIT);
+                (Some(d), cut)
+            }
+            None => (None, false),
+        };
+        colonies.push(json!({
+            "id": s.id,
+            "title": if s.issue_title.is_empty() { "open session" } else { s.issue_title.as_str() },
+            "issue": s.issue,
+            "status": s.status.as_str(),
+            "mode": if diff.is_some() { "changing" } else { "reading" },
+            "activity": activity,
+            "diff": diff,
+            "diff_truncated": truncated,
+        }));
+    }
+    Ok(Json(json!({"repo": repo, "path": path, "colonies": colonies})))
+}
+
+/// A relative token shaped like a repository path: at least one `/`, path characters only, not a
+/// flag, a URL or a glob.
+fn looks_like_repo_path(token: &str) -> bool {
+    token.contains('/')
+        && !token.starts_with('-')
+        && !token.starts_with('/')
+        && !token.contains("://")
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '+'))
+}
+
+/// `/workspace/crates/x.rs` → `crates/x.rs`; relative paths pass through; anything outside the
+/// worktree (or the worktree root itself) is `None`.
+fn workspace_relative(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let rel = if let Some(rest) = raw.strip_prefix("/workspace/") {
+        rest
+    } else if raw.starts_with('/') || raw.starts_with('~') {
+        return None;
+    } else {
+        raw.strip_prefix("./").unwrap_or(raw)
+    };
+    let rel = rel.trim_end_matches('/');
+    if rel.is_empty() || rel == "." || rel.contains("..") || rel.contains('*') {
+        return None;
+    }
+    Some(rel.to_string())
+}
+
+/// `GET /api/touched`: `{sessions: {id: [path…]}}` for every live colony, cached for a few seconds
+/// so a map open in several tabs does not multiply the git probes.
+pub async fn touched(State(app): State<Shared>) -> Json<Value> {
+    if let Ok(cache) = TOUCHED_CACHE.lock()
+        && let Some((at, value)) = cache.as_ref()
+        && at.elapsed() < TOUCHED_TTL
+    {
+        return Json(value.clone());
+    }
+    let live: Vec<Session> = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status.is_live() || s.status == SessionStatus::Publishing)
+        .cloned()
+        .collect();
+    let probes = live.iter().map(|s| {
+        let app = app.clone();
+        async move { (s.id.clone(), touched_for(&app, s).await) }
+    });
+    let mut by_id = BTreeMap::new();
+    for (id, files) in futures_util::future::join_all(probes).await {
+        if let Some(files) = files.filter(|f| !f.is_empty()) {
+            by_id.insert(id, files);
+        }
+    }
+    // What each live colony has been looking at lately, so a colony that is still exploring (or
+    // blocked) walks the chambers it reads instead of waiting at the surface.
+    let store = app.store();
+    let reads = live.iter().map(|s| async move {
+        let events = crate::diagnosis::tail_events_within(store, &s.id, "events.jsonl", READ_TAIL_BYTES).await;
+        (s.id.clone(), recent_reads(&events))
+    });
+    let mut reading = BTreeMap::new();
+    for (id, paths) in futures_util::future::join_all(reads).await {
+        if !paths.is_empty() {
+            reading.insert(id, paths);
+        }
+    }
+    let value = json!({"sessions": by_id, "reading": reading});
+    if let Ok(mut cache) = TOUCHED_CACHE.lock() {
+        *cache = Some((Instant::now(), value.clone()));
+    }
+    Json(value)
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/maps/{owner}/{name}", routing::get(get).post(create))
+        .route("/api/maps/{owner}/{name}/files", routing::get(files))
+        .route("/api/maps/{owner}/{name}/file", routing::get(file))
+        .route("/api/touched", routing::get(touched))
+        .route("/api/sessions/{id}/diff", routing::get(session_diff))
+}
+
+/// This module's feature descriptor (`features.rs`): its routes, scoped-token rule, activity rules
+/// and kinds, read through `features::ALL` by `server` and `api_tokens`.
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "maps",
+    routes,
+    token_scope: Some(token_scope),
+    activity: ACTIVITY,
+    kinds: &["map.create", "map.refresh"],
+    start_tasks: None,
+};
+
+/// The activity lines this module's writes record. The refresh (`map.refresh`) is written by the
+/// colony itself (`ingest`), not a route, so it is a kind, not a rule.
+const ACTIVITY: &[crate::activity::Rule] = &[crate::activity::rule(
+    "POST",
+    "/api/maps/{owner}/{name}",
+    "map.create",
+    crate::activity::Target::None,
+)];
+
+/// What a scoped token needs for a map route: read scope, then the repository against the token's
+/// limits — outside them the map reads as unknown (404), like an out-of-limits colony. The diff and
+/// `touched` routes are not map routes and stay the owner's (or the colony read's, `api_tokens`).
+fn token_scope<'a>(method: &axum::http::Method, segs: &[&'a str]) -> Option<crate::api_tokens::Need<'a>> {
+    match segs {
+        ["api", "maps", owner, name] if *method == axum::http::Method::GET && !owner.is_empty() && !name.is_empty() => {
+            Some(crate::api_tokens::Need::Map { owner, name })
+        }
+        ["api", "maps", owner, name, "files" | "file"]
+            if *method == axum::http::Method::GET && !owner.is_empty() && !name.is_empty() =>
+        {
+            Some(crate::api_tokens::Need::Map { owner, name })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn idle_mapping_colony(root: &FsPath, out: Option<&[u8]>) -> Shared {
+        let app = crate::tests::test_app(root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Idle);
+        s.id = "m1".into();
+        s.origin = Some(MAP_ORIGIN.into());
+        s.sandbox = "sandbox-m1".into();
+        app.sessions.write().await.push(s);
+        let dir = app.session_dir("m1").join("out");
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(bytes) = out {
+            std::fs::write(dir.join(OUT_FILE), bytes).unwrap();
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn an_idle_mapping_colony_with_a_valid_map_stores_it_and_stops() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-idle-ok-{}", crate::util::short_id()));
+        let app = idle_mapping_colony(&root, Some(&serde_json::to_vec(&doc()).unwrap())).await;
+        on_idle_after(app.clone(), "m1".into(), std::time::Duration::from_secs(60)).await;
+        let s = app.session("m1").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped, "done, so it gives its slot back");
+        assert_eq!(s.error, None, "a finished map is not an error");
+        let stored = read_stored(&app, "acme/repo").expect("the map is stored");
+        assert_eq!(stored["session"], "m1");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_mapping_colony_without_a_valid_map_waits_then_stops_with_an_error() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-idle-bad-{}", crate::util::short_id()));
+        let app = idle_mapping_colony(&root, Some(b"{ not json")).await;
+        let grace = std::time::Duration::from_secs(60);
+        on_idle_after(app.clone(), "m1".into(), grace).await;
+        assert_eq!(
+            app.session("m1").await.unwrap().status,
+            SessionStatus::Idle,
+            "it may still be fixing the file"
+        );
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        let s = app.session("m1").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped);
+        assert_eq!(s.error.as_deref(), Some("mapping colony went idle without a valid map"));
+        assert!(read_stored(&app, "acme/repo").is_none(), "nothing invalid is stored");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_mapping_colony_that_resumes_within_the_grace_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-idle-back-{}", crate::util::short_id()));
+        let app = idle_mapping_colony(&root, None).await;
+        let grace = std::time::Duration::from_secs(60);
+        on_idle_after(app.clone(), "m1".into(), grace).await;
+        app.update_session("m1", |x| x.status = SessionStatus::Running).await;
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(app.session("m1").await.unwrap().status, SessionStatus::Running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn doc() -> Value {
+        json!({
+            "schema_version": 1,
+            "diagram_type": "architecture",
+            "meta": {"title": "Demo", "repository": {"revision": "abc123"}},
+            "components": [
+                {"id": "web", "type": "frontend", "label": "Web", "pos": [10, 20], "size": [160, 60], "sources": [{"path": "./web/src", "line": 3}]},
+                {"id": "api", "type": "backend", "label": "API", "pos": [300, 20], "sources": [{"path": "crates/api/src/main.rs"}]},
+                {"id": "gh", "type": "external", "label": "GitHub", "pos": [600, 20]}
+            ],
+            "connections": [{"from": "web", "to": "api", "label": "REST"}, {"from": "api", "to": "gh"}],
+            "boundaries": [{"kind": "region", "label": "app", "wraps": ["web", "api"]}],
+            "cards": [{"title": "dropped"}]
+        })
+    }
+
+    #[test]
+    fn a_valid_diagram_keeps_only_what_the_cockpit_draws() {
+        let map = validate_map(&doc()).unwrap();
+        assert_eq!(map["title"], "Demo");
+        assert_eq!(map["components"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            map["components"][0]["sources"][0]["path"], "web/src",
+            "a leading ./ is dropped"
+        );
+        assert_eq!(
+            map["components"][1]["size"],
+            json!([160.0, 60.0]),
+            "a missing size gets a default"
+        );
+        assert_eq!(map["connections"][0]["label"], "REST");
+        assert_eq!(map["boundaries"][0]["wraps"], json!(["web", "api"]));
+        assert!(map.get("cards").is_none(), "fields the cockpit does not draw are not stored");
+    }
+
+    #[test]
+    fn broken_diagrams_are_refused_with_a_reason() {
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut d = doc();
+            f(&mut d);
+            validate_map(&d).unwrap_err().to_string()
+        };
+        assert!(with(&|d| d["diagram_type"] = json!("workflow")).contains("architecture"));
+        assert!(with(&|d| d["components"][1]["id"] = json!("web")).contains("twice"));
+        assert!(with(&|d| d["components"][0]["id"] = json!("a b")).contains("plain id"));
+        assert!(with(&|d| d["connections"][0]["to"] = json!("nope")).contains("does not exist"));
+        assert!(with(&|d| d["boundaries"][0]["wraps"] = json!(["ghost"])).contains("not a component"));
+        assert!(with(&|d| d["components"][0]["sources"][0]["path"] = json!("../etc/passwd")).contains("unsafe"));
+        assert!(with(&|d| d["components"][0]["sources"][0]["path"] = json!("/etc/passwd")).contains("unsafe"));
+        assert!(with(&|d| d["components"][0]["pos"] = json!([1])).contains("pos"));
+        assert!(
+            with(&|d| {
+                d["components"][0]["sources"] = json!([]);
+                d["components"][1]["sources"] = json!([]);
+            })
+            .contains("source-backed")
+        );
+    }
+
+    #[test]
+    fn maps_live_under_the_data_dir_per_repository_and_nowhere_else() {
+        let data = FsPath::new("/data");
+        assert_eq!(map_path(data, "acme/web").unwrap(), PathBuf::from("/data/maps/acme/web.json"));
+        assert!(map_path(data, "../x").is_none());
+        assert!(map_path(data, "acme/../../x").is_none());
+        assert!(map_path(data, "acme").is_none());
+    }
+
+    #[test]
+    fn touched_files_merge_uncommitted_first_without_duplicates_or_unsafe_paths() {
+        assert_eq!(name_only_paths("a.rs\0b/c.ts\0\0"), ["a.rs", "b/c.ts"]);
+        assert_eq!(
+            merge_touched(
+                vec!["a.rs".into(), "b.rs".into()],
+                vec!["b.rs".into(), "c.rs".into(), "../x".into()]
+            ),
+            ["a.rs", "b.rs", "c.rs"]
+        );
+        let many: Vec<String> = (0..500).map(|i| format!("f{i}.rs")).collect();
+        assert_eq!(merge_touched(many, vec![]).len(), MAX_TOUCHED);
+    }
+
+    #[test]
+    fn recent_reads_are_workspace_paths_newest_first_without_duplicates() {
+        let events: Vec<Value> = [
+            json!({"type": "tool_call", "name": "Read", "input": {"file_path": "/workspace/crates/colonizer/src/mesh.rs"}}),
+            json!({"type": "tool_result", "content": "ignored"}),
+            json!({"type": "tool_call", "name": "Bash", "input": {"command": "sed -n 1,40p /workspace/web/src/App.tsx; cat /opt/colonizer/x.md"}}),
+            json!({"type": "tool_call", "name": "Grep", "input": {"pattern": "fn", "path": "/workspace/crates/colonizer/src"}}),
+            json!({"type": "tool_call", "name": "Read", "input": {"file_path": "/workspace/crates/colonizer/src/mesh.rs"}}),
+            json!({"type": "tool_call", "name": "Glob", "input": {"pattern": "**/*.rs", "path": "/workspace"}}),
+            json!({"type": "tool_call", "name": "Bash", "input": {"command": "cd /workspace && grep -n route crates/colonizer/src/main.rs -A3"}}),
+        ]
+        .into();
+        assert_eq!(
+            recent_reads(&events),
+            vec![
+                "crates/colonizer/src/main.rs",
+                "crates/colonizer/src/mesh.rs",
+                "crates/colonizer/src",
+                "web/src/App.tsx"
+            ],
+            "newest first, deduplicated, the worktree root and paths outside it dropped"
+        );
+        assert!(recent_reads(&[]).is_empty());
+    }
+
+    #[test]
+    fn file_queries_are_repository_relative_and_never_climb_out() {
+        assert_eq!(
+            valid_file_query("crates/x/src/gateway.rs").as_deref(),
+            Some("crates/x/src/gateway.rs")
+        );
+        assert_eq!(valid_file_query("./web/src/App.tsx").as_deref(), Some("web/src/App.tsx"));
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../secret",
+            "a/../../b",
+            "a//b",
+            "a/./b",
+            "a\\b",
+            "a\u{0}b",
+        ] {
+            assert_eq!(valid_file_query(bad), None, "{bad:?}");
+        }
+        assert_eq!(valid_file_query(&"a/".repeat(600)), None, "longer than 1024 characters");
+    }
+
+    #[test]
+    fn file_activity_lists_the_calls_on_that_file_newest_first_with_their_settler() {
+        let call = |ts: &str, name: &str, input: Value| json!({"type": "tool_call", "ts": ts, "name": name, "input": input, "agent": {"description": "Hunt gateway injection", "name": "general-purpose"}});
+        let events = vec![
+            call(
+                "t1",
+                "Read",
+                json!({"file_path": "/workspace/crates/c/src/gateway.rs", "offset": 120, "limit": 60}),
+            ),
+            call(
+                "t2",
+                "Grep",
+                json!({"pattern": "reserve", "path": "/workspace/crates/c/src/gateway.rs"}),
+            ),
+            call("t3", "Read", json!({"file_path": "/workspace/crates/c/src/other.rs"})),
+            call(
+                "t4",
+                "Edit",
+                json!({"file_path": "/workspace/crates/c/src/gateway.rs", "old_string": "a\nb\nc", "new_string": "a\nb\nc\nd\ne\nf\ng"}),
+            ),
+            call(
+                "t5",
+                "Bash",
+                json!({"command": "cd /workspace && cargo test -p c crates/c/src/gateway.rs"}),
+            ),
+            json!({"type": "tool_result", "ts": "t6"}),
+        ];
+        let got = file_activity(&events, "crates/c/src/gateway.rs");
+        let summaries: Vec<&str> = got.iter().map(|a| a["summary"].as_str().unwrap()).collect();
+        assert_eq!(
+            summaries,
+            vec![
+                "Bash: cargo test -p c crates/c/src/gateway.rs",
+                "Edit (\u{2212}3 +7)",
+                "Grep \"reserve\" in gateway.rs",
+                "Read gateway.rs:120-180",
+            ]
+        );
+        assert_eq!(got[0]["ts"], "t5");
+        assert_eq!(got[0]["agent"], "Hunt gateway injection");
+        assert!(file_activity(&events, "crates/c/src/none.rs").is_empty());
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_on_a_line_and_flagged() {
+        let diff = "+line one\n+line two\n+line three\n".to_string();
+        assert_eq!(cap_diff(diff.clone(), 1000), (diff.clone(), false));
+        let (cut, flagged) = cap_diff(diff, 15);
+        assert!(flagged);
+        assert_eq!(cut, "+line one\n");
+        assert!(new_file_diff("a/b.rs", "x\ny\n").ends_with("@@ -0,0 +1,2 @@\n+x\n+y\n"));
+    }
+
+    #[test]
+    fn a_mapping_colony_always_gets_archify_once() {
+        assert_eq!(with_archify(""), "archify");
+        assert_eq!(with_archify("ecc, superpowers"), "ecc,superpowers,archify");
+        assert_eq!(with_archify("archify,ecc"), "archify,ecc");
+    }
+
+    #[test]
+    fn loop_origins_are_map_origins_and_name_their_loop() {
+        assert!(is_map_origin(MAP_ORIGIN));
+        assert!(is_map_origin(&loop_origin("loop_a")));
+        assert_eq!(refresh_loop_of(&loop_origin("loop_a")), Some("loop_a"));
+        assert!(!is_map_origin("loop:loop_a"));
+        assert!(!is_map_origin("map:loopish"), "the prefix must be whole");
+        assert_eq!(refresh_loop_of(&loop_origin("")), None, "an empty loop id is no loop");
+        assert_eq!(refresh_loop_of(MAP_ORIGIN), None, "a hand-drawn map has no loop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_loop_hears_how_each_repository_went() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-refresh-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/loops.json"),
+            json!([{
+                "id": "loop_a", "name": "Freshen", "org": "acme", "repo": "acme/*",
+                "prompt": "", "cadence": {"every": "every_days", "days": 14, "hour": 3, "minute": 0},
+                "kind": "map", "autopilot": true, "enabled": true,
+                "created_at": "2026-09-01T00:00:00Z"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let app = crate::tests::test_app(&root);
+        assert_eq!(app.loops.get("loop_a").await.unwrap().kind, crate::loops::LoopKind::Map);
+
+        // A drawn map: the loop's note says so, and History records the refresh.
+        let mut run = crate::sessions::tests::colony("acme", SessionStatus::NoChanges);
+        run.id = "m1".into();
+        run.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(run);
+        let out = app.session_dir("m1").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), serde_json::to_vec(&doc()).unwrap()).unwrap();
+        on_colony_end(&app, &app.session("m1").await.unwrap()).await;
+        assert_eq!(
+            app.loops.get("loop_a").await.unwrap().last_note.as_deref(),
+            Some("map of acme/repo refreshed")
+        );
+
+        // No drawn map: the note says why, and the old map stands.
+        let mut broken = crate::sessions::tests::colony("acme", SessionStatus::NoChanges);
+        broken.id = "m2".into();
+        broken.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(broken);
+        let out = app.session_dir("m2").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), b"{ not json").unwrap();
+        on_colony_end(&app, &app.session("m2").await.unwrap()).await;
+        let note = app.loops.get("loop_a").await.unwrap().last_note.unwrap();
+        assert!(note.starts_with("map refresh of acme/repo failed"), "{note}");
+        assert!(read_stored(&app, "acme/repo").is_some(), "the old map stands");
+
+        // The usual success — going idle with a valid map drawn, nothing published — reports too.
+        let mut idled = crate::sessions::tests::colony("acme", SessionStatus::Idle);
+        idled.id = "m3".into();
+        idled.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(idled);
+        let out = app.session_dir("m3").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), serde_json::to_vec(&doc()).unwrap()).unwrap();
+        on_idle_after(app.clone(), "m3".into(), std::time::Duration::from_secs(60)).await;
+        assert_eq!(
+            app.session("m3").await.unwrap().status,
+            SessionStatus::Stopped,
+            "the colony stops itself"
+        );
+        assert_eq!(
+            app.loops.get("loop_a").await.unwrap().last_note.as_deref(),
+            Some("map of acme/repo refreshed")
+        );
+
+        // And the usual failure — idle past the grace with still no valid map.
+        let mut stalled = crate::sessions::tests::colony("acme", SessionStatus::Idle);
+        stalled.id = "m4".into();
+        stalled.origin = Some(loop_origin("loop_a"));
+        app.sessions.write().await.push(stalled);
+        let out = app.session_dir("m4").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join(OUT_FILE), b"{ not json").unwrap();
+        let grace = std::time::Duration::from_secs(60);
+        on_idle_after(app.clone(), "m4".into(), grace).await;
+        tokio::time::sleep(grace + std::time::Duration::from_secs(1)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(app.session("m4").await.unwrap().status, SessionStatus::Stopped);
+        let note = app.loops.get("loop_a").await.unwrap().last_note.unwrap();
+        assert!(note.starts_with("map refresh of acme/repo failed"), "{note}");
+
+        let activity = std::fs::read_to_string(app.cfg.data_dir.join("activity.jsonl")).unwrap();
+        assert_eq!(activity.lines().filter(|l| l.contains("\"kind\":\"map.refresh\"")).count(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_prompt_keeps_the_repository_untouched_and_names_the_output() {
+        let p = map_prompt("acme/web");
+        assert!(p.contains("/harness/out/architecture.json"));
+        assert!(p.contains("--repo-root /workspace"));
+        assert!(p.contains("Do not change anything in /workspace"));
+        assert!(p.contains("do not write\n/harness/out/pr.md") || p.contains("do not write /harness/out/pr.md"));
+    }
+
+    #[test]
+    fn the_untracked_paths_come_out_of_the_porcelain_z_output() {
+        assert_eq!(
+            untracked_paths("?? new.rs\0 M edited.rs\0?? dir/inner.rs\0"),
+            ["new.rs", "dir/inner.rs"]
+        );
+        assert!(untracked_paths("").is_empty());
+    }
+
+    #[test]
+    fn the_diff_stat_counts_the_lines_the_diff_shows() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,2 +1,4 @@
+-old
++new
++++ b/not-a-header
+-- nor is this one
+diff --git a/b/gone.rs b/b/gone.rs
+--- a/b/gone.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-x
+diff --git a/c/new.rs b/c/new.rs
+--- /dev/null
++++ b/c/new.rs
+@@ -0,0 +1 @@
++z
+diff --git a/old/name.rs b/new/name.rs
+similarity index 100%
+rename from old/name.rs
+rename to new/name.rs
+diff --git a/img.png b/img.png
+index 111..222 100644
+Binary files a/img.png and b/img.png differ
+";
+        assert_eq!(
+            diff_stat(diff),
+            vec![
+                ("src/a.rs".to_string(), 2, 2),
+                ("b/gone.rs".to_string(), 0, 1),
+                ("c/new.rs".to_string(), 1, 0),
+                ("new/name.rs".to_string(), 0, 0),
+                ("img.png".to_string(), 0, 0),
+            ],
+            "header-shaped lines inside a hunk are content; a deletion keeps its --- path, a new \
+file its +++ one, a rename and a binary file come from their own headers at 0/0"
+        );
+        assert!(diff_stat("").is_empty());
+    }
+
+    /// The whole-colony diff of a stopped colony: the committed change, the uncommitted one and
+    /// the untracked file all appear, and a symlink planted in the worktree reads no host file.
+    #[tokio::test]
+    async fn a_colony_diff_covers_everything_the_colony_changed() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-diff-{}", crate::util::short_id()));
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // The env_remove calls drop the GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE a colony sandbox
+        // exports for its own worktree, so the fixture's git stays inside the scratch repo (the
+        // handler's own probes get the same hygiene from `git_plain`).
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&worktree)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .args(["-c", "user.email=test@colonizer", "-c", "user.name=test"])
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        // A base branch with one commit, then the colony's: one committed file, one commit past
+        // the big-file threshold, one uncommitted edit, one untracked file and one escaping symlink.
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("secret.txt"), "host file\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["checkout", "-qb", "colony"]);
+        std::fs::write(worktree.join("b.txt"), "committed\n").unwrap();
+        git(&["add", "b.txt"]);
+        git(&["commit", "-qm", "colony work"]);
+        std::fs::write(worktree.join("big.txt"), "x".repeat(FILE_DIFF_LIMIT + 1)).unwrap();
+        git(&["add", "big.txt"]);
+        git(&["commit", "-qm", "a file past the diff cap"]);
+        std::fs::write(worktree.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(worktree.join("untracked.txt"), "fresh\n").unwrap();
+        std::os::unix::fs::symlink(root.join("secret.txt"), worktree.join("escape")).unwrap();
+
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Stopped);
+        s.id = "d1".into();
+        s.base = Some("main".into());
+        s.worktree = worktree.to_string_lossy().into_owned();
+        s.git_admin_dir = Some(worktree.join(".git").to_string_lossy().into_owned());
+        app.sessions.write().await.push(s);
+
+        let Json(value) = session_diff(State(app.clone()), Path("d1".into())).await.unwrap();
+        let diff = value["diff"].as_str().unwrap();
+        assert!(diff.contains("b.txt"), "the committed change is in the diff");
+        assert!(diff.contains("+two"), "the uncommitted change is in the diff");
+        assert!(diff.contains("+fresh"), "the untracked file is synthesised as new");
+        assert!(!diff.contains("host file"), "the planted symlink reads no host file");
+        assert!(
+            diff.contains("and b/big.txt differ"),
+            "a file past the cap diffs as binary, not as text"
+        );
+        let paths: Vec<&str> = value["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["a.txt", "b.txt", "big.txt", "untracked.txt"],
+            "the binary file counts 0/0 but stays listed"
+        );
+        assert_eq!(
+            (
+                value["base"].as_str(),
+                value["added"].as_u64(),
+                value["removed"].as_u64(),
+                value["truncated"].as_bool()
+            ),
+            (Some("main"), Some(3), Some(0), Some(false))
+        );
+
+        // A colony that never booted has no worktree to diff: a 409, and an unknown id stays a 404.
+        let mut ghost = crate::sessions::tests::colony("acme", SessionStatus::Queued);
+        ghost.id = "d2".into();
+        app.sessions.write().await.push(ghost);
+        let err = session_diff(State(app.clone()), Path("d2".into())).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        let err = session_diff(State(app), Path("nope".into())).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A `git` in `dir` for a fixture: the committed identity and, crucially, the GIT_DIR /
+    /// GIT_WORK_TREE / GIT_INDEX_FILE a colony sandbox exports dropped, so the fixture's git stays
+    /// inside its own scratch repo.
+    fn fixture_git(dir: &FsPath, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["-c", "user.email=test@colonizer", "-c", "user.name=test"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A stacked colony's base is another colony's branch, which has no `origin/` ref until it is
+    /// pushed; the diff falls back to the local branch instead of 409ing (issue #622).
+    #[tokio::test]
+    async fn a_colony_whose_base_is_only_a_local_branch_still_diffs() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-stack-{}", crate::util::short_id()));
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        fixture_git(&worktree, &["init", "-q", "-b", "main"]);
+        std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        fixture_git(&worktree, &["add", "a.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "base"]);
+        // No `refs/remotes/origin/main`: the parent colony's branch was never pushed.
+        fixture_git(&worktree, &["checkout", "-qb", "colony"]);
+        std::fs::write(worktree.join("b.txt"), "committed\n").unwrap();
+        fixture_git(&worktree, &["add", "b.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "colony work"]);
+
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Stopped);
+        s.id = "s1".into();
+        s.base = Some("main".into());
+        s.worktree = worktree.to_string_lossy().into_owned();
+        s.git_admin_dir = Some(worktree.join(".git").to_string_lossy().into_owned());
+        app.sessions.write().await.push(s);
+
+        let Json(value) = session_diff(State(app.clone()), Path("s1".into())).await.unwrap();
+        let diff = value["diff"].as_str().unwrap();
+        assert!(
+            diff.contains("b.txt"),
+            "the committed change is measured against the local base, not a missing origin/main"
+        );
+        assert_eq!(value["base"].as_str(), Some("main"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// When both refs are here `origin/<base>` still wins: the pushed base is the source of truth, so
+    /// a commit only the local branch carries is not measured as the colony's work.
+    #[tokio::test]
+    async fn origin_base_is_still_preferred_over_the_local_branch() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-pref-{}", crate::util::short_id()));
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        fixture_git(&worktree, &["init", "-q", "-b", "main"]);
+        std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        fixture_git(&worktree, &["add", "a.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "base"]);
+        fixture_git(&worktree, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        // The local base moves on; the colony is still measured against origin, its pushed base.
+        std::fs::write(worktree.join("moved.txt"), "later\n").unwrap();
+        fixture_git(&worktree, &["add", "moved.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "local base moves"]);
+        fixture_git(&worktree, &["checkout", "-qb", "colony"]);
+        std::fs::write(worktree.join("b.txt"), "colony\n").unwrap();
+        fixture_git(&worktree, &["add", "b.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "colony work"]);
+
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Stopped);
+        s.id = "s2".into();
+        s.base = Some("main".into());
+        s.worktree = worktree.to_string_lossy().into_owned();
+        s.git_admin_dir = Some(worktree.join(".git").to_string_lossy().into_owned());
+        app.sessions.write().await.push(s);
+
+        let Json(value) = session_diff(State(app.clone()), Path("s2".into())).await.unwrap();
+        let diff = value["diff"].as_str().unwrap();
+        assert!(diff.contains("b.txt"), "the colony's own change is in the diff");
+        assert!(
+            diff.contains("moved.txt"),
+            "measuring against origin/main counts a locally-only base commit as unreached"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

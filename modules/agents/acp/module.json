@@ -1,0 +1,91 @@
+{
+  "kind": "agent",
+  "id": "acp",
+  "name": "ACP",
+  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Presets: Google's Gemini CLI (`gemini --experimental-acp`), handshake verified — the runner fetches the pinned @google/gemini-cli bundle on first boot, since nothing stages it into the colony image; and xAI's Grok Build (`grok agent stdio`), handshake verified against grok 1.0.34 but not yet driven through a turn with a real XAI_API_KEY — nothing stages the grok binary either. Other ACP agents run through a custom command. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
+  "protocol": "colonizer-runner/1",
+  "loop_tools": true,
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "gemini"
+    ],
+    "fetched_by_runner": [
+      "gemini"
+    ],
+    "image": "glibc + node >= 20; the gemini preset needs no gemini on PATH (the runner fetches the pinned @google/gemini-cli bundle on first boot), while the grok preset still needs the grok binary, which nothing stages",
+    "pins": {
+      "@google/gemini-cli": {
+        "version": "0.61.0",
+        "integrity": "sha512-dbQ9A0qBtFJNi6XBkHvfZ6Azpn6PNgH/P8h2MZ67RLlX8hSAVjup39CRWqdRxZv7YXIuhrFaytr8y0jKnkoxnQ==",
+        "source": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.61.0.tgz",
+        "install": "npm install -g @google/gemini-cli@0.61.0"
+      }
+    }
+  },
+  "session_resume": {
+    "dir": "/root/.gemini",
+    "description": "The gemini preset keeps its sessions under ~/.gemini and the runner reloads one with session/load, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact; a custom agent resumes only if it keeps its sessions there too."
+  },
+  "secrets": [
+    {
+      "env": [
+        "GEMINI_API_KEY"
+      ],
+      "hosts": [
+        "generativelanguage.googleapis.com"
+      ]
+    },
+    {
+      "env": [
+        "XAI_API_KEY"
+      ],
+      "hosts": [
+        "api.x.ai"
+      ]
+    }
+  ],
+  "egress": {
+    "api": ["generativelanguage.googleapis.com", "api.x.ai"],
+    "auth": [],
+    "telemetry": [],
+    "extra": ["registry.npmjs.org"]
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "agent": {
+        "type": "string",
+        "title": "ACP agent",
+        "enum": ["gemini", "grok", "custom"],
+        "description": "Which ACP agent to launch. `gemini` is the verified one: Google's Gemini CLI in its ACP mode (`gemini --experimental-acp`), authenticated with the GEMINI_API_KEY secret for generativelanguage.googleapis.com. `grok` is xAI's Grok Build in its ACP mode (`grok agent stdio`), authenticated with the XAI_API_KEY secret for api.x.ai: verified at the handshake (initialize, session/new with model selection) against grok 1.0.34, but a turn with a real XAI_API_KEY has not been run. `custom` launches any other ACP agent through the command below — declare its API hosts and credential in your deployment, since this manifest only declares Gemini's and grok's.",
+        "default": "gemini",
+        "env": "COLONIZER_ACP_AGENT"
+      },
+      "command": {
+        "type": "string",
+        "title": "Custom command",
+        "description": "Used when the ACP agent is `custom`: the full command line including arguments, e.g. `node /opt/acp-agent/main.js --stdio`. Quote spans with single or double quotes to keep arguments with spaces whole.",
+        "default": "",
+        "env": "COLONIZER_ACP_COMMAND"
+      },
+      "model": {
+        "type": "string",
+        "title": "Model",
+        "description": "Model id applied with session/set_model after session/new, when the agent advertises model selection there (the gemini and grok presets do). An agent that advertises no models cannot select one: it keeps its own default and the runner logs a warning. Switching the model on a running colony works the same way.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "exec_policy": {
+        "type": "string",
+        "title": "Exec policy",
+        "description": "JSON exec policy this install layers over the built-in one: {\"rules\": [{\"id\", \"decision\": \"deny\"|\"ask\"|\"allow\", \"reason\", \"command\"|\"script\"|\"touches\"|\"writes_outside\"}]} (see modules/agents/acp/README.md). A matched rule answers session/request_permission for the command tool calls it names: allow approves the call without asking you, deny refuses it, ask becomes a question to you. Layers can only narrow: the built-in deny rules always hold, an org policy (COLONIZER_EXEC_POLICY_ORG) narrows further, and a repository's own .colonizer/exec-policy.json narrows further still. Empty uses the built-in policy alone.",
+        "default": "",
+        "env": "COLONIZER_EXEC_POLICY"
+      }
+    }
+  }
+}

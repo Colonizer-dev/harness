@@ -1,0 +1,253 @@
+# Remote access: security review
+
+This is the security review [#536](https://github.com/Colonizer-dev/harness/issues/536) asks for
+before the remote-access relay is deployed for the first time. It was carried out on 2026-09-26
+against three revisions, and every line reference below points at them:
+
+- **The relay**: `services/relay/` at commit `5325415`
+  ([#555](https://github.com/Colonizer-dev/harness/issues/555), on `main`). `worker.js`, `tunnel.js`,
+  `protocol.js`, `auth.js` and `wrangler.toml` refs are all under `services/relay/`.
+- **The tunnel client**: `crates/colonizer/src/remote.rs`, plus its `host_guard` and `/api/remote`
+  changes in `crates/colonizer/src/main.rs`, at commit `a518798` — the
+  [#533](https://github.com/Colonizer-dev/harness/issues/533) branch, unmerged at review time.
+- Other cockpit refs (`auth.rs`, `notify.rs`, `providers.rs`, `gateway/mod.rs`, `mesh.rs`, `util.rs`,
+  `activity.rs` under `crates/colonizer/src/`) are at `main`.
+
+Method: code reading split by threat area — the relay edge, the frame protocol and tunnel, and the
+cockpit boundary — plus Node proof-of-concept runs against the shipped relay modules, and an
+independent re-check of every filed finding by a second reviewer.
+
+Outcome: the cockpit's own fences hold for tunnelled traffic. No tunnelled request skips
+`host_guard`, nothing reaches loopback services the cockpit does not itself serve, and the `Origin`
+fence from [#375](https://github.com/Colonizer-dev/harness/issues/375) is pinned for the tunnel
+host rather than widened. The id, cookie and pairing design at the relay holds too. Five findings
+were filed as separate security issues; three of them (R1–R3) should block deployment.
+
+## Status on `main` (re-checked 2026-09-27)
+
+The tunnel client has since merged (#558, `61d4d8e`), and the server was split into modules
+(#577): what the review cites in `main.rs` is now `host_guard` in
+`crates/colonizer/src/server.rs:37-90` and the router in `server.rs:226-236`. `remote.rs` on
+`main` is the reviewed code with its line numbers moved by a few lines at most. The relay source
+is unchanged since `5325415` (only the pinned wrangler version moved, #560). The relay is still
+not deployed.
+
+Every finding below is still open on `main`:
+
+| Id | Still true? | What was checked on `main` |
+| :--- | :--- | :--- |
+| R1 | Yes | `stripHopByHop` still throws on the client's `[name, value]` array (`services/relay/src/protocol.js:46-49`, reproduced with Node); the client still sends arrays (`remote.rs:797-802`). No relay test uses that shape. |
+| R2 | Yes | `reset_identity` still registers a fresh install and never retires the old one (`remote.rs:245-263`); the relay still has no endpoint that deletes an install (`worker.js:48-59`). |
+| R3 | Yes | The relay still forwards `colonizer_token` (`auth.js:199-209` strips only its own session cookie); nothing rotates the API token; `http_base` still accepts `ws://` for any host (`remote.rs:319-327`). |
+| R4 | Yes | `stripHopByHop` still passes `set-cookie … Domain=` through; `set_cookie_header` still has no `Secure` (`auth.rs:134-136`). |
+| R5 | Yes | `bodies` and `ws_in` still use unbounded channels (`remote.rs:704`, `:833`); the tunnel is still dialled with tungstenite's default config (`remote.rs:442-445`). |
+| L1–L5 | Yes | `safeNext` (`auth.js:81-85`), the optional limiter (`worker.js:62`, `:111`), bare `create_dir_all` (`remote.rs:169`, `:275`), the `sec-websocket-*` strip (`remote.rs:1048`) and the `via` field without a tunnel marker are all unchanged. |
+
+**Since then (re-checked 2026-10-03).** R1 is fixed: `stripHopByHop` now reads `[name, value]`
+pairs and keeps repeated `set-cookie`, with an end-to-end test that runs the real Rust client
+through the real relay (#618, PR #659). R2 is narrowed but not closed: **Reset link** now sends the
+old install a signed `DELETE …/owner` before replacing the key, so the old link loses its owner
+(`reset_identity` in `remote.rs`, #599, PR #663), but the old install stays registered at the relay,
+which still has no endpoint that deletes one. R3–R5 are unchanged: `http_base` still accepts `ws://`
+for any host, the relay still passes `Domain=` through, the cockpit cookie still has no `Secure`
+(`set_cookie_header` in `auth.rs`), and `ws_in` and `bodies` are still unbounded channels.
+
+**Since then (re-checked 2026-10-05).** R2, R3, R4 and R5 are fixed; each fix has
+tests that fail without it, and the whole link now runs end to end against the real relay code
+(`the_whole_link_round_trips_through_the_real_relay` in `remote.rs`, over
+`services/relay/scripts/local-relay.mjs`). The deployed Worker predates these fixes until it is
+redeployed.
+
+| Id | Status | Fix |
+| :--- | :--- | :--- |
+| R1 | Fixed | #659, as above. |
+| R2 | Fixed (`a787f94`) | The relay has a signed `DELETE /api/installs/<id>` that deletes the install, its owner and its pairings and closes its tunnel `4404`. Reset link calls it with the old key before replacing it, and if the relay cannot be told it answers `502` and keeps the old link, so a reset never leaves the old install live. Only an unreadable old key is replaced regardless, since nothing can sign for it. |
+| R3 | Fixed (`7853719`, and the link-credential commit of #1030) | `COLONIZER_REMOTE_URL` takes plaintext `ws://` only for a loopback relay. This machine's install token is never accepted through the tunnel — bearer, cookie or `?token=` — so it never needs to cross the relay. The owner's browser elsewhere signs in with a **link credential** (`clk_…`) instead: owner-scoped, stored hashed, valid only on tunnelled requests, handed over like a phone pairing (a single-use invite opened on the link, six digits confirmed locally, then the credential set as that browser's cookie on the link's origin). Reset link rotates every link credential at once, ending their requests and sockets through the same revocation phones use, and one device can be signed out alone. |
+| R4 | Fixed (`8574073`) | The relay drops every `Domain` attribute from a forwarded `set-cookie` and drops a cookie named like its own `__Host-` cookies; the tunnel client adds `Secure` to every `Set-Cookie` it sends back through the tunnel. |
+| R5 | Fixed (`9e64ff4`) | The tunnel socket takes no message or frame over 1 MiB; body frames wait in a 16-frame queue (the reader pauses) and are dropped once a stream has its body; a chunk is size-checked before it is decoded; websocket frames wait in a 64-frame queue, and a socket that falls behind is closed `1008` and its stream freed within 5 s. The relay closes a passthrough `1009` on a browser message over 128 KiB. |
+
+**How R3 was closed.** The maintainer chose the link-scoped owner credential over the other
+options (pairing remote browsers as phones, which would have lost owner powers through the link;
+rotating the install token on reset; or accepting the relay's trust level in writing). What the
+relay can still see is a link credential, never the install token, and only until the next Reset
+link. Paired phones (`cph_…`) still work through the link as before: they are per-device and
+revocable, and remain phones.
+
+No issue with any of the five R titles is in the public tracker as of 2026-09-27; if they were
+filed privately (as security advisories), this document cannot see them.
+
+One more gap, found on the re-check and not a security finding: the mothership had no code for
+the relay's signed pairing endpoints. The cockpit called `GET /api/remote/pairing` and
+`POST /api/remote/pairing/confirm` (`web/src/api.ts`), but neither was a mothership route, so no
+install could bind an owner and the relay forwarded no one. #599 closes it: the mothership now
+serves the pairing routes, and confirming a code is refused through the tunnel
+([remote-tunnel.md](remote-tunnel.md#pairing-and-the-owner)).
+[remote-tunnel.md](remote-tunnel.md#where-the-code-differs-today) lists every place the two halves
+depart from the pinned tunnel contract.
+
+## Pairing with the pair code alone (#1086, 2026-10-06)
+
+[#1086](https://github.com/Colonizer-dev/harness/issues/1086) drops the relay's GitHub sign-in as a
+precondition. A new install's link now forwards a browser without any relay session when the
+request carries one of three things, and only these:
+
+- a pairing invite, `GET /?pair=<invite>` (64 hex characters, at the root only);
+- that invite page's claim poll, `POST /api/phone/claim` with its `colonizer_pair` cookie;
+- a link credential (`clk_…`) or a paired phone's (`cph_…`), as the `colonizer_token` cookie or a
+  bearer.
+
+The relay recognises the shapes (`services/relay/src/passthrough.js`) but trusts none of them; the
+mothership's `host_guard` and `phone.rs` decide every one. Everything else gets the relay's own
+"Pair this device" page and never reaches the tunnel. The GitHub gate stays available as the
+`require_github` setting (local-only `PUT /api/remote/require-github`, relayed as a signed
+`PUT /api/installs/<id>/settings`): off for new installs, kept on for installs registered before
+the setting, and the owner binding and recovery work as before while it is on. A bound owner's
+GitHub session is forwarded in either mode.
+
+**R6, accepted by design: on the default setting, the mothership's own auth is the only gate on
+the invite and credential paths.** Before #1086 the relay's owner check was a second layer in front
+of them (see [The two boundary checks](#the-two-boundary-checks-536-asks-for): "a second gate, not
+a substitute"). What carries those paths now:
+
+| Protection | Where |
+| :--- | :--- |
+| The invite is 256 random bits, stored only as a SHA-256 hash, single-use (spent on its first presentation, even a wrong one), valid five minutes, at most four open at once, and a link invite opens nothing off the tunnel. | `phone.rs` `Book::mint_kind`, `open_from` |
+| Opening an invite hands over nothing: it binds a pairing to that one browser and shows six digits, which only the **local** cockpit can confirm (`403` through the link). | `server.rs` `host_guard`; `remote.rs` `confirm_device`, `local_only` |
+| Every failed pairing step (a dead invite, a claim that finds nothing, a wrong code) counts against the mothership's own limit, ten a minute across all callers. | `phone.rs` `Book::limited` |
+| Link and phone credentials are 256-bit, stored hashed, compared in constant time, revocable one by one (in-flight requests and sockets end at once), and all rotated by Reset link. | `remote.rs` `authenticate_link`, `revoke_link`, `rotate_links`; `phone.rs` |
+| The relay throttles the pass-through per install and per client in D1: every invite open counts (10 per client, 30 per install, per 10 min), and so does every forwarded credential the mothership rejected (20 per client, 200 per install, per 10 min). Past a limit it answers `429` and forwards nothing. The mothership reports a rejection with `x-colonizer-credential: rejected` (or a websocket `4401`), which the relay strips. | `services/relay/src/throttle.js`, `worker.js` `installHost`, `tunnel.js` `#countRejected` |
+
+Threat-model changes against the verdicts below:
+
+| Threat | Verdict with the pair code alone | Why |
+| :--- | :--- | :--- |
+| Guessing an invite or a credential over the internet | Holds | 256-bit secrets, and the relay's throttle makes even a spread-out guesser stop after a few hundred tries per 10 minutes per install. |
+| A leaked invite (a QR code photographed, a link pasted in the wrong chat) | Narrow, accepted | Whoever opens it first, within five minutes, gets the six digits. They still reach nothing unless the operator types *their* digits into the local cockpit, and the operator types the digits their own device shows; an operator who did not just open the link has no digits to type. With the GitHub gate on, they would also have needed the owner's GitHub account. Installs that want that second factor keep `require_github` on. |
+| A stolen link credential cookie | Holds, as before | `HttpOnly; Secure; SameSite=Strict`, host-only on the link's origin; revoking the device or Reset link ends it at once. Before #1086 a thief also needed the owner's relay session; now the credential alone works through the link until revoked. |
+| WebSocket hijack | Holds | A cross-site handshake carries no `SameSite=Strict` `colonizer_token`, and the cockpit still requires `Origin` to equal `https://<tunnel host>` for a cookie-authenticated upgrade. |
+| Install-id enumeration | Holds | Unknown installs answer `404`, known ones the pair page's `401`: an oracle, but useless against 100-bit ids. |
+| DoS of one install's pass-through | New, accepted (L6) | Anyone who knows the host can fill its per-install throttle (30 invite opens, or 200 rejected credentials, per 10 minutes) and pause pairing and the pass-through for everyone on that install until the window ends. The limits are generous, a bound owner's GitHub session is not throttled, and Reset link moves the install to a new host. |
+| Logging and storage leaks | Holds | The throttle stores a key per install and per client, where the client is an HMAC of the IP under `SESSION_SECRET`, truncated — never the address — and a row lives only until its window ends. The worker still logs nothing; the DO logs only the templated line. |
+| A relay compromise | Unchanged | The relay already saw link credentials in cleartext (R3's accepted residue); the GitHub layer never stood between a compromised relay and the cockpit. |
+
+The relay e2e (`the_whole_link_round_trips_through_the_real_relay`) now pairs a fresh browser
+through `?pair=` and the six digits with no GitHub session, loads the cockpit and its websocket on
+the link credential alone, sends a forged and a revoked credential to the pair page, then switches
+the GitHub gate on and runs the owner flow behind it. The relay's own negative tests are in
+`services/relay/test/pairing.test.mjs`.
+
+## Threat-model verdicts
+
+| Threat | Verdict | Where it is held, or the finding |
+| :--- | :--- | :--- |
+| Install-id guessing and enumeration | Holds | Ids are 20 base32 characters — 100 bits from `crypto.getRandomValues` (`worker.js:89-104`) — and register and dial are per-IP rate limited (`wrangler.toml:38-48`; `worker.js:62-64`, `:111-113`). Unknown, registered, bound and online installs do answer differently (404 / 302 to `/_auth` / 403 / 502 / proxied), but that oracle is useless against 100-bit ids. Registration growth is L2 below. |
+| A stolen session cookie | Holds, one caveat | `__Host-colonizer_session`: Secure, HttpOnly, SameSite=Lax, no Domain, HMAC-SHA256 sealed, 7 days (`auth.js:11-21`); bound to one install and its current GitHub owner and re-checked against D1 on every request, so unbinding revokes it at once (`auth.js:186-195`; `worker.js:223`); stripped before forwarding to the cockpit (`auth.js:197-209`; `worker.js:224-226`); fails closed without `SESSION_SECRET` (`auth.js:53-61`). Caveat: logout only clears the browser copy (`auth.js:180-182`) — revoking one stolen cookie means unbinding the owner. |
+| A relay compromise | Finding R3 (and R2) | The relay sees every request and response in cleartext, including the cockpit's api-token, and can act as the owner. The hello signature — Ed25519 over nonce, install id and timestamp, a fresh 32-byte nonce per dial, ±300 s skew (`tunnel.js:70`, `:106-107`) — stops anyone from impersonating an install to the relay, but nothing authenticates the relay to the cockpit beyond WebPKI TLS. |
+| Request smuggling through the frame protocol | Holds | Relay stream ids are a monotone counter, and unknown or late ids are ignored (`tunnel.js:43`, `:154-155`, `:186`, `:246`); the client refuses duplicate ids without touching the live stream (`remote.rs:704-730`). `clean_headers` strips hop-by-hop headers, Host and `sec-websocket-*`, and drops values containing CR, LF or NUL (`remote.rs:1030-1055`); Host is always overwritten with the registered tunnel host (`remote.rs:789`); the body is rebuilt from frames in-process, so Content-Length and Transfer-Encoding are inert; `//evil.com/x` parses as a path with no authority, and absolute-form fails `plausible_path` (`remote.rs:583`). Nothing is ever dialled out — every request is answered by `router.oneshot`. R1 is an interop crash in this layer, not a smuggling vector. |
+| WebSocket hijack | Holds | A cross-site handshake does not carry the SameSite=Lax relay session cookie and gets 401 at the relay (`worker.js:222-235`); a tunnelled cookie-authenticated upgrade still needs Origin to equal `https://<tunnel host>` exactly at the cockpit (`main.rs:966-978` at a518798); the relay forwards Origin untouched. Subprotocol negotiation is broken (L4). |
+| Origin-fence bypass (#375's Origin-absent class) | Holds | For tunnelled requests Origin must equal `https://<host>` exactly; absent, `null`, `http://`, a sibling install's origin and a port mismatch all fail (`main.rs:967-969`; tests at `remote.rs:1353-1396`). The local fence is not widened: the tunnel host is admitted only with the in-process `Tunnelled` extension and the switch on (`main.rs:939-950`), so a DNS-rebinding page sending `Host: <id>.my.colonizer.dev` to `127.0.0.1:7878` gets 403. With remote access off, tunnelled requests get 503 and the host is refused locally. |
+| DoS of one install | Findings R5 and R1's slot leak | Otherwise held at the relay by MAX_STREAMS 32, MAX_PENDING 16, a 120-burst / 20 rps bucket per install, chunk caps, 8 MiB body backpressure and head/idle/hello timers (`tunnel.js:59-86`, `:171-197`, `:239-248`, `:375-385`; `protocol.js:4-15`), and at the client by MAX_STREAMS, a 10 MiB MAX_BODY, a 60 s BODY_WAIT and a bounded 256-frame outbound queue (`remote.rs:59-81`, `:534-536`, `:756-777`). |
+| DoS of the relay itself | Holds | Durable Objects are only allocated for known ids, behind the dial limiter and MAX_PENDING with 10 s hello timeouts (`worker.js:110-126`; `tunnel.js:59-86`); apex JSON bodies are capped at 1 KiB by bytes (`worker.js:243-264`); Ed25519 verification runs once per hello. Notes: every request to an unknown subdomain costs one D1 read with no limiter (`worker.js:219`), and registration rows accumulate (L2). |
+| Key theft from `<config>/remote/` | Finding R2; L3 | The key file is written 0600 (`util.rs:328-339`) and no endpoint or log returns key material; registration sends only the public key. |
+| Logging leaks | Holds | The relay logs one line per stream: method, a templated path (query dropped, id-shaped segments replaced by `:id`), status, bytes, ms (`tunnel.js:368-370`; `protocol.js:73-77`); the worker logs nothing; error pages name missing variables, not values (`auth.js:61`). The client's activity entries record kind, via and target only, never query strings or bodies (`remote.rs:331-340`; `activity.rs:646-661`). Minor: see L5. |
+| The pairing-code race | Holds | Codes are 6 uniform digits with a 10-minute expiry (`auth.js:15`, `:89-99`). Confirming requires the mothership's Ed25519 signature, so a browser can neither brute-force nor forge a confirm (`worker.js:54-56`, `:130-142`). The bind is `UPDATE … WHERE owner_github_id IS NULL` inside one D1 batch, so two concurrent confirms bind exactly one owner and the loser gets 409 (`worker.js:176-184`). One dependency on the cockpit side: the confirm screen must show each pending code's `github_login` prominently (`worker.js:155`), because an owner who confirms an attacker's pending pairing binds the attacker. Signed endpoints accept a 300 s replay window without a nonce (`worker.js:28`, `:136`); the mutations they guard are idempotent or first-wins, so the impact is negligible. |
+
+## The two boundary checks #536 asks for
+
+**A tunnelled request cannot skip the cockpit's own auth.** HTTP goes through `serve_req` →
+`router.oneshot` on the full router, where `host_guard` is layered after `web_router` is merged
+(`main.rs:1634-1637`; `remote.rs:796`). WebSockets go through an in-memory `axum::serve` of the same
+router with the `Tunnelled` extension layered outside it (`remote.rs:605-607`). `Tunnelled` is
+constructed only in `remote.rs` (`:605`, `:795`) and cannot come from a frame or a header;
+`Authenticated` / `Via` are inserted by `host_guard` itself, never read from headers; nothing in the
+crate uses `ConnectInfo`, so no handler trusts a peer address. The relay's GitHub sign-in is a
+second gate, not a substitute: the browser still needs the cockpit token.
+
+**A tunnelled request cannot reach loopback-only services the cockpit doesn't serve.** The client
+opens TCP only to the relay — register and dial (`remote.rs:288-300`, `:414-447`); everything else
+is in-process. Two pre-existing settings reachable by any token holder do accept loopback URLs —
+the notify webhook (`notify.rs:449-474`) and a provider's `base_url` (`providers.rs:512-527`) — but
+the loopback services they could reach authenticate on their own (the gateway wants a per-colony
+token, `gateway/mod.rs:626-641`; headscale sits behind a 0700 socket and API keys,
+`mesh.rs:245-296`), so a remote token holder gains nothing a local one lacks. Blocking loopback and
+link-local targets there is hardening independent of remote access
+([sandbox-network.md](sandbox-network.md) covers the colony-side fence).
+
+## Findings filed as separate security issues
+
+The colony could file at most five issues; each finding was confirmed by code reading and
+re-checked independently. The titles are exact, so the issues can be found:
+
+| Id | Severity | Issue | Where |
+| :--- | :--- | :--- | :--- |
+| R1 | High | "Remote access: relay throws on the tunnel client's array-shaped `res` headers, hanging tunnelled responses and leaking stream slots" | `remote.rs:800-807` at a518798; `protocol.js:46-51`; `tunnel.js:158-161` |
+| R2 | High | "Remote access: reset_identity leaves the old install live at the relay, so a leaked &lt;config&gt;/remote/key keeps receiving the owner's traffic" | `remote.rs:245-263`; `worker.js:47-59` |
+| R3 | High | "Remote access: the cockpit api-token crosses the relay in cleartext, survives every reset, and COLONIZER_REMOTE_URL accepts plaintext ws://" | `worker.js:224-230`; `main.rs:961-966`, `:1001-1014` at a518798; `auth.rs:45-59`; `remote.rs:319-327` |
+| R4 | Medium | "Remote access: relay forwards tunnelled Set-Cookie with Domain=, letting one install toss cookies onto sibling installs; cockpit cookie lacks Secure" | `protocol.js:23-66`; `auth.rs:135-137` |
+| R5 | Medium | "Remote access: tunnel client queues relay-to-cockpit frames without bound (ws_in, bodies), so a relay or remote browser can exhaust mothership memory" | `remote.rs:484`, `:493`, `:445-451`, `:756-766` |
+
+How each one works:
+
+- **R1.** The client sends response headers as `[name, value]` pairs (`remote.rs:800-807` at
+  a518798); the relay's `stripHopByHop` iterates them as `[index, pair]` and throws
+  (`protocol.js:46-51`), after `#onRes` has already cleared the head timer (`tunnel.js:158-161`).
+  Every real response hangs, and after 32 the install answers 503. The relay's tests only use
+  object-shaped headers, which is why the shipped modules pass their own suite.
+- **R2.** `reset_identity` registers a new install but never retires the old one
+  (`remote.rs:245-263`), and the relay has no endpoint to do so (`worker.js:47-59`). The old
+  install stays owner-bound, so the phone's traffic to the old origin goes to whoever dials with
+  the leaked key.
+- **R3.** `worker.js:224-230` forwards the `colonizer_token` cookie; a bearer skips the Origin
+  fence (`main.rs:961-966` at a518798); no code rotates the token (`auth.rs:45-59`); the `?token=`
+  sign-in path works through the tunnel (`main.rs:1001-1014`); and `ws://` relays are accepted
+  without a loopback restriction (`remote.rs:319-327`).
+- **R4.** Installs are sibling subdomains of a domain that is not on the Public Suffix List, the
+  relay passes `Set-Cookie … Domain=` through (`protocol.js:23-66`), and the cockpit's
+  `colonizer_token` has no `Secure` (`auth.rs:135-137`). Impact is sign-in confusion or DoS on the
+  victim's install, not takeover.
+- **R5.** Unbounded channels (`remote.rs:484`, `:493`), default 64 MiB tungstenite messages
+  (`remote.rs:445-451`), and base64 decoded before the size check (`remote.rs:756-766`): an
+  authenticated browser can grow `ws_in` against a slow handler, and a relay can do worse.
+
+## Lower-severity notes, not filed
+
+Each was confirmed by code reading; L1 also by a proof-of-concept run.
+
+- **L1, Low — open redirect after sign-in.** `safeNext` blocks `//` and `/\` but not `/` followed by
+  a tab (`auth.js:81-85`). `next=%2F%09%2Fevil.example%2F` becomes `Location: /\t/evil.example/`,
+  which browsers resolve to `https://evil.example/` right after a successful GitHub sign-in
+  (`auth.js:136`, `:152`, `:161`). Fix: reject control characters, or resolve against the install's
+  own origin and require it unchanged.
+- **L2, Low — unbounded registrations.** `POST /api/installs` is unauthenticated beyond a per-IP
+  limiter the code treats as optional (`if (env.REGISTER_LIMITER)`), and nothing ever deletes
+  unowned installs; only pairings are purged (`worker.js:61-87`; `auth.js:211-214`). Fix: make the
+  limiter mandatory and collect unowned, never-dialled installs.
+- **L3, Low — key directory mode and plaintext key.** `<config>/remote/` is created with a bare
+  `create_dir_all` (umask, typically 0755; `remote.rs:169`, `:275`), and the key is plaintext
+  PKCS#8 outside the `COLONIZER_MASTER_KEY` envelope (`util.rs:109-137`). The 0700 config directory
+  protects it in the default layout, so this is defence in depth.
+- **L4, Low — WebSocket subprotocols cannot be negotiated.** The relay keeps
+  `sec-websocket-protocol` so the cockpit can negotiate (`protocol.js:36-38`), but the client
+  strips every `sec-websocket-*` header (`remote.rs:1051`) and the relay accepts the browser with a
+  bare `server.accept()` (`tunnel.js:298`).
+- **L5, Low — audit and error hygiene.** `remote.*` activity entries record `via: cockpit|api` but
+  not that the caller came through the tunnel, and error bodies returned through the tunnel include
+  local filesystem paths (`remote.rs:280-283`).
+- Also worth knowing: the short-lived `__Host-colonizer_oauth` cookie is forwarded to the cockpit
+  (only the session cookie is stripped). Harmless, but unnecessary.
+
+## Before the relay is deployed
+
+- R1 fixed, with a relay e2e test that uses the Rust client's exact frame shape. Done in #659.
+- R2 and R3 fixed, or the relay's trust level — it can read everything and act as the owner —
+  accepted in writing. R2 is fixed (`a787f94`) and R3 too (`7853719` and the link credential in
+  #1030); R4 and R5 are fixed as well (`8574073`, `9e64ff4`). The deployed Worker needs a redeploy
+  to carry the relay-side halves.
+- Deploy configuration: `SESSION_SECRET` set (the relay fails closed without it), `REGISTER_LIMITER`
+  and `DIAL_LIMITER` bindings deployed, the real `GITHUB_CLIENT_ID` and D1 `database_id` in place of
+  `wrangler.toml`'s placeholders, and the GitHub OAuth app's wildcard callback matching enabled
+  (`services/relay/README.md`, Deploy step 4).
+- The tunnel-client half of this review re-run once #533 merges, since `a518798` was unmerged at
+  review time. (#533 merged as #558; the re-check above found every finding unchanged.)
+- The mothership's side of pairing built, so an install can bind an owner at all (see *Status on
+  `main`* above). Done in #599.

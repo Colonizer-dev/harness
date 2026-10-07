@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex">
+<title>Colonizer · sign in</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230b0e14'/><path d='M16 5.5 25 10.75v10.5L16 26.5 7 21.25v-10.5z' fill='none' stroke='%23FF6B35' stroke-width='2.6' stroke-linejoin='round'/><circle cx='16' cy='16' r='3' fill='%23FF6B35'/></svg>">
+<style>
+  :root {
+    --bg: #07090e; --panel: #0e121a; --border: #212938; --text: #e8ecf3; --muted: #8a94a6;
+    --accent: #ff6b35; --accent-soft: rgb(255 107 53 / 0.12); --code: #0a0d13;
+    --glow: rgb(255 107 53 / 0.16); --grid: rgb(255 255 255 / 0.035);
+    --shadow: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 24px 64px rgb(0 0 0 / 0.55);
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f3f5f8; --panel: #ffffff; --border: #dde2ea; --text: #121722; --muted: #5b6577;
+      --accent: #c8440f; --accent-soft: #fdece4; --code: #f6f7fa;
+      --glow: rgb(200 68 15 / 0.10); --grid: rgb(18 23 34 / 0.045);
+      --shadow: 0 1px 2px rgb(18 23 34 / 0.06), 0 24px 64px rgb(18 23 34 / 0.12);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; padding: 24px;
+    font: 15px/1.55 var(--sans); color: var(--text); background: var(--bg);
+    background-image:
+      radial-gradient(640px 420px at 50% 38%, var(--glow), transparent 70%),
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: auto, 32px 32px, 32px 32px;
+    -webkit-font-smoothing: antialiased;
+  }
+  main {
+    width: 100%; max-width: 440px; padding: 36px 32px 28px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 18px;
+    box-shadow: var(--shadow); text-align: center;
+    animation: rise .5s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .mark { width: 64px; height: 64px; margin: 0 auto 20px; position: relative; }
+  .mark svg { width: 100%; height: 100%; display: block; }
+  .mark::after {
+    content: ""; position: absolute; inset: -10px; border-radius: 50%;
+    background: radial-gradient(closest-side, var(--accent-soft), transparent);
+    z-index: -1; animation: breathe 3.2s ease-in-out infinite;
+  }
+  .lock {
+    display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px;
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+    color: var(--accent); background: var(--accent-soft);
+  }
+  h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.25; letter-spacing: -.01em; }
+  p { margin: 0; color: var(--muted); }
+  .cmd {
+    display: flex; align-items: center; gap: 8px; margin: 22px 0 10px; padding: 6px 6px 6px 14px;
+    background: var(--code); border: 1px solid var(--border); border-radius: 12px; text-align: left;
+  }
+  .cmd code { flex: 1; font: 14px var(--mono); color: var(--text); overflow-x: auto; white-space: nowrap; }
+  .cmd code::before { content: "$ "; color: var(--muted); }
+  button {
+    flex: none; font: 600 13px var(--sans); color: #fff; background: var(--accent);
+    border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer;
+    transition: transform .12s ease, filter .12s ease;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:active { transform: scale(.97); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hint { font-size: 13px; }
+  .why {
+    margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);
+    font-size: 12.5px; color: var(--muted);
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @keyframes breathe { 0%, 100% { opacity: .55; transform: scale(.94); } 50% { opacity: 1; transform: scale(1.04); } }
+  @media (prefers-reduced-motion: reduce) { main, .mark::after { animation: none; } }
+  @media (max-width: 480px) { main { padding: 28px 20px 22px; } h1 { font-size: 20px; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark" aria-hidden="true">
+    <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#0b0e14"/><path d="M16 5.5 25 10.75v10.5L16 26.5 7 21.25v-10.5z" fill="none" stroke="#FF6B35" stroke-width="2.6" stroke-linejoin="round"/><circle cx="16" cy="16" r="3" fill="#FF6B35"/></svg>
+  </div>
+  <span class="lock"><svg width="11" height="12" viewBox="0 0 11 12" aria-hidden="true"><rect x="1" y="5" width="9" height="6.5" rx="1.5" fill="currentColor"/><path d="M3 5V3.5a2.5 2.5 0 0 1 5 0V5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>Locked</span>
+  <h1>Sign in to your cockpit</h1>
+  <p>This browser needs this machine's access link once. Run this on the host where Colonizer is running:</p>
+  <div class="cmd">
+    <code id="cmd">colonizer open</code>
+    <button type="button" id="copy">Copy</button>
+  </div>
+  <p class="hint">It opens the link for you. You can also use the one printed when Colonizer started.</p>
+  <p class="why">The cockpit can start, stop and publish colonies, so every browser signs in once with a token only this machine knows.</p>
+</main>
+<script>
+  (function () {
+    var b = document.getElementById('copy');
+    b.addEventListener('click', function () {
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText('colonizer open').then(done, function () {});
+      } else {
+        var r = document.createRange(); r.selectNodeContents(document.getElementById('cmd'));
+        var s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); done();
+      }
+    });
+    // A SameSite=Strict cookie is not sent on a cross-site navigation, but it is on this page's own
+    // reload, so reload once (session storage plus a timestamp, so it cannot loop).
+    try {
+      var k = 'colonizer_auth_retry', t = sessionStorage.getItem(k), now = Date.now();
+      if (!t || now - Number(t) > 60000) { sessionStorage.setItem(k, String(now)); location.reload(); }
+    } catch (e) {}
+  })();
+</script>
+</body>
+</html>

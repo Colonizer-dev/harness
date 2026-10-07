@@ -1,0 +1,15 @@
+{
+  "name": "colonizer-agent-grok-build",
+  "version": "0.1.0",
+  "description": "Colonizer agent module: xAI's Grok Build CLI, headless",
+  "scripts": {
+    "test": "node --test test/runner.test.mjs",
+    "start": "node runner.mjs"
+  },
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

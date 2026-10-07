@@ -1,0 +1,88 @@
+# Third-party binaries bundled with Colonizer at install time.
+# name       version   platform      kind    sha256                                                            url
+headscale    0.29.3    linux-x86_64  binary  8dc183758024ed7095cf610fedea0790233613c71353bc8be2715d82ba29b92c  https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_linux_amd64
+tailscale    1.102.4   linux-x86_64  tgz     50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9  https://pkgs.tailscale.com/stable/tailscale_1.102.4_amd64.tgz
+microsandbox 0.7.6     linux-x86_64  msb     daa69c6a644289bbb7ef889bd862ffba7acddf934d45e724fa160edcd9a540e0  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-linux-x86_64.tar.gz
+microsandbox 0.7.6     linux-aarch64 msb     47e4787423b12f56f24119f657c54974b1869c0853b3d7a0873157668d29aa03  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-linux-aarch64.tar.gz
+microsandbox 0.7.6     darwin-arm64  msb     a4f1722fee6460d4e2813e62b60dae4c092021d8120b7aaa9c2f4b5679d97d89  https://github.com/superradcompany/microsandbox/releases/download/v0.7.6/microsandbox-darwin-aarch64.tar.gz
+
+# The mesh on a Mac. headscale ships a darwin-arm64 binary just as it does for Linux. Tailscale
+# publishes no macOS tailscaled anywhere, so the darwin row pins the same v1.102.4 tag as the Linux
+# tgz above, as source, and scripts/build-tailscaled.sh builds tailscale and tailscaled from it.
+headscale    0.29.3    darwin-arm64  binary  fb55b6d3d1ef3b850fe02837299ac1853f383a06f561d7f180d36b9ce406904b  https://github.com/juanfont/headscale/releases/download/v0.29.3/headscale_0.29.3_darwin_arm64
+tailscale    1.102.4   darwin-arm64  source  784b023e825e1cca7b146ac6a7aff08b179d60d10839b51019f315dab426c871  https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/v1.102.4
+
+# A colony is a Linux microVM even when the host is a Mac, so it cannot run the Mach-O tailscaled
+# built above: it needs upstream's linux-arm64 build, vendored beside it and mounted instead. On a
+# Linux host the one download serves both, and there is no guest row.
+tailscale-guest 1.102.4 darwin-arm64  tgz     9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f  https://pkgs.tailscale.com/stable/tailscale_1.102.4_arm64.tgz
+
+# Claude Code plugin directories, staged read-only into the app and loadable per
+# colony with the claude-code module's `plugins` setting. Platform `any`.
+#
+# ECC is github.com/affaan-m/ECC at tag v2.2.3, commit
+# 5064474d4d762dc9640234a41617cccb79185cec. MIT (LICENSE is staged with it).
+# Staging drops the whole hooks/ directory: see scripts/fetch-vendor.sh.
+#
+# If GitHub ever regenerates this archive the checksum fails loudly and the
+# pin has to be refreshed by hand, which is the correct failure.
+ecc          2.2.3     any           plugin  7b49131274c2ae625f537c4ced312bef7a707b31d3bff491a71dcab7267698b6  https://codeload.github.com/affaan-m/ECC/tar.gz/refs/tags/v2.2.3
+
+# superpowers is github.com/obra/superpowers at tag v6.4.2. MIT (LICENSE is staged with it).
+# Staging drops hooks/ — its one hook, a SessionStart bootstrap, becomes system-prompt text in the
+# claude-code runner instead — and the using-git-worktrees and finishing-a-development-branch skills,
+# which would work around the worktree, branch and publish step Colonizer already owns.
+superpowers  6.4.2     any           plugin  66eae02bb1549ae289a14bb23a14c119d2e7ccdaf3b5fb8b95f17db581ef0249  https://codeload.github.com/obra/superpowers/tar.gz/refs/tags/v6.4.2
+
+# rtk is github.com/rtk-ai/rtk at tag v0.49.0 (Apache-2.0): compact command output for colonies that
+# switch it on. Pinned as source and built by scripts/build-rtk.sh into a static musl binary, because
+# upstream's aarch64 Linux release needs glibc 2.39 and the colony image has 2.36. Telemetry is off
+# unless someone opts in, which a colony never does.
+rtk          0.49.0    any           source  74b226ab00b8698d5084402893c76d93189493bd332b99d0b1e681d1ef860eb8  https://codeload.github.com/rtk-ai/rtk/tar.gz/refs/tags/v0.49.0
+
+# caveman is github.com/juliusbrussee/caveman at tag v3.1.0: terse replies for colonies that switch it on.
+# Only skills/caveman/SKILL.md and LICENSE are staged, and they are MIT. The repository's compression
+# engine, proxy and MCP server are BSL-1.1 and are neither staged nor used.
+caveman      3.1.0     any           prompt  676ae2e9bd2ee23c9fa216056d6ad38b97b49ac8f5f838c29f8a23f37a861564  https://codeload.github.com/juliusbrussee/caveman/tar.gz/refs/tags/v3.1.0
+
+# google-skills is github.com/google/skills at commit 1d77046 (2026-10-02); upstream has no tags, so the
+# version is the commit date and short hash. Apache-2.0 (LICENSE is staged with it). Staged for on-demand
+# loading: one discoverable skill, Colonizer's copy of the finder (vendor/google-skills/), reads a local
+# catalog of the other 149. The finder never fetches from GitHub; see scripts/fetch-vendor.sh.
+google-skills 2026.10.02-1d77046 any       plugin  6af0ed4e318866f9c6086e5dd117c6905de86c813dd0f6fe77fb9356b75ebfdb  https://codeload.github.com/google/skills/tar.gz/1d77046ad3670d62227f50a8f53286f6c6cde08b
+
+# archify is github.com/tt-a1i/archify at commit 3a5e785 (2026-10-04, 2.17.0-dev.1); pinned by commit because
+# the skill ships from main. MIT (LICENSE and THIRD_PARTY_NOTICES.md are staged with it). Staged as a
+# one-skill plugin (skills/archify/): the skill's schemas, examples, renderers and its dependency-free
+# node CLI (validate/deliver), which mapping colonies run against the worktree (crates/colonizer/src/maps.rs).
+# Not staged: test/ and scripts/check-update.mjs, the skill's network update check.
+archify      2026.10.04-3a5e785 any       plugin  a416e6238cec4ddc36c225e9aa01a0915ec93cd93a17f1748dbed6adc6330b73  https://codeload.github.com/tt-a1i/archify/tar.gz/3a5e785d68ab45ee43cc3ae7b5a4e2e5188d1e31
+
+# ponytail is github.com/DietrichGebert/ponytail at tag v4.12.0. MIT (LICENSE is staged with it). Pinned by
+# tag, so the daily updater follows the repo's latest release like ECC's and superpowers' pins. Staged as a
+# six-skill plugin (skills/ponytail, -review, -audit, -debt, -gain, -help), each a single SKILL.md. Neither
+# upstream manifest is copied: the root plugin.json is a bare {"name": "ponytail"} with no version,
+# description or skills (validate-plugins.mjs rejects it), and .claude-plugin/plugin.json declares a hooks
+# path to a hooks/ nothing stages, so both are generated instead. Not staged — hooks/, ponytail-mcp/,
+# commands/ and the per-agent folders (.codex-plugin, .cursor, .opencode, .clinerules, .kiro, .qoder,
+# .windsurf, .openclaw, .devin-plugin, .grok-plugin, .agents) plus the benchmark assets — because no
+# third-party code ever runs in a colony, and the skills are instructions an agent reads. The skill list
+# above is an allowlist: a new upstream skill fails staging until it is added to this arm of
+# scripts/fetch-vendor.sh and to this comment.
+ponytail     4.12.0     any           plugin  b85f6049059b819a68a551a60e529bc64f704f3935aec460a34a6dc77a1c14e5  https://codeload.github.com/DietrichGebert/ponytail/tar.gz/refs/tags/v4.12.0
+
+# fast-jev-compaction is github.com/tamaratran/fast-jev-compaction at commit e3f262a: Jev-scored
+# deletion of stale tool calls for colonies that switch compaction on. Pinned as a commit tarball,
+# not the npm fast-jev-compaction@0.4.0 release, which ships only the library dist/ (not the plugin
+# hooks/, .claude-plugin/ and src/ the hook actually runs) and is published by a different account
+# than the repo owner with extra CLIs not in the repo.
+fast-jev-compaction e3f262a any           hook    4b1de046ee17f93079968c0865a12bf94fa264f007b2527c0a11eb6794550e77  https://codeload.github.com/tamaratran/fast-jev-compaction/tar.gz/e3f262a7f4d42bd8dd32ced30d26176f7cb545b0
+
+# deja-vu is github.com/vshulcz/deja-vu at tag v0.21.1 (MIT): the transcript indexer behind the
+# optional deja memory feature (crates/colonizer/src/deja.rs). Only the host binary is used —
+# colonies never run deja — so staging keeps just the `deja` binary and drops the archive's
+# skills/ and README, which are for standalone deja users.
+deja-vu      0.21.1    linux-x86_64  tgz     d953476808cf48b4093602381883e48e081c50e6b33256c54fd390a30c8574f9  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_linux_amd64.tar.gz
+deja-vu      0.21.1    linux-aarch64 tgz     23175b19101191ab30f219d620484772a5359afc951bd42a98673daeba900188  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_linux_arm64.tar.gz
+deja-vu      0.21.1    darwin-x86_64 tgz     6201afef450c70515225d92cee43fa1a0cf0b0c1f7a91eb4e56c078585388950  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_darwin_amd64.tar.gz
+deja-vu      0.21.1    darwin-aarch64 tgz    98ac0e211239bc04d20aa7aa98ab3c89f28550f371f7a1a4648ca1cf5d021ab3  https://github.com/vshulcz/deja-vu/releases/download/v0.21.1/deja-vu_0.21.1_darwin_arm64.tar.gz

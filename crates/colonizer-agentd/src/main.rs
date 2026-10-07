@@ -1,0 +1,467 @@
+//! colonizer-agentd: the daemon inside every Colonizer microVM. It runs the agent runner module, keeps the
+//! session event log, and serves events, terminals and shutdown to the harness over the mesh.
+//! Contract: docs/protocol.md §1–§3.
+
+mod config;
+mod harden;
+mod pty;
+mod runner;
+mod seal;
+mod services;
+mod setup;
+mod store;
+mod watch;
+
+use axum::{
+    Json, Router,
+    extract::{
+        Query, Request, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
+use tokio::sync::broadcast::error::RecvError;
+
+use crate::{
+    config::SessionConfig,
+    runner::Runner,
+    store::{EventStore, log_event},
+};
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const USAGE: &str = "usage: colonizer-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
+                       [--path-policy FILE] [--seal-token] [--seccomp-profile]
+                       [--exec-hardened -- CMD [ARGS...]]
+
+  --config PATH      session config            (default /colonizer/session.json)
+  --token-file PATH  bearer token for the API  (default /colonizer/token)
+  --state-dir DIR    event log directory       (default /var/lib/colonizer)
+  --path-policy FILE path policy bind list     (default /colonizer/path-policy; when present,
+                     masked and protected paths are bound inside nested checkouts as they
+                     appear — watch.rs, docs/path-policy.md)
+  --seal-token       cover the token file with a read-only bind of /dev/null once it has been
+                     read, so no other process in the VM can read it; fail closed (seal.rs)
+  --seccomp-profile  print the runner hardening profile as JSON and exit
+  --exec-hardened    harden this process like a runner child, then exec CMD (after --)
+  --version          print the version
+
+  svc start|stop     register and run a long-lived service (services.rs); also spelled by
+                     invoking this binary through a `colonizer-svc` symlink";
+
+struct Args {
+    config: PathBuf,
+    token_file: PathBuf,
+    state_dir: PathBuf,
+    path_policy: PathBuf,
+    seal_token: bool,
+    exec: Vec<String>,
+}
+
+impl Args {
+    /// `Ok(None)` means the command was fully handled (`--help`, `--version`).
+    fn parse(argv: Vec<String>) -> Result<Option<Self>, String> {
+        let mut args = Args {
+            config: "/colonizer/session.json".into(),
+            token_file: "/colonizer/token".into(),
+            state_dir: "/var/lib/colonizer".into(),
+            path_policy: "/colonizer/path-policy".into(),
+            seal_token: false,
+            exec: Vec::new(),
+        };
+        let mut iter = argv.into_iter();
+        while let Some(arg) = iter.next() {
+            let split = arg
+                .split_once('=')
+                .filter(|(flag, _)| flag.starts_with("--"))
+                .map(|(flag, value)| (flag.to_string(), value.to_string()));
+            let (flag, inline) = match split {
+                Some((flag, value)) => (flag, Some(value)),
+                None => (arg, None),
+            };
+            match flag.as_str() {
+                "--version" | "-V" => {
+                    println!("colonizer-agentd {VERSION}");
+                    return Ok(None);
+                }
+                "--help" | "-h" => {
+                    println!("{USAGE}");
+                    return Ok(None);
+                }
+                "--seccomp-profile" => {
+                    println!("{}", harden::profile_json());
+                    return Ok(None);
+                }
+                "--seal-token" => args.seal_token = true,
+                // Everything after the flag (or a bare `--`) is the hardened child's argv, not ours.
+                "--exec-hardened" | "--" => {
+                    args.exec = iter.collect();
+                    if args.exec.first().map(String::as_str) == Some("--") {
+                        args.exec.remove(0);
+                    }
+                    if args.exec.is_empty() {
+                        return Err(format!("{flag} needs a command after `--`"));
+                    }
+                    break;
+                }
+                "--config" | "--token-file" | "--state-dir" | "--path-policy" => {
+                    let value = match inline {
+                        Some(value) => value,
+                        None => iter.next().ok_or_else(|| format!("{flag} needs a value"))?,
+                    };
+                    let slot = match flag.as_str() {
+                        "--config" => &mut args.config,
+                        "--token-file" => &mut args.token_file,
+                        "--path-policy" => &mut args.path_policy,
+                        _ => &mut args.state_dir,
+                    };
+                    *slot = PathBuf::from(value);
+                }
+                _ => return Err(format!("unknown argument: {flag}")),
+            }
+        }
+        Ok(Some(args))
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    // `colonizer-svc` is this binary under another name (a symlink in the image); the same surface
+    // is spelled `colonizer-agentd svc ...`, so both are checked before the flag parser (nothing
+    // agentd takes starts with a bare `svc`).
+    let invoked_as = argv
+        .first()
+        .map(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()).unwrap_or_default());
+    if invoked_as == Some("colonizer-svc") {
+        return services::svc_main(argv.into_iter().skip(1).collect()).await;
+    }
+    if argv.get(1).map(String::as_str) == Some("svc") {
+        return services::svc_main(argv.into_iter().skip(2).collect()).await;
+    }
+    let args = match Args::parse(std::env::args().skip(1).collect()) {
+        Ok(Some(args)) => args,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer-agentd: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match run(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("colonizer-agentd: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Args) -> Result<(), BoxError> {
+    // `--exec-hardened -- CMD` turns this process into a hardened runner stand-in: the manual KVM
+    // matrix and re-verification run the same profile a colony's runner child gets, no VM needed.
+    if !args.exec.is_empty() {
+        return exec_hardened(&args.exec);
+    }
+    // Self-hygiene before anything is spawned (harden.rs): non-dumpable, no core dumps, so a
+    // capability-less runner cannot read the daemon's memory or environ out of /proc.
+    if let Err(e) = harden::self_guard() {
+        eprintln!("colonizer-agentd {VERSION}: warning: cannot harden the daemon itself: {e}");
+    }
+    let raw = std::fs::read(&args.config).map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
+    let mut config: SessionConfig =
+        serde_json::from_slice(&raw).map_err(|e| format!("invalid {}: {e}", args.config.display()))?;
+    let token = std::fs::read_to_string(&args.token_file)
+        .map_err(|e| format!("cannot read {}: {e}", args.token_file.display()))?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(format!("{} is empty", args.token_file.display()).into());
+    }
+    // Issue #640: the token's only reader is this process, and it has now read it — so with
+    // --seal-token the path is covered before the listener, the runner or anything else exists,
+    // and a runner that reads /colonizer/token later finds an empty file instead of the bearer
+    // token that opens the unfiltered /v1/pty shell. A seal that fails or does not verify stops
+    // the start (fail closed), because a colony booting without it looks healthy while its agent
+    // can reach the terminal.
+    if args.seal_token {
+        seal::seal_token_path(&args.token_file).map_err(|e| format!("cannot seal {}: {e}", args.token_file.display()))?;
+    }
+    let store = Arc::new(
+        EventStore::open(&args.state_dir).map_err(|e| format!("cannot open event log in {}: {e}", args.state_dir.display()))?,
+    );
+    // Bind before starting the runner so a bad listen address fails fast.
+    let listener = tokio::net::TcpListener::bind(&config.listen)
+        .await
+        .map_err(|e| format!("cannot listen on {}: {e}", config.listen))?;
+    eprintln!(
+        "colonizer-agentd {VERSION}: session {} (agent {}) listening on {}",
+        config.session_id, config.agent.module, config.listen
+    );
+    store.append(log_event(
+        "info",
+        format!(
+            "colonizer-agentd {VERSION} listening on {} (agent module {})",
+            config.listen, config.agent.module
+        ),
+    ));
+
+    // Issue #700: the boot script's `colonizer-svc` link is best-effort; a missing one is a warn
+    // event the host shows, not a silent gap the agent trips over later.
+    if let Some(warning) = services::svc_link_warning(Path::new(services::BIN_DIR)) {
+        store.append(log_event("warn", warning));
+    }
+    // Path policy beyond boot (#648): masked and protected paths are bound inside nested
+    // checkouts as they appear, before the runner exists to act on them. Best effort — a miss is
+    // still reported at publish (watch.rs); it never stops the daemon.
+    watch::start(&config.workspace, &args.path_policy, store.clone());
+    // Issue #753: the runner is created before the server, but its child does not start until the
+    // brief is final — so the listener below answers /v1/health (the mothership's boot wait) and
+    // streams /v1/events while the repository's setup hook runs, its `log` events going out live. A
+    // long hook then delays only the agent, never the boot.
+    let runner = runner::create();
+    let state = AppState {
+        store: store.clone(),
+        runner: runner.clone(),
+        token: Arc::from(token),
+        workspace: config.workspace.clone(),
+    };
+    let app = Router::new()
+        .route("/v1/health", get(health))
+        .route("/v1/events", get(events))
+        .route("/v1/pty", get(pty_socket))
+        .route("/v1/shutdown", post(shutdown))
+        .layer(middleware::from_fn_with_state(state.clone(), require_token))
+        .with_state(state);
+    // Serving from a task, so the hook below runs with the listener already up. A serve failure
+    // (there is none after a successful bind) ends the daemon through the select at the end.
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    // Issue #753: the repository's setup hook runs before the runner and before a resume's services
+    // (so the tooling it installs is there for both), on every boot — a colony's microVM rootfs does
+    // not survive a suspend, so no earlier install lasts. It never fails the boot; its outcome is a
+    // log event and, on a first launch, a note on the brief below. A shutdown can arrive while it
+    // runs — the server is already up — so the hook is raced against both the HTTP shutdown and
+    // SIGTERM: whichever wins kills the hook's process group and stops the daemon here, before the
+    // agent could start.
+    let stopped = async {
+        tokio::select! {
+            _ = runner.stopped() => {}
+            _ = shutdown_signal() => {}
+        }
+    };
+    let hook = setup::run(&config.workspace, &store, stopped).await;
+    if matches!(hook, setup::Outcome::Cancelled) {
+        eprintln!("colonizer-agentd: stopping during the setup hook");
+        return Ok(());
+    }
+    // Issue #700: on a resume boot the declared services come back before the agent reads its brief,
+    // and the relaunch report prefixes the first user message. Without `restore` — every fresh boot —
+    // this is a no-op.
+    if let Some(prefix) = services::relaunch(&config, &store).await {
+        config.initial_prompt = Some(
+            match config.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+                Some(prompt) => format!("{prefix}\n\n{prompt}"),
+                None => prefix,
+            },
+        );
+    }
+    // Issue #753: tell the agent what the hook did and which tools are on PATH — but only on the
+    // first launch of its prompt. A resumed agent session (COLONIZER_RESUME_SESSION) already carries
+    // the notes in its transcript, and the prompt a resume sends is the held answer, not the brief.
+    if !config.agent.env.contains_key("COLONIZER_RESUME_SESSION")
+        && let Some(prompt) = config.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty())
+    {
+        let (present, missing) = setup::probe_toolbox();
+        config.initial_prompt = Some(format!("{prompt}\n\n{}", setup::note(&hook, &present, &missing)));
+    }
+
+    // The brief is final now that the hook and the resume report have shaped it; start the agent.
+    runner.launch(&config, store.clone());
+
+    tokio::select! {
+        result = server => result??,
+        _ = shutdown_signal() => {
+            eprintln!("colonizer-agentd: stopping the agent runner");
+            runner.shutdown().await;
+        }
+    }
+    Ok(())
+}
+
+/// Applies the runner-child hardening to this process and execs CMD in it (never returns on
+/// success; the exec failure is the only way control comes back).
+fn exec_hardened(argv: &[String]) -> Result<(), BoxError> {
+    let summary = harden::apply_self().map_err(|e| format!("cannot harden for --exec-hardened: {e}"))?;
+    eprintln!("colonizer-agentd {VERSION}: hardening: {summary}");
+    let (program, args) = argv.split_first().ok_or("--exec-hardened needs a command after `--`")?;
+    let error = std::process::Command::new(program).args(args).exec();
+    Err(format!("cannot exec `{program}`: {error}").into())
+}
+
+#[derive(Clone)]
+struct AppState {
+    store: Arc<EventStore>,
+    runner: Arc<Runner>,
+    token: Arc<str>,
+    workspace: PathBuf,
+}
+
+async fn require_token(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let authorized = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| constant_time_eq(token.trim().as_bytes(), state.token.as_bytes()));
+    if authorized {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response()
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+async fn health(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "ok": true,
+        "version": VERSION,
+        "agent": {
+            "state": state.store.agent_state(),
+            "running": state.runner.is_running(),
+            "last_seq": state.store.last_seq(),
+        },
+    }))
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+async fn events(State(state): State<AppState>, Query(query): Query<EventsQuery>, upgrade: WebSocketUpgrade) -> Response {
+    upgrade.on_upgrade(move |socket| stream_events(socket, state, query.since))
+}
+
+async fn stream_events(socket: WebSocket, state: AppState, since: u64) {
+    let (mut sink, mut incoming) = socket.split();
+    let (snapshot, mut live) = state.store.subscribe();
+
+    let mut commands = tokio::spawn({
+        let state = state.clone();
+        async move {
+            while let Some(Ok(message)) = incoming.next().await {
+                match message {
+                    Message::Text(text) => forward_command(&state, &text),
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let outgoing = async {
+        let mut sent = since;
+        for event in state.store.replay(since, snapshot).await {
+            if sink.send(Message::Text(event.line.into())).await.is_err() {
+                return;
+            }
+            sent = event.seq;
+        }
+        sent = sent.max(snapshot);
+        loop {
+            match live.recv().await {
+                Ok(event) => {
+                    if event.seq <= sent {
+                        continue;
+                    }
+                    if sink.send(Message::Text(event.line.clone().into())).await.is_err() {
+                        return;
+                    }
+                    sent = event.seq;
+                }
+                Err(RecvError::Lagged(_)) => {
+                    // This client fell behind the broadcast buffer; catch up from the log.
+                    let upto = state.store.last_seq();
+                    for event in state.store.replay(sent, upto).await {
+                        if sink.send(Message::Text(event.line.into())).await.is_err() {
+                            return;
+                        }
+                        sent = event.seq;
+                    }
+                }
+                Err(RecvError::Closed) => return,
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = outgoing => {}
+        _ = &mut commands => {}
+    }
+    commands.abort();
+}
+
+fn forward_command(state: &AppState, text: &str) {
+    let Ok(command @ Value::Object(_)) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    let kind = command["type"].as_str().unwrap_or_default();
+    if !matches!(kind, "user_message" | "answer" | "interrupt" | "set_model") {
+        return;
+    }
+    if !state.runner.send(&command) {
+        state.store.append(log_event(
+            "warn",
+            format!("agent runner is not running; dropped `{kind}` command"),
+        ));
+    }
+}
+
+#[derive(Deserialize)]
+struct PtyQuery {
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+async fn pty_socket(State(state): State<AppState>, Query(query): Query<PtyQuery>, upgrade: WebSocketUpgrade) -> Response {
+    let cols = query.cols.unwrap_or(80).clamp(1, 1000);
+    let rows = query.rows.unwrap_or(24).clamp(1, 1000);
+    upgrade.on_upgrade(move |socket| pty::serve(socket, state.workspace, cols, rows))
+}
+
+async fn shutdown(State(state): State<AppState>) -> Json<Value> {
+    state.runner.shutdown().await;
+    Json(json!({"ok": true}))
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}

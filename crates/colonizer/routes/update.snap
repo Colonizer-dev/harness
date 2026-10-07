@@ -1,0 +1,2 @@
+/api/update/apply                                    POST   unauth=401    token=owner            activity=app.update
+/api/update/restart                                  POST   unauth=401    token=owner            activity=app.update

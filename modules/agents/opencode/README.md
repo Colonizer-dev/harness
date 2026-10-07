@@ -1,0 +1,74 @@
+# OpenCode agent module
+
+Runs [OpenCode](https://opencode.ai) (`opencode run --format json`) and speaks the Colonizer
+runner contract (`docs/protocol.md` §2): commands as JSON lines on stdin, events as JSON lines
+on stdout, diagnostics on stderr.
+
+**Status: experimental.** The runner has driven the real pinned OpenCode binary end to end, but only
+against a stand-in gateway, outside a microVM; no colony launched from the cockpit has run on it
+yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/test/*.test.mjs`).
+
+- One turn per `user_message`: `opencode run` with the prompt on stdin, resumed with `--session`
+  from the second turn on. A turn with no output for 120 s is SIGINTed and retried once.
+- Questions: OpenCode's native question tool is unavailable in `run` mode, so the model asks
+  only through `colonizer_ask_user` (own MCP server, `mcp.mjs`), surfaced as `question` events;
+  the matching `answer` command resolves them. Long asks survive: the MCP `timeout` is set to
+  an hour and progress notes hold the call open.
+- Loops: in a loop colony (docs/protocol.md, Loops) the MCP server also offers `colonizer_loop_stop`,
+  and on a self-paced loop `colonizer_loop_next` too; both leave the colony as `loop_stop`/`loop_next`
+  events (`delay_minutes` clamped to 15–1440), and the mothership owns the schedule.
+- Shared memory (issue #766): with `COLONIZER_MEMORY_DIR` mounted, the same MCP server serves
+  `colonizer_memory_briefing` (a short, sourced summary, optionally on a topic),
+  `colonizer_memory_changes` (entries added, and entries revoked or removed, since the colony last
+  asked) and `colonizer_memory_search`, read from the mounted `notes.json` and note files and framed
+  as data to verify. They run inside `mcp.mjs` and never cross the bridge, and they show in the
+  transcript as tool calls. Memory is pulled, never injected: the instructions file carries one
+  fixed line naming these tools, and no note text. The logic is `memory.mjs` (a copy of the
+  claude-code module's) and `memory-mcp.mjs` (a copy of the ACP module's), both kept byte-identical
+  by `test/memory.test.mjs`. `colonizer_memory_propose` still crosses the bridge as a
+  `memory_proposal` event, now with `kind` and `confidence`.
+- Text arrives per part as `assistant_text` (`reasoning` as `thinking`); tool completions become
+  `tool_call`/`tool_result` (capped at 20 000 characters); `turn_end` carries cumulative
+  `model_usage` per `<provider>/<model>`.
+
+## Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `COLONIZER_MODEL` | required | Agent model as `<provider>/<model>` from Settings → Model providers, e.g. `local/deepseek-v4-flash` |
+| `COLONIZER_SMALL_MODEL` | main model | Model for titles and summaries, same `<provider>/<model>` form |
+| `COLONIZER_DISABLED_TOOLS` | none | OpenCode tool ids every call of is denied (`permission` deny on top of the allow-all), e.g. `bash`, `webfetch`; `edit` covers write, edit and apply_patch as one, and MCP tools are not covered |
+| `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.5) |
+| `COLONIZER_FINDINGS` | off | `true` emits `finding` events for `colonizer_finding_file` calls |
+| `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED` | set by the mothership | A loop colony's tools: `colonizer_loop_stop`, plus `colonizer_loop_next` when the loop is self-paced |
+| `COLONIZER_MEMORY_DIR` | unset | The mounted shared-memory store; turns on the `colonizer_memory_briefing`, `colonizer_memory_changes` and `colonizer_memory_search` tools |
+| `COLONIZER_OPENCODE_BIN` | none | Use this binary instead of downloading the pinned one |
+
+Models are reached through the mothership's provider gateway, which holds the keys (§6.5): for a
+LAN/tailnet endpoint add the `local` preset in Settings → Model providers (`base_url`
+`http://<tailnet-ip>:8000`, `auth` none), pick the OpenCode agent module, and set the model to
+`local/<model>`. The mothership host reaches the tailnet; the colony only reaches the gateway.
+
+## Binary
+
+At boot the runner uses `COLONIZER_OPENCODE_BIN`, then `opencode` on `PATH`, else downloads the
+pinned build for its architecture from registry.npmjs.org, checks it against `opencode.lock`
+(sha256, before extraction), and reuses it on later boots. The tarball and binary are cached on
+disk under `$XDG_CACHE_HOME/colonizer/opencode` (or `~/.cache/…`), not in `/tmp`: the colony's
+`/tmp` is a small tmpfs and the two together are ~245 MB. `linux-x64-baseline` serves x64 CPUs
+without AVX2.
+
+## Limitations
+
+- No Claude subscription models: the Claude login belongs to the Claude Code module.
+- Streaming is per part, not per token; resume starts a fresh OpenCode session per turn series.
+- The native `question` tool is unavailable in `run` mode; questions use `colonizer_ask_user`.
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch an OpenCode colony while one is set (the install's `exec_policy` setting, the org's exec policy, or a repo
+  `.colonizer/exec-policy.json`).
+
+## Develop
+
+```sh
+node --test test/*.test.mjs   # fake-child tests, no network, no binary
+```

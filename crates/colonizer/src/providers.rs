@@ -1,0 +1,3327 @@
+//! Model providers: endpoints that colonies can route models to, such as DeepSeek's Anthropic-compatible
+//! API, OpenAI (the `openai` wire, translated by openai.rs), or a model served on this machine or the
+//! operator's tailnet. Colonies reach them
+//! through the mothership's provider gateway (gateway/mod.rs), so keys stay here (0600) and never enter a
+//! colony.
+
+use crate::{
+    ApiResult, App, Shared, client_error, config_unreadable,
+    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, forget_probe, health},
+    modules::AgentModule,
+    orgs::effective_agent,
+    provider_quota,
+    sensitivity::{self, ProviderMark, Sensitivity, SensitivityOverrides},
+    sessions::agent_env,
+    util::{delete_secret, read_secret, write_secret},
+};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::{collections::BTreeMap, path::PathBuf};
+
+/// The protocol an endpoint speaks. An `anthropic` endpoint is proxied byte-for-byte; an `openai` one
+/// has to be translated in both directions, so the wire is recorded per provider rather than guessed
+/// from the URL. Providers saved before this field existed deserialise as `anthropic`, unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Wire {
+    #[default]
+    Anthropic,
+    Openai,
+}
+
+/// The token counts of one routed response, in Anthropic's terms, so both wires account on one scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub thinking_tokens: u64,
+}
+
+impl Usage {
+    /// Anthropic's shape, the one colonies and session records speak.
+    pub fn json(&self) -> Value {
+        json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_tokens,
+            "cache_creation_input_tokens": self.cache_write_tokens,
+        })
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens + self.thinking_tokens
+    }
+}
+
+/// Dollars per million tokens, so the gateway can turn routed usage into spend and hold a colony to its
+/// budget. A rate left at `0` prices that kind of token at nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pricing {
+    #[serde(default)]
+    pub input_per_mtok: f64,
+    #[serde(default)]
+    pub output_per_mtok: f64,
+    #[serde(default)]
+    pub cache_read_per_mtok: f64,
+    #[serde(default)]
+    pub cache_write_per_mtok: f64,
+    #[serde(default)]
+    pub thinking_per_mtok: f64,
+}
+
+impl Pricing {
+    /// What one response costs at these rates. The rates are per million tokens.
+    pub fn cost_usd(&self, usage: Usage) -> f64 {
+        (usage.input_tokens as f64 * self.input_per_mtok
+            + usage.output_tokens as f64 * self.output_per_mtok
+            + usage.cache_read_tokens as f64 * self.cache_read_per_mtok
+            + usage.cache_write_tokens as f64 * self.cache_write_per_mtok
+            + usage.thinking_tokens as f64 * self.thinking_per_mtok)
+            / 1_000_000.0
+    }
+}
+
+/// Where to read what is left in a prepaid token plan (issue #199): a `GET` to `url` with the
+/// provider's credential, and `pointer` — an RFC 6901 JSON pointer — naming the remaining-token
+/// number in the answer. The credential rides along, so `url` is pinned to the base URL's origin.
+/// `limit_pointer`, when set, names the plan's total in the same answer, so the model switcher can
+/// draw used against limit; without it only the remaining count is known.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuotaProbe {
+    pub url: String,
+    pub pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_pointer: Option<String>,
+}
+
+/// Per-provider dialect quirks: what one endpoint rejects that the Anthropic wire otherwise allows.
+/// Data, not branches: the next dialect gap becomes a row in [`PRESET_QUIRKS`], consulted at proxy
+/// time, instead of another `if id == ...` in gateway/proxy.rs. Keyed by the provider's `preset` (the
+/// catalogue id it was added from), so a hand-pointed custom endpoint keeps default behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProviderQuirks {
+    /// Drop `ttl` from `cache_control` blocks (`{"type":"ephemeral","ttl":…}` → `{"type":"ephemeral"}`).
+    pub strip_cache_ttl: bool,
+    /// Floor for `max_tokens`; a request below it is raised to it. Meta answers 400 below 16.
+    pub min_max_tokens: Option<u64>,
+}
+
+impl ProviderQuirks {
+    /// Whether any rewrite applies: without quirks the gateway keeps the body byte-identical.
+    pub fn needs_normalize(self) -> bool {
+        self.strip_cache_ttl || self.min_max_tokens.is_some()
+    }
+}
+
+/// One row per preset with a known dialect gap. `custom` (and anything unlisted) gets defaults.
+const PRESET_QUIRKS: &[(&str, ProviderQuirks)] = &[(
+    "meta",
+    ProviderQuirks {
+        strip_cache_ttl: true,
+        min_max_tokens: Some(16),
+    },
+)];
+
+/// The quirks for a preset id, or defaults when the preset has no known gaps.
+pub fn quirks_for_preset(preset: &str) -> ProviderQuirks {
+    PRESET_QUIRKS
+        .iter()
+        .find(|(id, _)| *id == preset)
+        .map(|(_, quirks)| *quirks)
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Provider {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub auth: String,
+    #[serde(default)]
+    pub wire: Wire,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub preset: String,
+    /// Headers and body-idle timeout for one request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Requests at once across all colonies; more wait in the gateway's queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Anthropic model used when the provider is unreachable, times out or its queue is full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
+    /// Dollars per million tokens on this endpoint. Unset (or all `0`) means routed requests still count
+    /// their tokens but cost, and spend, nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<Pricing>,
+    /// Where to read what is left in a prepaid token plan (issue #199). Unset means no probe: the
+    /// first sign of an exhausted plan stays the colonies failing over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<QuotaProbe>,
+    /// Strip `ttl` from `cache_control` blocks on top of whatever the preset's quirks say. The preset
+    /// is a UI label, not a capability, so a hand-pointed endpoint (preset `custom`) carrying this flag
+    /// normalizes exactly like its catalogue twin; without it, a `custom` preset keeps default behaviour.
+    #[serde(default)]
+    pub normalize_cache_ttl: bool,
+    /// Whether an operator has vetted this provider to receive restricted-sensitivity work — secrets,
+    /// `.env` files, infra config (sensitivity.rs, issue #472). Defaults to `false`: a provider is not
+    /// trusted with a colony's secrets just because it is configured, and "not marked trusted" is a safe
+    /// default for a field nobody has set yet.
+    #[serde(default)]
+    pub trusted: bool,
+    /// One step below `trusted`, and implied by it (sensitivity.rs, issue #626): a provider marked
+    /// vetted may carry `vetted`-class work — research notes, internal plans — but not restricted
+    /// secrets. Defaults to `false`, the same safe default as `trusted`.
+    #[serde(default)]
+    pub vetted: bool,
+    /// The organisation that actually runs the model behind this endpoint (`"anthropic"`, …), as the
+    /// operator recorded it. It gates nothing on its own: an org can pin restricted work to a list of
+    /// vendors, and a provider with no vendor recorded never matches such a list (sensitivity.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// What this connection serves (#295): canonical model id (the part after `<id>/`) → the wire name
+    /// the endpoint knows it by, sent verbatim. An empty wire name sends the canonical as is. When
+    /// non-empty the map is authoritative — the connection serves exactly the canonicals it lists,
+    /// which the boot checks — when empty, anything goes, as it always has.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_map: BTreeMap<String, String>,
+    /// Claude Code tools stripped from every request through this connection (#295).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
+}
+
+impl Provider {
+    /// The Claude model the colony's router retries on when this provider fails over: a
+    /// `fallback_model` with no `<provider>/` prefix. A provider-prefixed fallback is the gateway's
+    /// to route instead ([`Provider::provider_fallback`]), so the router never sees it.
+    pub fn claude_fallback(&self) -> Option<&str> {
+        self.fallback_model.as_deref().filter(|m| !m.is_empty() && !m.contains('/'))
+    }
+
+    /// The `(provider, model)` a quota-exhausted request is retried on by the gateway itself (issue
+    /// #767): a `fallback_model` of the form `<provider>/<model>` on another, same-wire provider.
+    pub fn provider_fallback(&self) -> Option<(&str, &str)> {
+        self.fallback_model
+            .as_deref()?
+            .split_once('/')
+            .filter(|(p, m)| !p.is_empty() && !m.is_empty())
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)
+    }
+
+    pub fn queue_timeout_secs(&self) -> u64 {
+        self.queue_timeout_secs.unwrap_or_else(|| self.timeout_secs())
+    }
+
+    /// This provider's dialect quirks: its preset's row, plus the explicit per-provider flag. See
+    /// [`ProviderQuirks`].
+    pub fn quirks(&self) -> ProviderQuirks {
+        let mut quirks = quirks_for_preset(self.preset.as_str());
+        if self.normalize_cache_ttl {
+            quirks.strip_cache_ttl = true;
+        }
+        quirks
+    }
+
+    /// What one routed response costs here: $0 when the provider has no pricing configured, whose tokens
+    /// are still counted.
+    pub fn cost_usd(&self, usage: Usage) -> f64 {
+        self.pricing.map_or(0.0, |pricing| pricing.cost_usd(usage))
+    }
+}
+
+/// The Claude Code built-in tool names, as they arrive in a request's `tools[].name` — the one list a
+/// `disabled_tools` entry may name.
+const KNOWN_TOOLS: &[&str] = &[
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "Glob",
+    "Grep",
+    "LS",
+    "NotebookEdit",
+    "NotebookRead",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "Agent",
+    "TodoWrite",
+    "TodoRead",
+    "ExitPlanMode",
+    "BashOutput",
+    "KillShell",
+    "SlashCommand",
+    "Skill",
+];
+
+/// Claude Code sends its web tools as Anthropic server tools, whose wire name differs from the
+/// built-in's: disabling `WebSearch` has to strip `{"type":"web_search_…","name":"web_search"}` too.
+const SERVER_TOOL_ALIASES: &[(&str, &str)] = &[("WebSearch", "web_search"), ("WebFetch", "web_fetch")];
+
+/// The connection-policy faults of one provider, named as `provider '<id>': <row>: <problem>`. Pure,
+/// so the PUT and the boot check see the same rule (#295).
+fn policy_errors(id: &str, model_map: &BTreeMap<String, String>, disabled_tools: &[String]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (canonical, wire) in model_map {
+        let row = format!("provider '{id}': model_map['{canonical}']");
+        if !valid_model(canonical) {
+            errors.push(format!("{row}: a canonical model id must be 1-120 characters without spaces"));
+        } else if canonical.starts_with(&format!("{id}/")) {
+            errors.push(format!("{row}: the canonical id must not repeat the '{id}/' prefix"));
+        } else if !wire.is_empty() && !valid_model(wire) {
+            errors.push(format!(
+                "{row}: wire name '{wire}' must be empty (send the canonical id) or a model ID without spaces"
+            ));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for tool in disabled_tools {
+        if !KNOWN_TOOLS.contains(&tool.as_str()) {
+            errors.push(format!(
+                "provider '{id}': disabled_tools['{tool}']: unknown tool (known: {})",
+                KNOWN_TOOLS.join(", ")
+            ));
+        } else if seen.contains(&tool.as_str()) {
+            errors.push(format!("provider '{id}': disabled_tools: '{tool}' is listed twice"));
+        }
+        seen.push(tool.as_str());
+    }
+    errors
+}
+
+/// The first fault in a loaded providers.json, prefixed with the file name: a hand-edited row the PUT
+/// would have refused fails the colony launch instead of surfacing as a request-time 400 (#295).
+pub(crate) fn config_error(providers: &[Provider]) -> Option<String> {
+    providers
+        .iter()
+        .find_map(|p| policy_errors(&p.id, &p.model_map, &p.disabled_tools).into_iter().next())
+        .map(|error| format!("providers.json: {error}"))
+}
+
+/// Rewrites a request body for one connection's policy (#295): the `model_map`'s wire name replaces
+/// the canonical model id, and `disabled_tools` entries — with their [`SERVER_TOOL_ALIASES`] — are
+/// stripped from `tools`, `tool_choice` following when it named a stripped tool, and both dropped
+/// when no tool survives. Returns `None` when nothing here applies to this body, so the caller keeps
+/// the original bytes and the anthropic passthrough stays byte-identical; a body that is not JSON is
+/// also left alone. The canonical is what the runner sends (it strips the `<provider>/` prefix), and
+/// pricing/estimation keep keying off it because the rewrite happens after the cost estimate.
+pub fn apply_connection_policy(body: &[u8], provider: &Provider) -> Option<Vec<u8>> {
+    if provider.model_map.is_empty() && provider.disabled_tools.is_empty() {
+        return None;
+    }
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object_mut()?;
+    let mut changed = false;
+    if let Some(wire) = object
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(|canonical| provider.model_map.get(canonical))
+        .filter(|wire| !wire.is_empty())
+    {
+        object.insert("model".into(), json!(wire));
+        changed = true;
+    }
+    if !provider.disabled_tools.is_empty() {
+        // Every `tools[].name` a disabled entry removes: the built-in itself plus its server-tool alias.
+        let removed: Vec<&str> = provider
+            .disabled_tools
+            .iter()
+            .flat_map(|tool| {
+                let mut names = vec![tool.as_str()];
+                names.extend(
+                    SERVER_TOOL_ALIASES
+                        .iter()
+                        .filter(|(builtin, _)| builtin == tool)
+                        .map(|(_, server)| *server),
+                );
+                names
+            })
+            .collect();
+        let dropped = object
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .map(|tools| {
+                let before = tools.len();
+                tools.retain(|tool| {
+                    !tool
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| removed.contains(&name))
+                });
+                before - tools.len()
+            })
+            .unwrap_or(0);
+        if dropped > 0 {
+            changed = true;
+            let choice = object.get("tool_choice").and_then(|c| c.get("name")).and_then(Value::as_str);
+            let emptied = object.get("tools").and_then(Value::as_array).is_some_and(Vec::is_empty);
+            if choice.is_some_and(|name| removed.contains(&name)) || emptied {
+                object.remove("tool_choice");
+            }
+            if emptied {
+                object.remove("tools");
+            }
+        }
+    }
+    changed.then(|| serde_json::to_vec(&value).ok()).flatten()
+}
+
+/// Models served by Anthropic with the Claude login, offered as suggestions in model pickers.
+pub(crate) const ANTHROPIC_MODELS: &[(&str, &str)] = &[
+    ("opus", "Claude Opus (latest)"),
+    ("sonnet", "Claude Sonnet (latest)"),
+    ("haiku", "Claude Haiku (latest)"),
+    ("fable", "Claude Fable (latest)"),
+    ("claude-opus-5-5", "Claude Opus 5.5"),
+    ("claude-opus-5", "Claude Opus 5"),
+    ("claude-sonnet-5", "Claude Sonnet 5"),
+    ("claude-haiku-4-5", "Claude Haiku 4.5"),
+];
+
+const AUTH_MODES: [&str; 3] = ["x-api-key", "bearer", "none"];
+/// The preset a provider was added from: a label for the UI, not a capability. The catalogue names
+/// dozens, so this is checked for shape rather than against a list.
+fn valid_preset(preset: &str) -> bool {
+    !preset.is_empty()
+        && preset.len() <= 48
+        && preset
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Presets a base URL names: the built-in presets, then every catalogue entry whose URL has no
+/// `${VAR}` placeholder (`web/src/providerCatalog.ts`). A URL two entries share is left out, since it
+/// names neither; the first row wins for a URL a built-in preset also uses. The web test
+/// `providerPresetInference.test.ts` fails when this table drifts from the catalogue.
+const KNOWN_PRESETS: &[(&str, &str)] = &[
+    ("deepseek", "https://api.deepseek.com/anthropic"),
+    ("openai", "https://api.openai.com"),
+    ("zai", "https://api.z.ai/api/anthropic"),
+    (
+        "alibaba",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+    ),
+    ("9527code", "https://9527.codes"),
+    ("a6api", "https://api.a6api.com"),
+    ("aicodemirror", "https://api.aicodemirror.ai/api/claudecode"),
+    ("aicodewith", "https://api.aicodewith.ai"),
+    ("aicoding", "https://api.aicoding.inc"),
+    ("aigocode", "https://api.aigocode.app"),
+    ("aihubmix", "https://aihubmix.com"),
+    ("amux", "https://api.amux.ai"),
+    ("apikey-fun", "https://api.apikey.fan"),
+    ("apinebula", "https://apinebula.ai"),
+    ("atlascloud", "https://api.atlascloud.ai"),
+    ("baidu-qianfan-coding-plan", "https://qianfan.baidubce.com/anthropic/coding"),
+    (
+        "baidu-qianfan-token-plan",
+        "https://qianfan.baidubce.com/anthropic/tokenplan/personal",
+    ),
+    ("bailing", "https://api.tbox.cn/api/anthropic"),
+    ("byteplus", "https://ark.ap-southeast.bytepluses.com/api/coding"),
+    ("ccsub", "https://www.ccsub.net"),
+    ("cherryin", "https://open.cherryin.net"),
+    ("claudeapi", "https://gw.apito.ai"),
+    ("claudecn", "https://claudecn.top"),
+    ("code0", "https://code0.ai"),
+    ("compshare", "https://api.modelverse.cn"),
+    ("compshare-coding-plan", "https://cp.compshare.cn"),
+    ("crazyrouter", "https://cn.crazyrouter.com"),
+    ("cubence", "https://api.cubence.com"),
+    ("dmxapi", "https://www.dmxapi.cn"),
+    ("e-flowcode", "https://e-flowcode.cc"),
+    ("etok-ai", "https://api.etok.ai"),
+    ("fennoai", "https://api.fenno.ai"),
+    ("github-copilot", "https://api.githubcopilot.com"),
+    ("jiekou-ai", "https://api.jiekou.ai/anthropic"),
+    ("kimi", "https://api.moonshot.cn/anthropic"),
+    ("kimi-for-coding", "https://api.kimi.com/coding"),
+    ("longcat", "https://api.longcat.chat/anthropic"),
+    ("meta", "https://api.meta.ai"),
+    ("micu", "https://www.micuapi.ai"),
+    ("minimax", "https://api.minimaxi.com/anthropic"),
+    ("minimax-en", "https://api.minimax.io/anthropic"),
+    ("modelscope", "https://api-inference.modelscope.cn"),
+    ("novita-ai", "https://api.novita.ai/anthropic"),
+    ("nvidia", "https://integrate.api.nvidia.com"),
+    ("opencode-go", "https://opencode.ai/zen/go"),
+    ("openrouter", "https://openrouter.ai/api"),
+    ("packycode", "https://www.packyapi.ai"),
+    ("patewayai", "https://api.pateway.ai"),
+    ("pipellm", "https://cc-api.pipellm.ai"),
+    ("ppio", "https://api.ppio.com/anthropic"),
+    ("qwencloud", "https://dashscope-intl.aliyuncs.com/apps/anthropic"),
+    (
+        "qwencloud-for-coding",
+        "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
+    ),
+    ("qiniu", "https://api.qnaigc.com"),
+    ("relaxycode", "https://www.relaxycode.com"),
+    ("rightcode", "https://www.rightapi.ai/claude"),
+    ("runapi", "https://runapi.host"),
+    ("shengsuanyun", "https://router.shengsuanyun.com/api"),
+    ("siliconflow", "https://api.siliconflow.cn"),
+    ("siliconflow-en", "https://api.siliconflow.com"),
+    ("soleapi", "https://soleapi.com"),
+    ("sssaicode", "https://node-hk.sssaicodeapi.com/api"),
+    ("stepfun", "https://api.stepfun.com/step_plan"),
+    ("stepfun-en", "https://api.stepfun.ai/step_plan"),
+    ("subrouter", "https://subrouter.ai"),
+    ("sudocode-chat", "https://api.sudocode.chat"),
+    ("sudocode-us", "https://sudocode.us"),
+    ("teamorouter", "https://api.teamorouter.cn"),
+    ("tencent-token-plan", "https://api.lkeap.cloud.tencent.com/plan/anthropic"),
+    ("therouter", "https://api.therouter.ai"),
+    ("volcengine-doubao", "https://ark.cn-beijing.volces.com/api/compatible"),
+    ("xai-grok", "https://api.x.ai/v1"),
+    ("xiaomi-mimo", "https://api.xiaomimimo.com/anthropic"),
+    (
+        "xiaomi-mimo-token-plan-china",
+        "https://token-plan-cn.xiaomimimo.com/anthropic",
+    ),
+    ("xycai", "https://apicdn.xycai.us"),
+    ("zetaapi", "https://api.zetaapi.ai"),
+    ("zhipu-glm", "https://open.bigmodel.cn/api/anthropic"),
+    ("qianwen-ai", "https://dashscope.aliyuncs.com/apps/anthropic"),
+    ("qianwen-coding-plan", "https://coding.dashscope.aliyuncs.com/apps/anthropic"),
+    (
+        "qianwen-token-plan",
+        "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    ),
+    ("volcengine-agent-plan", "https://ark.cn-beijing.volces.com/api/plan"),
+    ("volcengine-coding-plan", "https://ark.cn-beijing.volces.com/api/coding"),
+];
+
+/// `scheme://host[:port]/path` with the scheme and host lowercased, a default port and trailing
+/// slashes dropped. Mirrors `normalizeBaseUrl` in the web UI.
+fn normalize_base_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    // `split_url` takes lowercase schemes only; URL schemes are case-insensitive.
+    let (raw_scheme, rest) = url.split_once("://")?;
+    let (scheme, host, port, path) = split_url(&format!("{}://{rest}", raw_scheme.to_ascii_lowercase()))?;
+    let port = port.filter(|p| !matches!((scheme.as_str(), *p), ("http", 80) | ("https", 443)));
+    let mut out = format!("{scheme}://{}", host.to_ascii_lowercase());
+    if let Some(port) = port {
+        out.push_str(&format!(":{port}"));
+    }
+    out.push_str(path.trim_end_matches('/'));
+    Some(out)
+}
+
+/// The built-in or catalogue preset whose base URL is `base_url`, if any.
+pub(crate) fn preset_for_base_url(base_url: &str) -> Option<&'static str> {
+    let wanted = normalize_base_url(base_url)?;
+    KNOWN_PRESETS
+        .iter()
+        .find(|(_, known)| normalize_base_url(known).as_deref() == Some(wanted.as_str()))
+        .map(|(id, _)| *id)
+}
+
+/// A provider saved as `custom` (or with no preset) at a known vendor's URL is that vendor: its
+/// stored preset otherwise, or `custom`. What the listing reports, so a script-added DeepSeek wears
+/// DeepSeek's mark (#1166).
+pub(crate) fn resolved_preset<'a>(preset: &'a str, base_url: &str) -> &'a str {
+    if preset.is_empty() || preset == "custom" {
+        preset_for_base_url(base_url).unwrap_or("custom")
+    } else {
+        preset
+    }
+}
+
+/// The model env vars a colony can be pointed at, matched against the configured providers. The
+/// first four reach the runner as is (OpenCode's small model among them, which registers its own
+/// gateway route); the two tier models are the mothership's per-task routing and are stripped from
+/// the runner env before launch, so only `used_by` reads them — counting the tier settings in the
+/// module's configured env, while a colony booted onto a tier meets the tier's provider through the
+/// substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent on purpose: the mothership
+/// serves summaries itself, straight to Anthropic, never through the gateway. Order matches the
+/// settings array in [`used_by`].
+const MODEL_VARS: [&str; 6] = [
+    "COLONIZER_MODEL",
+    "COLONIZER_SUBAGENT_MODEL",
+    "COLONIZER_BACKGROUND_MODEL",
+    "COLONIZER_SMALL_MODEL",
+    "COLONIZER_MODEL_LOW",
+    "COLONIZER_MODEL_HIGH",
+];
+
+/// The model settings behind [`MODEL_VARS`], same order: the names a boot refusal can point a fix at.
+const SETTING_NAMES: [&str; 6] = [
+    "model",
+    "subagent_model",
+    "background_model",
+    "small_model",
+    "model_low",
+    "model_high",
+];
+
+impl App {
+    pub(crate) fn providers_file(&self) -> PathBuf {
+        self.cfg.config_dir.join("providers.json")
+    }
+
+    pub(crate) fn provider_key_file(&self, id: &str) -> PathBuf {
+        self.cfg.config_dir.join("provider-keys").join(id)
+    }
+
+    pub fn providers(&self) -> Vec<Provider> {
+        let providers: Vec<Provider> = self.read_config_loud(&self.providers_file(), "model providers");
+        self.warn_duplicate_ids(&providers);
+        providers
+    }
+
+    /// A hand-edited file can list one id twice: the first entry wins and any later one is ignored,
+    /// so the loser is named rather than silently shadowed (#326). This reader runs per request, so
+    /// the warning goes through the `config_damage` record [`App::read_config_loud`] dedups on
+    /// instead of the log — which is also why the message names no file: the strict read clears
+    /// that record by file name, and a record it kept clearing would be re-raised (and re-printed)
+    /// every request. The slot is shared with the strict read's file-damage alerts, and a file that
+    /// will not read at all is the more urgent fault: a warning only ever takes an empty slot or one
+    /// already holding a warning of its own, and a read that comes back without the duplicate drops
+    /// it here.
+    fn warn_duplicate_ids(&self, providers: &[Provider]) {
+        let dups = duplicate_provider_ids(providers);
+        let mut damage = self.config_damage.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if dups.is_empty() {
+            if damage.as_ref().is_some_and(|a| a.message.starts_with(DUPLICATE_IDS_WARNING)) {
+                *damage = None;
+            }
+            return;
+        }
+        let message = format!(
+            "{} {} — the first entry wins and any later one is ignored",
+            DUPLICATE_IDS_WARNING,
+            dups.join(", ")
+        );
+        match damage.as_ref() {
+            Some(a) if a.message == message => return,
+            // Not ours: a file-damage alert holds the slot and takes precedence until its own
+            // reader clears it, so this warning stays log-less rather than hiding it.
+            Some(a) if !a.message.starts_with(DUPLICATE_IDS_WARNING) => return,
+            _ => {}
+        }
+        eprintln!("providers: {message}");
+        *damage = Some(crate::StorageAlert {
+            kind: crate::StorageAlertKind::LoadDamage,
+            message,
+            ts: chrono::Utc::now(),
+            failures: 1,
+            recovered_at: None,
+        });
+    }
+
+    /// One-time migration on load (#1166): a provider saved as `custom` whose base URL is a known
+    /// vendor's becomes that vendor's preset, so the file itself says what the listing says. Only the
+    /// `preset` field changes; the key file, id and every other field stay as they were. A file that
+    /// will not read strictly is left alone ([`config_unreadable`] explains it to the operator), and a
+    /// second run finds nothing to rewrite. Returns how many providers moved.
+    pub(crate) async fn migrate_custom_presets(&self) -> usize {
+        let _config = self.config_write.lock().await;
+        let Ok(mut providers) = crate::util::read_json_or_default::<Vec<Provider>>(&self.providers_file()) else {
+            return 0;
+        };
+        let mut moved = 0;
+        for p in &mut providers {
+            if (p.preset.is_empty() || p.preset == "custom")
+                && let Some(id) = preset_for_base_url(&p.base_url)
+            {
+                p.preset = id.to_string();
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            match self.save_providers(&providers).await {
+                Ok(()) => println!("providers: {moved} saved as custom now carry their vendor's preset"),
+                Err(e) => {
+                    eprintln!("providers: could not record the vendor presets ({e:#}); they are still inferred on read");
+                    return 0;
+                }
+            }
+        }
+        moved
+    }
+
+    pub(crate) async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
+        std::fs::create_dir_all(&self.cfg.config_dir)?;
+        crate::util::write_atomic(&self.providers_file(), &serde_json::to_vec_pretty(providers)?).await
+    }
+
+    pub fn provider_key(&self, id: &str) -> Option<String> {
+        read_secret(&self.provider_key_file(id))
+    }
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id != "anthropic"
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// What a duplicate-ids warning starts with, so the load only ever clears or replaces its own
+/// damage record and never the strict read's file-damage alerts.
+const DUPLICATE_IDS_WARNING: &str = "these providers are listed more than once:";
+
+/// The ids `providers` lists more than once, in first-appearance order: the load keeps the first
+/// entry of each, the PUT refuses to save over the shadow, and both name them (#326).
+fn duplicate_provider_ids(providers: &[Provider]) -> Vec<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut dups: Vec<String> = Vec::new();
+    for provider in providers {
+        if seen.iter().any(|id| *id == provider.id) {
+            if !dups.iter().any(|id| id == &provider.id) {
+                dups.push(provider.id.clone());
+            }
+        } else {
+            seen.push(&provider.id);
+        }
+    }
+    dups
+}
+
+pub(crate) fn valid_model(model: &str) -> bool {
+    !model.is_empty() && model.len() <= 120 && model.chars().all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c))
+}
+
+/// Why `model` cannot be the `fallback_model` of provider `id` (speaking `wire`), if it cannot
+/// (issue #767). A Claude alias or id always can: the colony's router retries it on Anthropic. A
+/// `<provider>/<model>` can when that provider is another configured one that serves the model and
+/// speaks the same wire — the gateway retries the quota-exhausted request there itself, re-sending
+/// the request body it already holds, so an anthropic-wire provider falls back to an anthropic-wire
+/// one and an openai-wire provider to an openai-wire one. Cross-wire is refused: the gateway has no
+/// retry path that re-shapes an answer for the other wire mid-request.
+pub(crate) fn fallback_error(id: &str, wire: Wire, model: &str, providers: &[Provider]) -> Option<String> {
+    if !valid_model(model) {
+        return Some(format!("fallback model \"{model}\" must be a model ID without spaces"));
+    }
+    // No prefix: a Claude model, which any provider may fall back to.
+    let (other, canonical) = model.split_once('/')?;
+    if other.is_empty() || canonical.is_empty() {
+        return Some(format!(
+            "fallback model \"{model}\" must be a Claude model such as sonnet, or <provider>/<model>"
+        ));
+    }
+    if other == id {
+        return Some(format!("provider \"{id}\" can't fall back to one of its own models"));
+    }
+    let Some(target) = providers.iter().find(|p| p.id == other) else {
+        return Some(format!(
+            "fallback model \"{model}\" names provider \"{other}\", which is not configured"
+        ));
+    };
+    let serves = if !target.model_map.is_empty() {
+        target.model_map.contains_key(canonical)
+    } else {
+        target.models.is_empty() || target.models.iter().any(|m| m == canonical)
+    };
+    if !serves {
+        return Some(format!(
+            "fallback model \"{model}\": provider \"{other}\" does not list \"{canonical}\" among its models"
+        ));
+    }
+    if target.wire != wire {
+        return Some(format!(
+            "fallback model \"{model}\" is on an {}-wire provider and \"{id}\" speaks the {} wire; the gateway \
+             retries a quota fallback on the same wire only (anthropic to anthropic, openai to openai) — pick a \
+             model on a {}-wire provider, or a Claude model",
+            crate::gateway_audit::wire_name(target.wire),
+            crate::gateway_audit::wire_name(wire),
+            crate::gateway_audit::wire_name(wire)
+        ));
+    }
+    None
+}
+
+/// Claude Code resolves aliases itself, but a fallback request goes to the API as is, so it needs a model ID.
+pub(crate) fn api_model(model: &str) -> &str {
+    match model {
+        "opus" => "claude-opus-5",
+        "sonnet" => "claude-sonnet-5",
+        "haiku" => "claude-haiku-4-5",
+        "fable" => "claude-fable-5-1",
+        other => other,
+    }
+}
+
+/// Removes OAuth capability betas, which only Anthropic understands.
+pub fn strip_oauth_betas(value: &str) -> String {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|beta| !beta.is_empty() && !beta.starts_with("oauth-"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Splits `scheme://host[:port][/path]`; only http and https are accepted.
+pub fn split_url(url: &str) -> Option<(String, String, Option<u16>, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], rest[i..].to_string()),
+        None => (rest, String::new()),
+    };
+    if authority.is_empty() || authority.contains('@') || authority.contains(char::is_whitespace) {
+        return None;
+    }
+    let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
+        let (host, after) = stripped.split_once(']')?;
+        let port = match after.strip_prefix(':') {
+            Some(p) => Some(p.parse().ok()?),
+            None if after.is_empty() => None,
+            None => return None,
+        };
+        (format!("[{host}]"), port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host.to_string(), Some(port.parse().ok()?)),
+            None => (authority.to_string(), None),
+        }
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme.to_string(), host, port, path))
+}
+
+/// Whether two [`split_url`] results name one origin: same scheme, same host case-insensitively,
+/// and the same port with an absent port read as the scheme's default (80 for http, 443 for https).
+/// The bar a quota URL must clear, since the provider's credential is sent there (#199).
+fn same_origin(
+    (base_scheme, base_host, base_port, _): (String, String, Option<u16>, String),
+    (scheme, host, port, _): (String, String, Option<u16>, String),
+) -> bool {
+    let default_port = |scheme: &str| if scheme == "https" { 443 } else { 80 };
+    base_scheme == scheme
+        && host.eq_ignore_ascii_case(&base_host)
+        && port.unwrap_or_else(|| default_port(&scheme)) == base_port.unwrap_or_else(|| default_port(&base_scheme))
+}
+
+/// Everything a colony needs to route models through the gateway.
+#[derive(Default)]
+pub struct ColonyRoutes {
+    pub routes: Vec<Value>,
+    pub providers: Vec<Provider>,
+}
+
+/// Whether a model setting's value points at `provider_id`: named with that `<provider>/` prefix
+/// and a non-empty canonical. `deepseek/` names no model, so it routes nothing on either side of
+/// the record — [`ColonyRoutes::used`] admits no provider for it and [`ColonyRoutes::used_models`]
+/// records no pair.
+pub(crate) fn names_model_on(value: &str, provider_id: &str) -> bool {
+    value
+        .strip_prefix(provider_id)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+}
+
+impl ColonyRoutes {
+    /// Providers the colony's model settings actually point at.
+    pub fn used(&self, runner_env: &Map<String, Value>) -> Vec<Provider> {
+        let models: Vec<&str> = MODEL_VARS.iter().filter_map(|var| runner_env.get(*var)?.as_str()).collect();
+        self.providers
+            .iter()
+            .filter(|p| models.iter().any(|m| names_model_on(m, &p.id)))
+            .cloned()
+            .collect()
+    }
+
+    /// The `<provider>/<model>` pairs those same settings name, deduplicated in first-appearance
+    /// order (issue #681): what the gateway checks a request body's model against, next to
+    /// [`Self::used`]'s providers. The same walk, so a pair is always on record for every provider
+    /// `used` admits — and for nothing else. An empty canonical (`deepseek/`) is skipped here and
+    /// admits nothing in [`Self::used`], per [`names_model_on`].
+    pub fn used_models(&self, runner_env: &Map<String, Value>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for value in MODEL_VARS
+            .iter()
+            .filter_map(|var| runner_env.get(*var))
+            .filter_map(Value::as_str)
+        {
+            let Some(prefix) = provider_prefix(value) else { continue };
+            let canonical = &value[prefix.len() + 1..];
+            if canonical.is_empty() {
+                continue;
+            }
+            let pair = format!("{prefix}/{canonical}");
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+        out
+    }
+
+    /// The first model setting whose connection cannot serve this colony, as the boot-refusal message
+    /// naming the agent module and the fix (#295): a `<provider>/` prefix nobody configured — the
+    /// runner would quietly send those requests to Anthropic (router.mjs) — or a configured provider
+    /// whose non-empty `model_map` does not list the canonical the setting names. The same MODEL_VARS
+    /// walk as [`ColonyRoutes::used`]: bare names and values that don't shape up as a prefix are
+    /// Claude's own models and pass.
+    pub fn unusable_route(&self, backend: &str, runner_env: &Map<String, Value>) -> Option<String> {
+        for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
+            let Some(value) = runner_env.get(*var).and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(prefix) = provider_prefix(value) else { continue };
+            let Some(provider) = self.providers.iter().find(|p| p.id == prefix) else {
+                return Some(format!(
+                    "backend '{backend}' has no provider for model '{value}': add a provider '{prefix}' in \
+                     Settings → Providers (providers.json), or change the '{setting}' setting of the '{backend}' agent module"
+                ));
+            };
+            let canonical = &value[prefix.len() + 1..];
+            if provider.model_map.is_empty() || provider.model_map.contains_key(canonical) {
+                continue;
+            }
+            return Some(format!(
+                "backend '{backend}' has no provider for model '{value}': add '{canonical}' to the model_map of \
+                 provider '{prefix}', or pick one of: {}",
+                provider.model_map.keys().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        None
+    }
+}
+
+/// The boot-refusal for a used provider probed unreachable with no `fallback_model` (#295): the colony
+/// would boot into a model its connection can never deliver. One with a fallback still serves on
+/// Claude, so it stays the caller's warning. `health` is the fresh probe the boot runs for this
+/// refusal (the cached answer is stale-able, boot.rs), whose `error` names the base_url problem.
+pub fn unreachable_route(backend: &str, provider: &Provider, health: &Value, runner_env: &Map<String, Value>) -> Option<String> {
+    let value = MODEL_VARS
+        .iter()
+        .filter_map(|var| runner_env.get(*var).and_then(Value::as_str))
+        .find(|m| names_model_on(m, &provider.id))?;
+    let error = health.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+    Some(format!(
+        "backend '{backend}' has no provider for model '{value}': the endpoint {} is unreachable ({error}); \
+         set a fallback model on provider '{}' to use Claude instead",
+        provider.base_url, provider.id
+    ))
+}
+
+/// The `<provider>` half of a `<provider>/<model>` setting, when the value shapes up as one: a leading
+/// `[A-Za-z0-9]`, then `[A-Za-z0-9._-]*`, then `/`. Mirrors the runner's PROVIDER_PREFIX
+/// (modules/agents/claude-code/router.mjs) so the two stay in step.
+fn provider_prefix(model: &str) -> Option<&str> {
+    let (prefix, _) = model.split_once('/')?;
+    let mut rest = prefix.chars();
+    match rest.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return None,
+    }
+    rest.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)).then_some(prefix)
+}
+
+/// What to do, at boot, about a model setting whose provider the gateway would refuse for the task's
+/// sensitivity class (issue #704), resolved with the gateway's own rule so a booted colony is one it
+/// will carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModelFix {
+    /// The gateway would carry the model, or it names no configured provider (no route of ours
+    /// serves it): leave the setting alone.
+    Keep,
+    /// The gateway would refuse the model; run on `model` instead, or — for `None` — clear the
+    /// setting so it inherits the harness default.
+    Substitute { model: Option<String>, reason: String },
+    /// Refused, and nothing eligible exists to fall back to: the caller leaves it and warns.
+    NoFallback { reason: String },
+}
+
+/// The configured provider a `<provider>/<model>` setting names, or `None` for a bare Claude model or
+/// an unconfigured prefix — neither is a route the gateway serves, so neither is gated.
+fn gated_provider<'a>(providers: &'a [Provider], model: &str) -> Option<&'a Provider> {
+    provider_prefix(model).and_then(|prefix| providers.iter().find(|p| p.id == prefix))
+}
+
+/// Whether the gateway would carry `model` for a task of this class (see [`gated_provider`]).
+pub(crate) fn model_eligible(
+    sensitivity: Sensitivity,
+    overrides: Option<&SensitivityOverrides>,
+    providers: &[Provider],
+    model: &str,
+) -> bool {
+    let Some(provider) = gated_provider(providers, model) else {
+        return true;
+    };
+    let mark = ProviderMark::of(provider.trusted, provider.vetted);
+    sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides)
+}
+
+/// Resolve one model setting at boot (issue #704). When the gateway would refuse the model, the fix
+/// is `fallback` if eligible; a blank `fallback` clears the setting (inheriting the harness default)
+/// and a non-blank ineligible one is [`ModelFix::NoFallback`] rather than an invented name.
+pub(crate) fn model_fix(
+    sensitivity: Sensitivity,
+    overrides: Option<&SensitivityOverrides>,
+    providers: &[Provider],
+    model: &str,
+    fallback: &str,
+) -> ModelFix {
+    let Some(provider) = gated_provider(providers, model) else {
+        return ModelFix::Keep;
+    };
+    let mark = ProviderMark::of(provider.trusted, provider.vetted);
+    if sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides) {
+        return ModelFix::Keep;
+    }
+    let reason = refusal_reason(sensitivity, overrides, provider);
+    let replacement = if fallback.is_empty() {
+        None
+    } else if model_eligible(sensitivity, overrides, providers, fallback) {
+        Some(fallback.to_string())
+    } else {
+        return ModelFix::NoFallback { reason };
+    };
+    ModelFix::Substitute {
+        model: replacement,
+        reason,
+    }
+}
+
+/// Why the gateway would refuse this model, in its own terms: the mark can be the blocker, or — when
+/// the org pins vendors — the vendor can be, even though the mark already meets the bar.
+fn refusal_reason(sensitivity: Sensitivity, overrides: Option<&SensitivityOverrides>, provider: &Provider) -> String {
+    let required = sensitivity::required_mark(sensitivity, overrides);
+    if ProviderMark::of(provider.trusted, provider.vetted) < required {
+        format!("\"{}\" is not marked {}", provider.id, required.as_str())
+    } else {
+        format!("\"{}\" is not on this org's restricted-vendor list", provider.id)
+    }
+}
+
+/// The pricing the gateway would actually charge for `model`, if any provider's id prefixes it in
+/// `<provider>/<model>` form and that provider has pricing configured. `None` for a bare model name
+/// (no gateway involved) or a provider with no pricing on file.
+pub(crate) fn pricing_for(providers: &[Provider], model: &str) -> Option<Pricing> {
+    let prefix = provider_prefix(model)?;
+    providers.iter().find(|p| p.id == prefix)?.pricing
+}
+
+pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
+    let port = app.cfg.gateway_bind.port();
+    let providers = app.providers();
+    let routes = providers
+        .iter()
+        .map(|provider| {
+            json!({
+                "provider": provider.id,
+                "prefix": format!("{}/", provider.id),
+                "base_url": format!("http://host.microsandbox.internal:{port}/providers/{}", provider.id),
+                "auth": "none",
+                "headers": {COLONY_HEADER: gateway_token},
+                // The wire the provider speaks, so a runner that talks the OpenAI wire itself (a
+                // non-Claude agent module) knows which routes serve it untranslated (issue #629).
+                "wire": provider.wire,
+                "timeout_secs": provider.timeout_secs(),
+                "context_tokens": provider.context_tokens,
+                // Only a Claude fallback is the router's: a provider-prefixed one is retried by the
+                // gateway itself on quota exhaustion (issue #767).
+                "fallback_model": provider.claude_fallback().map(api_model),
+            })
+        })
+        .collect();
+    ColonyRoutes { routes, providers }
+}
+
+/// The boot log lines for the connection half of the tool policy (#295): one per tool each used
+/// provider strips, so the colony report can read back what the colony never gets.
+pub fn connection_disabled_tool_lines(providers: &[Provider]) -> Vec<String> {
+    providers
+        .iter()
+        .flat_map(|p| {
+            p.disabled_tools
+                .iter()
+                .map(move |tool| format!("tool '{tool}' disabled (level: connection, connection: '{}')", p.id))
+        })
+        .collect()
+}
+
+/// The boot log lines for the harness half of the tool policy (#295): one per tool the agent module
+/// disables via `COLONIZER_DISABLED_TOOLS` (comma-separated names), or the message the boot refuses
+/// with when a name is not one the module knows. A module's names are its own — the `x-known-tools`
+/// list on its `disabled_tools` schema property, the CLI's native tool names — falling back to
+/// Claude Code's [`KNOWN_TOOLS`] when it declares none. Missing or empty means nothing disabled.
+pub fn harness_disabled_tool_lines(agent: &AgentModule, runner_env: &Map<String, Value>) -> Result<Vec<String>, String> {
+    let Some(raw) = runner_env.get("COLONIZER_DISABLED_TOOLS").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let known: Vec<&str> = agent.schema["properties"]["disabled_tools"]["x-known-tools"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_else(|| KNOWN_TOOLS.to_vec());
+    let mut lines = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        if !known.contains(&name) {
+            return Err(format!(
+                "agent module '{}' setting 'disabled_tools': unknown tool '{name}' (known: {})",
+                agent.id,
+                known.join(", ")
+            ));
+        }
+        lines.push(format!("tool '{name}' disabled (level: harness, harness: '{}')", agent.id));
+    }
+    Ok(lines)
+}
+
+/// The model settings (`model`, `subagent_model`, `background_model`, `small_model`, `model_low`,
+/// `model_high`)
+/// whose resolved value — schema default, global setting or org override — routes to this provider as
+/// `<provider-id>/<model>`, named for a human, e.g. `["subagent_model"]`. Empty means no model setting
+/// points at it. A bare alias or a partial id prefix is Claude's or another provider's model, so it
+/// doesn't match, same rule as [`ColonyRoutes::used`].
+pub(crate) fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> {
+    let mut used: Vec<&'static str> = Vec::new();
+    for env in envs {
+        for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
+            let points_here = env
+                .get(*var)
+                .and_then(Value::as_str)
+                .is_some_and(|m| names_model_on(m, provider_id));
+            if points_here && !used.contains(&setting) {
+                used.push(setting);
+            }
+        }
+    }
+    used
+}
+
+/// The claude-code runner env for the global agent settings (schema defaults layered under
+/// modules.json), plus one per org that overrides them: every configuration a colony could start with.
+pub(crate) async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
+    let Some(agent) = app.agents.iter().find(|a| a.id == "claude-code") else {
+        return Vec::new();
+    };
+    let modules = app.modules.read().await;
+    let mut envs = vec![agent_env(agent, &modules.agent)];
+    for org in app.all_org_settings().into_values() {
+        envs.push(agent_env(agent, &effective_agent(&modules, &org)));
+    }
+    envs
+}
+
+fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Value {
+    let (in_flight, queued) = app.gateway.load(&provider.id);
+    let usage = app.gateway.usage(&provider.id);
+    // An exhausted plan degrades the provider whatever its failure rate says: the verdict shares
+    // the one health rule every surface reads. The surfaced record shares it too, so a lapsed
+    // reset (or TTL) hides the badge at the same instant the provider stops reading degraded.
+    let mut health = health(&usage);
+    let quota_exhausted = app.gateway.is_quota_exhausted(&provider.id);
+    if quota_exhausted {
+        health.degraded = true;
+    }
+    json!({
+        "id": provider.id,
+        "name": provider.name,
+        "base_url": provider.base_url,
+        "auth": provider.auth,
+        "wire": provider.wire,
+        "has_key": app.provider_key(&provider.id).is_some(),
+        "models": provider.models,
+        "preset": resolved_preset(&provider.preset, &provider.base_url),
+        "timeout_secs": provider.timeout_secs(),
+        "max_concurrent": provider.max_concurrent,
+        "queue_timeout_secs": provider.queue_timeout_secs,
+        "context_tokens": provider.context_tokens,
+        "fallback_model": provider.fallback_model,
+        "pricing": provider.pricing,
+        "model_map": provider.model_map,
+        "disabled_tools": provider.disabled_tools,
+        "trusted": provider.trusted,
+        "quota": provider.quota,
+        "normalize_cache_ttl": provider.normalize_cache_ttl,
+        "in_flight": in_flight,
+        "queued": queued,
+        "usage": usage,
+        "health": health,
+        "used_by": used_by(&provider.id, envs),
+        "quota_exhausted": if quota_exhausted {
+            app.gateway.quota_state(&provider.id).map(|q| json!({"reset_at": q.reset_at, "reset_unix": q.reset_unix}))
+        } else {
+            None::<Value>
+        },
+    })
+}
+
+/// Quota exhaustion across providers for the status poll and the queue (issue #225): whether every
+/// routable provider is out, and the earliest reset when it is.
+pub(crate) struct QuotaStatus {
+    pub paused: bool,
+    pub reason: Option<String>,
+    pub reset_at: Option<String>,
+    pub reset_unix: Option<i64>,
+    pub providers: Vec<String>,
+    /// Which scope the pause covers: the Claude account's own cap (`"account"`) or named exhausted
+    /// providers (`"provider"`). `None` when the queue is not paused. The cockpit honors it when
+    /// present and otherwise derives the scope from `providers`, so older web builds keep working.
+    pub kind: Option<String>,
+    /// Each exhausted provider's display name and the model roles that route to it, so the banner
+    /// says "BytePlus plan limit reached, used by subagents" rather than an id. An account pause
+    /// carries one entry for the Claude account itself, with the roles that run on Claude models.
+    pub details: Vec<QuotaProviderDetail>,
+    /// The Claude account is out but its fallback (`account_fallback_model`) is carrying the work, so
+    /// the queue is not paused (issue #1130): the fallback model, its provider's display name and
+    /// the account's reset, for the banner's "Claude out, running on MiniMax until 19:51". `None`
+    /// whenever the account works or has no usable fallback.
+    pub fallback: Option<Value>,
+}
+
+/// One exhausted plan, as the cockpit banner names it.
+pub(crate) struct QuotaProviderDetail {
+    /// The provider id, or `anthropic` for the Claude account's own cap.
+    pub id: String,
+    /// The name the operator gave the provider (`BytePlus`), or `Claude` for the account cap.
+    pub name: String,
+    /// Plain-word labels of the roles that route here (`orchestrator`, `subagents`, …).
+    pub used_by: Vec<&'static str>,
+}
+
+impl QuotaProviderDetail {
+    pub(crate) fn to_json(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "used_by": self.used_by})
+    }
+}
+
+/// The plain words for a model setting, as the banner lists what an exhausted plan affects.
+pub(crate) fn role_label(setting: &str) -> &'static str {
+    match setting {
+        "model" => "orchestrator",
+        "subagent_model" => "subagents",
+        "background_model" => "background",
+        "small_model" => "small model",
+        "model_low" => "small tasks",
+        "model_high" => "large tasks",
+        _ => "other roles",
+    }
+}
+
+/// The roles that run on the Claude account rather than a configured provider: every model setting
+/// whose value names no provider's model. An empty setting is the agent's own default, which is a
+/// Claude model, so it counts too — but only the orchestrator, since the others fall back to it.
+pub(crate) fn claude_used_by(providers: &[Provider], envs: &[Map<String, Value>]) -> Vec<&'static str> {
+    let mut used: Vec<&'static str> = Vec::new();
+    for env in envs {
+        for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
+            let value = env.get(*var).and_then(Value::as_str).unwrap_or_default().trim();
+            let on_claude = if value.is_empty() {
+                setting == "model"
+            } else {
+                !providers.iter().any(|p| names_model_on(value, &p.id))
+            };
+            let label = role_label(setting);
+            if on_claude && !used.contains(&label) {
+                used.push(label);
+            }
+        }
+    }
+    used
+}
+
+pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
+    let waiting = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status == crate::sessions::SessionStatus::Queued)
+        .count();
+    // The Claude account's own cap pauses the queue on its own record — even with no providers
+    // configured — and names no real provider as exhausted.
+    if app.gateway.is_account_quota_exhausted() {
+        let record = app.gateway.account_quota_state();
+        // With a fallback that can take the work the account's cap is not a pause: colonies keep
+        // booting and run on the fallback until the reset (#1130). A task the fallback may not
+        // carry parks on its own, with the reason the gateway names.
+        if let Some((model, provider_name)) = crate::gateway::fallback_usable(app).await {
+            let envs = runner_envs(app).await;
+            return QuotaStatus {
+                paused: false,
+                reason: None,
+                reset_at: record.as_ref().and_then(|q| q.reset_at.clone()),
+                reset_unix: record.as_ref().and_then(|q| q.reset_unix),
+                providers: Vec::new(),
+                kind: Some("account".to_string()),
+                details: vec![QuotaProviderDetail {
+                    id: "anthropic".to_string(),
+                    name: "Claude".to_string(),
+                    used_by: claude_used_by(&app.providers(), &envs),
+                }],
+                fallback: Some(json!({
+                    "model": model,
+                    "provider_name": provider_name,
+                    "reset_at": record.as_ref().and_then(|q| q.reset_at.clone()),
+                    "reset_unix": record.as_ref().and_then(|q| q.reset_unix),
+                })),
+            };
+        }
+        let pause = provider_quota::account_pause(
+            record.as_ref().and_then(|q| q.reset_at.clone()),
+            record.as_ref().and_then(|q| q.reset_unix),
+            waiting,
+        );
+        let envs = runner_envs(app).await;
+        let details = vec![QuotaProviderDetail {
+            id: "anthropic".to_string(),
+            name: "Claude".to_string(),
+            used_by: claude_used_by(&app.providers(), &envs),
+        }];
+        return QuotaStatus {
+            paused: true,
+            reason: Some(pause.reason),
+            reset_at: pause.reset_at,
+            reset_unix: pause.reset_unix,
+            providers: pause.providers,
+            kind: Some("account".to_string()),
+            details,
+            fallback: None,
+        };
+    }
+    let envs = runner_envs(app).await;
+    let providers = app.providers();
+    let exhausted = app.gateway.quota_exhausted();
+    let states: Vec<provider_quota::ProviderQuota> = providers
+        .iter()
+        .map(|p| {
+            let hit = exhausted.iter().find(|(id, _, _)| id == &p.id);
+            provider_quota::ProviderQuota {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                exhausted: hit.is_some(),
+                reset_at: hit.and_then(|(_, reset, _)| reset.clone()),
+                reset_unix: hit.and_then(|(_, _, unix)| *unix),
+                routable: !used_by(&p.id, &envs).is_empty(),
+            }
+        })
+        .collect();
+    match provider_quota::quota_pause(&states, waiting) {
+        Some(pause) => {
+            let details = pause
+                .providers
+                .iter()
+                .map(|id| QuotaProviderDetail {
+                    id: id.clone(),
+                    name: providers
+                        .iter()
+                        .find(|p| &p.id == id)
+                        .map(|p| p.name.trim())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id)
+                        .to_string(),
+                    used_by: used_by(id, &envs).into_iter().map(role_label).collect(),
+                })
+                .collect();
+            QuotaStatus {
+                paused: true,
+                reason: Some(pause.reason),
+                reset_at: pause.reset_at,
+                reset_unix: pause.reset_unix,
+                providers: pause.providers,
+                kind: Some("provider".to_string()),
+                details,
+                fallback: None,
+            }
+        }
+        None => QuotaStatus {
+            paused: false,
+            reason: None,
+            reset_at: None,
+            reset_unix: None,
+            providers: Vec::new(),
+            kind: None,
+            details: Vec::new(),
+            fallback: None,
+        },
+    }
+}
+
+pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
+    let envs = runner_envs(&app).await;
+    Json(app.providers().iter().map(|p| describe(&app, p, &envs)).collect())
+}
+
+#[derive(Deserialize)]
+pub struct PutProvider {
+    name: String,
+    base_url: String,
+    #[serde(default = "default_auth")]
+    auth: String,
+    /// Omitted means `anthropic`, so a client that predates the field cannot flip an existing provider.
+    #[serde(default)]
+    wire: Wire,
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    preset: Option<String>,
+    /// Omitted keeps the saved key; an empty string removes it.
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    max_concurrent: Option<u64>,
+    #[serde(default)]
+    queue_timeout_secs: Option<u64>,
+    #[serde(default)]
+    context_tokens: Option<u64>,
+    #[serde(default)]
+    fallback_model: Option<String>,
+    /// Omitted keeps the saved policy (model_map, disabled_tools), like pricing: a Settings save from
+    /// a web build that predates the fields must not quietly reopen a restricted connection. An empty
+    /// map or list is an explicit clear.
+    #[serde(default)]
+    model_map: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    disabled_tools: Option<Vec<String>>,
+    /// Omitted keeps the saved pricing, like the key: a Settings save from a web build that predates the
+    /// field must not quietly stop a budget from counting. All-`0` rates are how a caller clears it,
+    /// which also is exactly what "no pricing" means, so nothing becomes unreachable.
+    #[serde(default)]
+    pricing: Option<Pricing>,
+    /// Omitted keeps the saved probe, like pricing; a probe whose URL is empty removes it, the way
+    /// an empty key string does. The credential goes to this URL, so the host is pinned at
+    /// validation (issue #199).
+    #[serde(default)]
+    quota: Option<QuotaProbe>,
+    /// Omitted keeps the saved flag, like pricing: an older save must not quietly re-enable the 400s
+    /// this flag suppresses.
+    #[serde(default)]
+    normalize_cache_ttl: Option<bool>,
+    /// Omitted keeps the saved trust mark (sensitivity.rs, issue #472): a Settings save from a web
+    /// build that predates the field must not quietly un-vet a restricted-capable provider.
+    #[serde(default)]
+    trusted: Option<bool>,
+    /// Omitted keeps the saved vetting mark, like trusted (sensitivity.rs, issue #626).
+    #[serde(default)]
+    vetted: Option<bool>,
+    /// Omitted keeps the saved vendor, like trusted; an empty string clears it.
+    #[serde(default)]
+    vendor: Option<String>,
+}
+
+fn default_auth() -> String {
+    "x-api-key".into()
+}
+
+fn in_range(value: Option<u64>, min: u64, max: u64) -> bool {
+    value.is_none_or(|v| (min..=max).contains(&v))
+}
+
+/// A price is a dollar amount per million tokens: finite, never negative.
+fn valid_price(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
+/// The gateway appends the request's own path to a base_url (e.g. `/v1/messages`, and `/v1/models`
+/// for the health probe), so on the `anthropic` wire — where the path is fixed — a base already
+/// ending in `/v1` doubles it and 404s silently until the first real call surfaces it, and is
+/// refused here instead. An `openai`-wire base legitimately ends in a version segment (xai-grok's is
+/// `https://api.x.ai/v1`, BytePlus's `…/api/coding/v3`): the gateway's join there drops the guest
+/// path's leading `/v1` for any `/v<N>` base (issue #1018).
+fn base_url_needs_stripping(base_url: &str, wire: Wire) -> bool {
+    wire == Wire::Anthropic && base_url.ends_with("/v1")
+}
+
+pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<PutProvider>) -> ApiResult<Value> {
+    let bad = |message: &str| client_error(StatusCode::BAD_REQUEST, message);
+    if !valid_id(&id) {
+        return Err(bad(
+            "provider ids are lowercase letters, digits and dashes, and can't be \"anthropic\"",
+        ));
+    }
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 60 {
+        return Err(bad("provider name must be 1-60 characters"));
+    }
+    let base_url = req.base_url.trim().trim_end_matches('/').to_string();
+    if base_url.len() > 300 || split_url(&base_url).is_none() {
+        return Err(bad("base URL must be an http(s) URL like https://api.deepseek.com/anthropic"));
+    }
+    if base_url_needs_stripping(&base_url, req.wire) {
+        return Err(bad(
+            "base URL for an Anthropic-wire provider must not end in /v1 — the gateway appends its own \
+             path (e.g. /v1/messages); strip the trailing /v1",
+        ));
+    }
+    if !AUTH_MODES.contains(&req.auth.as_str()) {
+        return Err(bad("auth must be x-api-key, bearer or none"));
+    }
+    let models: Vec<String> = req
+        .models
+        .iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    if models.len() > 50 || !models.iter().all(|m| valid_model(m)) {
+        return Err(bad("models must be up to 50 model IDs without spaces"));
+    }
+    let preset = req.preset.unwrap_or_else(|| "custom".into());
+    if !valid_preset(&preset) {
+        return Err(bad(
+            "preset ids are lowercase letters, digits and dashes, up to 48 characters",
+        ));
+    }
+    let preset = resolved_preset(&preset, &req.base_url).to_string();
+    if !in_range(req.timeout_secs, 30, 3600) {
+        return Err(bad("request timeout must be 30-3600 seconds"));
+    }
+    if !in_range(req.max_concurrent, 1, 64) {
+        return Err(bad("max concurrent requests must be 1-64, or empty for no limit"));
+    }
+    if !in_range(req.queue_timeout_secs, 1, 3600) {
+        return Err(bad("queue timeout must be 1-3600 seconds"));
+    }
+    if !in_range(req.context_tokens, 1024, 2_000_000) {
+        return Err(bad("context window must be 1,024-2,000,000 tokens"));
+    }
+    let pricing_ok = req.pricing.as_ref().is_none_or(|p| {
+        [
+            p.input_per_mtok,
+            p.output_per_mtok,
+            p.cache_read_per_mtok,
+            p.cache_write_per_mtok,
+            p.thinking_per_mtok,
+        ]
+        .iter()
+        .all(|rate| valid_price(*rate))
+    });
+    if !pricing_ok {
+        return Err(bad("pricing rates must be dollar amounts per million tokens, zero or more"));
+    }
+    // The quota probe is fetched with the provider's own credential, so its origin is pinned to the
+    // base URL's — scheme, host and port, the port included: a probe anywhere else, even a plaintext
+    // twin of the vendor's host, would hand that key to whoever answers there (#199).
+    // Outer `None` keeps the saved probe, like pricing; inner `None` — an empty URL — clears it, the
+    // way an empty key string removes the key.
+    let quota: Option<Option<QuotaProbe>> = match req.quota {
+        Some(quota) if quota.url.trim().is_empty() => Some(None),
+        Some(quota) => {
+            let url = quota.url.trim().trim_end_matches('/');
+            if url.len() > 300 || split_url(url).is_none() {
+                return Err(bad(
+                    "quota URL must be an http(s) URL on the same origin as the base URL — the provider's credential is sent to it",
+                ));
+            }
+            if !split_url(&base_url)
+                .zip(split_url(url))
+                .is_some_and(|(base, probe)| same_origin(base, probe))
+            {
+                return Err(bad(
+                    "quota URL must be on the same origin as the base URL — scheme, host and port — because the \
+                     provider's credential is sent to it, and must never leave the vendor that issued it",
+                ));
+            }
+            if !quota.pointer.trim().starts_with('/') {
+                return Err(bad(
+                    "quota JSON pointer must be non-empty and start with / (RFC 6901), like /data/remaining_tokens",
+                ));
+            }
+            let limit_pointer = quota
+                .limit_pointer
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string);
+            if limit_pointer.as_deref().is_some_and(|p| !p.starts_with('/')) {
+                return Err(bad(
+                    "quota limit JSON pointer must start with / (RFC 6901), like /data/total_tokens, or be empty",
+                ));
+            }
+            Some(Some(QuotaProbe {
+                url: url.into(),
+                pointer: quota.pointer.trim().into(),
+                limit_pointer,
+            }))
+        }
+        None => None,
+    };
+    let fallback_model = req.fallback_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if fallback_model.as_deref().is_some_and(|m| !valid_model(m)) {
+        return Err(bad(
+            "fallback model must be a Claude model such as sonnet or claude-sonnet-5, or <provider>/<model> on another provider of the same wire",
+        ));
+    }
+    // The same rule the boot later checks a loaded providers.json against ([`config_error`]): a row
+    // the policy can't honour — an id with a space, a wire name that is only spaces, a tool Claude
+    // Code does not have — is refused here with the provider and row named (#295). Only what the
+    // caller sent is checked; an omitted field keeps the saved value, which its own save checked.
+    if let Some(error) = policy_errors(
+        &id,
+        req.model_map.as_ref().unwrap_or(&BTreeMap::new()),
+        req.disabled_tools.as_deref().unwrap_or(&[]),
+    )
+    .first()
+    {
+        return Err(bad(error));
+    }
+    // The whole read-modify-write of providers.json — the api-key secret and the pricing and
+    // normalize-cache-ttl keep-lookups included — is one critical section over a strict read
+    // (#408): a file that will not parse is refused before the key is written or deleted, rather
+    // than silently replaced by defaults, the keep-lookups read the locked copy instead of racing
+    // a concurrent save, and two saves at once cannot each lose the other's provider. The guard
+    // is dropped at the save: the cache and env work below it reads other state.
+    let _config = app.config_write.lock().await;
+    let mut providers: Vec<Provider> =
+        crate::util::read_json_or_default(&app.providers_file()).map_err(|e| config_unreadable(&app.providers_file(), &e))?;
+    // A hand-edited file can list this id twice: the first-match update below would refresh the
+    // first entry and leave the stale shadow in place, so the save is refused naming the id
+    // instead (#326). Deleting the provider removes every entry with the id, which is the way out.
+    if duplicate_provider_ids(&providers).iter().any(|dup| dup == &id) {
+        return Err(bad(&format!(
+            "provider \"{id}\" is listed more than once in providers.json; delete it and add it again (or remove the duplicate by hand), then save"
+        )));
+    }
+    // A provider-prefixed fallback is checked against the providers on file, under the same lock:
+    // it must name another provider that serves the model on the same wire (issue #767).
+    if let Some(error) = fallback_model
+        .as_deref()
+        .and_then(|m| fallback_error(&id, req.wire, m, &providers))
+    {
+        return Err(bad(&error));
+    }
+    // The credential rides the base URL: the gateway forwards it there, and the health probe follows.
+    // So a save that moves the provider to another origin — scheme, host or port, the origin the quota
+    // rule already pins (#199) — must bring the key with it or remove it: the saved key belongs to the
+    // origin it was issued at, and a path change on the same origin is the same party. An origin that
+    // will not parse counts as a move, on either side.
+    let existing = providers.iter().find(|p| p.id == id);
+    let origin_moved = match existing.map(|p| split_url(&p.base_url)) {
+        None => false,
+        Some(saved) => !split_url(&base_url)
+            .zip(saved)
+            .is_some_and(|(new, saved)| same_origin(new, saved)),
+    };
+    if origin_moved && existing.is_some() && app.provider_key(&id).is_some() {
+        let supplied = req.api_key.as_deref().map(str::trim);
+        let brings_key = matches!(supplied, Some(key) if !key.is_empty());
+        if !brings_key && supplied != Some("") {
+            return Err(bad(
+                "changing the base URL to a different origin requires entering the API key again — the saved \
+                 key belongs to the origin it was issued at; remove the key with this save if the new address \
+                 needs none",
+            ));
+        }
+    }
+    // The quota probe carries the credential too, so the probe this save leaves in place — sent or
+    // kept — is held to the same-origin rule its own save applies; a base URL that moves out from
+    // under a kept probe would send the credential to the probe's old origin.
+    let kept_quota = quota.clone().unwrap_or_else(|| existing.and_then(|p| p.quota.clone()));
+    if let Some(probe) = &kept_quota
+        && !split_url(&base_url)
+            .zip(split_url(&probe.url))
+            .is_some_and(|(base, probe)| same_origin(base, probe))
+    {
+        return Err(bad(
+            "the quota probe URL must stay on the same origin as the base URL — scheme, host and port — \
+             because the provider's credential is sent to it; move or clear the probe in the same save",
+        ));
+    }
+    match req.api_key.as_deref().map(str::trim) {
+        Some("") => {
+            delete_secret(&app.provider_key_file(&id));
+        }
+        Some(key) if key.len() > 500 || key.contains(char::is_whitespace) => {
+            return Err(bad("that doesn't look like an API key"));
+        }
+        Some(key) => {
+            // A hosted deployment without a master key refuses the store; answer 503 naming the
+            // env vars before any half-state, rather than a generic 500 from `write_secret`.
+            if let Err(message) = crate::util::credential_writable() {
+                return Err(client_error(StatusCode::SERVICE_UNAVAILABLE, &message));
+            }
+            write_secret(&app.provider_key_file(&id), key)?
+        }
+        None => {}
+    }
+
+    // Omitted keeps the saved pricing: a Settings save from a web build that predates the field must not
+    // quietly stop a budget from counting. An all-`0` object clears it in effect, so nothing is unreachable.
+    let pricing = match req.pricing {
+        Some(pricing) => Some(pricing),
+        None => providers.iter().find(|p| p.id == id).and_then(|p| p.pricing),
+    };
+
+    let provider = Provider {
+        id: id.clone(),
+        name: name.to_string(),
+        base_url,
+        auth: req.auth,
+        wire: req.wire,
+        models,
+        preset,
+        timeout_secs: req.timeout_secs,
+        max_concurrent: req.max_concurrent,
+        queue_timeout_secs: req.queue_timeout_secs,
+        context_tokens: req.context_tokens,
+        fallback_model,
+        pricing,
+        model_map: req.model_map.unwrap_or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.model_map.clone())
+                .unwrap_or_default()
+        }),
+        disabled_tools: req.disabled_tools.unwrap_or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.disabled_tools.clone())
+                .unwrap_or_default()
+        }),
+        // Omitted keeps the saved probe, like pricing: a Settings save from a web build that predates
+        // the field must not quietly stop the plan balance from being read.
+        quota: quota.unwrap_or_else(|| providers.iter().find(|p| p.id == id).and_then(|p| p.quota.clone())),
+        normalize_cache_ttl: req.normalize_cache_ttl.unwrap_or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.normalize_cache_ttl)
+                .unwrap_or(false)
+        }),
+        trusted: req
+            .trusted
+            .unwrap_or_else(|| providers.iter().find(|p| p.id == id).map(|p| p.trusted).unwrap_or(false)),
+        vetted: req
+            .vetted
+            .unwrap_or_else(|| providers.iter().find(|p| p.id == id).map(|p| p.vetted).unwrap_or(false)),
+        // Trimmed on the way in, so the vendor a vendor list is matched against is the one the
+        // operator meant; an empty string clears it, like an empty key.
+        vendor: match req.vendor {
+            Some(vendor) => {
+                let vendor = vendor.trim();
+                (!vendor.is_empty()).then(|| vendor.to_string())
+            }
+            None => providers.iter().find(|p| p.id == id).and_then(|p| p.vendor.clone()),
+        },
+    };
+    match providers.iter_mut().find(|p| p.id == id) {
+        Some(existing) => *existing = provider.clone(),
+        None => providers.push(provider.clone()),
+    }
+    app.save_providers(&providers).await?;
+    drop(_config);
+    // The probe cache key carries no credential, so a rotated key or a changed auth mode /
+    // endpoint would otherwise keep serving the old answer for up to the probe TTL.
+    forget_probe(&app, &id).await;
+    let envs = runner_envs(&app).await;
+    Ok(Json(describe(&app, &provider, &envs)))
+}
+
+pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    // One critical section over a strict read (#408): a providers.json that will not parse is
+    // refused rather than silently replaced by the remainder, and a concurrent put cannot race
+    // the retain.
+    let _config = app.config_write.lock().await;
+    let mut providers: Vec<Provider> =
+        crate::util::read_json_or_default(&app.providers_file()).map_err(|e| config_unreadable(&app.providers_file(), &e))?;
+    let before = providers.len();
+    providers.retain(|p| p.id != id);
+    if providers.len() == before {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such provider"));
+    }
+    app.save_providers(&providers).await?;
+    drop(_config);
+    if valid_id(&id) {
+        delete_secret(&app.provider_key_file(&id));
+    }
+    // A provider that no longer exists must not keep its usage record forever.
+    app.gateway.forget_usage(&id);
+    app.gateway.forget_quota(&id);
+    // Nor its probe answer: a later provider reusing the id must be probed fresh.
+    forget_probe(&app, &id).await;
+    Ok(Json(json!({"ok": true})))
+}
+
+pub async fn models(State(app): State<Shared>) -> Json<Vec<Value>> {
+    let mut out: Vec<Value> = ANTHROPIC_MODELS
+        .iter()
+        .map(|(id, label)| json!({"id": id, "label": label, "provider": "anthropic"}))
+        .collect();
+    for provider in app.providers() {
+        for model in &provider.models {
+            out.push(json!({
+                "id": format!("{}/{model}", provider.id),
+                "label": format!("{model} · {}", provider.name),
+                "provider": provider.id,
+            }));
+        }
+    }
+    Json(out)
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/providers", routing::get(list))
+        .route("/api/providers/{id}", routing::put(put).delete(delete))
+        .route("/api/models", routing::get(models))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(id: &str) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.into(),
+            base_url: "http://100.80.225.14:8000".into(),
+            auth: "none".into(),
+            wire: Wire::Anthropic,
+            models: vec![],
+            preset: "local".into(),
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: None,
+            pricing: None,
+            model_map: BTreeMap::new(),
+            disabled_tools: Vec::new(),
+            quota: None,
+            normalize_cache_ttl: false,
+            trusted: false,
+            vetted: false,
+            vendor: None,
+        }
+    }
+
+    /// A restricted colony's model on a provider nobody marked trusted is rerouted onto the eligible
+    /// fallback (issue #704) — and the eligible, bare-Claude and ungated cases are left alone.
+    #[test]
+    fn a_model_on_an_untrusted_provider_is_rerouted_for_restricted_work() {
+        let mut trusted = provider("trustedai");
+        trusted.trusted = true;
+        let mut untrusted = provider("zai");
+        untrusted.vendor = Some("zai".into());
+        let all = vec![trusted, untrusted];
+
+        assert_eq!(
+            model_fix(
+                Sensitivity::Restricted,
+                None,
+                &all,
+                "zai/glm-5.3-flash",
+                "trustedai/claude-sonnet-5"
+            ),
+            ModelFix::Substitute {
+                model: Some("trustedai/claude-sonnet-5".into()),
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+        // A bare Claude model is Anthropic's own, served without a provider entry: never gated.
+        assert_eq!(model_fix(Sensitivity::Restricted, None, &all, "sonnet", ""), ModelFix::Keep);
+        // The eligible model is left alone, whatever it might fall back to.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "trustedai/x", "sonnet"),
+            ModelFix::Keep
+        );
+        // A `<prefix>/` nobody configured is not a gateway route, so it is not gated either.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "unconfigured/whatever", "sonnet"),
+            ModelFix::Keep
+        );
+        // A loose class gates nothing.
+        assert_eq!(
+            model_fix(Sensitivity::Standard, None, &all, "zai/glm-5.3-flash", "sonnet"),
+            ModelFix::Keep
+        );
+        // A blank fallback clears the setting to inherit the harness default: always a fix.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash", ""),
+            ModelFix::Substitute {
+                model: None,
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+
+        // The fix and the gateway's check are one rule: what we substitute is what it would carry.
+        assert!(!model_eligible(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash"));
+        assert!(model_eligible(
+            Sensitivity::Restricted,
+            None,
+            &all,
+            "trustedai/claude-sonnet-5"
+        ));
+    }
+
+    /// With no eligible fallback the model is left as it is — the boot warns rather than invent a
+    /// name (issue #704) — and an org's vendor pin refuses a trusted provider off the list.
+    #[test]
+    fn with_no_eligible_fallback_the_model_is_left_for_the_caller_to_warn_about() {
+        let mut untrusted = provider("zai");
+        untrusted.vendor = Some("zai".into());
+        let all = vec![untrusted, provider("groq")];
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash", "groq/llama"),
+            ModelFix::NoFallback {
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+
+        let mut pinned_vendor = provider("trustedai");
+        pinned_vendor.trusted = true;
+        pinned_vendor.vendor = Some("Somewhere".into());
+        let pinned = SensitivityOverrides {
+            restricted_vendors: Some(vec!["Anthropic".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            model_fix(
+                Sensitivity::Restricted,
+                Some(&pinned),
+                &[pinned_vendor],
+                "trustedai/claude-sonnet-5",
+                "sonnet"
+            ),
+            ModelFix::Substitute {
+                model: Some("sonnet".into()),
+                reason: "\"trustedai\" is not on this org's restricted-vendor list".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_flag_strips_ttl_even_on_a_custom_preset() {
+        let mut p = provider("meta-handpointed");
+        p.preset = "custom".into();
+        assert!(!p.quirks().strip_cache_ttl, "custom preset alone normalizes nothing");
+        p.normalize_cache_ttl = true;
+        assert!(p.quirks().strip_cache_ttl, "the explicit flag must win over the preset row");
+        p.preset = "meta".into();
+        p.normalize_cache_ttl = false;
+        assert!(p.quirks().strip_cache_ttl, "the preset row still applies on its own");
+    }
+
+    #[test]
+    fn routed_tokens_are_priced_per_million_and_unpriced_providers_cost_nothing() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_read_tokens: 2_000_000,
+            cache_write_tokens: 0,
+            thinking_tokens: 200_000,
+        };
+        let pricing = Pricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cache_read_per_mtok: 0.3,
+            cache_write_per_mtok: 3.75,
+            thinking_per_mtok: 5.0,
+        };
+        let cost = pricing.cost_usd(usage);
+        assert!(
+            (cost - (3.0 + 7.5 + 0.6 + 1.0)).abs() < 1e-9,
+            "3 in + 0.5 out at 15 + 2 cache read at 0.3 + 0.2 thinking at 5, got {cost}"
+        );
+        // Cached reads are priced separately from fresh input: the same million tokens twice, once each way.
+        let fresh = Usage {
+            input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let cached = Usage {
+            cache_read_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let one_rate = Pricing {
+            input_per_mtok: 1.0,
+            cache_read_per_mtok: 0.1,
+            ..Default::default()
+        };
+        assert!((one_rate.cost_usd(fresh) - 1.0).abs() < 1e-9);
+        assert!(
+            (one_rate.cost_usd(cached) - 0.1).abs() < 1e-9,
+            "{:?}",
+            one_rate.cost_usd(cached)
+        );
+
+        let unpriced = provider("local");
+        assert_eq!(
+            unpriced.cost_usd(usage),
+            0.0,
+            "no pricing configured: tokens counted, dollars none"
+        );
+        assert_eq!(Usage::default().total_tokens(), 0);
+        assert_eq!(usage.total_tokens(), 3_700_000, "thinking tokens count toward the total too");
+    }
+
+    /// The cost gate (issue #470) prices models through this lookup, so the shapes it must tell apart
+    /// matter: a routed `<provider>/<model>` reaches its provider's pricing, a bare alias reaches
+    /// nothing, and a provider with no pricing on file prices nothing either.
+    #[test]
+    fn pricing_for_resolves_a_prefixed_model_and_nothing_else() {
+        let mut priced = provider("deepseek");
+        priced.pricing = Some(Pricing {
+            input_per_mtok: 0.27,
+            output_per_mtok: 1.1,
+            ..Default::default()
+        });
+        let providers = vec![provider("strix"), priced];
+
+        // Extra slashes are the provider's model id, as in `ColonyRoutes::used`.
+        assert_eq!(
+            pricing_for(&providers, "deepseek/deepseek-ai/DeepSeek-V4.1-Flash"),
+            Some(Pricing {
+                input_per_mtok: 0.27,
+                output_per_mtok: 1.1,
+                ..Default::default()
+            })
+        );
+        // A bare alias or ID never routes through the gateway, so nothing prices it.
+        assert_eq!(pricing_for(&providers, "opus"), None);
+        // A prefix no configured provider answers to.
+        assert_eq!(pricing_for(&providers, "unknown/model"), None);
+        // The provider is found but carries no pricing on file.
+        assert_eq!(pricing_for(&providers, "strix/qwen3"), None);
+    }
+
+    /// providers.json on disk predates `pricing`, and a Settings save from an older web build omits it.
+    /// Either one must leave the provider priced as it was, not silently free.
+    #[test]
+    fn a_provider_saved_before_pricing_deserialises_without_it() {
+        let saved = r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key"}"#;
+        let provider: Provider = serde_json::from_str(saved).unwrap();
+        assert_eq!(provider.pricing, None);
+
+        let priced: Provider = serde_json::from_str(
+            r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","pricing":{"input_per_mtok":0.27,"output_per_mtok":1.1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            priced.pricing,
+            Some(Pricing {
+                input_per_mtok: 0.27,
+                output_per_mtok: 1.1,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            priced.cost_usd(Usage {
+                input_tokens: 1_000_000,
+                ..Default::default()
+            }),
+            0.27
+        );
+    }
+
+    #[test]
+    fn prices_must_be_amounts_never_negatives_or_infinities() {
+        assert!(valid_price(0.0), "a zero rate prices that token kind at nothing");
+        assert!(valid_price(3.0));
+        assert!(!valid_price(-0.01));
+        assert!(!valid_price(f64::NAN));
+        assert!(!valid_price(f64::INFINITY));
+    }
+
+    /// Every rate the save checks shares that refusal, thinking included (#622): the gateway bills
+    /// thinking tokens through `thinking_per_mtok`, so a negative one would subtract from the budget.
+    #[tokio::test]
+    async fn a_negative_thinking_rate_is_refused_like_the_other_prices() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.pricing = Some(Pricing {
+            thinking_per_mtok: -0.01,
+            ..Default::default()
+        });
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("pricing rates"), "{}", err.message());
+        assert!(app.providers().is_empty(), "the refused save writes nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn urls_are_split_and_validated() {
+        assert_eq!(
+            split_url("https://api.deepseek.com/anthropic"),
+            Some(("https".into(), "api.deepseek.com".into(), None, "/anthropic".into()))
+        );
+        assert_eq!(
+            split_url("http://127.0.0.1:8080"),
+            Some(("http".into(), "127.0.0.1".into(), Some(8080), String::new()))
+        );
+        assert_eq!(
+            split_url("http://[::1]:9000/v1"),
+            Some(("http".into(), "[::1]".into(), Some(9000), "/v1".into()))
+        );
+        assert!(split_url("ftp://example.com").is_none());
+        assert!(split_url("https://user:pass@example.com").is_none());
+        assert!(split_url("https://example.com:notaport").is_none());
+    }
+
+    /// An anthropic-wire base_url ending in `/v1` doubles up with the path the gateway appends
+    /// (`/v1/messages`, and `/v1/models` for the health probe) and 404s silently, so it is rejected.
+    /// An `openai`-wire base legitimately ends in `/v1` (e.g. the xai-grok catalog entry): the
+    /// gateway's join there skips the guest path's repeated `/v1`, so the check only applies to
+    /// `wire: anthropic`.
+    #[test]
+    fn an_anthropic_wire_base_url_ending_in_v1_is_rejected() {
+        assert!(base_url_needs_stripping("https://api.example.com/v1", Wire::Anthropic));
+        assert!(!base_url_needs_stripping(
+            "https://api.example.com/anthropic",
+            Wire::Anthropic
+        ));
+        assert!(
+            !base_url_needs_stripping("https://api.x.ai/v1", Wire::Openai),
+            "an openai-wire provider legitimately ends in /v1"
+        );
+    }
+
+    /// providers.json on disk predates `wire`, and a Settings save from an older web build omits it.
+    /// Either one deserialising as anything but `anthropic` would silently reroute a working provider
+    /// into the (unimplemented) translator.
+    #[test]
+    fn a_provider_without_a_wire_is_anthropic() {
+        let saved = r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key"}"#;
+        let provider: Provider = serde_json::from_str(saved).unwrap();
+        assert_eq!(provider.wire, Wire::Anthropic);
+
+        let put: PutProvider =
+            serde_json::from_str(r#"{"name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic"}"#).unwrap();
+        assert_eq!(put.wire, Wire::Anthropic);
+
+        assert_eq!(serde_json::to_value(Wire::Openai).unwrap(), serde_json::json!("openai"));
+    }
+
+    #[test]
+    fn preset_ids_are_checked_for_shape_not_membership() {
+        // The catalogue names dozens of vendors, and its longest id today is 34 characters.
+        for ok in [
+            "custom",
+            "deepseek",
+            "kimi-for-coding",
+            "9527code",
+            "tencent-token-plan-enterprise-lite",
+        ] {
+            assert!(valid_preset(ok), "{ok}");
+        }
+        for bad in ["", "Custom", "has space", "under_score", &"x".repeat(49)] {
+            assert!(!valid_preset(bad), "{bad}");
+        }
+    }
+
+    /// A provider's fallback (issue #767): any Claude model, or a model another provider serves on
+    /// the same wire; never its own model, an unknown provider, an unlisted model or another wire.
+    #[test]
+    fn a_fallback_is_claude_or_a_same_wire_model_on_another_provider() {
+        let providers: Vec<Provider> = serde_json::from_value(json!([
+            {"id": "bailian", "name": "B", "base_url": "http://x", "auth": "none", "models": ["qwen3.8-max"]},
+            {"id": "zai", "name": "Z", "base_url": "http://x", "auth": "none", "models": ["glm-5"]},
+            {"id": "grok", "name": "G", "base_url": "http://x/v1", "auth": "none", "wire": "openai", "models": ["grok-5"]},
+            {"id": "xai", "name": "X", "base_url": "http://x/v1", "auth": "none", "wire": "openai", "models": ["grok-5-fast"]},
+        ]))
+        .unwrap();
+        let check = |id: &str, wire: Wire, model: &str| fallback_error(id, wire, model, &providers);
+        assert_eq!(check("bailian", Wire::Anthropic, "sonnet"), None);
+        assert_eq!(check("grok", Wire::Openai, "claude-sonnet-5"), None, "Claude serves any wire");
+        assert_eq!(check("bailian", Wire::Anthropic, "zai/glm-5"), None, "anthropic to anthropic");
+        assert_eq!(check("grok", Wire::Openai, "xai/grok-5-fast"), None, "openai to openai");
+        let cross = check("bailian", Wire::Anthropic, "grok/grok-5").unwrap();
+        assert!(cross.contains("same wire") && cross.contains("openai-wire"), "{cross}");
+        assert!(check("xai", Wire::Openai, "zai/glm-5").unwrap().contains("same wire"));
+        assert!(
+            check("bailian", Wire::Anthropic, "bailian/qwen3.8-max")
+                .unwrap()
+                .contains("its own")
+        );
+        assert!(
+            check("bailian", Wire::Anthropic, "nope/x")
+                .unwrap()
+                .contains("not configured")
+        );
+        assert!(
+            check("bailian", Wire::Anthropic, "zai/glm-9")
+                .unwrap()
+                .contains("does not list")
+        );
+        assert!(check("bailian", Wire::Anthropic, "two words").is_some());
+
+        let with = |fallback: &str| Provider {
+            fallback_model: Some(fallback.into()),
+            ..providers[0].clone()
+        };
+        assert_eq!(with("sonnet").claude_fallback(), Some("sonnet"));
+        assert_eq!(with("sonnet").provider_fallback(), None);
+        assert_eq!(with("zai/glm-5").claude_fallback(), None, "the router never sees it");
+        assert_eq!(with("zai/glm-5").provider_fallback(), Some(("zai", "glm-5")));
+    }
+
+    #[test]
+    fn ids_and_models_are_validated() {
+        assert!(valid_id("deepseek"));
+        assert!(!valid_id("anthropic"));
+        assert!(!valid_id("Deep Seek"));
+        assert!(valid_model("deepseek-ai/DeepSeek-V4.1-Flash"));
+        assert!(!valid_model("has space"));
+    }
+
+    #[test]
+    fn quirks_are_data_keyed_by_preset_not_provider_branches() {
+        assert_eq!(
+            quirks_for_preset("meta"),
+            ProviderQuirks {
+                strip_cache_ttl: true,
+                min_max_tokens: Some(16),
+            }
+        );
+        assert_eq!(quirks_for_preset("custom"), ProviderQuirks::default());
+        assert_eq!(quirks_for_preset(""), ProviderQuirks::default());
+        assert_eq!(quirks_for_preset("deepseek"), ProviderQuirks::default());
+        assert!(quirks_for_preset("meta").needs_normalize());
+        assert!(!ProviderQuirks::default().needs_normalize());
+
+        let mut meta = provider("meta");
+        meta.preset = "meta".into();
+        assert!(meta.quirks().needs_normalize());
+        assert!(!provider("deepseek").quirks().needs_normalize());
+    }
+
+    #[test]
+    fn timeouts_default_and_aliases_resolve() {
+        let mut p = provider("strix");
+        assert_eq!((p.timeout_secs(), p.queue_timeout_secs()), (600, 600));
+        p.timeout_secs = Some(900);
+        assert_eq!(p.queue_timeout_secs(), 900);
+        p.queue_timeout_secs = Some(30);
+        assert_eq!(p.queue_timeout_secs(), 30);
+        assert_eq!(api_model("sonnet"), "claude-sonnet-5");
+        assert_eq!(api_model("claude-opus-5"), "claude-opus-5");
+        assert_eq!(strip_oauth_betas("oauth-2025-04-20, a ,b"), "a,b");
+    }
+
+    #[test]
+    fn used_providers_follow_the_model_settings() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("str"), provider("deepseek")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("opus"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_EFFORT".into(), json!("deepseek/not-a-model-var"));
+        let used: Vec<String> = routes.used(&env).into_iter().map(|p| p.id).collect();
+        assert_eq!(used, vec!["strix"]);
+    }
+
+    #[test]
+    fn used_models_records_the_pairs_the_settings_name() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("deepseek")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("opus"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_SMALL_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("deepseek/deepseek-chat"));
+        // Bare aliases and an empty canonical name nothing; the same pair named by two settings is
+        // recorded once.
+        env.insert("COLONIZER_MODEL_LOW".into(), json!("deepseek/"));
+        env.insert("COLONIZER_MODEL_HIGH".into(), json!("sonnet"));
+        assert_eq!(
+            routes.used_models(&env),
+            vec!["strix/deepseek-v4-flash".to_string(), "deepseek/deepseek-chat".to_string()]
+        );
+        // And the empty canonical admits no provider either side: `used` skips it like `used_models`.
+        env.clear();
+        env.insert("COLONIZER_MODEL".into(), json!("deepseek/"));
+        assert!(routes.used(&env).is_empty());
+        assert!(routes.used_models(&env).is_empty());
+    }
+
+    #[test]
+    fn an_unconfigured_provider_prefix_refuses_the_launch_naming_the_fix() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("str")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("strix/qwen3"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strixish/qwen"));
+        // "strixish" shares "strix" as a partial id prefix but is its own provider, so it is the
+        // first setting naming a provider nobody configured.
+        assert_eq!(
+            routes.unusable_route("claude-code", &env),
+            Some(
+                "backend 'claude-code' has no provider for model 'strixish/qwen': add a provider 'strixish' in \
+                 Settings → Providers (providers.json), or change the 'subagent_model' setting of the 'claude-code' \
+                 agent module"
+                    .to_string()
+            )
+        );
+
+        // `anthropic` can never be a provider id (valid_id refuses it), and an empty providers list
+        // leaves every prefixed setting unrouted.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL_LOW".into(), json!("anthropic/claude-x"));
+        let refused = ColonyRoutes::default().unusable_route("claude-code", &env);
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|m| m.contains("model 'anthropic/claude-x'") && m.contains("'model_low' setting")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_map_without_the_canonical_refuses_the_launch_naming_the_served_models() {
+        let mut proxy = provider("proxy");
+        proxy.model_map = BTreeMap::from([
+            ("deepseek-v4-flash".into(), String::new()),
+            ("qwen3".into(), "Qwen/Qwen3".into()),
+        ]);
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![proxy],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/glm-5.3"));
+        let refused = routes.unusable_route("claude-code", &env);
+        assert!(
+            refused.as_deref().is_some_and(|m| {
+                m.contains("has no provider for model 'proxy/glm-5.3'")
+                    && m.contains("add 'glm-5.3' to the model_map of provider 'proxy'")
+                    && m.contains("or pick one of: deepseek-v4-flash, qwen3")
+            }),
+            "{refused:?}"
+        );
+
+        // A canonical the map lists passes.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/qwen3"));
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
+
+        // An empty map is not authoritative: the connection serves anything, as it always has.
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("proxy")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/anything-else"));
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
+    }
+
+    #[test]
+    fn an_unreachable_provider_without_a_fallback_refuses_the_launch() {
+        let routes_provider = provider("proxy");
+        let health = json!({"reachable": false, "error": "connection failed"});
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("proxy/qwen3"));
+        let refused = unreachable_route("claude-code", &routes_provider, &health, &env);
+        assert!(
+            refused.as_deref().is_some_and(|m| {
+                m.contains("has no provider for model 'proxy/qwen3'")
+                    && m.contains("http://100.80.225.14:8000 is unreachable (connection failed)")
+                    && m.contains("set a fallback model on provider 'proxy'")
+            }),
+            "{refused:?}"
+        );
+        // No model setting points at this provider: the caller keeps its warning, there is no route to refuse.
+        assert_eq!(unreachable_route("claude-code", &routes_provider, &health, &Map::new()), None);
+    }
+
+    #[test]
+    fn configured_prefixes_and_bare_names_pass_the_unrouted_check() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("deepseek"), provider("str")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("deepseek/deepseek-ai/DeepSeek-V4.1-Flash"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("str/llama"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("opus"));
+        assert_eq!(
+            routes.unusable_route("claude-code", &env),
+            None,
+            "a configured id/ prefix matches at the first slash, extra slashes included"
+        );
+
+        // Bare aliases and full Claude ids never look like a provider route.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("claude-opus-5-5"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("us.anthropic.claude-opus-5-5"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("fable"));
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
+
+        // Shapes the runner's PROVIDER_PREFIX rejects are Claude's to interpret, not ours.
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("/leading-slash"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("two words/x"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!(".hidden/x"));
+        assert_eq!(routes.unusable_route("claude-code", &env), None);
+    }
+
+    #[test]
+    fn claude_used_by_names_the_roles_left_on_claude_models() {
+        let mut global = Map::new();
+        global.insert("COLONIZER_MODEL".into(), json!("opus"));
+        global.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("byteplus/seed-2.0-code"));
+        global.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("haiku"));
+        let providers = vec![provider("byteplus")];
+        assert_eq!(claude_used_by(&providers, &[global]), vec!["orchestrator", "background"]);
+        // An unset orchestrator is the agent's own default, a Claude model; an unset subagent model
+        // follows the orchestrator, so it is not counted twice.
+        let mut routed = Map::new();
+        routed.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("byteplus/seed-2.0-code"));
+        assert_eq!(claude_used_by(&providers, &[routed]), vec!["orchestrator"]);
+        assert_eq!(role_label("subagent_model"), "subagents");
+        assert_eq!(role_label("model_high"), "large tasks");
+    }
+
+    #[test]
+    fn used_by_names_the_settings_that_point_at_a_provider() {
+        let mut global = Map::new();
+        global.insert("COLONIZER_MODEL".into(), json!("opus"));
+        global.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        global.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("str/llama"));
+        let mut org = Map::new();
+        org.insert("COLONIZER_MODEL".into(), json!("strix/qwen3"));
+        assert_eq!(
+            used_by("strix", &[global.clone(), org]),
+            vec!["subagent_model", "model"],
+            "an org override counts"
+        );
+        // "strix/deepseek-v4-flash" shares "str" as a prefix but only "str/llama" is provider str's model.
+        assert_eq!(used_by("str", &[global.clone()]), vec!["background_model"]);
+
+        // A bare alias is a Claude model and a partial id prefix is another provider's, so neither matches.
+        let mut aliases = Map::new();
+        aliases.insert("COLONIZER_MODEL".into(), json!("strix"));
+        aliases.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strixish/qwen"));
+        assert_eq!(used_by("strix", &[aliases]), Vec::<&str>::new());
+    }
+
+    // -- the connection policy: model_map and disabled_tools (#295) --------------------------------
+
+    /// The anthropic passthrough is byte-identical whenever the policy has nothing to say, so the
+    /// rewrite never reaches a body it did not need to touch.
+    #[test]
+    fn a_connection_without_a_policy_for_the_body_is_byte_identical() {
+        let body = br#"{"model":"qwen3","max_tokens":8,"system":"t"}"#;
+        assert_eq!(apply_connection_policy(body, &provider("proxy")), None, "no policy at all");
+        let mut mapped = provider("proxy");
+        mapped.model_map = BTreeMap::from([("qwen3".into(), String::new())]);
+        assert_eq!(
+            apply_connection_policy(body, &mapped),
+            None,
+            "an empty wire name sends the canonical, so the bytes stand"
+        );
+        let mut unmapped = provider("proxy");
+        unmapped.model_map = BTreeMap::from([("deepseek-v4".into(), "DeepSeek-V4".into())]);
+        assert_eq!(
+            apply_connection_policy(body, &unmapped),
+            None,
+            "an unmapped model is not rewritten"
+        );
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["Write".into()];
+        assert_eq!(
+            apply_connection_policy(body, &strip),
+            None,
+            "no tools in the body, nothing to strip"
+        );
+        assert_eq!(
+            apply_connection_policy(b"not json", &mapped),
+            None,
+            "only real requests are rewritten"
+        );
+    }
+
+    #[test]
+    fn a_mapped_model_is_rewritten_to_the_wire_name_verbatim() {
+        let mut mapped = provider("proxy");
+        mapped.model_map = BTreeMap::from([("qwen3".into(), "Qwen/Qwen3-32B".into())]);
+        let body = br#"{"model":"qwen3","messages":[]}"#;
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body, &mapped).unwrap()).unwrap();
+        assert_eq!(out["model"], "Qwen/Qwen3-32B");
+        assert_eq!(out["messages"], json!([]), "everything else passes through");
+    }
+
+    #[test]
+    fn disabled_tools_strip_client_and_server_entries_and_their_choice() {
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["WebSearch".into()];
+        let body = serde_json::json!({
+            "model": "qwen3",
+            "tools": [
+                {"name": "Bash", "input_schema": {}},
+                {"name": "WebSearch", "input_schema": {}},
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+                {"type": "web_fetch_20250910", "name": "web_fetch"}
+            ],
+            "tool_choice": {"type": "tool", "name": "WebSearch"}
+        })
+        .to_string();
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body.as_bytes(), &strip).unwrap()).unwrap();
+        // The built-in `WebSearch` and its server-tool `web_search` alias both go; other server tools stay.
+        assert_eq!(
+            out["tools"],
+            json!([{"name": "Bash", "input_schema": {}}, {"type": "web_fetch_20250910", "name": "web_fetch"}])
+        );
+        assert_eq!(out["tool_choice"], Value::Null, "a choice naming a stripped tool is dropped");
+    }
+
+    #[test]
+    fn an_emptied_tools_list_is_dropped_with_its_choice() {
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["WebFetch".into(), "WebSearch".into()];
+        let body = serde_json::json!({
+            "model": "qwen3",
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "auto"}
+        })
+        .to_string();
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body.as_bytes(), &strip).unwrap()).unwrap();
+        assert!(out.get("tools").is_none(), "an empty tools array is not sent");
+        assert!(
+            out.get("tool_choice").is_none(),
+            "a choice with no tools to choose is not sent either"
+        );
+        // A partial strip leaves both fields when the choice names nothing removed.
+        let body = serde_json::json!({
+            "model": "qwen3",
+            "tools": [{"name": "Bash", "input_schema": {}}, {"type": "web_search_20250305", "name": "web_search"}],
+            "tool_choice": {"type": "auto"}
+        })
+        .to_string();
+        let mut strip = provider("proxy");
+        strip.disabled_tools = vec!["WebSearch".into()];
+        let out: Value = serde_json::from_slice(&apply_connection_policy(body.as_bytes(), &strip).unwrap()).unwrap();
+        assert_eq!(out["tool_choice"], json!({"type": "auto"}));
+        assert_eq!(out["tools"], json!([{"name": "Bash", "input_schema": {}}]));
+    }
+
+    /// The PUT refuses a row the policy can't honour, with the provider and the row named; the boot
+    /// re-runs the same check over a loaded providers.json ([`config_error`]).
+    #[test]
+    fn policy_errors_name_the_provider_and_the_row() {
+        let errs = |map: BTreeMap<&str, &str>, tools: &[&str]| {
+            policy_errors(
+                "proxy",
+                &map.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                &tools.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            errs(BTreeMap::from([("has space", "")]), &[]),
+            vec!["provider 'proxy': model_map['has space']: a canonical model id must be 1-120 characters without spaces"]
+        );
+        assert_eq!(
+            errs(BTreeMap::from([("proxy/qwen3", "")]), &[]),
+            vec!["provider 'proxy': model_map['proxy/qwen3']: the canonical id must not repeat the 'proxy/' prefix"]
+        );
+        assert_eq!(
+            errs(BTreeMap::from([("qwen3", "  ")]), &[]),
+            vec![
+                "provider 'proxy': model_map['qwen3']: wire name '  ' must be empty (send the canonical id) or a model ID without spaces"
+            ]
+        );
+        let unknown = errs(BTreeMap::new(), &["Nope"]);
+        assert_eq!(unknown.len(), 1);
+        assert!(
+            unknown[0].starts_with("provider 'proxy': disabled_tools['Nope']: unknown tool (known: "),
+            "{}",
+            unknown[0]
+        );
+        assert_eq!(
+            errs(BTreeMap::new(), &["Bash", "Bash"]),
+            vec!["provider 'proxy': disabled_tools: 'Bash' is listed twice"]
+        );
+        // The shapes that are fine: a versioned SKU, a blank send-as-is, real tools.
+        assert!(
+            errs(
+                BTreeMap::from([("qwen3", "Qwen/Qwen3-32B"), ("ds", "")]),
+                &["Bash", "WebSearch"]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_providers_json_row_fails_the_launch_naming_the_file() {
+        let mut bad = provider("proxy");
+        bad.model_map = BTreeMap::from([("nope model".into(), String::new())]);
+        assert_eq!(
+            config_error(&[provider("ok"), bad]),
+            Some(
+                "providers.json: provider 'proxy': model_map['nope model']: a canonical model id must be \
+                 1-120 characters without spaces"
+                    .to_string()
+            )
+        );
+        assert_eq!(config_error(&[provider("ok")]), None);
+    }
+
+    /// The smallest agent module, with `schema` as its settings schema.
+    fn agent_module(id: &str, schema: Value) -> AgentModule {
+        AgentModule::test(id)
+            .dir(PathBuf::from("/opt/colonizer/agent"))
+            .entry(vec!["runner.mjs".into()])
+            .schema(schema)
+    }
+
+    #[test]
+    fn disabled_tool_lines_name_their_level_and_source() {
+        let mut proxy = provider("proxy");
+        proxy.disabled_tools = vec!["WebSearch".into(), "Write".into()];
+        assert_eq!(
+            connection_disabled_tool_lines(&[provider("ok"), proxy]),
+            vec![
+                "tool 'WebSearch' disabled (level: connection, connection: 'proxy')",
+                "tool 'Write' disabled (level: connection, connection: 'proxy')",
+            ]
+        );
+
+        // No `x-known-tools` on the schema property, so the names are Claude Code's built-ins.
+        let claude = agent_module("claude-code", json!({"type": "object", "properties": {}}));
+        let mut env = Map::new();
+        env.insert("COLONIZER_DISABLED_TOOLS".into(), json!("WebSearch , Write"));
+        assert_eq!(
+            harness_disabled_tool_lines(&claude, &env).unwrap(),
+            vec![
+                "tool 'WebSearch' disabled (level: harness, harness: 'claude-code')",
+                "tool 'Write' disabled (level: harness, harness: 'claude-code')",
+            ]
+        );
+        assert_eq!(
+            harness_disabled_tool_lines(&claude, &Map::new()).unwrap(),
+            Vec::<String>::new()
+        );
+        let mut unknown = Map::new();
+        unknown.insert("COLONIZER_DISABLED_TOOLS".into(), json!("WebSearch, Sed"));
+        assert_eq!(
+            harness_disabled_tool_lines(&claude, &unknown),
+            Err(format!(
+                "agent module 'claude-code' setting 'disabled_tools': unknown tool 'Sed' (known: {})",
+                KNOWN_TOOLS.join(", ")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_module_validates_disabled_tools_against_its_own_names() {
+        let codex = agent_module(
+            "codex",
+            json!({"type": "object", "properties": {"disabled_tools": {
+                "type": "string", "env": "COLONIZER_DISABLED_TOOLS", "x-known-tools": ["shell", "web_search", "view_image"]
+            }}}),
+        );
+        // The module's native tool names are accepted.
+        let mut env = Map::new();
+        env.insert("COLONIZER_DISABLED_TOOLS".into(), json!("shell, view_image"));
+        assert_eq!(
+            harness_disabled_tool_lines(&codex, &env).unwrap(),
+            vec![
+                "tool 'shell' disabled (level: harness, harness: 'codex')",
+                "tool 'view_image' disabled (level: harness, harness: 'codex')",
+            ]
+        );
+        // A Claude Code name is refused, and the message lists the module's own names.
+        let mut claude_name = Map::new();
+        claude_name.insert("COLONIZER_DISABLED_TOOLS".into(), json!("Write"));
+        assert_eq!(
+            harness_disabled_tool_lines(&codex, &claude_name),
+            Err(
+                "agent module 'codex' setting 'disabled_tools': unknown tool 'Write' (known: shell, web_search, view_image)"
+                    .into()
+            )
+        );
+    }
+
+    /// The key lives in its own 0600 file, outside the struct: nothing serialises into a secret.
+    #[test]
+    fn a_serialised_provider_carries_no_key() {
+        let fields = serde_json::to_value(provider("proxy")).unwrap();
+        assert!(
+            fields
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|field| !field.contains("key") && !field.contains("secret") && !field.contains("token")),
+            "{fields}"
+        );
+    }
+
+    // -- the strict providers.json rule (#408) -----------------------------------------------------
+
+    fn providers_app() -> (Shared, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-providers-{}", crate::util::short_id()));
+        (crate::tests::test_app(&root), root)
+    }
+
+    fn put_req(name: &str) -> PutProvider {
+        PutProvider {
+            name: name.into(),
+            base_url: "https://api.deepseek.com/anthropic".into(),
+            auth: "none".into(),
+            wire: Wire::Anthropic,
+            models: Vec::new(),
+            preset: None,
+            api_key: None,
+            timeout_secs: None,
+            max_concurrent: None,
+            queue_timeout_secs: None,
+            context_tokens: None,
+            fallback_model: None,
+            pricing: None,
+            model_map: None,
+            disabled_tools: None,
+            quota: None,
+            normalize_cache_ttl: None,
+            trusted: None,
+            vetted: None,
+            vendor: None,
+        }
+    }
+
+    /// The marks ride the same omitted-keeps-saved rule as pricing and trusted (issue #626): a save
+    /// from a client that predates them must not strip a provider's vetting or vendor, and a blank
+    /// vendor string is an explicit clear.
+    #[tokio::test]
+    async fn a_put_that_omits_the_marks_keeps_them_and_a_blank_vendor_clears() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.vetted = Some(true);
+        first.vendor = Some("  Anthropic ".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+        let stored = &app.providers()[0];
+        assert!(stored.vetted);
+        assert_eq!(stored.vendor.as_deref(), Some("Anthropic"), "the vendor is saved trimmed");
+
+        let second = put_req("DeepSeek renamed");
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(second)).await.unwrap();
+        let stored = &app.providers()[0];
+        assert_eq!(stored.name, "DeepSeek renamed");
+        assert!(stored.vetted, "an omitted vetted keeps the saved mark");
+        assert_eq!(
+            stored.vendor.as_deref(),
+            Some("Anthropic"),
+            "an omitted vendor keeps the saved one"
+        );
+
+        let mut third = put_req("DeepSeek renamed");
+        third.vetted = Some(false);
+        third.vendor = Some("   ".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(third)).await.unwrap();
+        let stored = &app.providers()[0];
+        assert!(!stored.vetted);
+        assert_eq!(stored.vendor, None, "a blank vendor string clears the vendor");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `trusted` and the connection policy ride the same GET as pricing and the key state (#605):
+    /// the cockpit form prefills from it, and an unmarked provider reports `false` rather than being
+    /// omitted, so the Trusted switch has a value to sit on.
+    #[tokio::test]
+    async fn the_list_returns_trusted_and_the_connection_policy() {
+        let (app, root) = providers_app();
+        let mut marked = put_req("Marked");
+        marked.trusted = Some(true);
+        marked.model_map = Some(BTreeMap::from([("sonnet".into(), "claude-wire-sonnet".into())]));
+        marked.disabled_tools = Some(vec!["WebSearch".into()]);
+        let _ = put(State(app.clone()), Path("marked".into()), Json(marked)).await.unwrap();
+        let _ = put(State(app.clone()), Path("plain".into()), Json(put_req("Plain")))
+            .await
+            .unwrap();
+
+        let Json(listed) = list(State(app.clone())).await;
+        let by_id = |id: &str| {
+            listed
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} in {listed:?}"))
+        };
+        let marked = by_id("marked");
+        assert_eq!(marked["trusted"], json!(true));
+        assert_eq!(marked["model_map"]["sonnet"], json!("claude-wire-sonnet"));
+        assert_eq!(marked["disabled_tools"], json!(["WebSearch"]));
+        assert_eq!(
+            by_id("plain")["trusted"],
+            json!(false),
+            "an unmarked provider reports trusted: false"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn damaged_providers(app: &crate::Shared, bytes: &[u8]) -> PathBuf {
+        let path = app.cfg.config_dir.join("providers.json");
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_put_over_a_damaged_providers_json_is_refused_and_leaves_the_bytes_alone() {
+        let (app, root) = providers_app();
+        let damaged = b"][ nope";
+        let path = damaged_providers(&app, damaged);
+
+        let mut req = put_req("DeepSeek");
+        req.api_key = Some("sk-live-123".into()); // a refused save must not touch the key either
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(
+            err.message().contains("providers.json") && err.message().contains("refusing to overwrite it"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "the file is not overwritten");
+        assert!(
+            !app.provider_key_file("deepseek").exists(),
+            "the key from the refused save is not persisted"
+        );
+
+        // The gateway's reader still answers — with defaults — and the damage reaches /api/status.
+        assert!(app.providers().is_empty());
+        let alert = app.config_damage.lock().unwrap().clone().unwrap();
+        assert_eq!(alert.kind, crate::StorageAlertKind::LoadDamage);
+        assert!(alert.message.contains("providers.json"), "{}", alert.message);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_delete_over_a_damaged_providers_json_is_refused_and_leaves_the_bytes_alone() {
+        let (app, root) = providers_app();
+        let path = damaged_providers(&app, b"nonsense");
+
+        let err = delete(State(app.clone()), Path("deepseek".into())).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(err.message().contains("refusing to overwrite it"), "{}", err.message());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "nonsense");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- duplicated ids in a hand-edited providers.json (#326) --------------------------------------
+
+    /// Two entries answering to one id, as a hand edit leaves them.
+    fn duplicated_file(app: &crate::Shared) -> PathBuf {
+        let path = app.cfg.config_dir.join("providers.json");
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"[
+                {"id": "dupped", "name": "First", "base_url": "https://api.example.com", "auth": "none"},
+                {"id": "dupped", "name": "Second", "base_url": "https://api.example.com", "auth": "none"}
+            ]"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn duplicate_ids_are_found_in_first_appearance_order() {
+        let dups = duplicate_provider_ids(&[provider("a"), provider("b"), provider("a"), provider("b"), provider("a")]);
+        assert_eq!(dups, ["a", "b"]);
+        assert!(duplicate_provider_ids(&[provider("a"), provider("b")]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_duplicated_load_keeps_the_first_entry_and_names_the_loser() {
+        let (app, root) = providers_app();
+        duplicated_file(&app);
+
+        let providers = app.providers();
+        assert_eq!(providers.len(), 2, "the list is not deduped; consumers take the first match");
+        assert_eq!(providers[0].name, "First");
+        let alert = app.config_damage.lock().unwrap().clone().unwrap();
+        assert_eq!(alert.kind, crate::StorageAlertKind::LoadDamage);
+        assert!(
+            alert
+                .message
+                .starts_with("these providers are listed more than once: dupped — ")
+                && alert.message.contains("the first entry wins"),
+            "{}",
+            alert.message
+        );
+
+        // Fixing the file clears the warning instead of leaving it stuck on.
+        std::fs::write(app.cfg.config_dir.join("providers.json"), "[]").unwrap();
+        app.providers();
+        assert!(
+            app.config_damage.lock().unwrap().is_none(),
+            "the fixed file clears the damage"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_put_over_a_duplicated_id_is_refused_naming_it() {
+        let (app, root) = providers_app();
+        let path = duplicated_file(&app);
+
+        let err = put(State(app.clone()), Path("dupped".into()), Json(put_req("Second")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("\"dupped\"") && err.message().contains("more than once"),
+            "{}",
+            err.message()
+        );
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("First"),
+            "the file is not touched by the refused save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_put_with_an_unusable_policy_row_is_refused_naming_the_provider_and_row() {
+        let (app, root) = providers_app();
+        let mut req = put_req("Proxy");
+        req.model_map = Some(BTreeMap::from([("nope model".into(), String::new())]));
+        let err = put(State(app), Path("proxy".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("provider 'proxy'") && err.message().contains("model_map['nope model']"),
+            "{}",
+            err.message()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The web Settings form predates `model_map`/`disabled_tools` and sends neither, so a save that
+    /// omits them keeps a hand-edited policy — only an explicit empty map or list clears it.
+    #[tokio::test]
+    async fn a_put_that_omits_the_policy_keeps_it_and_an_explicit_empty_clears_it() {
+        let (app, root) = providers_app();
+        let mut req = put_req("Proxy");
+        req.model_map = Some(BTreeMap::from([("qwen3".into(), "Qwen/Qwen3".into())]));
+        req.disabled_tools = Some(vec!["WebSearch".into()]);
+        let _saved = put(State(app.clone()), Path("proxy".into()), Json(req)).await.unwrap();
+
+        let _saved = put(State(app.clone()), Path("proxy".into()), Json(put_req("Proxy")))
+            .await
+            .unwrap();
+        let saved = app.providers().into_iter().find(|p| p.id == "proxy").unwrap();
+        assert_eq!(saved.model_map, BTreeMap::from([("qwen3".into(), "Qwen/Qwen3".into())]));
+        assert_eq!(saved.disabled_tools, vec!["WebSearch".to_string()]);
+
+        let mut req = put_req("Proxy");
+        req.model_map = Some(BTreeMap::new());
+        req.disabled_tools = Some(Vec::new());
+        let _saved = put(State(app.clone()), Path("proxy".into()), Json(req)).await.unwrap();
+        let saved = app.providers().into_iter().find(|p| p.id == "proxy").unwrap();
+        assert!(
+            saved.model_map.is_empty() && saved.disabled_tools.is_empty(),
+            "explicitly cleared"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_warning_never_displaces_a_file_damage_alert() {
+        let (app, root) = providers_app();
+        // What a failed orgs.json read leaves in the slot the two readers share.
+        *app.config_damage.lock().unwrap() = Some(crate::StorageAlert {
+            kind: crate::StorageAlertKind::LoadDamage,
+            message: "/config/orgs.json could not be read (…); defaults are in effect for org settings".into(),
+            ts: chrono::Utc::now(),
+            failures: 1,
+            recovered_at: None,
+        });
+        duplicated_file(&app);
+
+        app.providers();
+        let held = app.config_damage.lock().unwrap().clone().unwrap();
+        assert!(
+            held.message.starts_with("/config/orgs.json"),
+            "the file-damage alert takes precedence: {}",
+            held.message
+        );
+
+        // …and once the file damage is gone, the warning takes the vacated slot.
+        *app.config_damage.lock().unwrap() = None;
+        app.providers();
+        let held = app.config_damage.lock().unwrap().clone().unwrap();
+        assert!(held.message.starts_with(DUPLICATE_IDS_WARNING), "{}", held.message);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- quota probes (#199) ------------------------------------------------------------------------
+
+    /// The probe is fetched with the provider's credential, so a URL off the base URL's origin is
+    /// refused before it can be saved: the key must never leave the vendor that issued it.
+    #[tokio::test]
+    async fn a_quota_probe_on_another_host_is_refused() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.quota = Some(QuotaProbe {
+            url: "https://balances.example.com/plan".into(),
+            pointer: "/data/remaining".into(),
+            limit_pointer: None,
+        });
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("same origin") && err.message().contains("credential"),
+            "{}",
+            err.message()
+        );
+        assert!(app.providers().is_empty(), "the refused save writes nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The origin is pinned, not just the name: a plaintext twin or an odd port of the vendor's
+    /// host would carry the credential somewhere else just as surely as another name would.
+    #[tokio::test]
+    async fn a_quota_probe_on_another_scheme_or_port_is_refused() {
+        let (app, root) = providers_app();
+        for url in ["http://api.deepseek.com/plan", "https://api.deepseek.com:8443/plan"] {
+            let mut req = put_req("DeepSeek");
+            req.quota = Some(QuotaProbe {
+                url: url.into(),
+                pointer: "/data/remaining".into(),
+                limit_pointer: None,
+            });
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().contains("same origin"), "{url}: {}", err.message());
+        }
+        assert!(app.providers().is_empty(), "the refused saves write nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_quota_pointer_must_be_rfc_6901() {
+        let (app, root) = providers_app();
+        // An empty pointer would resolve to the whole body, which is never a number, so it is
+        // refused with the pointers no RFC 6901 parser would accept.
+        for pointer in ["data.remaining", ""] {
+            let mut req = put_req("DeepSeek");
+            req.quota = Some(QuotaProbe {
+                url: "https://api.deepseek.com/plan".into(),
+                pointer: pointer.into(),
+                limit_pointer: None,
+            });
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().contains("pointer"), "{pointer:?}: {}", err.message());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// On the base URL's host it saves (trimmed, trailing slash off); omitted keeps what is saved,
+    /// and an empty URL clears it — the pricing keep-rules with the key's way out.
+    #[tokio::test]
+    async fn a_quota_probe_on_the_base_host_is_saved_kept_and_cleared() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.quota = Some(QuotaProbe {
+            url: "https://api.deepseek.com/plan/".into(),
+            pointer: " /data/remaining ".into(),
+            limit_pointer: None,
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
+        let saved = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
+        assert_eq!(
+            saved.quota,
+            Some(QuotaProbe {
+                url: "https://api.deepseek.com/plan".into(),
+                pointer: "/data/remaining".into(),
+                limit_pointer: None,
+            })
+        );
+
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(put_req("DeepSeek")))
+            .await
+            .unwrap();
+        let kept = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
+        assert!(kept.quota.is_some(), "omitted keeps the saved probe");
+
+        let mut req = put_req("DeepSeek");
+        req.quota = Some(QuotaProbe {
+            url: "  ".into(),
+            pointer: String::new(),
+            limit_pointer: None,
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
+        let cleared = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
+        assert!(cleared.quota.is_none(), "an empty URL removes the probe");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- moving a provider to another origin (#681) --------------------------------------------------
+
+    /// The credential rides the base URL, so a save that moves a keyed provider to another origin —
+    /// host, scheme or port — is refused unless the key comes with it, and a refused save leaves both
+    /// the record and the key file exactly as they were.
+    #[tokio::test]
+    async fn an_origin_change_without_the_key_is_refused_and_persists_nothing() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        for moved_to in [
+            "https://api.example.com/anthropic",       // another host
+            "http://api.deepseek.com/anthropic",       // the same host, plaintext
+            "https://api.deepseek.com:8443/anthropic", // the same host, another port
+        ] {
+            let mut moved = put_req("DeepSeek");
+            moved.base_url = moved_to.into();
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(moved))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{moved_to}");
+            assert!(
+                err.message().contains("different origin") && err.message().contains("API key"),
+                "{moved_to}: {}",
+                err.message()
+            );
+            let stored = &app.providers()[0];
+            assert_eq!(
+                stored.base_url, "https://api.deepseek.com/anthropic",
+                "{moved_to}: the refused save writes nothing"
+            );
+            assert_eq!(
+                app.provider_key("deepseek").as_deref(),
+                Some("sk-saved-1"),
+                "{moved_to}: the saved key stays"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Entering the key again is the way through: the move lands and the fresh key is what is stored.
+    #[tokio::test]
+    async fn an_origin_change_with_a_fresh_key_moves_the_provider_and_the_key() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("sk-fresh-2".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A path change on the same origin is the same party: the saved key carries on.
+    #[tokio::test]
+    async fn a_same_origin_path_change_keeps_the_saved_key() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.deepseek.com/other/path".into();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.deepseek.com/other/path");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-saved-1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Removing the key with the move (`api_key: ""`) is allowed — nothing is left to send anywhere.
+    #[tokio::test]
+    async fn removing_the_key_with_the_origin_change_is_allowed() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek"), None, "the key is gone with the move");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider with no key stored moves freely: there is nothing saved to send on.
+    #[tokio::test]
+    async fn an_origin_change_with_no_key_stored_needs_no_key() {
+        let (app, root) = providers_app();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(put_req("DeepSeek")))
+            .await
+            .unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The quota probe carries the credential too, so a move that leaves the saved probe on the old
+    /// origin is refused even with a fresh key; bringing the probe along (or an empty URL, which the
+    /// quota rules already define as a clear) lets the move through.
+    #[tokio::test]
+    async fn an_origin_change_that_leaves_the_quota_probe_behind_is_refused() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        first.quota = Some(QuotaProbe {
+            url: "https://api.deepseek.com/plan".into(),
+            pointer: "/data/remaining".into(),
+            limit_pointer: None,
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("sk-fresh-2".into());
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(moved))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("quota probe") && err.message().contains("same origin"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            app.providers()[0].base_url,
+            "https://api.deepseek.com/anthropic",
+            "the refused save writes nothing"
+        );
+
+        let mut retried = put_req("DeepSeek");
+        retried.base_url = "https://api.example.com/anthropic".into();
+        retried.api_key = Some("sk-fresh-2".into());
+        retried.quota = Some(QuotaProbe {
+            url: "https://api.example.com/plan".into(),
+            pointer: "/data/remaining".into(),
+            limit_pointer: None,
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(retried)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- vendor inference for providers saved as `custom` (#1166) ----------------------------------
+
+    #[test]
+    fn a_base_url_names_its_vendor_whatever_its_case_slash_or_default_port() {
+        assert_eq!(preset_for_base_url("https://api.deepseek.com/anthropic"), Some("deepseek"));
+        assert_eq!(
+            preset_for_base_url("HTTPS://API.DeepSeek.com:443/anthropic///"),
+            Some("deepseek")
+        );
+        assert_eq!(preset_for_base_url("https://api.minimaxi.com/anthropic"), Some("minimax"));
+        assert_eq!(preset_for_base_url("https://api.meta.ai"), Some("meta"));
+        assert_eq!(
+            preset_for_base_url("https://api.z.ai/api/anthropic"),
+            Some("zai"),
+            "the built-in preset wins over a catalogue twin"
+        );
+        assert_eq!(
+            preset_for_base_url("https://api.deepseek.com/other"),
+            None,
+            "the path is part of the match"
+        );
+        assert_eq!(
+            preset_for_base_url("http://api.deepseek.com/anthropic"),
+            None,
+            "so is the scheme"
+        );
+        assert_eq!(
+            preset_for_base_url("https://api.deepseek.com:8443/anthropic"),
+            None,
+            "and a non-default port"
+        );
+        assert_eq!(preset_for_base_url("not a url"), None);
+        assert_eq!(
+            preset_for_base_url("https://tokenhub.tencentmaas.com/plan/anthropic"),
+            None,
+            "a URL two catalogue entries share names neither"
+        );
+    }
+
+    #[test]
+    fn only_custom_or_unset_presets_are_resolved_from_the_url() {
+        let url = "https://api.deepseek.com/anthropic";
+        assert_eq!(resolved_preset("custom", url), "deepseek");
+        assert_eq!(resolved_preset("", url), "deepseek");
+        assert_eq!(resolved_preset("zai", url), "zai", "a chosen preset is never overridden");
+        assert_eq!(resolved_preset("custom", "https://llm.example.com"), "custom");
+        assert_eq!(resolved_preset("", "https://llm.example.com"), "custom");
+    }
+
+    #[tokio::test]
+    async fn the_list_reports_the_vendor_of_a_custom_provider() {
+        let (app, root) = providers_app();
+        damaged_providers(
+            &app,
+            br#"[{"id":"ds","name":"DS","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","preset":"custom"},
+                {"id":"mine","name":"Mine","base_url":"https://llm.example.com","auth":"none","preset":"custom"}]"#,
+        );
+        let Json(listed) = list(State(app.clone())).await;
+        let preset = |id: &str| listed.iter().find(|p| p["id"] == id).unwrap()["preset"].clone();
+        assert_eq!(preset("ds"), json!("deepseek"));
+        assert_eq!(preset("mine"), json!("custom"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_load_migration_rewrites_custom_and_keeps_the_key_and_every_other_field() {
+        let (app, root) = providers_app();
+        let path = damaged_providers(
+            &app,
+            br#"[{"id":"mm","name":"MiniMax Coding","base_url":"https://api.minimaxi.com/anthropic/","auth":"bearer","preset":"custom",
+                  "models":["m1"],"trusted":true,"vendor":"minimax","context_tokens":200000,"disabled_tools":["WebSearch"]},
+                {"id":"mine","name":"Mine","base_url":"https://llm.example.com","auth":"none","preset":"custom"},
+                {"id":"zz","name":"Zed","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","preset":"zai"}]"#,
+        );
+        crate::util::write_secret(&app.provider_key_file("mm"), "sk-test-not-real").unwrap();
+
+        assert_eq!(app.migrate_custom_presets().await, 1);
+        let saved: Vec<Provider> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let by = |id: &str| saved.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by("mm").preset, "minimax");
+        assert_eq!(by("mm").name, "MiniMax Coding");
+        assert_eq!(by("mm").base_url, "https://api.minimaxi.com/anthropic/");
+        assert_eq!(by("mm").models, vec!["m1".to_string()]);
+        assert!(by("mm").trusted);
+        assert_eq!(by("mm").vendor.as_deref(), Some("minimax"));
+        assert_eq!(by("mm").context_tokens, Some(200000));
+        assert_eq!(by("mm").disabled_tools, vec!["WebSearch".to_string()]);
+        assert_eq!(
+            app.provider_key("mm").as_deref(),
+            Some("sk-test-not-real"),
+            "the key is untouched"
+        );
+        assert_eq!(by("mine").preset, "custom", "an unknown endpoint stays custom");
+        assert_eq!(by("zz").preset, "zai", "a chosen preset stays");
+
+        assert_eq!(app.migrate_custom_presets().await, 0, "a second run has nothing to move");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_load_migration_leaves_a_damaged_file_alone() {
+        let (app, root) = providers_app();
+        let path = damaged_providers(&app, b"{ not json");
+        assert_eq!(app.migrate_custom_presets().await, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

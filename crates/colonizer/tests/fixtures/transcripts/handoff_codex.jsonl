@@ -1,0 +1,5 @@
+{"timestamp":"2026-04-01T00:00:00Z","type":"session_meta","payload":{"id":"handoff-codex","cwd":"/home/dev/app","git":{"branch":"feature/parser"},"cli_version":"0.1","model":"gpt-5"}}
+{"timestamp":"2026-04-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list the files; the token to use is ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5"}]}}
+{"timestamp":"2026-04-01T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}","call_id":"call-shell"}}
+{"timestamp":"2026-04-01T00:00:04Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call-shell","aggregated_output":"src\n","exit_code":0}}
+{"timestamp":"2026-04-01T00:00:10Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The parser needs the off-by-one fix before the test can pass."}]}}

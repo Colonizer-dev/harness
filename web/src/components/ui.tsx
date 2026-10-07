@@ -1,0 +1,521 @@
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import type { Attention, HarnessStatus, Session, SessionStatus } from "../types";
+import { IconAlert, IconInfo } from "./icons";
+
+export function cx(...classes: (string | false | null | undefined)[]): string {
+  return classes.filter(Boolean).join(" ");
+}
+
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "primary" | "secondary" | "ghost" | "danger";
+  size?: "sm" | "md";
+};
+
+export function buttonClass(variant: ButtonProps["variant"] = "secondary", size: ButtonProps["size"] = "md"): string {
+  return cx(
+    "inline-flex shrink-0 cursor-pointer select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+    size === "sm" ? "h-7 px-2.5 text-small-lg" : "h-9 px-3.5 text-sm",
+    variant === "primary" && "bg-accent text-on-accent hover:bg-accent-hover disabled:hover:bg-accent",
+    variant === "secondary" && "border border-border bg-panel text-text hover:bg-panel-2",
+    variant === "ghost" && "text-muted hover:bg-panel-2 hover:text-text",
+    variant === "danger" && "border border-border bg-panel text-err hover:bg-err-soft",
+  );
+}
+
+export function Button({ variant, size, className, type = "button", ...props }: ButtonProps) {
+  return <button type={type} className={cx(buttonClass(variant, size), className)} {...props} />;
+}
+
+export type Tone = "neutral" | "info" | "ok" | "warn" | "err" | "accent";
+
+const TONE: Record<Tone, string> = {
+  neutral: "border-border bg-panel-2 text-muted",
+  info: "border-transparent bg-info-soft text-info",
+  ok: "border-transparent bg-ok-soft text-ok",
+  warn: "border-transparent bg-warn-soft text-warn",
+  err: "border-transparent bg-err-soft text-err",
+  accent: "border-transparent bg-accent-soft text-accent",
+};
+
+export function Badge({
+  tone = "neutral",
+  pulse = false,
+  children,
+  className,
+  title,
+}: {
+  tone?: Tone;
+  pulse?: boolean;
+  children: ReactNode;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      className={cx(
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-meta-lg font-semibold leading-4",
+        TONE[tone],
+        className,
+      )}
+    >
+      {pulse && <span className="pulse-soft size-1.5 rounded-full bg-current" />}
+      {children}
+    </span>
+  );
+}
+
+export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; live: boolean }> = {
+  queued: { label: "Queued", tone: "neutral", live: false },
+  blocked: { label: "Blocked", tone: "warn", live: false },
+  starting: { label: "Starting", tone: "info", live: true },
+  running: { label: "Working", tone: "info", live: true },
+  waiting_for_answer: { label: "Needs your answer", tone: "accent", live: true },
+  idle: { label: "Idle", tone: "neutral", live: true },
+  publishing: { label: "Opening PR", tone: "info", live: false },
+  pr_opened: { label: "PR opened", tone: "info", live: false },
+  merged: { label: "PR merged", tone: "ok", live: false },
+  closed: { label: "PR closed", tone: "neutral", live: false },
+  no_changes: { label: "No changes", tone: "warn", live: false },
+  parked: { label: "Parked", tone: "warn", live: false },
+  stopped: { label: "Stopped", tone: "neutral", live: false },
+  failed: { label: "Failed", tone: "err", live: false },
+};
+
+/** Sessions whose microVM is up. */
+export function isLive(status: SessionStatus): boolean {
+  return SESSION_STATUS[status]?.live ?? false;
+}
+
+/** Whether the colony's microVM is currently down because it is suspended (or already being
+ *  restored): no live machine to pulse about, even though `status` still reads as live. */
+export function isSuspended(session: Pick<Session, "suspended" | "pending_answer">): boolean {
+  return session.suspended != null || session.pending_answer != null;
+}
+
+/** Whether the colony has already answered and is now only waiting for a parallelism slot to free
+ *  (issue #667): suspended, its answer stored, and `status` still `waiting_for_answer`. Not a new
+ *  status — a derived state, so nothing the mothership sends has to change for it to read right. */
+export function isAnsweredWaiting(
+  session: Pick<Session, "status" | "suspended" | "pending_answer">,
+): boolean {
+  return session.status === "waiting_for_answer" && session.suspended != null && session.pending_answer != null;
+}
+
+/** When the held answer took effect: `answered_at`, falling back to the suspend time. Epoch
+ *  milliseconds, the key the restore queue orders by; null when there is none or it will not parse. */
+export function answeredAt(session: Pick<Session, "suspended" | "pending_answer">): number | null {
+  const at = session.pending_answer?.answered_at ?? session.suspended?.at ?? null;
+  const ms = at == null ? NaN : Date.parse(at);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** This colony's place in the restore queue, 1-based: answered colonies re-boot in answer order and
+ *  ahead of fresh launches, so only answered-waiting colonies count as being in line. null when this
+ *  colony is not in that state (or is missing from the list). */
+export function restorePlace(
+  session: Pick<Session, "id" | "status" | "suspended" | "pending_answer" | "superseded">,
+  sessions: readonly Pick<Session, "id" | "status" | "suspended" | "pending_answer" | "superseded">[],
+): number | null {
+  // A colony a merge superseded is out of the line until it is kept (issue #673): the server's
+  // restore pass skips it, and nobody behind it waits on it.
+  const inRestoreLine = (s: Pick<Session, "status" | "suspended" | "pending_answer" | "superseded">) =>
+    isAnsweredWaiting(s) && !supersededHeld(s);
+  if (!inRestoreLine(session)) return null;
+  const inLine = sessions
+    .filter(inRestoreLine)
+    .sort(
+      (a, b) =>
+        (answeredAt(a) ?? Infinity) - (answeredAt(b) ?? Infinity) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+  const at = inLine.findIndex((s) => s.id === session.id);
+  return at < 0 ? null : at + 1;
+}
+
+/** 1st, 2nd, 3rd, 4th… — 11th through 13th stay `-th`, and so does everything else. */
+export function ordinal(n: number): string {
+  const teens = n % 100;
+  if (teens < 11 || teens > 13) {
+    if (n % 10 === 1) return `${n}st`;
+    if (n % 10 === 2) return `${n}nd`;
+    if (n % 10 === 3) return `${n}rd`;
+  }
+  return `${n}th`;
+}
+
+/** The park reasons the mothership writes (issue #213), in human words; anything else shows as given. */
+const PARK_REASONS: Record<string, string> = {
+  provider_quota_exhausted: "provider quota exhausted",
+  hold_timeout: "hold timed out",
+  idle_timeout: "idle too long",
+  provider_retry: "gateway error, retrying automatically",
+  repo_pr_rate_limit: "repo's daily PR cap reached",
+};
+
+/** The short local date/time a parked colony can resume at, e.g. "27 Sep, 14:05"; "" for a timestamp that will not parse. */
+export function parkedResumesAt(resetsAt: string): string {
+  const at = new Date(resetsAt);
+  return Number.isNaN(at.getTime()) ? "" : at.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Why a parked colony is parked, and when it can come back (issue #213), as one line —
+ *  "provider quota exhausted · resumes 27 Sep, 14:05". A missing or unparseable `resets_at`
+ *  drops the resume half; an unknown reason shows with its underscores spelled out. */
+export function parkedLabel(parked: Pick<Session, "parked">["parked"]): string {
+  if (!parked) return "";
+  const reason = PARK_REASONS[parked.reason] ?? parked.reason.replace(/_/g, " ");
+  const when = parked.resets_at ? parkedResumesAt(parked.resets_at) : "";
+  return when ? `${reason} · resumes ${when}` : reason;
+}
+
+/** The overlap reasons a merge supersedes a colony by (issue #673), in human words. */
+const SUPERSEDE_REASONS: Record<NonNullable<Session["superseded"]>["reason"], string> = {
+  supply_chain: "same supply-chain target",
+  issue: "same issue",
+  files: "overlapping files",
+};
+
+/** Whether a merge superseded this colony and the operator has not kept it (issue #673): the queue,
+ *  the restore pass and the resume route all hold it until Keep. Mirrors `supersede::blocks_start`. */
+export function supersededHeld(session: Pick<Session, "superseded">): boolean {
+  return session.superseded != null && !session.superseded.kept;
+}
+
+/** What a supersession says in its badge tooltip: "same issue — covered by "Fix the login""
+ *  (issue #673). An unknown reason shows with its underscores spelled out. */
+export function supersededTitle(superseded: NonNullable<Session["superseded"]>): string {
+  const reason = SUPERSEDE_REASONS[superseded.reason] ?? superseded.reason.replace(/_/g, " ");
+  return `${reason} — covered by "${superseded.title}"`;
+}
+
+/** The label a colony's status reads as, suspension-aware (issues #562, #667, #701): a
+ *  `waiting_for_answer` colony whose microVM is stopped is suspended rather than working, one whose
+ *  answer is stored and a boot is underway (queued or starting) says so, one that answered while
+ *  suspended is queued for a slot (or held until kept when a merge superseded it, issue #673), and a
+ *  suspended colony whose question was opened reads as warming up until the VM is ready. Everything
+ *  else keeps the plain status label. */
+export function statusLabel(
+  session: Pick<Session, "status" | "suspended" | "pending_answer" | "prewarm" | "superseded">,
+): string {
+  if (session.pending_answer != null && (session.status === "queued" || session.status === "starting")) {
+    return "Resuming with your answer";
+  }
+  // Issue #673: a superseded answered colony does not resume when a slot frees — it waits for Keep.
+  if (isAnsweredWaiting(session)) return supersededHeld(session) ? "Answered · held until kept" : "Answered · resumes when a slot frees";
+  if (session.prewarm?.ready_at) return "Ready — waiting for your answer";
+  if (session.prewarm?.started_at) return "Warming up…";
+  if (session.suspended != null && session.status === "waiting_for_answer") return "Suspended — resumes when you answer";
+  return SESSION_STATUS[session.status]?.label ?? session.status;
+}
+
+/** Whether the mesh is actually broken, as opposed to unavailable on this platform.
+ *
+ *  A Mac vendors no `tailscaled`, so the mothership reports `state: "unavailable"` and colonies use a
+ *  loopback port (#32). That is by design and must not read as a fault — it used to, because every
+ *  reader tested `mesh.error` and the payload put the explanation there. Kept in one place so the
+ *  sidebar dot, the Settings nav and the Runtime row cannot disagree. */
+export function meshBroken(mesh: HarnessStatus["mesh"]): boolean {
+  if (!mesh || !mesh.enabled) return false;
+  if (mesh.state === "unavailable") return false;
+  return mesh.state === "error" || Boolean(mesh.error);
+}
+
+/** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone,
+ *  while a suspended colony holds none — its microVM was removed to free exactly that slot (issue #562).
+ *  A warm-up whose boot was admitted (issue #701) holds one again; one still queued does not.
+ *  Mirrors `Session::holds_slot` in crates/colonizer/src/sessions.rs; keep the two in step. */
+export function occupiesSlot(session: Pick<Session, "status" | "suspended" | "prewarm">): boolean {
+  if (!isLive(session.status) && session.status !== "publishing") return false;
+  if (session.prewarm?.started_at) return true;
+  return session.suspended == null;
+}
+
+/** Statuses the publish endpoint accepts: live colonies, plus parked (issue #213), stopped, failed and no-changes ones whose worktree can still be finished. */
+const PUBLISHABLE: SessionStatus[] = ["running", "waiting_for_answer", "idle", "parked", "stopped", "failed", "no_changes"];
+
+/** Whether publishing this colony is possible: it kept its worktree (`git_admin_dir`, the server's own condition), its status is one the endpoint reconciles, and it is not suspended — the endpoint refuses a suspended colony, whose answer must stay restorable (issue #562). Mirrored from the server, so the button never offers a publish that would 409. */
+export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git_admin_dir" | "suspended">): boolean {
+  return !session.cleaned_up && session.git_admin_dir != null && session.suspended == null && PUBLISHABLE.includes(session.status);
+}
+
+export function StatusBadge({ session }: { session: Pick<Session, "status" | "suspended" | "pending_answer" | "prewarm" | "superseded"> }) {
+  const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone, live: false };
+  // A suspended colony's microVM is stopped: the pulse would read as a machine burning while it is not.
+  const animated = !isSuspended(session) && (session.status === "starting" || session.status === "running" || session.status === "publishing" || session.status === "waiting_for_answer");
+  // One that answered and is queued for a slot is not asking for anyone, so it loses the accent
+  // "needs you" tone and reads like the queue.
+  const tone: Tone = isAnsweredWaiting(session) ? "neutral" : meta.tone;
+  return (
+    <Badge tone={tone} pulse={animated}>
+      {statusLabel(session)}
+    </Badge>
+  );
+}
+
+export function Spinner({ className }: { className?: string }) {
+  return (
+    <svg className={cx("animate-spin", className)} width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export const inputClass =
+  "w-full min-w-0 rounded-lg border border-border bg-panel px-3 py-2 text-sm text-text outline-none transition-colors placeholder:text-faint focus:border-accent focus:ring-2 focus:ring-[var(--accent-ring)]";
+
+export function Switch({
+  checked,
+  onChange,
+  label,
+  labelledBy,
+  id,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  /** Accessible name; ignored when a visible label is tied in with `labelledBy`. */
+  label: string;
+  labelledBy?: string;
+  id?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      id={id}
+      aria-checked={checked}
+      aria-label={labelledBy ? undefined : label}
+      aria-labelledby={labelledBy}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cx(
+        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+        checked ? "bg-accent" : "bg-panel-3",
+      )}
+    >
+      <span
+        className={cx(
+          "inline-block size-4 rounded-full bg-white shadow transition-transform",
+          checked ? "translate-x-[18px]" : "translate-x-0.5",
+        )}
+      />
+    </button>
+  );
+}
+
+/**
+ * A small "i" button that reveals an explanation. Hover and focus peek at it; a click
+ * pins it open so it also works on touch. Escape closes it without closing a parent dialog.
+ */
+export function InfoButton({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+  const id = useId();
+  const wrap = useRef<HTMLSpanElement>(null);
+  const [pinned, setPinned] = useState(false);
+  const [peek, setPeek] = useState(false);
+  const [align, setAlign] = useState<"start" | "end">("start");
+  const open = pinned || peek;
+
+  useEffect(() => {
+    if (!pinned) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setPinned(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [pinned]);
+
+  // Open towards the middle of the window so the popover is not clipped at the pane edge.
+  const place = () => {
+    const rect = wrap.current?.getBoundingClientRect();
+    if (rect) setAlign(rect.left + rect.width / 2 > window.innerWidth / 2 ? "end" : "start");
+  };
+
+  return (
+    <span
+      ref={wrap}
+      className={cx("relative inline-flex", className)}
+      onMouseEnter={() => {
+        place();
+        setPeek(true);
+      }}
+      onMouseLeave={() => setPeek(false)}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && open) {
+          e.preventDefault();
+          e.stopPropagation();
+          setPinned(false);
+          setPeek(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-controls={id}
+        aria-describedby={id}
+        onClick={() => {
+          place();
+          setPinned((p) => !p);
+        }}
+        onFocus={() => {
+          place();
+          setPeek(true);
+        }}
+        onBlur={() => setPeek(false)}
+        className={cx(
+          "grid size-5 shrink-0 cursor-pointer place-items-center rounded-full transition-colors hover:bg-panel-3 hover:text-text",
+          open ? "text-text" : "text-faint",
+        )}
+      >
+        <IconInfo size={13} />
+      </button>
+      <span
+        role="tooltip"
+        id={id}
+        hidden={!open}
+        className={cx(
+          "absolute top-full z-30 mt-1.5 w-max max-w-[min(18rem,calc(100vw-2rem))] space-y-1.5 rounded-lg border border-border bg-panel-2 px-3 py-2 text-left text-small font-normal leading-snug text-text shadow-[var(--shadow)] [overflow-wrap:anywhere]",
+          align === "end" ? "right-0" : "left-0",
+        )}
+      >
+        {children}
+      </span>
+    </span>
+  );
+}
+
+/** The GitHub org (repository owner) a colony belongs to. */
+export function orgOf(session: Pick<Session, "org" | "repo">): string {
+  return session.org || session.repo.split("/")[0] || "";
+}
+
+export function sameOrg(a: string | null | undefined, b: string | null | undefined): boolean {
+  return (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
+}
+
+export function attentionText(attention: Attention): string {
+  const n = attention.nudges ?? 0;
+  switch (attention.reason) {
+    case "stalled":
+      return `No progress, nudged ${n}×`;
+    case "nudges_exhausted":
+      return `Still stalled after ${n} nudge${n === 1 ? "" : "s"}`;
+    case "waiting_for_answer":
+      return "Waiting for your answer";
+    case "autopilot_held":
+      return attention.detail?.trim() || "Autopilot held the PR";
+    case "hold_timeout":
+      return "Held too long — parked, resume to continue";
+    case "idle_timeout":
+      return "Idle with nothing to do — parked to free its slot, resume to continue";
+    case "repo_pr_rate_limit":
+      return "Repo's daily PR cap reached — parked, resume to continue";
+    case "control_defeat":
+      return "A control may have been bypassed";
+    case "looping":
+      return attention.signature ? `Looping on ${attention.signature} — stopped, resume to continue` : "Looping — stopped, resume to continue";
+    case "provider_retry":
+      return attention.summary?.trim() || attention.detail?.trim() || "Retrying a provider error automatically";
+    default:
+      return "Needs attention";
+  }
+}
+
+/**
+ * The colony header's "auto-fixed" line (issue #1191): what the watchdog playbook did by itself,
+ * the signatures once each with a count, newest last. `null` when it did nothing.
+ */
+export function autoFixLine(session: Pick<Session, "auto_fixes">): string | null {
+  const fixes = (session.auto_fixes ?? []).filter((fix) => fix.signature !== "looping");
+  if (fixes.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const fix of fixes) counts.set(fix.signature, (counts.get(fix.signature) ?? 0) + 1);
+  const names = [...counts].map(([signature, n]) => (n > 1 ? `${signature} ×${n}` : signature));
+  return `auto-fixed: ${names.join(", ")}`;
+}
+
+/** The amber marker for colonies the watchdog flagged. */
+export function AttentionBadge({ attention, className }: { attention: Attention | null | undefined; className?: string }) {
+  // An automatic retry backing off (issue #1093) needs nobody, so it is no amber "Needs attention".
+  if (!attention || attention.reason === "provider_retry") return null;
+  return (
+    <span
+      title={attentionText(attention)}
+      className={cx(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-warn-soft px-2 py-0.5 text-meta-lg font-semibold leading-4 text-warn",
+        className,
+      )}
+    >
+      <IconAlert size={11} strokeWidth={2.5} /> Needs attention
+    </span>
+  );
+}
+
+/** "18 min ago", for sentences like "last activity 18 min ago". */
+export function minutesAgo(ts: string | null | undefined): string {
+  if (!ts) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
+}
+
+export function timeAgo(ts: string | null | undefined, now: Date = new Date()): string {
+  if (!ts) return "";
+  const seconds = Math.max(0, (now.getTime() - new Date(ts).getTime()) / 1000);
+  if (seconds < 45) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86_400)}d ago`;
+}
+
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms == null) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+/** Whole seconds from an ISO timestamp until `to` (default now); used for elapsed counters. */
+export const seconds = (from: string | null, to?: string | null) => {
+  if (!from) return 0;
+  const end = to ? Date.parse(to) : Date.now();
+  return Math.max(0, Math.round((end - Date.parse(from)) / 1000));
+};
+
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setMatches(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
+/** localStorage access that tolerates private windows and blocked storage. */
+export function stored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function store(key: string, value: string | null): void {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable */
+  }
+}

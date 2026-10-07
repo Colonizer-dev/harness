@@ -1,0 +1,104 @@
+Colonizer is an independent project. It is not affiliated with, endorsed by,
+sponsored by or otherwise connected to any of the companies named below.
+
+Vendor marks in the web UI
+--------------------------
+
+The Model providers screen shows a small mark beside each provider so a row
+can be told apart at a glance. The artwork for those marks comes from the
+Simple Icons project (https://simpleicons.org), whose SVG path data is
+released under the CC0 1.0 Universal public domain dedication
+(https://creativecommons.org/publicdomain/zero/1.0/). The files live in
+web/src/components/icons.tsx.
+
+CC0 covers the drawing, not the trademark. Each mark is a trademark or
+registered trademark of its owner, and appears here only to identify that
+vendor's service. Nothing in this repository claims any right to the marks
+or implies endorsement by their owners.
+
+Marks in the icon set, and whose they are:
+
+  - Claude — Anthropic, shown on the built-in Anthropic row
+  - DeepSeek — DeepSeek, shown on the DeepSeek preset
+  - Alibaba Cloud — Alibaba, shown on the Alibaba (Qwen) preset
+  - Qwen — Alibaba, in the icon set for that same preset; not on screen today
+  - Z.AI — Zhipu AI, shown on the Z.AI preset and the Zhipu GLM entries
+  - Meta — Meta Platforms, shown on the Meta Model API entry
+  - BytePlus — ByteDance's mark, shown on the BytePlus entry
+
+The Z.AI, Meta and BytePlus marks are not from Simple Icons. Their SVG paths
+are copied from @lobehub/icons (https://github.com/lobehub/lobe-icons), which
+is MIT licensed, Copyright (c) 2023 LobeHub. The package itself is not a
+dependency. The trademark paragraph above applies to them equally.
+
+Vendors shown by name only, with a neutral lettermark in place of a logo:
+
+  - OpenAI
+
+Colonizer's own code is licensed under the MIT license; see LICENSE.
+
+Provider catalogue
+------------------
+
+The searchable list of Anthropic-compatible endpoints in Settings is adapted
+from cc-switch (https://github.com/farion1231/cc-switch), which is MIT
+licensed. Only the endpoint data was taken: names, base URLs, authentication
+header and API format.
+
+Inclusion is not a recommendation. Colonizer does not vet, endorse or have any
+relationship with the services listed, several of which resell access to models
+they do not run. Some carried commercial-partner flags in the source catalogue;
+those flags were not imported, and no placement here was paid for.
+
+Vendored skill packs
+--------------------
+
+A colony may be switched to the skill pack vendored from the project below.
+Only the skills are staged; upstream's hooks, tool servers and commands are
+not, so no third-party code runs in a colony. Its version pin lives in
+vendor/vendor.lock, and its licence travels with the staged copy, as a LICENSE
+file beside the skills. The other vendored packs — ECC, superpowers, archify and
+Google's skills — are credited in vendor/vendor.lock and docs/protocol/plugins.md.
+
+  ponytail — Copyright (c) 2026 DietrichGebert — MIT
+  License — https://github.com/DietrichGebert/ponytail
+
+```
+MIT License
+
+Copyright (c) 2026 DietrichGebert
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+Bundled and linked software
+---------------------------
+
+Reading a colony's own agent transcript (the transcript route) uses txcript
+(https://github.com/skillsynchq/txcript), a library for moving coding-agent
+sessions between harness formats. It is Apache-2.0 licensed; the crate ships
+the standard Apache-2.0 text and names no copyright holder beyond the project,
+so copyright is attributed to the txcript project.
+
+txcript's opencode and hermes readers store and load their sessions with
+SQLite, through the `rusqlite` crate with its `bundled` feature. SQLite itself
+is in the public domain (https://www.sqlite.org/copyright.html); the bundled
+copy is compiled from the SQLite amalgamation source and is linked into the
+harness binary.
+

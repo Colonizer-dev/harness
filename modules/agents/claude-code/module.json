@@ -1,0 +1,336 @@
+{
+  "kind": "agent",
+  "id": "claude-code",
+  "name": "Claude Code",
+  "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
+  "protocol": "colonizer-runner/1",
+  "loop_tools": true,
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "claude"
+    ],
+    "image": "glibc + node >= 20"
+  },
+  "session_resume": {
+    "dir": "/root/.claude/projects",
+    "description": "Claude Code keeps one transcript per session under ~/.claude/projects and can resume any of them given its session id, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact."
+  },
+  "secrets": [
+    {
+      "env": [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY"
+      ],
+      "hosts": [
+        "api.anthropic.com"
+      ]
+    },
+    {
+      "env": [
+        "JEV_API_KEY",
+        "TYPESAFE_API_KEY"
+      ],
+      "hosts": [
+        "api.typesafe.ai"
+      ]
+    }
+  ],
+  "egress": {
+    "api": ["api.anthropic.com"],
+    "auth": ["platform.claude.com"],
+    "telemetry": ["http-intake.logs.us5.datadoghq.com", "*.sentry.io"],
+    "extra": ["api.typesafe.ai"]
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "Model for the main agent: a Claude alias or ID (opus, claude-opus-5-5) or <provider>/<model> for another provider. Empty uses Claude Code's default.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "subagent_model": {
+        "type": "string",
+        "title": "Subagent model",
+        "description": "Default model for subagents: a Claude alias or ID, or <provider>/<model> such as deepseek/deepseek-flash. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_MODEL"
+      },
+      "summary_model": {
+        "type": "string",
+        "title": "Summary model",
+        "description": "Which model writes the one-line task summaries: <provider>/<model> from Model providers, or a Claude model. Empty picks the first <provider>/<model> the agent already routes to (subagent, small-task or background model), else Claude Haiku with an Anthropic API key. The Claude subscription login is never used for this.",
+        "default": "",
+        "env": "COLONIZER_SUMMARY_MODEL"
+      },
+      "summaries": {
+        "type": "boolean",
+        "title": "Task summaries",
+        "description": "Write each colony's task as one plain sentence with a cheap model (see Summary model), so the cockpit can say what a colony is doing. Only the issue or instructions text is sent. On by default.",
+        "default": true,
+        "env": "COLONIZER_SUMMARIES"
+      },
+      "relaunch_subagents": {
+        "type": "boolean",
+        "title": "Relaunch subagents a suspension or restart ended",
+        "description": "When a resumed colony's previous run ended because it was suspended, the harness restarted or its microVM was torn down, the brief tells the orchestrator which subagents were still in flight — with each one's task and last progress — and that nobody stopped them, so the runner's \"stopped by the user\" report for them is not taken at face value. On, it relaunches the unfinished ones without asking. Off, it asks you first. On by default.",
+        "default": true
+      },
+      "background_model": {
+        "type": "string",
+        "title": "Background model",
+        "description": "Model for background work such as titles and summaries: a Claude alias or ID, or <provider>/<model>. Empty uses Claude Code's default.",
+        "default": "",
+        "env": "COLONIZER_BACKGROUND_MODEL"
+      },
+      "account_fallback_model": {
+        "type": "string",
+        "title": "If Claude runs out, use",
+        "description": "When the Claude subscription hits its session or weekly limit, every role that resolves to a Claude model runs on this <provider>/<model> until the limit resets, then goes back to Claude by itself. Nothing saved changes, so there is nothing to switch back. A restricted-sensitivity task uses it only when the provider is marked trusted; otherwise it parks, saying why. Empty keeps today's behavior: colonies wait for the reset.",
+        "default": ""
+      },
+      "router_idle_timeout_secs": {
+        "type": "integer",
+        "title": "Model request idle timeout (seconds)",
+        "description": "When a colony's model requests go through the model router, how long Anthropic or a provider may stay silent \u2014 before it starts answering, or between two parts of a streamed answer \u2014 before the request fails as timed out. A streamed answer has no overall limit. A provider's own timeout is never cut short. 600 by default.",
+        "minimum": 60,
+        "default": 600,
+        "env": "COLONIZER_ROUTER_IDLE_TIMEOUT_SECS"
+      },
+      "route_per_task": {
+        "type": "boolean",
+        "title": "Route the model per task",
+        "description": "The orchestrator model is picked from the issue in front of the colony — its labels, length, checklist and the paths it names — instead of every colony running on the same one. With neither tier model set below, this changes nothing.",
+        "default": true
+      },
+      "model_low": {
+        "type": "string",
+        "title": "Model for small tasks",
+        "description": "Model for small tasks such as a typo fix, copy and one-line config changes: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_MODEL_LOW"
+      },
+      "model_high": {
+        "type": "string",
+        "title": "Model for large tasks",
+        "description": "Model for large tasks such as cross-cutting changes, migrations and new subsystems: a Claude alias or ID, or <provider>/<model>. Empty uses the orchestrator model.",
+        "default": "",
+        "env": "COLONIZER_MODEL_HIGH"
+      },
+      "route_cost_gate": {
+        "type": "boolean",
+        "title": "Gate routing down on cost",
+        "description": "Before the rule routes this colony down to the small-task model, estimate the whole cost of the routed task — the context that cheaper model has to load from scratch, its output, and what the orchestrator model re-reads afterwards — and keep the colony on the orchestrator model when routing down would not actually come out cheaper. An explicit tier chosen for the colony is never second-guessed. On by default; it only has something to say once the three token estimates below are set.",
+        "default": true
+      },
+      "route_cost_context_tokens": {
+        "type": "integer",
+        "title": "Routed task context estimate (X)",
+        "description": "Estimated context tokens (X) the cheaper tier has to reload for a routed subtask, if this colony's shape is known. 0 = unknown; the cost gate is skipped while unset.",
+        "minimum": 0,
+        "default": 0
+      },
+      "route_cost_output_tokens": {
+        "type": "integer",
+        "title": "Routed task output estimate (Y)",
+        "description": "Estimated output tokens (Y) a routed subtask produces. Used by the cost gate; 0 leaves it unset.",
+        "minimum": 0,
+        "default": 0
+      },
+      "route_cost_reread_tokens": {
+        "type": "integer",
+        "title": "Routed task re-read estimate (Z)",
+        "description": "Estimated tokens (Z) the orchestrator model has to re-read afterwards to pick up what a routed subtask changed. Used by the cost gate; 0 leaves it unset.",
+        "minimum": 0,
+        "default": 0
+      },
+      "jev_shadow_mode": {
+        "type": "boolean",
+        "title": "Jev shadow mode (experimental)",
+        "description": "Ask an optional external classifier for a second opinion on model-tier routing and record it for comparison — never applied to the actual decision. Off by default; requires a JEV_API_KEY secret. Vendor unverified as of this writing — enable only if you have a real account with the provider.",
+        "default": false
+      },
+      "jev_brief_shadow": {
+        "type": "boolean",
+        "title": "Jev brief picks, shadow (experimental, #585)",
+        "description": "At boot, ask the optional external classifier which shared-memory notes and skill packs a colony should load (up to five, one at a time), record the picks and which of them the colony actually reads later, so the bench can grade the picks' precision and recall. Shadow only — nothing a colony sees changes, and memory stays pull-only. Notes tagged house-rule or security are always loaded and never offered. Off by default; requires a JEV_API_KEY secret and shared memory on for the org. Vendor unverified as of this writing.",
+        "default": false
+      },
+      "jev_routing_act": {
+        "type": "boolean",
+        "title": "Let Jev pick the model tier (experimental)",
+        "description": "Ask the Jev classifier for its tier opinion (as shadow mode does) and use it instead of the rule's tier when it is at least as confident as the threshold below. It never routes a task below its floor: a task whose paths need a vetted or trusted provider keeps at least the rule's tier, and an unknown sandbox preset never goes to the small-task model. An explicit tier chosen for the colony still wins. Off by default; requires a JEV_API_KEY secret.",
+        "default": false
+      },
+      "jev_routing_act_confidence": {
+        "type": "number",
+        "title": "Jev tier confidence threshold",
+        "description": "Minimum confidence Jev's tier opinion needs before it replaces the rule's tier. Only used when Jev may pick the model tier.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.8
+      },
+      "jev_recovery_act": {
+        "type": "boolean",
+        "title": "Let Jev choose the recovery path (experimental)",
+        "description": "When a step fails — a provider error, a tool failure, a watchdog stall, or a colony held after an error — ask the Jev classifier how to recover: retry the same step, split the work into smaller subagent tasks, nudge the agent, ask you, or stop. The pick is used only when it is at least as confident as the threshold below, and only until the per-colony cap below is reached, after which the colony is left for you. Never a push, publish or delete. Off by default; requires a JEV_API_KEY secret. Shadow mode (jev_shadow_mode) records the picks without applying them.",
+        "default": false
+      },
+      "jev_recovery_act_confidence": {
+        "type": "number",
+        "title": "Jev recovery confidence threshold",
+        "description": "Minimum confidence Jev's recovery pick needs before it replaces the harness's own rule (nudge a stalled colony, hold a failed one). Only used when Jev may choose the recovery path.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.8
+      },
+      "jev_recovery_cap": {
+        "type": "integer",
+        "title": "Jev recoveries per colony",
+        "description": "How many machine-chosen recoveries (retry, narrow the task, nudge) Jev may apply to one colony before it falls back to asking you. Recoveries that ask a person or stop do not count. Only used when Jev may choose the recovery path.",
+        "minimum": 0,
+        "maximum": 20,
+        "default": 2
+      },
+      "delegate": {
+        "type": "string",
+        "title": "Delegation",
+        "description": "Enforce (the default): the orchestrator may only plan, ask and delegate — reading, editing and running commands are refused, so the work happens in subagents on the subagent model. Encourage: it is asked to hand implementation to subagents. Off: the orchestrator does the work itself.",
+        "enum": ["off", "encourage", "enforce"],
+        "default": "enforce",
+        "env": "COLONIZER_DELEGATE"
+      },
+      "effort": {
+        "type": "string",
+        "title": "Orchestrator effort",
+        "description": "Reasoning effort for the main agent. Empty uses the model default.",
+        "enum": [
+          "",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "default": "",
+        "env": "COLONIZER_EFFORT"
+      },
+      "subagent_effort": {
+        "type": "string",
+        "title": "Subagent effort",
+        "description": "Reasoning effort for the general-purpose and Explore subagents, e.g. medium under an xhigh orchestrator. Empty keeps Claude Code's rule: a subagent reasons at the orchestrator's effort. Plugin agents keep that rule either way.",
+        "enum": ["", "low", "medium", "high", "xhigh", "max"],
+        "default": "",
+        "env": "COLONIZER_SUBAGENT_EFFORT"
+      },
+      "enforce_choices": {
+        "type": "boolean",
+        "title": "Enforce choice cards",
+        "description": "If the agent ends a turn with a plain-text question, ask it once to re-ask with choices.",
+        "default": true,
+        "env": "COLONIZER_ENFORCE_CHOICES"
+      },
+      "plugins": {
+        "type": "string",
+        "format": "plugin-dirs",
+        "title": "Skillsets",
+        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. archify is on by default, so any colony can draw the repository as an architecture map for the Nest; the rest, ponytail among them, are off until you switch them on. Stored as a comma-separated list of names.",
+        "default": "archify",
+        "env": "COLONIZER_PLUGIN_DIRS"
+      },
+      "caveman": {
+        "type": "boolean",
+        "title": "Terse replies (caveman)",
+        "description": "Token savings: the agent answers in caveman's compressed style, keeping code, commands and exact errors intact. Pull request descriptions and questions to you stay in plain sentences. Off by default.",
+        "default": false,
+        "env": "COLONIZER_CAVEMAN"
+      },
+      "caveman_level": {
+        "type": "string",
+        "enum": ["lite", "full", "ultra"],
+        "title": "Caveman level",
+        "description": "How terse, when terse replies are on: lite drops filler but keeps full sentences, full drops articles too, ultra is the shortest.",
+        "default": "full",
+        "env": "COLONIZER_CAVEMAN_LEVEL"
+      },
+      "headroom": {
+        "type": "boolean",
+        "title": "Compress what the agent reads (Headroom)",
+        "description": "Token savings: model requests pass through Headroom inside the colony, which compacts large tool output such as JSON before it reaches the model, and leaves earlier turns alone so prompt caching keeps working. The first time it is switched on, the mothership downloads Headroom (220–245 MB, depending on the architecture). It takes 300–370 MB of each colony’s memory. Off by default.",
+        "default": false,
+        "env": "COLONIZER_HEADROOM"
+      },
+      "rtk": {
+        "type": "boolean",
+        "title": "Compact command output (rtk)",
+        "description": "Token savings: shell commands the agent runs, such as git status or a test run, go through rtk, which shortens their output before the agent reads it. Commands rtk has no rule for run unchanged. Off by default.",
+        "default": false,
+        "env": "COLONIZER_RTK"
+      },
+      "jev_compaction": {
+        "type": "boolean",
+        "title": "Prune stale tool calls at compaction (fast-jev-compaction)",
+        "description": "Token savings: when the context fills, stale tool calls are pruned by their Jev score instead of Claude Code's lossy summary, and everything kept stays word for word. Off by default. Each compaction sends this colony's conversation and tool-call history — file paths, command output — to TypeSafe at api.typesafe.ai, so read TypeSafe's data-handling terms before using it on private repos; TypeSafe bills that use directly and it is not tracked in model usage or colony cost, and it needs the mothership's TypeSafe key (JEV_API_KEY). It is separate from the Jev routing second opinion (jev_shadow_mode), and it composes with Headroom and rtk.",
+        "default": false,
+        "env": "COLONIZER_JEV_COMPACTION"
+      },
+      "jev_keep_threshold": {
+        "type": "number",
+        "title": "Jev compaction keep threshold",
+        "description": "Minimum Jev score a message needs to survive compaction; lower keeps more. Only used when Jev compaction is on.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.5,
+        "env": "COLONIZER_JEV_KEEP_THRESHOLD"
+      },
+      "jev_preserve_recent": {
+        "type": "integer",
+        "title": "Jev compaction recent messages",
+        "description": "How many of the most recent messages compaction always keeps verbatim, whatever their score; the first message is always kept too. Only used when Jev compaction is on.",
+        "minimum": 0,
+        "maximum": 100,
+        "default": 6,
+        "env": "COLONIZER_JEV_PRESERVE_RECENT"
+      },
+      "scan": {
+        "type": "string",
+        "title": "Pre-flight scan",
+        "description": "Scan the repository inside the colony before the agent starts. 'warn' reports findings and carries on; 'block' ends the colony when the scanner exits non-zero. Advisory, not a security boundary: the boundary is the microVM, the publish step and your review of the pull request.",
+        "enum": [
+          "off",
+          "warn",
+          "block"
+        ],
+        "default": "off",
+        "env": "COLONIZER_SCAN"
+      },
+      "scan_command": {
+        "type": "string",
+        "title": "Scanner command",
+        "description": "Command to run for the pre-flight scan, resolved inside the colony \u2014 for example a scanner mounted through 'Plugin directories'. Split on whitespace and run without a shell. Empty means no scan runs.",
+        "default": "",
+        "env": "COLONIZER_SCAN_COMMAND"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Claude Code tool names this colony never gets, such as Write, WebSearch, Task. The tool is removed from the agent's context and cannot be called, whatever endpoint serves the model; a provider can also strip tools per connection. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS"
+      },
+      "exec_policy": {
+        "type": "string",
+        "title": "Exec policy",
+        "description": "JSON exec policy this install layers over the built-in one: {\"rules\": [{\"id\", \"decision\": \"deny\"|\"ask\"|\"allow\", \"reason\", \"command\"|\"script\"|\"touches\"|\"writes_outside\"}]} (see modules/agents/claude-code/README.md). An ask becomes a question to you. Layers can only narrow: the built-in deny rules always hold, an org policy (COLONIZER_EXEC_POLICY_ORG) narrows further, and a repository's own .colonizer/exec-policy.json narrows further still. Empty uses the built-in policy alone.",
+        "default": "",
+        "env": "COLONIZER_EXEC_POLICY"
+      }
+    }
+  }
+}

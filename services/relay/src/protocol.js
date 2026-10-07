@@ -1,0 +1,145 @@
+// The pure side of tunnel protocol v1: sizes, header stripping, and the one-way path template used in logs.
+
+/** Concurrent streams per install (HTTP and WS passthrough both count). */
+export const MAX_STREAMS = 32;
+
+/** Concurrent pending (not yet verified) handshakes per install: past this, new dials are refused
+ * 1013 until one settles. Handshakes are independent, so a re-dial loop cannot starve the real one. */
+export const MAX_PENDING = 16;
+
+/** Raw bytes per outbound chunk: base64 of this is exactly 48 KiB = 49152 chars, so either reading of
+ * "chunks ≤ 48 KiB" holds. */
+export const CHUNK_RAW = 36864;
+
+/** Inbound chunks must decode to at most this many bytes. */
+export const CHUNK_DECODED_MAX = 49152;
+
+/** The largest browser websocket message forwarded to the mothership, in bytes. A bigger one closes that
+ * passthrough 1009 instead (review finding R5): the mothership caps every tunnel message at 1 MiB, and
+ * 128 KiB stays under it even as base64 or fully JSON-escaped text. */
+export const WS_MSG_MAX = 128 * 1024;
+
+/** Seconds between tunnel pings. */
+export const PING_MS = 20000;
+
+/** Seconds of hello signature slack in either direction. */
+export const TS_SKEW = 300;
+
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'trailers',
+  'transfer-encoding',
+  'upgrade',
+  'proxy-connection',
+]);
+
+// The handshake headers the mothership must not see or replay on a ws_open (the relay already accepted the
+// browser's socket; sec-websocket-protocol survives so the cockpit's /ws can negotiate subprotocols).
+const WS_HANDSHAKE = new Set(['sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions', 'sec-websocket-accept']);
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HEX = /^[0-9a-f]+$/i;
+const TOKEN = /^[a-z0-9]+$/i;
+
+/** One [name, value] entry per value: an array value means repeats and is flattened. */
+function* eachValue(name, value) {
+  if (Array.isArray(value)) for (const one of value) yield [name, one];
+  else yield [name, value];
+}
+
+/** Flattens any accepted shape — Headers, [name, value] pairs, or a plain object — into single
+ * [name, value] entries. Headers iteration can join repeated set-cookie values, so those come from
+ * getSetCookie() instead when it exists. */
+function* eachHeader(headers) {
+  if (Array.isArray(headers)) {
+    for (const [name, value] of headers) yield* eachValue(name, value);
+  } else if (typeof headers?.entries === 'function') {
+    for (const [name, value] of headers.entries()) {
+      if (name !== 'set-cookie') yield* eachValue(name, value);
+    }
+    if (typeof headers.getSetCookie === 'function') {
+      for (const cookie of headers.getSetCookie()) yield ['set-cookie', cookie];
+    }
+  } else {
+    for (const [name, value] of Object.entries(headers ?? {})) yield* eachValue(name, value);
+  }
+}
+
+/** Strips hop-by-hop headers, everything named in Connection, and any x-relay-* header; for a ws_open also
+ * the WebSocket handshake headers. Accepts Headers, [name, value] pairs, or a plain object, and returns
+ * lower-cased [name, value] pairs with repeats kept — the wire shape, so repeated set-cookie survives. */
+export function stripHopByHop(headers, { ws = false } = {}) {
+  const out = [];
+  const connections = [];
+  for (const [rawName, rawValue] of eachHeader(headers)) {
+    const name = rawName.toLowerCase();
+    const value = String(rawValue);
+    if (name === 'connection') {
+      connections.push(value);
+      continue;
+    }
+    if (HOP_BY_HOP.has(name) || name.startsWith('x-relay-')) continue;
+    if (ws && WS_HANDSHAKE.has(name)) continue;
+    out.push([name, value]);
+  }
+  // Connection-named headers must go whether they came before or after Connection itself.
+  for (const value of connections) {
+    for (const named of value.split(',')) {
+      const drop = named.trim().toLowerCase();
+      for (let at = out.length - 1; at >= 0; at--) if (out[at][0] === drop) out.splice(at, 1);
+    }
+  }
+  return out;
+}
+
+// The relay's own cookies (auth.js). A cockpit answer must never set one of these: the browser would take
+// it as the relay's session or sign-in state on that host.
+const RELAY_COOKIES = new Set(['__host-colonizer_session', '__host-colonizer_oauth']);
+
+/** A cockpit set-cookie made host-only (review finding R4): every Domain attribute is dropped, so a
+ * cookie set through one install's host can never land on my.colonizer.dev or a sibling install. Answers
+ * null for a cookie named like one of the relay's own, which is dropped altogether. */
+export function hostOnlyCookie(value) {
+  const [pair, ...attributes] = String(value).split(';');
+  const eq = pair.indexOf('=');
+  const name = (eq === -1 ? pair : pair.slice(0, eq)).trim().toLowerCase();
+  if (RELAY_COOKIES.has(name)) return null;
+  const kept = attributes.filter((attribute) => attribute.split('=')[0].trim().toLowerCase() !== 'domain');
+  return [pair, ...kept].join(';');
+}
+
+/** The headers of a mothership `res`, ready for the browser: hop-by-hop stripped (stripHopByHop), and
+ * every set-cookie made host-only (hostOnlyCookie). */
+export function responseHeaders(headers) {
+  const out = [];
+  for (const [name, value] of stripHopByHop(headers)) {
+    if (name !== 'set-cookie') {
+      out.push([name, value]);
+      continue;
+    }
+    const cookie = hostOnlyCookie(value);
+    if (cookie !== null) out.push([name, cookie]);
+  }
+  return out;
+}
+
+const looksLikeId = (seg) =>
+  /^\d+$/.test(seg) || UUID.test(seg) || (seg.length >= 8 && HEX.test(seg)) ||
+  // Long mixed letter/digit tokens are opaque ids too (base32/base64-ish salts, sha names, …).
+  (seg.length >= 16 && TOKEN.test(seg) && /\d/.test(seg) && /[a-z]/i.test(seg));
+
+/** The path as it may appear in logs: query dropped, id-shaped segments replaced, nothing else changed. */
+export function pathTemplate(path) {
+  const parts = path.split('?')[0].split('/').map((seg) => (seg && looksLikeId(seg) ? ':id' : seg));
+  return parts.join('/') || '/';
+}
+
+/** The exact bytes the mothership signs for a hello: nonce ‖ install_id ‖ ts (ts as String of the JSON value). */
+export function helloMessage(nonce, installId, ts) {
+  return nonce + installId + String(ts);
+}

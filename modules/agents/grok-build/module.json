@@ -1,0 +1,75 @@
+{
+  "kind": "agent",
+  "id": "grok-build",
+  "name": "Grok Build",
+  "description": "xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session. Experimental first slice.",
+  "protocol": "colonizer-runner/1",
+  "loop_tools": true,
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "grok"
+    ],
+    "fetched_by_runner": [
+      "grok"
+    ],
+    "image": "glibc + node >= 20",
+    "pins": {
+      "grok": {
+        "version": "1.0.34",
+        "source_rev": "036a5d8348cd744767cd0b08518ab17bf608fa7f",
+        "install": "https://x.ai/cli/install.sh"
+      }
+    }
+  },
+  "secrets": [
+    {
+      "env": [
+        "XAI_API_KEY"
+      ],
+      "hosts": [
+        "api.x.ai"
+      ]
+    }
+  ],
+  "egress": {
+    "api": ["api.x.ai"],
+    "auth": [],
+    "telemetry": [],
+    "extra": [
+      "x.ai"
+    ]
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "Model for the colony as xai-grok/<model> (grok-4.5 is the CLI's own default) or a bare xAI model id. A <provider>/<model> whose prefix matches a connection from Settings → Model providers rides the mothership's gateway on its openai wire instead — tokens and spend are accounted host-side. Anthropic-wire connections and providers with no route are refused: grok speaks the OpenAI wire only.",
+        "default": "xai-grok/grok-4.5",
+        "env": "COLONIZER_MODEL"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Grok Build tool ids this colony never gets, passed as grok's headless --disallowed-tools denylist, such as run_terminal_cmd, write_file or web_fetch. web_search is always off already (the runner passes --disable-web-search) and the colonizer MCP tools are not covered by the denylist. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "run_terminal_cmd",
+          "read_file",
+          "write_file",
+          "search_replace",
+          "grep",
+          "list_dir",
+          "web_fetch",
+          "Agent"
+        ]
+      }
+    }
+  }
+}

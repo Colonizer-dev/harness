@@ -1,0 +1,77 @@
+{
+  "kind": "agent",
+  "id": "hermes",
+  "name": "Hermes",
+  "description": "Nous Research's Hermes Agent CLI, driven headlessly (hermes chat -q --format stream-json). One model; questions reach the cockpit through the colonizer ask_user MCP tool. The runner builds the pinned hermes-agent source into a venv on first boot (every download and dependency hash-checked), so nothing needs to be staged into the colony image.",
+  "protocol": "colonizer-runner/1",
+  "loop_tools": true,
+  "entry": [
+    "node",
+    "runner.mjs"
+  ],
+  "requires": {
+    "binaries": [
+      "hermes"
+    ],
+    "fetched_by_runner": [
+      "hermes"
+    ],
+    "image": "glibc + node >= 20; the runner builds the pinned hermes-agent (source commit, uv and every Python dependency hash-pinned in hermes.lock and hermes-requirements.lock) on first boot, on the image's python3.11-3.13 or, without one, a pinned CPython it downloads",
+    "pins": {
+      "hermes": {
+        "version": "0.21.5",
+        "tag": "v2026.9.24",
+        "source_rev": "f97608f178d1ffeca59860195ab7da295f7c8e5f"
+      }
+    }
+  },
+  "secrets": [],
+  "egress": {
+    "api": [],
+    "auth": [],
+    "telemetry": [],
+    "extra": [
+      "github.com",
+      "codeload.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com",
+      "pypi.org",
+      "files.pythonhosted.org"
+    ]
+  },
+  "settings": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "title": "Orchestrator model",
+        "description": "The only model this agent runs on, as <provider>/<model>. It must name a provider added in Settings, which the colony reaches through the mothership's provider gateway — the key stays host-side and the colony needs no provider egress. Nous Portal models (nous/…) are refused: Portal credits are a prepaid pool the gateway cannot account for. Empty is refused too: headless Hermes has no default to fall back on.",
+        "default": "",
+        "env": "COLONIZER_MODEL"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Hermes toolset names this colony never gets, such as web, browser or computer_use, appended (deduplicated) to the runner's always-off list in config.yaml. The names are whole toolsets: a single tool inside one (only write_file within file, say) cannot be turned off. memory, skills, delegation, cronjob, tts and clarify are always off already. Empty disables nothing beyond that.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "terminal",
+          "file",
+          "web",
+          "search",
+          "browser",
+          "vision",
+          "code_execution",
+          "todo",
+          "session_search",
+          "connections",
+          "image_gen",
+          "video",
+          "x_search",
+          "computer_use"
+        ]
+      }
+    }
+  }
+}

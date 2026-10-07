@@ -1,0 +1,603 @@
+# Runs the checks every pull request has to pass: the Rust tests and lint, the agent modules'
+# runner tests, the live map's receiver's tests, and the web UI's build and tests. Each piece is
+# its own job so a red run names what broke.
+#
+# `cargo fmt --all --check` gates the tree, which was formatted in one pass against the `rustfmt.toml`
+# at the repository root (width 130 — the style the tree was already written in).
+#
+# Node 24 is what every other workflow pins and what the colony image (node:24-bookworm) runs;
+# engines floors differ per module (claude-code at 20, pi at 22.19), and CI checks the newest
+# runtime people actually run.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nothing here publishes, so a superseded run's result is worthless: only the newest commit on a ref
+# matters, and an older one still running is just queued minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The remote-access end-to-end test (crates/colonizer/src/remote.rs) spawns services/relay's
+      # local-relay harness, which needs node:sqlite: Node 24, the pin every other job uses.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # Same toolchain the release builds use: stable, minimal profile.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+
+      # Test and clippy share this cache; the target dir makes the second run of a branch cheap.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # Every entry in Cargo.lock must resolve from the registry, into an empty cargo home so the warm
+      # cache above cannot hide an entry the registry no longer has; a phantom lock entry passed CI
+      # once and only failed the release build (#313). Fetch-only, so it costs a download, no compile.
+      - name: Lockfile resolves
+        run: CARGO_HOME="$(mktemp -d)" cargo fetch --locked
+
+      # The OTLP stack lives in colonizer-observability, an add-on the mothership never links (#844).
+      # Fails if any of it reaches the mothership's normal dependency tree.
+      - name: The mothership links no OTLP stack
+        run: |
+          tree="$(cargo tree -p colonizer-harness -e normal --locked --prefix none)"
+          if printf '%s\n' "$tree" | grep -E '^(colonizer-observability|opentelemetry|opentelemetry_sdk|opentelemetry-proto|prost|tonic|flate2) '; then
+            echo "::error::colonizer-harness depends on the crates above; they belong in colonizer-observability only"
+            exit 1
+          fi
+
+      # Includes colonizer-agentd's integration and smoke tests, which boot the real agentd binary on
+      # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
+      # stock runners have it; no KVM is involved anywhere in this job. --locked, like the release
+      # build: a lockfile cargo would have to change fails here instead of being silently re-resolved.
+      # Wrapped: a flake is retried once and recorded; a real failure still ends the step non-zero.
+      - name: Test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- cargo test --workspace --locked
+
+      # The crates the release publishes (release.yml `crates`), in the order it publishes them, built
+      # from their own packaged source the way crates.io gets it. A workspace build reads the whole
+      # repository, so an include_str! of a file outside the crate passes every step above and fails
+      # only `cargo publish` on the tag: v0.1.10 and v0.1.11 never reached crates.io that way. The
+      # verify build shares target/ with the test build, so only the crates themselves recompile.
+      # One invocation, not one per crate: colonizer-harness depends on colonizer-redact at the same
+      # version, which crates.io does not have before the tag, and cargo resolves it from the
+      # colonizer-redact packaged beside it only when both are in the same run.
+      - name: Package
+        run: cargo publish --dry-run --locked -p colonizer-redact -p colonizer-agentd -p colonizer-harness
+
+      # The tests the way a user gets them: each crate's .crate, unpacked outside the checkout so
+      # nothing but the crate itself is in reach. This is what a stray include_str! or a path above
+      # the crate fails on; the workspace test above cannot, because it sees the whole repository.
+      # The tarball is built here rather than reused from the step above: `cargo publish --dry-run`
+      # leaves its copy under target/package/tmp-crate, target/ is restored from cache so a stale
+      # .crate of another version can also be lying around, and building it fresh pins the crate's
+      # current version. target/ is shared so only the registry dependencies are reused; the crate
+      # itself compiles from the unpacked source.
+      - name: Test the packaged crates
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          # Packaged together for the same reason as the step above.
+          cargo package --locked -p colonizer-redact -p colonizer-agentd -p colonizer-harness
+          for crate in colonizer-redact colonizer-agentd colonizer-harness; do
+            pkgid=$(cargo pkgid -p "$crate")
+            version="${pkgid##*@}"
+            version="${version##*#}"
+            dest="$RUNNER_TEMP/packaged/$crate-$version"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            tar -xzf "$CARGO_TARGET_DIR/package/$crate-$version.crate" -C "$dest" --strip-components=1
+            if [ "$crate" = colonizer-harness ]; then
+              # Its colonizer-redact comes from crates.io, which may not have this version yet: patch
+              # in the one unpacked above. That moves only colonizer-redact's entry in the packaged
+              # Cargo.lock, so the update is that one package and --locked still pins the rest.
+              # colonizer-redact can be a version ahead of the harness (a new redact API between
+              # releases), so its unpacked directory is named by its own version, not the harness's.
+              redact_version=$(cargo pkgid -p colonizer-redact)
+              redact_version="${redact_version##*@}"
+              redact_version="${redact_version##*#}"
+              patch="patch.crates-io.colonizer-redact.path=\"$RUNNER_TEMP/packaged/colonizer-redact-$redact_version\""
+              (cd "$dest" && cargo update --config "$patch" -p colonizer-redact && cargo test --locked --config "$patch")
+            else
+              (cd "$dest" && cargo test --locked)
+            fi
+          done
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Last, so a formatting nit never hides a failing test or a real lint.
+      - name: Format
+        run: cargo fmt --all --check
+
+      # The retry wrapper's flake records, uploaded so a run a flake turned green is still visible.
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The Mac build: every other job is Linux, so a Linux-only `cfg` import once broke
+  # colonizer-agentd on macOS (#771) while main stayed green. Compile and lint only — no tests, no
+  # KVM, no microVM — so the job stays cheap. Making it a required status check on main is a
+  # repository-settings change.
+  rust-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-check-${{ runner.os }}-
+
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # Both agent modules' adapters, as named steps so a red run names the module: the Claude Code
+  # adapter (driven through a fake SDK) and the Pi adapter (driven through a fake Pi process).
+  # Neither touches the network. One job, not a matrix: `runner` is a required status check on main,
+  # and a matrix would report as `runner (claude-code)` / `runner (pi)`, leaving `runner` pending.
+  runner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            modules/agents/claude-code/package-lock.json
+            modules/agents/pi/package-lock.json
+
+      - name: Install the Claude Code runner's dependencies
+        working-directory: modules/agents/claude-code
+        run: npm ci
+
+      - name: Test the Claude Code runner
+        working-directory: modules/agents/claude-code
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Install the Pi runner's dependencies
+        working-directory: modules/agents/pi
+        run: npm ci
+
+      - name: Test the Pi runner
+        working-directory: modules/agents/pi
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      # The OpenCode runner has no dependencies (its MCP server is hand-rolled), so there is
+      # nothing to install: plain `node --test` from the repository root.
+      - name: Test the OpenCode runner
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test modules/agents/opencode/test/*.test.mjs
+
+      # The Grok Build runner has no dependencies either: its tests drive the real runner.mjs over
+      # stdio against a stub grok CLI, so `npm test` is a bare `node --test`.
+      - name: Test the Grok Build runner
+        working-directory: modules/agents/grok-build
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      # The Hermes runner has no dependencies (its package-lock.json exists only because install.sh
+      # runs `npm ci` on every module with a package.json); its tests drive the real runner.mjs
+      # against a stub of the hermes CLI — no hermes install, no network, no microVM.
+      - name: Test the Hermes runner
+        working-directory: modules/agents/hermes
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      # The Codex runner is shaped like the Grok Build and Hermes runners: no dependencies, the
+      # real runner.mjs driven over stdio against a stub codex CLI — no OpenAI, no network.
+      - name: Test the Codex runner
+        working-directory: modules/agents/codex
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      # The ACP runner is shaped the same way: no dependencies, the real runner.mjs driven over
+      # stdio against a scriptable fake ACP agent — no gemini install, no network.
+      - name: Test the ACP runner
+        working-directory: modules/agents/acp
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
+  # either, and none of the tests touch a mothership, a colony or the network; the job's one
+  # network step is the staged-pack validation below, which downloads the pinned archives the
+  # way an install does.
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Two commits deep: on a pull request HEAD is GitHub's merge commit, and HEAD^1 is the base it
+      # merged onto, which is what the changelog check below diffs against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test scripts/test/*.test.mjs
+
+      # Every relative link and #anchor in the tracked Markdown must resolve, so a renamed doc or a
+      # reworded heading fails the pull request that did it instead of a reader's click later.
+      - name: Check documentation links
+        run: node scripts/check-doc-links.mjs
+
+      # Pending changelog entries are fragments under changelog.d/, one file per change, so parallel
+      # pull requests never collide in CHANGELOG.md. This validates every fragment and, on a pull
+      # request, fails one that edits CHANGELOG.md unless it is the release (it adds the section for
+      # the bumped crate version) or carries the `changelog-edit` label; a code change without a
+      # fragment only warns. See changelog.d/README.md.
+      - name: Changelog fragments
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+          ALLOW_EDIT: ${{ contains(github.event.pull_request.labels.*.name, 'changelog-edit') && '--allow-changelog-edit' || '' }}
+        run: node scripts/changelog.mjs check ${BASE:+--base "$BASE"} $ALLOW_EDIT
+
+      # The packs an install actually ships, staged exactly as scripts/fetch-vendor.sh stages
+      # them, checked against the full rule set in scripts/validate-plugins.mjs — the unit
+      # tests above cover the validator; this runs it over what a colony can mount.
+      - name: Validate the staged skill packs
+        run: |
+          VENDOR_KINDS="plugin prompt" sh scripts/fetch-vendor.sh
+          node scripts/validate-plugins.mjs dist/plugins/*
+
+      # The build scripts' tests drive the real scripts against stub uname, cargo and msb on PATH, so
+      # they need no cargo, no microsandbox and no network; the happy paths need a Linux host, which
+      # the runner is, and skip with a message anywhere else.
+      - name: Test the build scripts
+        run: sh scripts/test/build-scripts.test.sh
+
+      # The provenance step of scripts/install-release.sh, in isolation: a stub gh on PATH drives
+      # verify_provenance, so a gh that is not logged in is a skip (fatal only under
+      # COLONIZER_REQUIRE_ATTESTATION=1) while a logged-in gh that rejects the attestation stays fatal.
+      # It needs no /dev/kvm, so it runs here rather than in release.yml beside the full installer test.
+      - name: Test the install provenance check
+        run: sh scripts/test/install-attestation.test.sh
+
+      # scripts/ci/check-exec-bits.sh scans the index (not the worktree) for shebang scripts that
+      # lost their +x bit — the colony-commit failure of issue #455 — and its own test drives it
+      # against throwaway repos, so neither needs cargo nor the network.
+      - name: Check executable bits
+        run: sh scripts/ci/check-exec-bits.sh
+
+      - name: Test the exec-bit check
+        run: sh scripts/test/check-exec-bits.test.sh
+
+      # scripts/ci/check-rust-file-size.sh keeps non-test Rust modules under 2000 lines (issue
+      # #825), against an allowlist of files not yet split; a file over the limit that is not
+      # listed fails, and so does a listed file that shrank or is gone. Its own test drives it
+      # against throwaway repos, so neither needs cargo nor the network.
+      - name: Check Rust file sizes
+        run: sh scripts/ci/check-rust-file-size.sh
+
+      - name: Test the Rust file size check
+        run: sh scripts/test/check-rust-file-size.test.sh
+
+      # Two tracked paths that differ only in letter case (or script modules whose names do, once
+      # the extension is dropped) pass every Linux job and break a macOS or Windows checkout: the
+      # macOS release build of v0.2.0 failed that way (issue #915). This catches it on the PR.
+      - name: Check case-only path collisions
+        run: sh scripts/ci/check-case-collisions.sh
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
+  # so there is nothing to install and `npm test` is plain `node --test`.
+  telemetry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: services/telemetry
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Same shape as telemetry: the tests are bare `node --test` on the Node the repo pins, and the one
+  # devDependency (wrangler, for the manual deploy) is never imported by src or test, so there is
+  # nothing to install.
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: services/relay
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Validates wrangler.toml and the bundle without touching Cloudflare: a malformed config
+      # (e.g. `[[durable_objects]]` where wrangler wants a table) fails here, not at deploy time.
+      - name: Wrangler config (dry run)
+        run: |
+          npm ci
+          npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/relay-dry"
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The build is tsc --noEmit && vite build: it is the only place the UI's types are checked.
+      - name: Build
+        run: npm run build
+
+      # The hosted demo (docs/cockpit.md, "Hosted demo") must keep building too.
+      - name: Build demo
+        run: npm run build:demo
+
+      - name: Test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The colony report's tests import node's own modules and ../colony-report.mjs only; the repository
+  # root has no package.json or lockfile, so there is nothing to install and `node --test` is the job.
+  colony-report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test scripts/test/colony-report.test.mjs
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # A real colony, end to end, on every pull request (issue #368): a real mothership (`colonizer
+  # serve`), a real microVM through the vendored msb, real agentd, the real claude-code runner module
+  # and the real Claude Code CLI, against a scratch git repository and a stub Anthropic-wire model
+  # server — no GitHub writes, no paid model, no secrets. scripts/colony-e2e.mjs is the whole
+  # harness: it launches everything, points the colony at the stub, and asserts it comes back
+  # `no_changes` (the agent writes only /harness/out/pr.md, so there is nothing to commit). Like
+  # every job here it runs on PRs and pushes to main, but it is deliberately not a required check: a
+  # KVM-dependent job can flake on a runner difference, and a retry is cheaper than a blocked PR.
+  #
+  # install.sh itself is not run: a bundle drags in the web build, rtk and fetch-at-install
+  # bookkeeping, none of which a colony boot reads. What is staged below is exactly what the
+  # mothership resolves at boot — vendored msb, the pinned guest runtimes, the agent module — plus a
+  # dummy Claude credential through the API, which the mothership only prefix-checks.
+  colony-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      # Same toolchain the release builds use: stable, minimal profile.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      # Shares the rust job's cache family (its restore key is the fallback), so the mothership and
+      # agentd builds start from a warm target/ (target/alpine* is the agentd build below) and registry.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-e2e-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # Hosted runners do have /dev/kvm but keep it from the runner user (root:kvm 0660), and msb's
+      # libkrun needs it. release.yml's installer job does the same chmod.
+      - name: Let the runner user use /dev/kvm
+        run: sudo chmod 0666 /dev/kvm
+
+      - name: Vendored microsandbox
+        run: VENDOR_KINDS=msb scripts/fetch-vendor.sh
+
+      # agentd is built the way install.sh builds it — inside a rust:1-alpine microVM, static musl —
+      # because it runs in the colony's glibc 2.36 bookworm image and a host build on this glibc
+      # 2.39 runner could demand symbol versions the image has not got (scripts/build-agentd.sh).
+      - name: colonizer-agentd (static musl, built in a microVM)
+        run: MSB="$PWD/dist/vendor/microsandbox/bin/msb" scripts/build-agentd.sh
+
+      # The guest runtimes install.sh fetches from the host's own install: the Node the runner
+      # command starts with, and the Claude Code CLI the runner drives (both sha256-pinned).
+      - name: Guest runtimes (pinned Node and Claude Code)
+        run: |
+          scripts/fetch-node-binary.sh
+          scripts/fetch-agent-binary.sh
+
+      # install.sh's module staging, for the one module the run needs: the mothership discovers
+      # agents under <assets>/modules/agents. --omit=optional as in a bundle: the colony runs the
+      # Claude Code binary mounted at /opt/claude/bin/claude, not the SDK's platform package.
+      - name: Stage the claude-code agent module
+        run: |
+          mkdir -p dist/modules/agents/claude-code
+          (cd modules/agents/claude-code && tar --exclude=./node_modules --exclude=./test -cf - .) | tar -xf - -C dist/modules/agents/claude-code
+          (cd dist/modules/agents/claude-code && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
+
+      # The exe resolves its assets from dist/ in the checkout (config.rs, resolve_assets), so no
+      # install step is needed; --locked, like the rust job.
+      - name: Build the mothership
+        run: cargo build --release --locked -p colonizer-harness
+
+      # The pinned colony image (the same digest install.sh --pull-image resolves), pulled up front
+      # so a broken pin or a broken pull fails here, at a named step, instead of as a colony boot
+      # timeout. msb caches images under $HOME/.microsandbox and the driver points the mothership's
+      # HOME at the work dir, so the pull must target that same HOME or the boot re-downloads.
+      - name: Pull the pinned colony image
+        run: |
+          image=$(awk '$1 !~ /^#/ && $6 == "node:24-bookworm" && $4 == "image" { print $6 "@sha256:" $5; exit }' crates/colonizer/images.lock)
+          mkdir -p "$RUNNER_TEMP/colony-e2e/home"
+          HOME="$RUNNER_TEMP/colony-e2e/home" dist/vendor/microsandbox/bin/msb pull "$image"
+
+      # The driver prints a failure report itself and exits non-zero unless the colony reached
+      # no_changes.
+      - name: Run a colony end to end
+        run: node scripts/colony-e2e.mjs --work "$RUNNER_TEMP/colony-e2e" --timeout-mins 20
+
+      # The diagnostics the driver's failure report cites, not the whole work dir: home/ holds the
+      # gigabyte msb image cache, and the scratch repo and worktrees say nothing the session logs
+      # do not. The driver's own stdout (the full report) is in the step log regardless.
+      - name: Upload the run's logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colony-e2e-logs
+          path: |
+            ${{ runner.temp }}/colony-e2e/serve.log
+            ${{ runner.temp }}/colony-e2e/gh-calls.log
+            ${{ runner.temp }}/colony-e2e/data/sessions
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The hermetic Unified Harness Protocol conformance run (issue #297): boots the mothership this
+  # build produces on loopback with throwaway config/data dirs — no KVM, no credentials, no colony —
+  # and fails when any check's outcome moved from the committed expectation in
+  # docs/uhp-conformance.json: a moved outcome is a protocol-behaviour change, re-measured
+  # deliberately with scripts/ci/uhp-conformance.sh --update and docs/conformance.md, never
+  # absorbed. The same script validates the claude-code runner's event fixture against
+  # docs/agent-events.schema.json, so the runner contract's schema cannot silently rot.
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain and cache family the rust job uses: stable, minimal profile, and the restore
+      # keys fall back to the rust job's cache, so usually only the mothership itself compiles.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-conformance-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-conformance-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # A debug build is enough: the suite only talks HTTP to it. --locked, like the rust job.
+      - name: Build the mothership
+        run: cargo build --locked -p colonizer-harness
+
+      # Hosted runners ship python3 with venv support; the script makes its own venv and installs
+      # the pinned suite into it.
+      - name: Hermetic UHP conformance run
+        run: sh scripts/ci/uhp-conformance.sh

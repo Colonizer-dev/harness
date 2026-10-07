@@ -1,0 +1,102 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          },
+          {
+            "key": "colonizer.install.id",
+            "value": {
+              "stringValue": "install-1"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "claude-sonnet"
+                  }
+                },
+                {
+                  "key": "input_tokens",
+                  "value": {
+                    "intValue": "9007199254740993"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "doubleValue": 12.5
+                  }
+                },
+                {
+                  "key": "fallback",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "body": {
+                "kvlistValue": {
+                  "values": [
+                    {
+                      "key": "status",
+                      "value": {
+                        "intValue": "200"
+                      }
+                    },
+                    {
+                      "key": "steps",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "queue"
+                            },
+                            {
+                              "stringValue": "send"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "gateway.request",
+              "flags": 0,
+              "observedTimeUnixNano": "1700000000123456789",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "fedcba9876543210",
+              "timeUnixNano": "1700000000123456789",
+              "traceId": "0abcdef0123456789abcdef001234567"
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

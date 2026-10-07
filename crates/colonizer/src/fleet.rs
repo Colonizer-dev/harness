@@ -1,0 +1,533 @@
+//! Fleet visibility (issue #231): `GET /api/hosts` turns this mothership's own `/api/status`
+//! numbers, plus a poll-on-request fan-out to any configured peers, into one list an operator with
+//! several machines can look at together. There is no second machine reaching in: this host only
+//! ever dials *out* to peers named in `COLONIZER_FLEET_PEERS`, over whatever private network the
+//! operator already has. `COLONIZER_BIND` stays loopback-only on every host by default; an operator
+//! who wants a given host to answer these polls sets that host's own `COLONIZER_BIND` to a private
+//! interface IP (never `0.0.0.0`). Nothing here changes that default or opens anything new.
+
+use crate::{Shared, runtime, sessions::SessionStatus};
+use axum::{Json, extract::State};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{collections::HashMap, time::Duration};
+use tokio::sync::Mutex;
+
+/// How long a peer poll waits before that peer is counted unreachable. Short on purpose: the fleet
+/// view is one page load, not a background job, and a wedged peer must not hold the whole list up.
+const PEER_POLL_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostHealth {
+    #[default]
+    Online,
+    Unreachable,
+}
+
+/// One row of the fleet view: this host's own numbers, or a peer's, told from `/api/status`'s
+/// `host`, `runtime`, `version` and `queue_depth` fields.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct HostSummary {
+    /// This host's stable `host_id` (see `runtime::host_id`), or — for a peer never yet reached —
+    /// the peer's configured base URL, so it still has *some* stable key to be listed under.
+    pub id: String,
+    /// Display name: the host's hostname, or (never-reached peer) its base URL again.
+    pub name: String,
+    pub platform: String,
+    pub os: String,
+    pub version: Option<String>,
+    /// Whether the member can boot the colony microVM image, from its reduced status's `host.kvm_ok`
+    /// (issue #688). `None` where there is no `/dev/kvm` (a Mac) or the peer is too old to report it;
+    /// placement reads `Some(false)` as "cannot run colonies" and `None` as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kvm: Option<bool>,
+    pub slots_in_use: usize,
+    pub slots_ceiling: usize,
+    pub queue_depth: usize,
+    pub disk_free_bytes: Option<u64>,
+    /// The disk's size, beside `disk_free_bytes`: what makes "97% full" sayable (issue #764).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
+    /// RFC 3339, `None` for a peer that has never once answered.
+    pub last_heartbeat: Option<String>,
+    pub health: HostHealth,
+    /// Seconds since the host's queue loop last ticked, as its status reported it (issue #764);
+    /// omitted when unknown — an older peer, or a loop that has not ticked yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_tick_age_s: Option<i64>,
+    /// A fleet member's history-push drain state, as its status reported it (issue #764).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_sync: Option<PeerSync>,
+}
+
+/// A member's `fleet_sync` block of the reduced `/api/status` (`fleet_sync::health_summary`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PeerSync {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub backlog_rows: u64,
+    #[serde(default)]
+    pub oldest_unsent_age_s: Option<i64>,
+    #[serde(default)]
+    pub last_error_class: Option<String>,
+    #[serde(default)]
+    pub consent: bool,
+}
+
+/// Last-known `HostSummary` per configured peer base URL (not per host id: an unreachable peer we
+/// have never successfully reached has no id yet beyond its own URL). This machine's own entry is
+/// never stored here — `self_summary` always computes it live, so it can never go stale.
+#[derive(Default)]
+pub struct FleetCache {
+    last_known: Mutex<HashMap<String, HostSummary>>,
+    /// When each peer URL was last polled, answered or not: the instant a heartbeat's age is
+    /// measured at, so a member does not read as stale merely because nobody looked (issue #764).
+    last_polled: Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+}
+
+/// What the latest poll of one peer URL saw, for member health (issue #764, fleet_health.rs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerObservation {
+    /// When the latest poll ran.
+    pub polled_at: chrono::DateTime<chrono::Utc>,
+    /// When the peer last answered one; `None` if it never has.
+    pub last_answer: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the latest poll was answered.
+    pub reachable: bool,
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    /// What its last answer said about its queue loop and its history push.
+    pub runner_tick_age_s: Option<i64>,
+    pub fleet_sync: Option<PeerSync>,
+}
+
+impl FleetCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The latest poll of `url`, or `None` if it has never been polled.
+    pub async fn observation(&self, url: &str) -> Option<PeerObservation> {
+        let polled_at = *self.last_polled.lock().await.get(url)?;
+        let known = self.last_known.lock().await.get(url).cloned();
+        Some(PeerObservation {
+            polled_at,
+            last_answer: known
+                .as_ref()
+                .and_then(|k| k.last_heartbeat.as_deref())
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&chrono::Utc)),
+            reachable: known.as_ref().is_some_and(|k| k.health == HostHealth::Online),
+            disk_free_bytes: known.as_ref().and_then(|k| k.disk_free_bytes),
+            disk_total_bytes: known.as_ref().and_then(|k| k.disk_total_bytes),
+            runner_tick_age_s: known.as_ref().and_then(|k| k.runner_tick_age_s),
+            fleet_sync: known.as_ref().and_then(|k| k.fleet_sync.clone()),
+        })
+    }
+
+    /// Records one poll of `url`: `summary` is its row as the fleet view shows it.
+    pub(crate) async fn record_poll(&self, url: &str, at: chrono::DateTime<chrono::Utc>, summary: HostSummary) {
+        self.last_polled.lock().await.insert(url.to_string(), at);
+        self.last_known.lock().await.insert(url.to_string(), summary);
+    }
+}
+
+/// This machine's own row, built from the same probes `/api/status` reports — never cached in
+/// `FleetCache`, always fresh (though `runtime`/`host` still share their own short-lived probe
+/// cache, same as a direct `/api/status` call would).
+pub async fn self_summary(app: &Shared) -> HostSummary {
+    let modules = app.modules.read().await.clone();
+    let (runtime, host) = tokio::join!(runtime::status_runtime(app, false), runtime::status_host(app, false),);
+    let sessions = app.sessions.read().await;
+    let slots_in_use = sessions.iter().filter(|s| s.holds_slot()).count();
+    let queue_depth = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
+    drop(sessions);
+    let slots_ceiling = crate::capacity::max_parallel(app, &modules).await;
+    HostSummary {
+        id: host.id.clone(),
+        name: host.hostname.clone().unwrap_or_else(|| host.id.clone()),
+        platform: runtime.platform.to_string(),
+        os: runtime.os.name.clone(),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        kvm: runtime.kvm.as_ref().map(|kvm| kvm.ok),
+        slots_in_use,
+        slots_ceiling,
+        queue_depth,
+        disk_free_bytes: host.disk_free_bytes,
+        disk_total_bytes: host.disk_total_bytes,
+        last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
+        health: HostHealth::Online,
+        runner_tick_age_s: crate::queue::last_tick_age_s(),
+        fleet_sync: None,
+    }
+}
+
+/// One peer's `GET /api/status`, turned into a `HostSummary`. `None` on any failure — connection
+/// refused, non-2xx, a body that is not the JSON `/api/status` shape, or a timeout — never a panic;
+/// the caller decides what an unreachable peer looks like in the list.
+async fn poll_peer(client: &reqwest::Client, base_url: &str, timeout: Duration) -> Option<HostSummary> {
+    let url = format!("{}/api/status", base_url.trim_end_matches('/'));
+    let response = client.get(&url).timeout(timeout).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    summary_from_status_json(base_url, &body)
+}
+
+/// The parse half of [`poll_peer`], sealed from the network call so it is testable on a literal
+/// JSON value. Peers answer without this install's token, so they serve the reduced status: no id,
+/// no hostname, only version, counts, capacity and health. Missing fields fall back to
+/// the configured URL and zeroes rather than failing the row; only a body with neither a `host`
+/// nor a `runtime` object is not a status shape at all.
+fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary> {
+    let host = body.get("host");
+    let runtime = body.get("runtime");
+    if host.is_none() && runtime.is_none() {
+        return None;
+    }
+    let host_str = |key: &str| host.and_then(|host| host.get(key)).and_then(Value::as_str);
+    let host_num = |key: &str| host.and_then(|host| host.get(key)).and_then(Value::as_u64).unwrap_or(0) as usize;
+    let id = host_str("id").unwrap_or(base_url).to_string();
+    let name = host_str("hostname").unwrap_or(&id).to_string();
+    let platform = runtime
+        .and_then(|runtime| runtime.get("platform"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let os = runtime
+        .and_then(|runtime| runtime.get("os"))
+        .and_then(|os| os.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let version = body.get("version").and_then(Value::as_str).map(str::to_string);
+    // The reduced status omits `kvm_ok` where there is no `/dev/kvm` to check, so an absent key is
+    // `None` — an unknown verdict — never `false`.
+    let kvm = host.and_then(|host| host.get("kvm_ok")).and_then(Value::as_bool);
+    let slots_in_use = host_num("microvms_live");
+    let slots_ceiling = host_num("microvms_ceiling");
+    let queue_depth = body.get("queue_depth").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let disk_free_bytes = host.and_then(|host| host.get("disk_free_bytes")).and_then(Value::as_u64);
+    let disk_total_bytes = host.and_then(|host| host.get("disk_total_bytes")).and_then(Value::as_u64);
+    let runner_tick_age_s = body
+        .get("runner")
+        .and_then(|runner| runner.get("last_tick_age_s"))
+        .and_then(Value::as_i64);
+    let fleet_sync = body
+        .get("fleet_sync")
+        .and_then(|sync| serde_json::from_value::<PeerSync>(sync.clone()).ok());
+    Some(HostSummary {
+        id,
+        name,
+        platform,
+        os,
+        version,
+        kvm,
+        slots_in_use,
+        slots_ceiling,
+        queue_depth,
+        disk_free_bytes,
+        disk_total_bytes,
+        last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
+        health: HostHealth::Online,
+        runner_tick_age_s,
+        fleet_sync,
+    })
+}
+
+/// A peer that just failed to answer: the last-known row with `health` flipped to `Unreachable` if
+/// one exists (so a stalled peer keeps showing its last real numbers, not nulls), else a placeholder
+/// keyed on the URL itself, cached so later calls have something to fall back to.
+async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
+    let mut cache = app.fleet_cache.last_known.lock().await;
+    if let Some(prior) = cache.get(base_url) {
+        let mut stale = prior.clone();
+        stale.health = HostHealth::Unreachable;
+        return stale;
+    }
+    let placeholder = HostSummary {
+        id: base_url.to_string(),
+        name: base_url.to_string(),
+        platform: String::new(),
+        os: String::new(),
+        version: None,
+        kvm: None,
+        slots_in_use: 0,
+        slots_ceiling: 0,
+        queue_depth: 0,
+        disk_free_bytes: None,
+        disk_total_bytes: None,
+        last_heartbeat: None,
+        health: HostHealth::Unreachable,
+        runner_tick_age_s: None,
+        fleet_sync: None,
+    };
+    cache.insert(base_url.to_string(), placeholder.clone());
+    placeholder
+}
+
+/// The whole fleet: this host first, then every configured peer, polled concurrently. A peer that
+/// answers updates `fleet_cache`; one that does not falls back to [`unreachable_summary`]. Nobody
+/// vanishes from the list just because a poll failed.
+pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
+    let mut hosts = vec![self_summary(app).await];
+    // Configured peers first, then the fleet's own edges (fleet_members.rs): a member polls its
+    // owner, an owner polls every member that published its URL. Configured wins on a duplicate.
+    let mut peers = app.cfg.fleet_peers.clone();
+    for url in app.fleet_members.peer_urls().await {
+        if !peers.contains(&url) {
+            peers.push(url);
+        }
+    }
+    if peers.is_empty() {
+        return hosts;
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build();
+    let client = match client {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("fleet: could not build an HTTP client, every peer reads as unreachable: {e:#}");
+            for url in &peers {
+                hosts.push(unreachable_summary(app, url).await);
+            }
+            return hosts;
+        }
+    };
+    let polls = peers
+        .iter()
+        .map(|url| async { (url.as_str(), poll_peer(&client, url, PEER_POLL_TIMEOUT).await) });
+    let polled_at = chrono::Utc::now();
+    for (url, result) in futures_util::future::join_all(polls).await {
+        let summary = match result {
+            Some(summary) => summary,
+            None => unreachable_summary(app, url).await,
+        };
+        app.fleet_cache.record_poll(url, polled_at, summary.clone()).await;
+        hosts.push(summary);
+    }
+    hosts
+}
+
+/// The fleet as placement candidates (issue #688): this member, always local, and the last-known row
+/// of each polled peer from [`FleetCache`] — cached data only, never a fresh poll, so a launch with
+/// no fleet costs one summary and sees this member alone.
+pub async fn placement_candidates(app: &Shared) -> (crate::placement::Candidate, Vec<crate::placement::Candidate>) {
+    let local = crate::placement::Candidate::from_summary(&self_summary(app).await, true);
+    let peers = app
+        .fleet_cache
+        .last_known
+        .lock()
+        .await
+        .values()
+        .map(|summary| crate::placement::Candidate::from_summary(summary, false))
+        .collect();
+    (local, peers)
+}
+
+/// `GET /api/hosts`: `{"hosts": [HostSummary, ...]}`, self first.
+pub async fn list_hosts_handler(State(app): State<Shared>) -> Json<Value> {
+    Json(json!({"hosts": list_hosts(&app).await}))
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
+/// behind the activity log's route layer and `host_guard`.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/hosts", routing::get(list_hosts_handler))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::test_app_with;
+    use axum::{Router, routing::get};
+    use std::net::TcpListener as StdTcpListener;
+
+    #[tokio::test]
+    async fn one_host_with_no_peers_configured_lists_only_itself() {
+        let root = temp_root();
+        let app = test_app_with(&root, |_| {});
+        let hosts = list_hosts(&app).await;
+        assert_eq!(hosts.len(), 1, "no peers configured: just this machine");
+        assert_eq!(hosts[0].health, HostHealth::Online);
+        assert_eq!(hosts[0].id, runtime::host_id(&app));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stand-in peer mothership: one route, `/api/status`, answering a fixed body shaped like the
+    /// real handler's — just the keys `summary_from_status_json` reads.
+    async fn fake_peer(body: Value) -> String {
+        let router = Router::new().route(
+            "/api/status",
+            get(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        url
+    }
+
+    fn peer_status_body(id: &str, hostname: &str) -> Value {
+        json!({
+            "version": "9.9.9",
+            "queue_depth": 2,
+            "host": {
+                "id": id,
+                "hostname": hostname,
+                "disk_free_bytes": 123456,
+                "microvms_live": 1,
+                "microvms_ceiling": 4,
+                "kvm_ok": true,
+            },
+            "runtime": {
+                "platform": "linux-x86_64",
+                "os": {"vendor": "debian", "name": "Debian", "version": "13"},
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn two_hosts_when_one_peer_is_configured_and_reachable() {
+        let peer_url = fake_peer(peer_status_body("peer-123", "peer-box")).await;
+        let root = temp_root();
+        let app = test_app_with(&root, move |cfg| cfg.fleet_peers = vec![peer_url]);
+        let hosts = list_hosts(&app).await;
+        assert_eq!(hosts.len(), 2, "self plus the one configured peer");
+        assert_eq!(hosts[0].health, HostHealth::Online, "self is always online");
+        let peer = &hosts[1];
+        assert_eq!(peer.health, HostHealth::Online);
+        assert_eq!(peer.id, "peer-123");
+        assert_eq!(peer.name, "peer-box");
+        assert_eq!(peer.platform, "linux-x86_64");
+        assert_eq!(peer.os, "Debian");
+        assert_eq!(peer.version.as_deref(), Some("9.9.9"));
+        assert_eq!(peer.kvm, Some(true), "kvm_ok rides the reduced status's host block");
+        assert_eq!(peer.slots_in_use, 1);
+        assert_eq!(peer.slots_ceiling, 4);
+        assert_eq!(peer.queue_depth, 2);
+        assert_eq!(peer.disk_free_bytes, Some(123456));
+        assert!(peer.last_heartbeat.is_some());
+        assert_eq!(peer.runner_tick_age_s, None, "an older peer reports no runner tick");
+        assert_eq!(peer.fleet_sync, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #764: a member's reduced status carries its queue-loop tick and its drain state.
+    #[test]
+    fn a_members_runner_tick_and_sync_state_are_read_from_its_status() {
+        let mut body = peer_status_body("peer-123", "peer-box");
+        body["runner"] = json!({"last_tick_age_s": 400});
+        body["fleet_sync"] = json!({"state": "unauthorized", "backlog_rows": 3, "oldest_unsent_age_s": 7200,
+                                    "last_error_class": "unauthorized", "consent": true});
+        let row = summary_from_status_json("http://peer:7878", &body).unwrap();
+        assert_eq!(row.runner_tick_age_s, Some(400));
+        let sync = row.fleet_sync.unwrap();
+        assert_eq!(sync.state, "unauthorized");
+        assert_eq!((sync.backlog_rows, sync.oldest_unsent_age_s), (3, Some(7200)));
+        assert_eq!(sync.last_error_class.as_deref(), Some("unauthorized"));
+        assert!(sync.consent);
+    }
+
+    /// A peer answering without our token serves the reduced status (no id, no hostname): the row
+    /// still parses off the configured URL, while a body with no `host` or `runtime` is not one.
+    #[tokio::test]
+    async fn a_peer_serving_the_reduced_status_still_lists_with_defaults() {
+        assert!(summary_from_status_json("http://peer:7878", &json!({"version": "1"})).is_none());
+        assert!(summary_from_status_json("http://peer:7878", &json!(null)).is_none());
+        let peer_url = fake_peer(json!({
+            "version": "9.9.9",
+            "queue_depth": 1,
+            "host": {"microvms_live": 2, "microvms_ceiling": 4, "disk_free_bytes": 777},
+            "runtime": {"platform": "linux-x86_64", "os": {"vendor": "debian", "name": "Debian"}},
+            "storage": {"ok": true},
+        }))
+        .await;
+        let root = temp_root();
+        let peer_url_clone = peer_url.clone();
+        let app = test_app_with(&root, move |cfg| cfg.fleet_peers = vec![peer_url_clone.clone()]);
+        let hosts = list_hosts(&app).await;
+        assert_eq!(hosts.len(), 2);
+        let peer = &hosts[1];
+        assert_eq!(peer.health, HostHealth::Online);
+        assert_eq!(peer.id, peer_url, "no id in the reduced body: the url stands in");
+        assert_eq!(peer.name, peer_url);
+        assert_eq!(peer.platform, "linux-x86_64");
+        assert_eq!(peer.os, "Debian");
+        assert_eq!(peer.slots_in_use, 2);
+        assert_eq!(peer.slots_ceiling, 4);
+        assert_eq!(peer.queue_depth, 1);
+        assert_eq!(peer.disk_free_bytes, Some(777));
+        assert_eq!(peer.kvm, None, "no kvm_ok in the body: the verdict is unknown, not false");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_peer_never_seen_before_still_appears_as_a_placeholder() {
+        // A bound-then-dropped listener: its port is free again, but nothing answers on it, so a
+        // connection to it is refused rather than accepted.
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let peer_url = format!("http://127.0.0.1:{port}");
+
+        let root = temp_root();
+        let peer_url_clone = peer_url.clone();
+        let app = test_app_with(&root, move |cfg| cfg.fleet_peers = vec![peer_url_clone.clone()]);
+        let hosts = list_hosts(&app).await;
+        assert_eq!(hosts.len(), 2);
+        let peer = &hosts[1];
+        assert_eq!(peer.health, HostHealth::Unreachable);
+        assert_eq!(peer.id, peer_url, "never reached: the url stands in for an id");
+        assert_eq!(peer.name, peer_url);
+        assert_eq!(peer.slots_in_use, 0);
+        assert_eq!(peer.disk_free_bytes, None);
+        assert_eq!(peer.last_heartbeat, None, "never once answered");
+
+        // Seed the cache as if this peer had answered before, then poll again: the down peer keeps
+        // its last-known numbers instead of being nulled out.
+        let prior = HostSummary {
+            id: "peer-was-here".into(),
+            name: "peer-was-here".into(),
+            platform: "linux-x86_64".into(),
+            os: "Debian".into(),
+            version: Some("9.9.8".into()),
+            kvm: Some(true),
+            slots_in_use: 3,
+            slots_ceiling: 4,
+            queue_depth: 1,
+            disk_free_bytes: Some(999),
+            disk_total_bytes: None,
+            last_heartbeat: Some("2026-09-20T12:00:00+00:00".into()),
+            health: HostHealth::Online,
+            runner_tick_age_s: None,
+            fleet_sync: None,
+        };
+        app.fleet_cache
+            .last_known
+            .lock()
+            .await
+            .insert(peer_url.clone(), prior.clone());
+        let hosts_again = list_hosts(&app).await;
+        let peer_again = &hosts_again[1];
+        assert_eq!(peer_again.health, HostHealth::Unreachable, "still down");
+        assert_eq!(peer_again.id, prior.id, "last-known stats are kept, not nulled out");
+        assert_eq!(peer_again.slots_in_use, prior.slots_in_use);
+        assert_eq!(peer_again.disk_free_bytes, prior.disk_free_bytes);
+        assert_eq!(peer_again.last_heartbeat, prior.last_heartbeat);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn temp_root() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("colonizer-fleet-{}", crate::util::short_id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        dir
+    }
+}

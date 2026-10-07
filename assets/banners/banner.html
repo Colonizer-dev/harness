@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<!-- Source for assets/banners/<crate>.png, the banners on the crates' READMEs. banner.html?crate=<name>
+     picks the crate. Regenerate with scripts/render-crate-banners.sh. Colours and type follow colonizer.dev. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0a0c11; width: 1280px; height: 400px; overflow: hidden; }
+  .banner { position: relative; width: 1280px; height: 400px; overflow: hidden; color: #e7e9ef; font-family: "Instrument Sans", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .dots { position: absolute; inset: 0; background-image: radial-gradient(rgba(255,255,255,.1) 1px, transparent 1.2px); background-size: 6px 6px; -webkit-mask-image: radial-gradient(ellipse 40% 100% at 84% 45%, #000 0%, transparent 100%); }
+  .glow { position: absolute; right: -60px; top: -240px; width: 640px; height: 640px; background: radial-gradient(circle, rgba(255,123,44,.18), transparent 60%); filter: blur(30px); }
+  .content { position: absolute; inset: 0; padding: 46px 60px 42px; display: grid; grid-template-rows: auto 1fr auto; }
+  .eyebrow { display: flex; align-items: center; gap: 14px; font-family: "JetBrains Mono", monospace; font-size: 15px; font-weight: 500; letter-spacing: .28em; color: #e7e9ef; }
+  .eyebrow b { color: #6f778a; font-weight: 400; }
+  .copy { align-self: center; max-width: 640px; }
+  h1 { margin: 0 0 14px; font-weight: 600; font-size: 60px; line-height: 1; letter-spacing: -.04em; }
+  p { margin: 0; font-size: 21px; line-height: 1.5; color: #aab1c0; }
+  .foot { font-family: "JetBrains Mono", monospace; font-size: 13px; letter-spacing: .14em; color: #6f778a; }
+  .art { position: absolute; right: 64px; top: 30px; width: 380px; height: 340px; overflow: visible; }
+  .rule { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: #ff7b2c; }
+</style>
+</head>
+<body>
+<div class="banner">
+  <div class="dots"></div>
+  <div class="glow"></div>
+  <svg class="art" id="art" viewBox="0 0 380 340" aria-hidden="true"></svg>
+  <div class="content">
+    <div class="eyebrow">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><polygon points="13,2 23,7.5 23,18.5 13,24 3,18.5 3,7.5" fill="none" stroke="#ff7b2c" stroke-width="2"/><circle cx="13" cy="13" r="3" fill="#ff7b2c"/></svg>
+      <span id="eyebrow"></span>
+    </div>
+    <div class="copy">
+      <h1 id="title"></h1>
+      <p id="lead"></p>
+    </div>
+    <div class="foot" id="foot"></div>
+  </div>
+  <div class="rule"></div>
+</div>
+<script>
+(function () {
+  var CRATES = {
+    'colonizer-harness': {
+      eyebrow: 'COLONIZER <b>·</b> HARNESS',
+      title: 'The mothership.',
+      lead: 'Runs coding agents in private KVM microVMs, reaches them over a private mesh, and opens their pull requests.',
+      foot: 'MICROVMS · MESH · CHOICE CARDS · PULL REQUESTS · MIT',
+      command: 'colonizer',
+      art: mothership
+    },
+    'colonizer-agentd': {
+      eyebrow: 'COLONIZER <b>·</b> AGENTD',
+      title: 'Inside every colony.',
+      lead: 'Runs the agent, keeps the event log and serves the terminal, for the mothership to reach over the mesh.',
+      foot: 'RUNNER BRIDGE · EVENT LOG · TERMINALS · STATIC MUSL · MIT',
+      command: 'colonizer-agentd',
+      art: daemon
+    }
+  };
+  var name = new URLSearchParams(location.search).get('crate') || 'colonizer-harness';
+  var crate = CRATES[name];
+  document.getElementById('eyebrow').innerHTML = crate.eyebrow;
+  document.getElementById('title').textContent = crate.title;
+  document.getElementById('lead').textContent = crate.lead;
+  document.getElementById('foot').textContent = crate.foot;
+
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.getElementById('art');
+  var MONO = 'JetBrains Mono, monospace';
+  function el(tag, attrs, text) {
+    var node = document.createElementNS(NS, tag);
+    for (var k in attrs) node.setAttribute(k, attrs[k]);
+    if (text) node.textContent = text;
+    svg.appendChild(node);
+    return node;
+  }
+  function hex(x, y, r, attrs) {
+    var pts = [];
+    for (var k = 0; k < 6; k++) { var b = Math.PI / 6 + k * Math.PI / 3; pts.push((x + r * Math.cos(b)).toFixed(1) + ',' + (y + r * Math.sin(b)).toFixed(1)); }
+    return el('polygon', Object.assign({ points: pts.join(' ') }, attrs));
+  }
+  function label(x, y, text, size, fill) {
+    return el('text', { x: x, y: y, 'text-anchor': 'middle', 'font-family': MONO, 'font-size': size || 10, fill: fill || '#e7e9ef' }, text);
+  }
+
+  // The colony graph from colonizer.dev: the mothership and the colonies it sent out.
+  function mothership() {
+    var cx = 190, cy = 118, R = 96;
+    el('circle', { cx: cx, cy: cy, r: R, fill: 'none', stroke: 'rgba(255,255,255,.12)', 'stroke-dasharray': '3 7' });
+    ['issue-142', 'issue-97', 'repo/api', 'issue-203', 'issue-15', 'repo/web'].forEach(function (text, i) {
+      var a = -Math.PI / 2 + i * Math.PI / 3, x = cx + R * Math.cos(a), y = cy + R * Math.sin(a);
+      el('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: 'rgba(255,123,44,.45)', 'stroke-width': 1.5 });
+      hex(x, y, 21, { fill: '#12151d', stroke: '#ff7b2c', 'stroke-width': 1.5 });
+      label(x, y + 2.5, text, 7);
+    });
+    hex(cx, cy, 30, { fill: '#0f1218', stroke: '#ff7b2c', 'stroke-width': 2.5 });
+    hex(cx, cy, 16, { fill: '#ff7b2c' });
+  }
+
+  // A colony: the daemon between the agent, the event log and the terminal, reached from the mothership.
+  function daemon() {
+    el('rect', { x: 20, y: 60, width: 340, height: 162, rx: 12, fill: 'rgba(13,16,22,.85)', stroke: 'rgba(255,255,255,.18)', 'stroke-width': 1.2 });
+    el('text', { x: 36, y: 80, 'font-family': MONO, 'font-size': 9.5, fill: '#6f778a', 'letter-spacing': '.08em' }, 'COLONY · KVM MICROVM');
+    // Over the mesh to the mothership, above the colony.
+    el('line', { x1: 190, y1: 28, x2: 190, y2: 116, stroke: 'rgba(255,123,44,.65)', 'stroke-width': 1.5, 'stroke-dasharray': '4 4' });
+    hex(190, 16, 12, { fill: '#0f1218', stroke: '#ff7b2c', 'stroke-width': 2 });
+    hex(190, 16, 5.5, { fill: '#ff7b2c' });
+    el('text', { x: 210, y: 20, 'font-family': MONO, 'font-size': 10, fill: '#aab1c0' }, 'mothership');
+    el('text', { x: 200, y: 49, 'font-family': MONO, 'font-size': 9, fill: '#6f778a' }, 'private mesh');
+    function node(x, y, w, text) {
+      el('rect', { x: x - w / 2, y: y - 15, width: w, height: 30, rx: 6, fill: '#12151d', stroke: 'rgba(255,255,255,.22)', 'stroke-width': 1.2 });
+      label(x, y + 3.5, text, 10);
+    }
+    el('line', { x1: 108, y1: 156, x2: 162, y2: 150, stroke: 'rgba(255,123,44,.5)', 'stroke-width': 1.5 });
+    el('line', { x1: 218, y1: 142, x2: 262, y2: 124, stroke: 'rgba(255,123,44,.5)', 'stroke-width': 1.5 });
+    el('line', { x1: 218, y1: 158, x2: 262, y2: 180, stroke: 'rgba(255,123,44,.5)', 'stroke-width': 1.5 });
+    node(70, 158, 84, 'claude code');
+    node(306, 122, 88, 'event log');
+    node(306, 184, 88, 'terminal');
+    hex(190, 150, 28, { fill: '#0f1218', stroke: '#ff7b2c', 'stroke-width': 2.5 });
+    hex(190, 150, 13, { fill: '#ff7b2c' });
+    label(190, 198, 'agentd', 10.5, '#aab1c0');
+  }
+
+  crate.art();
+  // And the thing you run.
+  el('text', { x: 190, y: 250, 'text-anchor': 'middle', 'font-family': MONO, 'font-size': 14, fill: '#ff7b2c' }, '↓');
+  el('rect', { x: 60, y: 264, width: 260, height: 42, rx: 6, fill: '#0f1218', stroke: '#e7e9ef', 'stroke-width': 1.3 });
+  el('text', { x: 190, y: 290, 'text-anchor': 'middle', 'font-family': MONO, 'font-size': 14, fill: '#e7e9ef' }, crate.command);
+  document.documentElement.setAttribute('data-ready', '1');
+})();
+</script>
+</body>
+</html>

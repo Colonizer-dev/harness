@@ -1,0 +1,238 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "d4503413932d9fb28da47806c7bf8353"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "decisions"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "decision"
+                  }
+                },
+                {
+                  "key": "point",
+                  "value": {
+                    "stringValue": "recovery.retry"
+                  }
+                },
+                {
+                  "key": "mode",
+                  "value": {
+                    "stringValue": "act"
+                  }
+                },
+                {
+                  "key": "pick",
+                  "value": {
+                    "stringValue": "retry"
+                  }
+                },
+                {
+                  "key": "confidence",
+                  "value": {
+                    "doubleValue": 0.8
+                  }
+                },
+                {
+                  "key": "latency_ms",
+                  "value": {
+                    "intValue": "420"
+                  }
+                },
+                {
+                  "key": "did",
+                  "value": {
+                    "stringValue": "jev"
+                  }
+                },
+                {
+                  "key": "options",
+                  "value": {
+                    "intValue": "3"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "recovery.retry"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.decision",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108120000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108120000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "ff358f7eea3c9769d8f9cdb2be5ef8de"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "decisions"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "outcome"
+                  }
+                },
+                {
+                  "key": "point",
+                  "value": {
+                    "stringValue": "recovery.retry"
+                  }
+                },
+                {
+                  "key": "mode",
+                  "value": {
+                    "stringValue": "act"
+                  }
+                },
+                {
+                  "key": "latency_ms",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "miss",
+                  "value": {
+                    "stringValue": "timeout"
+                  }
+                },
+                {
+                  "key": "did",
+                  "value": {
+                    "stringValue": "rule"
+                  }
+                },
+                {
+                  "key": "options",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "outcome.progressed",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "outcome.window_min",
+                  "value": {
+                    "intValue": "30"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "recovery.retry"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.decision",
+              "flags": 0,
+              "observedTimeUnixNano": "1791109920000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791109920000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

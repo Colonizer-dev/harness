@@ -1,0 +1,7 @@
+{
+  "name": "graft",
+  "version": "0.19.0",
+  "description": "A code map of the colony's repository (graft by Nanonets): ranked answers with exact file:line, every caller of a symbol, a file's API — before grepping and reading.",
+  "license": "MIT",
+  "skills": ["graft"]
+}

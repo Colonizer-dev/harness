@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<title>Colonizer · signed in</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230b0e14'/><path d='M16 5.5 25 10.75v10.5L16 26.5 7 21.25v-10.5z' fill='none' stroke='%23FF6B35' stroke-width='2.6' stroke-linejoin='round'/><circle cx='16' cy='16' r='3' fill='%23FF6B35'/></svg>">
+<style>
+  :root {
+    --bg: #07090e; --text: #e8ecf3; --muted: #8a94a6; --accent: #ff6b35;
+    --glow: rgb(255 107 53 / 0.16); --grid: rgb(255 255 255 / 0.035);
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f3f5f8; --text: #121722; --muted: #5b6577; --accent: #c8440f;
+      --glow: rgb(200 68 15 / 0.10); --grid: rgb(18 23 34 / 0.045); }
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; font: 15px/1.5 var(--sans); color: var(--text); background: var(--bg);
+    background-image:
+      radial-gradient(640px 420px at 50% 42%, var(--glow), transparent 70%),
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: auto, 32px 32px, 32px 32px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { text-align: center; }
+  .mark { width: 72px; height: 72px; margin: 0 auto 18px; }
+  .mark svg { width: 100%; height: 100%; display: block; }
+  .hex { stroke-dasharray: 64; stroke-dashoffset: 64; animation: draw 0.9s cubic-bezier(.4,0,.2,1) forwards; }
+  .core { transform-origin: 16px 16px; animation: pop .35s .75s cubic-bezier(.2,.8,.2,1) both; }
+  h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: -.01em; }
+  p { margin: 0; color: var(--muted); }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { .hex { animation: none; stroke-dashoffset: 0; } .core { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="mark" aria-hidden="true">
+    <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#0b0e14"/><path class="hex" d="M16 5.5 25 10.75v10.5L16 26.5 7 21.25v-10.5z" fill="none" stroke="#FF6B35" stroke-width="2.6" stroke-linejoin="round"/><circle class="core" cx="16" cy="16" r="3" fill="#FF6B35"/></svg>
+  </div>
+  <h1>Signed in</h1>
+  <p>Opening your cockpit&hellip;</p>
+</div>
+<script>
+  // Replace the address with the same path minus `token`, so the secret never lingers in history.
+  // A plain redirect would arrive without the SameSite=Strict cookie when the link was followed cross-site.
+  // The address bar is cleaned at once; the navigation waits for the mark to finish drawing.
+  var u = new URL(location.href); u.searchParams.delete('token');
+  try { history.replaceState(null, '', u.toString()); } catch (e) {}
+  setTimeout(function () { location.replace(u.toString()); }, 700);
+</script>
+</body>
+</html>

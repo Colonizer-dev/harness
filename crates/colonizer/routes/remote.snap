@@ -1,0 +1,12 @@
+/api/remote                                          GET    unauth=401    token=owner            activity=-
+/api/remote                                          PUT    unauth=401    token=owner            activity=-
+/api/remote/devices                                  GET    unauth=401    token=owner            activity=-
+/api/remote/devices/confirm                          POST   unauth=401    token=owner            activity=-
+/api/remote/devices/invites                          POST   unauth=401    token=owner            activity=-
+/api/remote/devices/{id}                             DELETE unauth=401    token=owner            activity=-
+/api/remote/owner                                    DELETE unauth=401    token=owner            activity=-
+/api/remote/pairing                                  GET    unauth=401    token=owner            activity=-
+/api/remote/pairing/confirm                          POST   unauth=401    token=owner            activity=-
+/api/remote/pairing/reject                           POST   unauth=401    token=owner            activity=-
+/api/remote/require-github                           PUT    unauth=401    token=owner            activity=-
+/api/remote/reset                                    POST   unauth=401    token=owner            activity=-

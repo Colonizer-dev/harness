@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colonizer.dev/webhook-events.v1.schema.json",
+  "title": "Colonizer webhook event, version 1",
+  "description": "One JSON note the notify module POSTs to a webhook (docs/protocol/webhooks.md). Every event has the same eight keys. `version` changes only when a key changes meaning or goes away; a new event name or a new key does not change it, so receivers must ignore event names and keys they do not know. No payload carries repository content (issue titles, questions, branches, errors) or a secret. The `event` list is checked against the harness (crates/colonizer/src/notify.rs EVENT_NAMES) by a test.",
+  "type": "object",
+  "required": ["version", "id", "event", "at", "text", "colony", "pr_url", "provider"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "The payload shape's version."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^evt_[0-9a-f]{32}$",
+      "description": "The event's stable id, also sent as the X-Colonizer-Event-Id header. The same event always carries the same id; receivers dedupe on it."
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "started",
+        "running",
+        "idle",
+        "question",
+        "answered",
+        "publishing",
+        "pull_request",
+        "merged",
+        "closed",
+        "no_changes",
+        "parked",
+        "resumed",
+        "stopped",
+        "failed",
+        "cleaned",
+        "attention",
+        "needs_rebase",
+        "provider_degraded",
+        "judge_degraded",
+        "provider_quota_exhausted",
+        "account_needs_sign_in",
+        "account_resolved",
+        "ci_unavailable",
+        "digest"
+      ],
+      "description": "What happened. The first sixteen are the colony lifecycle: one per status transition, plus `cleaned`; the rest are the events a person is told about and the host-level ones."
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the mothership built this note."
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One short line naming the repository and issue, or the provider, and what happened."
+    },
+    "colony": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["id", "repo", "org", "issue", "status"],
+          "properties": {
+            "id": { "type": "string" },
+            "repo": { "type": "string" },
+            "org": { "type": "string" },
+            "issue": { "type": ["integer", "null"] },
+            "status": {
+              "type": "string",
+              "enum": ["queued", "blocked", "starting", "running", "waiting_for_answer", "idle", "publishing", "pr_opened", "merged", "closed", "no_changes", "parked", "stopped", "failed"]
+            }
+          }
+        }
+      ],
+      "description": "The colony the event is about, or null on a host-level event."
+    },
+    "pr_url": {
+      "type": ["string", "null"],
+      "description": "The colony's pull request on `pull_request` and `needs_rebase`; null otherwise."
+    },
+    "provider": {
+      "type": ["object", "null"],
+      "description": "The provider behind `provider_degraded`, `judge_degraded` or `provider_quota_exhausted`; null otherwise."
+    }
+  }
+}

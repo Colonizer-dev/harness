@@ -1,0 +1,14 @@
+/api/fleet                                           GET    unauth=401    token=owner            activity=-
+/api/fleet/invites                                   POST   unauth=401    token=owner            activity=-
+/api/fleet/invites/{id}                              DELETE unauth=401    token=owner            activity=-
+/api/fleet/join                                      DELETE unauth=401    token=owner            activity=-
+/api/fleet/join                                      POST   unauth=401    token=owner            activity=-
+/api/fleet/join/confirm                              POST   unauth=401    token=owner            activity=-
+/api/fleet/leave                                     POST   unauth=401    token=owner            activity=-
+/api/fleet/members/{id}                              DELETE unauth=401    token=owner            activity=-
+/api/fleet/peer/leave                                POST   unauth=401    token=fleet            activity=-
+/api/fleet/peer/pairings/{id}                        POST   unauth=415    token=owner            activity=-
+/api/fleet/peer/redeem                               POST   unauth=415    token=owner            activity=-
+/api/fleet/peer/refresh                              POST   unauth=415    token=owner            activity=-
+/api/fleet/pending/{id}/approve                      POST   unauth=401    token=owner            activity=-
+/api/fleet/pending/{id}/reject                       POST   unauth=401    token=owner            activity=-

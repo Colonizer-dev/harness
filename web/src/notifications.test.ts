@@ -1,0 +1,517 @@
+// The notification contract: what "needs you" means (one definition shared with the sidebar's
+// rank-0), what the tab may show, which transitions are worth telling a person about, that the text
+// can only ever name the repository and issue number — never the issue title, the question or an
+// error, because notifications land on screens other people see — and that the stored preferences
+// degrade to safe defaults, with everything off restoring today's tab exactly.
+
+// The favicon contract reads index.html from disk at test time. Those are node builtins — vitest
+// runs in plain node and resolves them fine, but this tsconfig types a browser build and carries
+// no @types/node, so tsc must look away from exactly these two imports.
+// @ts-expect-error node:fs — no @types/node in this browser-facing tsconfig
+import { readFileSync } from "node:fs";
+// @ts-expect-error node:url — no @types/node in this browser-facing tsconfig
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+import {
+  attentionCount,
+  colonyLabel,
+  defaultNotificationPrefs,
+  diffEvents,
+  eventText,
+  faviconHref,
+  needsYou,
+  needsYouFeed,
+  needsYouLabel,
+  orgFilterForTarget,
+  parseNotificationPrefs,
+  serializeNotificationPrefs,
+  snapshotOf,
+  tabTitle,
+  unseenFailure,
+  type ColonyEvent,
+  type EventSwitches,
+} from "./notifications";
+import type { AttentionReason, Session } from "./types";
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+let nextId = 0;
+
+function session(overrides: Partial<Session> = {}): Session {
+  const id = overrides.id ?? `s${++nextId}`;
+  return {
+    id,
+    repo: "acme/webshop",
+    org: "acme",
+    issue: 42,
+    issue_title: "Checkout fails for guest users",
+    status: "running",
+    branch: `colonizer/issue-42-${id}`,
+    base: "main",
+    parent: null,
+    worktree: `/wt/${id}`,
+    git_admin_dir: `/git/${id}`,
+    sandbox: `colony-${id}`,
+    mesh: null,
+    agent: "claude-code",
+    autopilot: false,
+    pr_url: null,
+    error: null,
+    cost_usd: null,
+    cleaned_up: false, keep_worktree: false,
+    created_at: "2026-09-18T09:00:00Z",
+    updated_at: "2026-09-18T09:10:00Z",
+    attention: null,
+    ...overrides,
+  };
+}
+
+const stalled = (nudges = 1) => ({ reason: "stalled" as const, since: "2026-09-18T09:05:00Z", nudges });
+
+const ALL_ON: EventSwitches = { question: true, attention: true, failed: true, pull_request: true };
+const ALL_OFF: EventSwitches = { question: false, attention: false, failed: false, pull_request: false };
+
+// ---------------------------------------------------------------------------
+// The predicate
+// ---------------------------------------------------------------------------
+
+describe("needsYou", () => {
+  it("does not flag a working colony for a provider error it may recover from, only a stopped one", () => {
+    const flag = { reason: "model_error" as const, since: "2026-09-24T08:20:00Z", nudges: 0 };
+    expect(needsYou(session({ status: "running", attention: flag }))).toBe(false);
+    expect(needsYou(session({ status: "idle", attention: flag }))).toBe(true);
+  });
+
+  it("never needs you while an automatic retry of a gateway error is pending (issue #1093)", () => {
+    const retrying = { reason: "provider_retry" as const, since: "2026-10-06T08:00:00Z", nudges: 0, cause: "gateway_error" as const };
+    expect(needsYou(session({ status: "parked", attention: retrying }))).toBe(false);
+    // Once the retries run out it is held, and then it does.
+    const held = { reason: "autopilot_held" as const, since: "2026-10-06T08:20:00Z", nudges: 0, cause: "gateway_error" as const };
+    expect(needsYou(session({ status: "idle", attention: held }))).toBe(true);
+  });
+  it("is true when a question waits on a person", () => {
+    expect(needsYou(session({ status: "waiting_for_answer" }))).toBe(true);
+  });
+
+  it("is false once the question has been answered and only a slot is waited for (issue #667)", () => {
+    const suspended = { at: "2026-09-26T10:00:00Z", snapshot: null, reason: "waiting_for_answer", path: "session_resume" };
+    const answered = { question_id: "q1", prompt: "ship it?", answered_at: "2026-09-26T10:05:00Z" };
+    expect(needsYou(session({ status: "waiting_for_answer", suspended, pending_answer: answered }))).toBe(false);
+    // Without the answer stored, the same colony is still very much yours.
+    expect(needsYou(session({ status: "waiting_for_answer", suspended }))).toBe(true);
+  });
+
+  it("is true while a warm-up boots a suspended colony for its still-open question (issue #701)", () => {
+    const suspended = { at: "2026-09-26T10:00:00Z", snapshot: null, reason: "waiting_for_answer", path: "session_resume" };
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: "2026-09-26T10:05:30Z", ready_at: null };
+    // The status has moved on to booting, so the waiting_for_answer branch no longer reads it.
+    expect(needsYou(session({ status: "starting", suspended, prewarm: warming }))).toBe(true);
+    // Once the answer is held, the boot is no longer yours to act on.
+    const answered = { question_id: "q1", prompt: "ship it?", answered_at: "2026-09-26T10:06:00Z" };
+    expect(needsYou(session({ status: "starting", suspended, pending_answer: answered, prewarm: warming }))).toBe(false);
+  });
+
+  it("is true for any attention flag, whatever its reason", () => {
+    for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
+      expect(needsYou(session({ status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(true);
+    }
+  });
+
+  it("is false for a terminal colony even when a stale attention flag is still set", () => {
+    const terminal = ["pr_opened", "merged", "closed", "no_changes", "stopped", "failed"] as const;
+    for (const status of terminal) {
+      for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
+        expect(needsYou(session({ status, attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(false);
+      }
+    }
+  });
+
+  it("stays true for attention on live colonies", () => {
+    for (const status of ["starting", "running", "waiting_for_answer", "idle"] as const) {
+      expect(needsYou(session({ status, attention: stalled() }))).toBe(true);
+    }
+  });
+
+  it("stays true for a bare waiting_for_answer with no flag", () => {
+    expect(needsYou(session({ status: "waiting_for_answer", attention: null }))).toBe(true);
+  });
+
+  it("is false for a colony that is merely working, finished or failed unflagged", () => {
+    expect(needsYou(session({ status: "running" }))).toBe(false);
+    expect(needsYou(session({ status: "failed" }))).toBe(false);
+    expect(needsYou(session({ status: "pr_opened" }))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The parity fixture shared with the mothership
+// ---------------------------------------------------------------------------
+
+// One list of cases both sides run their needs-you rule over — this suite and the Rust test that
+// reads crates/colonizer/tests/fixtures/needs_you.json — so the app badge in a dock and the
+// attention count the mothership attaches to its pushes can never disagree about what "needs you"
+// means (issue #744). Each case's fields are merged onto a complete base session, exactly as each
+// side merges them onto its own.
+interface NeedsYouCase {
+  name: string;
+  session: Partial<Session>;
+  needs_you: boolean;
+}
+
+const parityCases: NeedsYouCase[] = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../../crates/colonizer/tests/fixtures/needs_you.json", import.meta.url)), "utf8"),
+);
+
+describe("the shared needs-you fixture", () => {
+  it("names every case and covers the branches", () => {
+    expect(parityCases.length).toBeGreaterThanOrEqual(12);
+    expect(new Set(parityCases.map((c) => c.name)).size).toBe(parityCases.length);
+    for (const c of parityCases) expect(typeof c.needs_you).toBe("boolean");
+  });
+
+  for (const c of parityCases) {
+    it(`needsYou: ${c.name}`, () => {
+      expect(needsYou({ ...session(), ...c.session })).toBe(c.needs_you);
+    });
+  }
+});
+
+describe("attentionCount", () => {
+  it("counts only the colonies that need a person", () => {
+    expect(
+      attentionCount([
+        session({ id: "a", issue: 1, status: "waiting_for_answer" }),
+        session({ id: "b", issue: 2 }),
+        session({ id: "c", issue: 3, status: "running", attention: stalled() }),
+      ]),
+    ).toBe(2);
+  });
+
+  it("includes a failure nobody has looked at yet, and drops it once seen", () => {
+    expect(
+      attentionCount([session({ id: "a", issue: 1, status: "failed" }), session({ id: "b", issue: 2, status: "failed", unseen_failure: true })]),
+    ).toBe(1);
+  });
+});
+
+describe("unseenFailure", () => {
+  it("is a failure nobody has looked at yet — the one state an open resolves", () => {
+    expect(unseenFailure(session({ status: "failed", unseen_failure: true }))).toBe(true);
+  });
+
+  it("is not a seen failure, not another status, and never an open question", () => {
+    expect(unseenFailure(session({ status: "failed" }))).toBe(false);
+    expect(unseenFailure(session({ status: "failed", unseen_failure: false }))).toBe(false);
+    expect(unseenFailure(session({ status: "running", unseen_failure: true }))).toBe(false);
+    expect(unseenFailure(session({ status: "waiting_for_answer" }))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The tab
+// ---------------------------------------------------------------------------
+
+describe("tabTitle", () => {
+  it("carries the count of colonies that need a person", () => {
+    expect(tabTitle(1)).toBe("(1) Colonizer");
+    expect(tabTitle(2)).toBe("(2) Colonizer");
+  });
+
+  it("is today's plain title at zero", () => {
+    expect(tabTitle(0)).toBe("Colonizer");
+  });
+});
+
+describe("faviconHref", () => {
+  // The href index.html ships with, read from the file itself at test time rather than copied
+  // here: a copy would let the page and this contract drift while every assertion still passed.
+  // Byte-identical is the whole point — with the in-tab layer off the page must get today's
+  // favicon back, not a lookalike.
+  const indexHtml = readFileSync(fileURLToPath(new URL("../index.html", import.meta.url)), "utf8");
+  const SHIPPED = indexHtml.match(/<link rel="icon" href="([^"]+)"/)?.[1] ?? "";
+
+  it("finds the shipped favicon in index.html — the file this contract must not drift from", () => {
+    expect(SHIPPED.length).toBeGreaterThan(0);
+    expect(SHIPPED.startsWith("data:image/svg+xml")).toBe(true);
+  });
+
+  it("is the shipped favicon when nothing waits", () => {
+    expect(faviconHref(false)).toBe(SHIPPED);
+  });
+
+  it("adds a dot on the same brand SVG while a colony waits", () => {
+    const waiting = faviconHref(true);
+    expect(waiting.startsWith("data:image/svg+xml,")).toBe(true);
+    expect(waiting).not.toBe(SHIPPED);
+    expect(waiting).toContain("<circle cx='25' cy='7'");
+    expect(waiting).toContain(SHIPPED.slice(SHIPPED.indexOf("<rect"), SHIPPED.lastIndexOf("<circle")));
+  });
+});
+
+describe("needsYouLabel", () => {
+  it("is singular for one colony", () => {
+    expect(needsYouLabel(1)).toBe("1 colony needs you");
+  });
+
+  it("is plural beyond one", () => {
+    expect(needsYouLabel(2)).toBe("2 colonies need you");
+  });
+});
+
+describe("colonyLabel", () => {
+  it("names the repository and issue", () => {
+    expect(colonyLabel("acme/webshop", 42)).toBe("acme/webshop #42");
+  });
+
+  it("is just the repository for a colony launched without an issue", () => {
+    expect(colonyLabel("acme/webshop", null)).toBe("acme/webshop");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The strip's jump
+// ---------------------------------------------------------------------------
+
+describe("orgFilterForTarget", () => {
+  it("keeps the filter when the colony it opens is already in it", () => {
+    expect(orgFilterForTarget("acme", session())).toBe("acme");
+  });
+
+  it("clears the filter when the colony belongs to another org, so the jump lands in the visible list", () => {
+    expect(orgFilterForTarget("acme", session({ org: "globex" }))).toBe(null);
+  });
+
+  it("leaves no filter alone — with every org shown nothing can be hidden", () => {
+    expect(orgFilterForTarget(null, session({ org: "globex" }))).toBe(null);
+  });
+
+  it("matches the filter the way the list does, case-insensitively", () => {
+    expect(orgFilterForTarget("ACME", session())).toBe("ACME");
+  });
+
+  it("resolves a colony whose org the mothership omits through the repository owner, without crashing or clearing spuriously", () => {
+    expect(orgFilterForTarget("acme", session({ org: undefined }))).toBe("acme");
+    expect(orgFilterForTarget("globex", session({ org: undefined }))).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The edge-triggered diff
+// ---------------------------------------------------------------------------
+
+describe("snapshotOf", () => {
+  it("keeps the status and attention reason per colony", () => {
+    expect(
+      snapshotOf([session({ id: "a", status: "waiting_for_answer" }), session({ id: "b", status: "running", attention: stalled() })]),
+    ).toEqual({
+      a: { status: "waiting_for_answer", attention: null },
+      b: { status: "running", attention: "stalled" },
+    });
+  });
+
+  it("carries only the colonies it was given, so a rebuild prunes colonies that disappeared", () => {
+    const before = snapshotOf([session({ id: "a" }), session({ id: "gone" })]);
+    expect(before).toHaveProperty("gone");
+    expect(snapshotOf([session({ id: "a" })])).not.toHaveProperty("gone");
+  });
+});
+
+describe("diffEvents", () => {
+  it("never fires on the first sight of a colony, however loudly it is waiting", () => {
+    expect(
+      diffEvents({}, [session({ status: "waiting_for_answer", attention: stalled() })], ALL_ON),
+    ).toEqual([]);
+  });
+
+  it("fires question when a colony enters waiting_for_answer", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running" })]);
+    expect(diffEvents(previous, [session({ id: "a", status: "waiting_for_answer" })], ALL_ON)).toEqual([
+      { id: "a", repo: "acme/webshop", issue: 42, kind: "question", reason: null },
+    ]);
+  });
+
+  it("does not repeat question while the colony stays waiting", () => {
+    const previous = snapshotOf([session({ id: "a", status: "waiting_for_answer" })]);
+    expect(diffEvents(previous, [session({ id: "a", status: "waiting_for_answer" })], ALL_ON)).toEqual([]);
+  });
+
+  it("fires attention for stalled and nudges_exhausted only — waiting_for_answer duplicates question, autopilot_held is not a person's turn", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running" })]);
+    const fire = (reason: AttentionReason) =>
+      diffEvents(previous, [session({ id: "a", status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } })], ALL_ON);
+    expect(fire("stalled").map((e) => e.kind)).toEqual(["attention"]);
+    expect(fire("nudges_exhausted").map((e) => e.kind)).toEqual(["attention"]);
+    expect(fire("waiting_for_answer")).toEqual([]);
+    expect(fire("autopilot_held")).toEqual([]);
+  });
+
+  it("does not repeat attention while the same reason holds", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running", attention: stalled() })]);
+    expect(diffEvents(previous, [session({ id: "a", status: "running", attention: stalled(2) })], ALL_ON)).toEqual([]);
+  });
+
+  it("fires attention again when the reason deepens from stalled to nudges_exhausted", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running", attention: stalled() })]);
+    const events = diffEvents(
+      previous,
+      [session({ id: "a", status: "running", attention: { reason: "nudges_exhausted", since: "2026-09-18T09:05:00Z", nudges: 4 } })],
+      ALL_ON,
+    );
+    expect(events.map((e) => [e.kind, e.reason])).toEqual([["attention", "nudges_exhausted"]]);
+  });
+
+  it("fires failed and pull_request on their transitions only", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running" })]);
+    expect(diffEvents(previous, [session({ id: "a", status: "failed", error: "git push rejected" })], ALL_ON).map((e) => e.kind)).toEqual(["failed"]);
+    expect(
+      diffEvents(previous, [session({ id: "a", status: "pr_opened", pr_url: "https://github.com/acme/webshop/pull/61" })], ALL_ON).map((e) => e.kind),
+    ).toEqual(["pull_request"]);
+    const failedBefore = snapshotOf([session({ id: "a", status: "failed" })]);
+    expect(diffEvents(failedBefore, [session({ id: "a", status: "failed" })], ALL_ON)).toEqual([]);
+  });
+
+  it("gates each kind on its own switch, leaving the others working", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running" })]);
+    const waiting = [session({ id: "a", status: "waiting_for_answer" })];
+    expect(diffEvents(previous, waiting, ALL_OFF)).toEqual([]);
+    expect(diffEvents(previous, waiting, { ...ALL_OFF, question: true }).map((e) => e.kind)).toEqual(["question"]);
+    expect(diffEvents(previous, waiting, { ...ALL_ON, question: false })).toEqual([]);
+  });
+
+  it("fires at most once per (colony, event) across many colonies, and seeds a colony seen for the first time mid-session", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running" }), session({ id: "b", status: "running" })]);
+    const events = diffEvents(
+      previous,
+      [session({ id: "a", status: "waiting_for_answer" }), session({ id: "b", status: "failed" }), session({ id: "c", status: "waiting_for_answer" })],
+      ALL_ON,
+    );
+    expect(events.map((e) => `${e.id}:${e.kind}`).sort()).toEqual(["a:question", "b:failed"]);
+  });
+
+  it("carries the address of the colony and nothing else", () => {
+    const previous = snapshotOf([session({ id: "a", status: "running" })]);
+    const [event] = diffEvents(previous, [session({ id: "a", status: "waiting_for_answer" })], ALL_ON);
+    expect(event?.repo).toBe("acme/webshop");
+    expect(event?.issue).toBe(42);
+    expect(Object.values(event ?? {})).not.toContain("Checkout fails for guest users");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The text
+// ---------------------------------------------------------------------------
+
+describe("eventText", () => {
+  const event = (overrides: Partial<ColonyEvent>): ColonyEvent => ({ id: "a", repo: "acme/webshop", issue: 42, kind: "question", reason: null, ...overrides });
+
+  it("says each event in the same dull shape", () => {
+    expect(eventText(event({ kind: "question" }))).toBe("acme/webshop #42 needs an answer");
+    expect(eventText(event({ kind: "attention", reason: "stalled" }))).toBe("acme/webshop #42 has stalled");
+    expect(eventText(event({ kind: "attention", reason: "nudges_exhausted" }))).toBe("acme/webshop #42 is out of nudges");
+    expect(eventText(event({ kind: "failed" }))).toBe("acme/webshop #42 failed");
+    expect(eventText(event({ kind: "pull_request" }))).toBe("acme/webshop #42 opened a pull request");
+  });
+
+  it("renders a colony without an issue as just the repository", () => {
+    expect(eventText(event({ issue: null, kind: "question" }))).toBe("acme/webshop needs an answer");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The preferences blob
+// ---------------------------------------------------------------------------
+
+describe("notification preferences", () => {
+  it("defaults to the in-tab layer on and everything noisy off", () => {
+    expect(defaultNotificationPrefs()).toEqual({
+      inTab: true,
+      sound: false,
+      browser: false,
+      events: { question: true, attention: true, failed: true, pull_request: true },
+    });
+  });
+
+  it("round-trips a stored blob exactly", () => {
+    const prefs: NotificationPrefsLike = { inTab: false, sound: true, browser: true, events: { question: false, attention: true, failed: false, pull_request: true } };
+    expect(parseNotificationPrefs(serializeNotificationPrefs(prefs))).toEqual(prefs);
+  });
+
+  it("falls back to the defaults for null, garbage and the wrong shape", () => {
+    for (const raw of [null, "", "not json", "42", "null", '"a string"', "[]", "{}", '{"events":[]}']) {
+      expect(parseNotificationPrefs(raw)).toEqual(defaultNotificationPrefs());
+    }
+  });
+
+  it("fills missing fields and rejects wrong-typed ones, per field", () => {
+    expect(parseNotificationPrefs(JSON.stringify({ sound: true, browser: "yes", events: { question: false } }))).toEqual({
+      inTab: true,
+      sound: true,
+      browser: false,
+      events: { question: false, attention: true, failed: true, pull_request: true },
+    });
+  });
+
+  it("parses an everything-off blob to everything off — the state that restores today's behaviour", () => {
+    const everythingOff = { inTab: false, sound: false, browser: false, events: ALL_OFF };
+    expect(parseNotificationPrefs(serializeNotificationPrefs(everythingOff))).toEqual(everythingOff);
+  });
+});
+
+type NotificationPrefsLike = ReturnType<typeof defaultNotificationPrefs>;
+
+// ---------------------------------------------------------------------------
+// The Needs-you list (issue #1140)
+// ---------------------------------------------------------------------------
+
+const HOUR = 3_600_000;
+const at = (hoursAgo: number, now: number) => new Date(now - hoursAgo * HOUR).toISOString();
+
+describe("needsYou for the states issue #1140 adds", () => {
+  it("does not ask a person for a colony parked for sitting idle, or one blocked on its parent", () => {
+    const idle = { reason: "idle_timeout", since: "2026-10-07T10:00:00Z", nudges: 0 } as Session["attention"];
+    expect(needsYou(session({ status: "parked", attention: idle }))).toBe(false);
+    expect(needsYou(session({ status: "blocked" }))).toBe(false);
+  });
+});
+
+describe("needsYouFeed", () => {
+  const now = Date.parse("2026-10-07T12:00:00Z");
+  const failed = (id: string, issue: number, hoursAgo: number, error = "boom") =>
+    session({ id, issue, status: "failed", unseen_failure: true, error, created_at: at(hoursAgo, now), updated_at: at(hoursAgo, now) });
+
+  it("hides a failed colony a newer queued, running or merged colony for the same issue has overtaken", () => {
+    for (const status of ["queued", "running", "merged", "blocked"] as const) {
+      const feed = needsYouFeed([failed("old", 7, 80), session({ id: "new", issue: 7, status, created_at: at(1, now) })], now);
+      expect(feed.rows, status).toEqual([]);
+    }
+    // A newer colony for another issue changes nothing.
+    expect(needsYouFeed([failed("old", 7, 80), session({ id: "new", issue: 8, status: "running", created_at: at(1, now) })], now).rows.map((s) => s.id)).toEqual(["old"]);
+  });
+
+  it("lists one entry per issue: the newest colony", () => {
+    const feed = needsYouFeed([failed("older", 7, 30), failed("newest", 7, 2), failed("other", 9, 5)], now);
+    expect(feed.rows.map((s) => s.id).sort()).toEqual(["newest", "other"]);
+  });
+
+  it("keeps cascade failures out", () => {
+    const feed = needsYouFeed(
+      [
+        failed("a", 1, 3, "colony `c8a6d23c` was stopped or parked, so it cannot be stacked on"),
+        failed("b", 2, 3, "colony `a` failed, so it has no branch to build on"),
+        failed("real", 3, 3, "the agent crashed"),
+      ],
+      now,
+    );
+    expect(feed.rows.map((s) => s.id)).toEqual(["real"]);
+  });
+
+  it("folds abandoned questions older than 72 hours into one group and keeps fresh ones in the list", () => {
+    const feed = needsYouFeed([failed("a", 1, 100, "abandoned_question"), failed("b", 2, 80, "abandoned_question"), failed("fresh", 3, 10, "abandoned_question")], now);
+    expect(feed.oldQuestions.map((s) => s.id).sort()).toEqual(["a", "b"]);
+    expect(feed.rows.map((s) => s.id)).toEqual(["fresh"]);
+    expect(attentionCount([failed("a", 1, 100, "abandoned_question"), failed("b", 2, 80, "abandoned_question")])).toBe(1);
+  });
+});
