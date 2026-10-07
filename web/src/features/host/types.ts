@@ -393,6 +393,11 @@ export interface BehindColony {
   affected_by: string[];
 }
 
+/** GET /api/setup: the advisory Setup rows the person marked "don't ask again". */
+export interface SetupState {
+  dismissed: string[];
+}
+
 /** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */
 export interface TelemetryStatus {
   /** null until the user has answered. */

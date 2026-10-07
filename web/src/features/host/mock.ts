@@ -287,6 +287,7 @@ export function mockUpdateView(ms: MockState, update: UpdateStatus): UpdateStatu
   return base;
 }
 
+const mockDismissed = new Set<string>();
 export let mockTelemetry: TelemetryStatus = {
   enabled: null,
   blocked_by: null,
@@ -469,6 +470,12 @@ export function hostMock(ms: MockState): HostApi {
       return clone(mockUpdateView(ms, mockUpdate));
     },
     telemetry: async () => clone(mockTelemetry),
+    setupState: async () => ({ dismissed: [...mockDismissed] }),
+    setSetupDismissed: async (id, dismissed) => {
+      if (dismissed) mockDismissed.add(id);
+      else mockDismissed.delete(id);
+      return { dismissed: [...mockDismissed] };
+    },
     setTelemetry: async (enabled) => {
       await sleep(250);
       const install_id = enabled ? (mockTelemetry.heartbeat.install_id ?? crypto.randomUUID()) : null;

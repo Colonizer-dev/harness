@@ -4,7 +4,7 @@
 // GET /api/status can change the answer — a Check again button, which fetches with ?fresh=1.
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { errorDetail, stackPresetOf, setupTone, type SetupRow, type SetupRowId, type SetupView } from "../setup";
+import { DISMISSIBLE_ROW_IDS, errorDetail, stackPresetOf, setupTone, type SetupRow, type SetupRowId, type SetupView } from "../setup";
 import type { HarnessStatus, ModuleInfo, TelemetryStatus } from "../types";
 import { type ImagePull } from "../useImagePull";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
@@ -27,6 +27,7 @@ export function SetupSection({
   onStatusChanged,
   onSandboxSaved,
   onTelemetryChanged,
+  onDismissedChanged,
   onLaunch,
   onDismiss,
   onShown,
@@ -42,6 +43,7 @@ export function SetupSection({
   onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   onSandboxSaved: (saved: ModuleInfo) => void;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  onDismissedChanged: (ids: string[]) => void;
   onLaunch: () => void;
   onDismiss: () => void;
   onShown: () => void;
@@ -126,6 +128,22 @@ export function SetupSection({
       setSavingMap(false);
     }
   };
+
+  // "Don't ask again" for an advisory row: kept on the mothership, so it holds across browsers and restarts.
+  const dismiss = async (id: SetupRowId, dismissed: boolean) => {
+    try {
+      onDismissedChanged((await api.setSetupDismissed(id, dismissed)).dismissed);
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
+  };
+
+  const dismissButton = (row: SetupRow) =>
+    DISMISSIBLE_ROW_IDS.includes(row.id) ? (
+      <Button size="sm" variant="ghost" onClick={() => void dismiss(row.id, true)}>
+        Don't ask again
+      </Button>
+    ) : null;
 
   const retry = (row: SetupRow) =>
     row.retry ? (
@@ -212,6 +230,7 @@ export function SetupSection({
           </Button>
         )}
         {notes(row)}
+        {row.state === "todo" && dismissButton(row)}
       </div>
     );
   };
@@ -282,6 +301,7 @@ export function SetupSection({
         </Button>
       </div>
       {row.fix && row.state === "todo" && <p className="text-small-lg text-muted">{row.fix}</p>}
+      {row.state === "todo" && dismissButton(row)}
       {notes(row)}
     </div>
   );
@@ -330,8 +350,13 @@ export function SetupSection({
                     {row.os != null && <OsLogo os={row.os} size={14} />}
                     <span className="text-body-lg font-semibold">{row.title}</span>
                     {row.state === "done" && <span className="min-w-0 text-small-lg text-muted [overflow-wrap:anywhere]">{row.detail}</span>}
-                    {row.state === "working" && <Badge tone="info">Downloading</Badge>}
+                    {row.state === "working" && <Badge tone="info">{pull.status?.state === "pulling" ? "Downloading" : "Checking"}</Badge>}
                     {row.state === "blocked" && <Badge tone="err">Blocked</Badge>}
+                    {DISMISSIBLE_ROW_IDS.includes(row.id) && row.detail.startsWith("Skipped") && (
+                      <Button size="sm" variant="ghost" className="ml-auto" onClick={() => void dismiss(row.id, false)}>
+                        Ask again
+                      </Button>
+                    )}
                     {(row.id === "stack" || row.id === "github" || row.id === "claude") && row.state === "done" && (
                       <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setEditing(editing === row.id ? null : row.id)}>
                         {editing === row.id ? "Close" : "Change"}
