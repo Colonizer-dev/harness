@@ -187,6 +187,8 @@ impl Gateway {
         match route {
             AccountRoute::Claude => {
                 notes.remove(colony);
+                // Its Claude requests go to Anthropic again: an earlier fallback route is stale.
+                self.last_route.lock().unwrap().remove(colony);
             }
             other => {
                 notes.insert(colony.to_string(), other.clone());

@@ -482,6 +482,63 @@ async fn a_refused_proposal_never_reaches_mem0() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A colony routed only to minimax whose turn ends with a generic usage-limit error marks minimax
+/// (#1168), not the Claude account, and the queue's pause reason names the provider.
+#[tokio::test]
+async fn an_unattributed_hit_on_a_minimax_only_colony_marks_minimax() {
+    let root = std::env::temp_dir().join(format!("colonizer-routed-quota-{}", crate::util::short_id()));
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let providers = vec![json!({"id": "minimax", "name": "MiniMax", "base_url": "http://127.0.0.1:1", "auth": "none"})];
+    std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&providers).unwrap()).unwrap();
+    let app = crate::tests::test_app(&root);
+    let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+    s.id = "mm".into();
+    s.allowed_providers = Some(vec!["minimax".into()]);
+    s.model_usage = Some(json!({"minimax/MiniMax-M3.1-Flash-Preview": {"input_tokens": 100}}));
+    app.sessions.write().await.push(s);
+    tokio::fs::create_dir_all(app.session_dir("mm")).await.unwrap();
+
+    let text = "You've reached your usage limit, resets 7am (UTC)";
+    let hit = provider_quota::classify_quota_exhaustion(0, "", text).expect("usage limit classifies");
+    assert!(hit.account_wide, "the text alone reads as the Claude account's cap");
+    park_quota_colony(&app, "mm", text, &hit).await;
+
+    assert!(app.gateway.is_quota_exhausted("minimax"), "the routed provider is marked");
+    assert!(!app.gateway.is_account_quota_exhausted(), "the Claude account is not");
+    let status = crate::providers::quota_status(&app).await;
+    assert!(status.paused);
+    let reason = status.reason.unwrap_or_default();
+    assert!(reason.contains("MiniMax") && !reason.contains("Claude account"), "{reason}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The gateway's record of the colony's last routed request beats `allowed_providers`.
+#[tokio::test]
+async fn the_gateways_last_route_attributes_an_unnamed_hit() {
+    let root = std::env::temp_dir().join(format!("colonizer-last-route-{}", crate::util::short_id()));
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let providers: Vec<Value> = ["bailian", "zai"]
+        .iter()
+        .map(|id| json!({"id": id, "name": id, "base_url": "http://127.0.0.1:1", "auth": "none"}))
+        .collect();
+    std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&providers).unwrap()).unwrap();
+    let app = crate::tests::test_app(&root);
+    let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+    s.id = "lr".into();
+    s.allowed_providers = Some(vec!["bailian".into(), "zai".into()]);
+    app.sessions.write().await.push(s);
+    tokio::fs::create_dir_all(app.session_dir("lr")).await.unwrap();
+    app.gateway.note_route("lr", "zai");
+
+    let text = "You've reached your usage limit, resets 7am (UTC)";
+    let hit = provider_quota::classify_quota_exhaustion(0, "", text).unwrap();
+    park_quota_colony(&app, "lr", text, &hit).await;
+    assert!(app.gateway.is_quota_exhausted("zai"));
+    assert!(!app.gateway.is_quota_exhausted("bailian"));
+    assert!(!app.gateway.is_account_quota_exhausted());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// An account-level session-limit hit names no provider, so the park records the dedicated
 /// account record instead of any real provider: healthy providers stay healthy, the queue pauses
 /// on the account record alone, a routed success does not lift it, and the colony resumes when it
