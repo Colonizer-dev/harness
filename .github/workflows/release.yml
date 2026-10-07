@@ -203,10 +203,20 @@ jobs:
           curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:17878/ | grep -qi '<html'
           kill "$pid"
 
+      # The unsigned (ad hoc) macOS app, issue #1138 phase 1: Colonizer.app around the tarball just
+      # built and smoke-tested, in a DMG with a stable name. No Developer ID, no notarization.
+      - name: Build the macOS app (DMG)
+        if: matrix.platform == 'darwin-arm64'
+        run: |
+          scripts/build-dmg.sh "out/colonizer-$PLATFORM.tar.gz" "$VERSION" out/Colonizer-arm64.dmg
+          hdiutil verify out/Colonizer-arm64.dmg
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: colonizer-${{ matrix.platform }}
-          path: out/colonizer-${{ matrix.platform }}.tar.gz
+          path: |
+            out/colonizer-${{ matrix.platform }}.tar.gz
+            out/Colonizer-arm64.dmg
           if-no-files-found: error
           retention-days: 7
 
@@ -265,7 +275,7 @@ jobs:
         run: |
           cp scripts/install-release.sh release/install.sh
           cd release
-          sha256sum colonizer-*.tar.gz install.sh > SHA256SUMS
+          sha256sum colonizer-*.tar.gz Colonizer-arm64.dmg install.sh > SHA256SUMS
           cat SHA256SUMS
           # Issue #1097: the critical and fixes-running notices come first, as a visible list and a
           # block `/api/update` reads (it carries the notices of the releases just before, too), so a
@@ -297,6 +307,8 @@ jobs:
             echo
             echo 'Here <platform> is linux-x86_64 or darwin-arm64.'
             echo
+            echo "Apple Silicon Macs can also use Colonizer-arm64.dmg: an unsigned app, so macOS asks you to approve it once (System Settings > Privacy & Security > Open Anyway). The curl installer above is the recommended path."
+            echo
             echo '```'
             cat SHA256SUMS
             echo '```'
@@ -309,7 +321,7 @@ jobs:
       - name: Attest the release artifacts
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: release/colonizer-*.tar.gz, release/install.sh, release/SHA256SUMS
+          subject-path: release/colonizer-*.tar.gz, release/Colonizer-arm64.dmg, release/install.sh, release/SHA256SUMS
 
       - name: Publish
         run: |
@@ -319,7 +331,7 @@ jobs:
           # and the tag the moment a release is published, so an asset attached afterwards would be
           # rejected — attaching everything to the draft first is the only order that works. It is
           # also good practice without immutability: a half-uploaded release is never visible.
-          gh release create "$TAG" colonizer-*.tar.gz install.sh SHA256SUMS \
+          gh release create "$TAG" colonizer-*.tar.gz Colonizer-arm64.dmg install.sh SHA256SUMS \
             --draft --repo "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "Colonizer $TAG" --notes-file notes.md
           # --latest on publish: the app release claims "latest" deterministically, so a newer

@@ -37,6 +37,13 @@
 #   COLONIZER_RELEASE_URL=<url>
 #                              fetch the app from <url>/<file> instead of the GitHub release; the
 #                              build attestation belongs to the official release, so it is skipped
+#   COLONIZER_LOCAL_ARCHIVE=<file>
+#                              install from this colonizer-<platform>.tar.gz instead of downloading
+#                              one: the macOS app (Colonizer-arm64.dmg) carries the archive and calls
+#                              the installer with it. No download, SHA256SUMS or attestation check
+#                              happens for the archive — the app it came in is what you chose to
+#                              trust — but everything fetched at install (the Claude Agent SDK,
+#                              Claude Code, Node.js) is still downloaded and checked as usual
 #   COLONIZER_REQUIRE_ATTESTATION=1
 #                              make a provenance check that comes back without a verdict a
 #                              failure, not a note
@@ -90,16 +97,23 @@ main() {
   # dash runs a trap and then carries on, so a signal has to end the script here.
   trap 'cleanup; exit 1' INT TERM
 
-  say "downloading Colonizer ($version, $platform)"
-  fetch "$base/$archive" "$tmp/$archive"
-  fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
-  expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
-  [ -n "$expected" ] || fail "$archive is not listed in the release's SHA256SUMS"
-  [ "$(sha256_of "$tmp/$archive")" = "$expected" ] || fail "checksum mismatch for $archive; nothing was installed"
-  verify_provenance "$tmp/SHA256SUMS"
+  if [ -n "${COLONIZER_LOCAL_ARCHIVE:-}" ]; then
+    [ -f "$COLONIZER_LOCAL_ARCHIVE" ] || fail "COLONIZER_LOCAL_ARCHIVE $COLONIZER_LOCAL_ARCHIVE is not a file"
+    say "installing Colonizer from $COLONIZER_LOCAL_ARCHIVE"
+    archive_path=$COLONIZER_LOCAL_ARCHIVE
+  else
+    say "downloading Colonizer ($version, $platform)"
+    fetch "$base/$archive" "$tmp/$archive"
+    fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
+    expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
+    [ -n "$expected" ] || fail "$archive is not listed in the release's SHA256SUMS"
+    [ "$(sha256_of "$tmp/$archive")" = "$expected" ] || fail "checksum mismatch for $archive; nothing was installed"
+    verify_provenance "$tmp/SHA256SUMS"
+    archive_path=$tmp/$archive
+  fi
 
   mkdir -p "$tmp/unpack"
-  tar -xzf "$tmp/$archive" -C "$tmp/unpack"
+  tar -xzf "$archive_path" -C "$tmp/unpack"
   [ -x "$tmp/unpack/colonizer/bin/colonizer" ] || fail "$archive has no colonizer/bin/colonizer"
   installed=$(cat "$tmp/unpack/colonizer/VERSION" 2>/dev/null || echo "$version")
 
