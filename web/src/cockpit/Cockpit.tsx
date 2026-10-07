@@ -16,6 +16,8 @@ import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { colonyFromUrl, pushTarget } from "../push";
+import { formatRoute, isRootPath, parseRoute, type Route } from "../routes";
+import { currentLocation, navigate as pushUrl, routerBase, subscribe } from "../router";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -204,7 +206,15 @@ export function Cockpit({
     };
   }, [api]);
   // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
-  const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? storedView());
+  // The address names the view (issue #1180): `/nest`, `/settings/models/providers`, `/colonies/<id>`.
+  // The bare root is the Overview, but a returning visitor's remembered view still wins there, so a
+  // bookmark of `/` keeps opening where it always did.
+  const [bootRoute] = useState<Route | null>(() => {
+    if (DEMO) return null;
+    const { pathname, search } = currentLocation();
+    return isRootPath(pathname, routerBase()) ? null : parseRoute(pathname, search, routerBase());
+  });
+  const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? (bootRoute?.view === "colony" ? "home" : bootRoute?.view) ?? storedView());
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
@@ -215,7 +225,7 @@ export function Cockpit({
   const [launchPrefill, setLaunchPrefill] = useState<SharedIssue | null>(null);
   // A colony a push deep link asked for (issue #516): `?colony=<id>` from boot, or a
   // `colonizer:open` message from the service worker, opened once the session list has it.
-  const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href));
+  const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href) ?? bootRoute?.colony ?? null);
   // A phone that just signed in through a scanned code lands on `?welcome=phone` (issue #746),
   // which offers the install-and-notify sheet once.
   const [welcome, setWelcome] = useState<"phone" | null>(() => welcomeFromUrl(window.location.href));
@@ -505,6 +515,65 @@ export function Cockpit({
     setPendingOpen(null);
   }, [pendingOpen, selectedId, sessions, onSelectSession]);
 
+  // ---- The address bar (issue #1180) ---------------------------------------------------------
+  //
+  // State to address: whenever the view, the open colony or the workspace changes, the address
+  // follows with pushState (replaceState when only the query moved), so back and forward walk the
+  // views. The settings page and the colony's tab live in the address itself, written by the panes,
+  // so they are read back from it here rather than overwritten.
+  useEffect(() => {
+    if (DEMO) return;
+    // A colony or a shared issue is still being looked up: the address names it, so leave it be.
+    if (deeplink || shared) return;
+    const here = currentLocation();
+    const base = routerBase();
+    const current = parseRoute(here.pathname, here.search, base);
+    const route: Route = { view, org: selectedOrg ?? undefined };
+    if (view === "colony") {
+      route.colony = selectedId ?? undefined;
+      if (current?.view === "colony" && current.colony === selectedId) route.colonyTab = current.colonyTab;
+    }
+    if (view === "settings") route.section = current?.view === "settings" ? current.section : null;
+    const next = formatRoute(route, here.search, base);
+    const now = here.pathname + here.search;
+    if (next === now) return;
+    // Same path, different query (the workspace chip, a stripped launch param): not a new page.
+    pushUrl(next + here.hash, { replace: next.split("?")[0] === now.split("?")[0], silent: true });
+  }, [view, selectedId, selectedOrg, deeplink, shared]);
+
+  // Address to state: back, forward, and links the app makes itself (a settings page that opens
+  // Secrets) arrive as navigations, and the cockpit follows them. A colony the list does not have
+  // yet waits as a deep link; a path the cockpit has no view at is ignored.
+  const followAddress = useCallback(() => {
+    if (DEMO) return;
+    const here = currentLocation();
+    const route = parseRoute(here.pathname, here.search, routerBase());
+    if (!route) return;
+    if (route.view === "colony" && route.colony) setDeeplink(route.colony);
+    else setView(route.view);
+    if (route.org !== (selectedOrgRef.current ?? undefined)) onSelectOrgRef.current(route.org ?? null);
+  }, []);
+  const selectedOrgRef = useRef(selectedOrg);
+  selectedOrgRef.current = selectedOrg;
+  const onSelectOrgRef = useRef(onSelectOrg);
+  onSelectOrgRef.current = onSelectOrg;
+  useEffect(() => subscribe(followAddress), [followAddress]);
+
+  // The workspace a deep link names, applied once at boot (App reconciles it if it does not exist).
+  useEffect(() => {
+    if (bootRoute?.org) onSelectOrg(bootRoute.org);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A colony the address names that the mothership does not have (deleted, or another machine's):
+  // once the list is in, stop waiting so the address settles on the Nest.
+  useEffect(() => {
+    if (deeplink && sessionsLoaded && !sessions.some((s) => s.id === deeplink)) {
+      setDeeplink(null);
+      if (view === "colony") setView("home");
+    }
+  }, [deeplink, sessionsLoaded, sessions, view]);
+
   const act = useCallback(
     async (id: string, action: "stop" | "resume", run: (id: string) => Promise<Session>) => {
       try {
@@ -567,7 +636,7 @@ export function Cockpit({
         return <Page width="full">{memory}</Page>;
       case "settings":
         return (
-          <Page width="full" cap="readable">
+          <Page width="full">
             {settings(() => setView("home"))}
           </Page>
         );

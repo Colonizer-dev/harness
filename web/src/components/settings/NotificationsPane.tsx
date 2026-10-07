@@ -118,7 +118,7 @@ export function NotificationsPane({
         <Row
           id="notifications-in-tab"
           label="In this tab"
-          info={<p>The count of colonies that need you in the tab title, a dot on the favicon, and a strip above the colony list.</p>}
+          help="Shows how many colonies need you in the tab title, a dot on the favicon, and a strip above the colony list."
           inline
         >
           <Switch
@@ -129,7 +129,7 @@ export function NotificationsPane({
             onChange={(checked) => patch({ inTab: checked })}
           />
         </Row>
-        <Row id="notifications-sound" label="Play a sound when a colony asks a question" inline>
+        <Row id="notifications-sound" label="Play a sound when a colony asks a question" help="A short chime, so you notice even when you are looking away." inline>
           <Switch
             id="notifications-sound"
             labelledBy="notifications-sound-label"
@@ -138,7 +138,7 @@ export function NotificationsPane({
             onChange={(checked) => patch({ sound: checked })}
           />
         </Row>
-        <Row id="notifications-browser" label="Browser notifications while the tab is not in front" inline>
+        <Row id="notifications-browser" label="Browser notifications while the tab is not in front" help="Your browser shows a desktop notification. It asks your permission the first time." inline>
           <Switch
             id="notifications-browser"
             labelledBy="notifications-browser-label"

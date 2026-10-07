@@ -499,7 +499,7 @@ export function SectionHero({
         </p>
       </div>
       {nodes.length > 0 && (
-        <div className="hero-band border-t border-border px-4 pb-4 pt-5">
+        <div className="hero-band border-t border-border px-4 pb-4 pt-5 max-sm:hidden">
           <Flow nodes={nodes} both={guide.both} />
         </div>
       )}

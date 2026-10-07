@@ -1380,6 +1380,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Every cockpit route is a real path (issue #1180): the SPA fallback serves `index.html` for
+    /// each client route the cockpit's address bar can hold, deep ones included, while `/api/*`
+    /// keeps its JSON 404 and a missing asset keeps its 404.
+    #[tokio::test]
+    async fn every_cockpit_route_serves_the_page_and_no_api_path_does() {
+        let root = temp_root();
+        let assets = root.join("assets-dir");
+        std::fs::create_dir_all(assets.join("web/assets")).unwrap();
+        std::fs::write(assets.join("web/index.html"), "<html>cockpit</html>").unwrap();
+        std::fs::write(assets.join("web/assets/index-abc.js"), "export {};").unwrap();
+        let app = test_app_with(&root, |cfg| cfg.assets = Some(assets.clone()));
+        let router = router(&app);
+
+        for uri in [
+            "/",
+            "/nest",
+            "/chat",
+            "/code",
+            "/history",
+            "/loops",
+            "/memory",
+            "/host",
+            "/secrets",
+            "/settings",
+            "/settings/models/providers",
+            "/settings/runtime/module-source",
+            "/settings/secrets",
+            "/colonies/abc123",
+            "/colonies/abc123/terminal",
+            "/orgs/Colonizer-dev",
+            "/nest?org=acme&mock=1",
+        ] {
+            let res = router
+                .clone()
+                .oneshot(guarded(Method::GET, uri, vec![bearer(&app)]))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+            assert!(body_text(res).await.contains("cockpit"), "GET {uri} serves index.html");
+        }
+
+        // The same path under /api is the API's: a JSON 404, never the page.
+        for uri in ["/api/settings/models/providers", "/api/colonies/abc123", "/api/nest"] {
+            let res = router
+                .clone()
+                .oneshot(guarded(Method::GET, uri, vec![bearer(&app)]))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "GET {uri}");
+            assert_eq!(
+                res.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/json",
+                "GET {uri}"
+            );
+            assert!(!body_text(res).await.contains("cockpit"), "GET {uri} is not the page");
+        }
+
+        // Assets stay assets: a deep route does not turn a missing chunk into the page.
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, "/assets/missing.js", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The `?token=` sign-in works on any path (issue #1180): a link to a deep route signs in,
+    /// sets the cookie, and the page it answers with drops `token` from the address and reloads
+    /// that same path — so the visitor lands on the page they asked for.
+    #[tokio::test]
+    async fn the_sign_in_link_works_on_any_cockpit_path() {
+        let root = temp_root();
+        let app = test_app(&root);
+        for path in [
+            "/",
+            "/nest",
+            "/settings/models/providers",
+            "/colonies/abc123/terminal",
+            "/orgs/acme",
+        ] {
+            let uri = format!("{path}?token={}", app.api_token);
+            let res = auth_router(&app).oneshot(guarded(Method::GET, &uri, vec![])).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "GET {path}");
+            assert!(res.headers().get(header::SET_COOKIE).is_some(), "GET {path} sets the cookie");
+            assert_eq!(res.headers().get(header::CACHE_CONTROL).unwrap(), "no-store", "GET {path}");
+            let page = body_text(res).await;
+            // The script rewrites `location.href` itself, so the path survives and only `token` goes.
+            assert!(page.contains("searchParams.delete('token')"), "GET {path}");
+            assert!(
+                page.contains("location.replace(u.toString())"),
+                "GET {path} reloads the same path"
+            );
+            assert!(!page.contains(&app.api_token), "the token is never echoed back");
+        }
+        // Without it, the same deep path is the locked page.
+        let res = auth_router(&app)
+            .oneshot(guarded(Method::GET, "/settings/models/providers", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Without a built web dir the API 404 is the same, and only the cockpit falls back to the
     /// "not built" page (#641).
     #[tokio::test]

@@ -194,7 +194,7 @@ export function PushDeviceEditor({
         )}
       </div>
 
-      <Row id={id("quiet")} label="Quiet hours" inline>
+      <Row id={id("quiet")} label="Quiet hours" help="Hold notifications between the hours you pick." inline>
         <Switch id={id("quiet")} labelledBy={`${id("quiet")}-label`} label="Quiet hours" checked={quietOn} onChange={setQuietOn} />
       </Row>
       {quietOn && (

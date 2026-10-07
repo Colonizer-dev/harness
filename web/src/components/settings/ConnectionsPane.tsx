@@ -37,7 +37,7 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
   const githubViaToken = github?.source === "saved token";
 
   return (
-    <Pane title="Connections" subtitle="Both are needed before the first colony" back={back}>
+    <Pane title="GitHub & Claude" subtitle="The two accounts colonies need before the first one starts" back={back}>
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"

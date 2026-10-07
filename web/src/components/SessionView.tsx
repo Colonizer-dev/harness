@@ -9,6 +9,9 @@ import { ContinueLocally } from "../features/handoff/ContinueLocally";
 import type { Session } from "../types";
 import { BoundaryRow } from "./BoundaryRow";
 import { ChatPanel } from "./ChatPanel";
+import { parseRoute } from "../routes";
+import { currentLocation, navigate, routerBase, subscribe } from "../router";
+import { DEMO } from "../demo";
 import {
   IconAlert,
   IconBranch,
@@ -68,7 +71,29 @@ export function SessionView({
   const api = useApi();
   const toast = useToast();
   const { stream, state } = useSessionStream(api, sessionId);
-  const [tab, setTab] = useState<"chat" | "terminal">("chat");
+  // The tab is part of the address (`/colonies/<id>/terminal`, issue #1180): a link opens on it,
+  // and back and forward move between tabs.
+  const tabFromAddress = useCallback((): "chat" | "terminal" => {
+    const here = currentLocation();
+    const route = parseRoute(here.pathname, here.search, routerBase());
+    return route?.view === "colony" && route.colony === sessionId && route.colonyTab ? route.colonyTab : "chat";
+  }, [sessionId]);
+  const [tab, setTabState] = useState<"chat" | "terminal">(() => (DEMO ? "chat" : tabFromAddress()));
+  const setTab = useCallback(
+    (next: "chat" | "terminal") => {
+      setTabState(next);
+      if (DEMO) return;
+      const here = currentLocation();
+      const route = parseRoute(here.pathname, here.search, routerBase());
+      // Only rewrite an address that is this colony's own; `silent`, since this is the state talking.
+      if (route?.view === "colony" && route.colony === sessionId) {
+        const base = `/colonies/${encodeURIComponent(sessionId)}${next === "terminal" ? "/terminal" : ""}`;
+        navigate(base + here.search + here.hash, { silent: true });
+      }
+    },
+    [sessionId],
+  );
+  useEffect(() => (DEMO ? undefined : subscribe(() => setTabState(tabFromAddress()))), [tabFromAddress]);
   const [busy, setBusy] = useState<Action | null>(null);
 
   // The stream sees session changes immediately; keep the sidebar list in step instead of waiting for its poll.

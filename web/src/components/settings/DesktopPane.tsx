@@ -84,7 +84,7 @@ export function DesktopPane({ back }: { back?: () => void }) {
             <p className="text-small-lg text-muted">Start at login is available on macOS and Linux.</p>
           ) : (
             <>
-              <Row id="login-item-switch" label="Start Colonizer at login" inline>
+              <Row id="login-item-switch" label="Start Colonizer at login" help="Starts the mothership when you sign in to your computer, so it is already there." inline>
                 <Switch
                   id="login-item-switch"
                   labelledBy="login-item-switch-label"
