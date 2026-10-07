@@ -64,6 +64,20 @@ pub(crate) fn stacked_on(parent_id: &str, parent: Option<&Session>) -> Stacked {
     }
 }
 
+/// The boot found the colony it is stacked on unable to lend a branch right now (issue #1206). Not a
+/// failure of the child: `boot` puts the colony back (queued, blocked or re-based on the default
+/// branch, whichever its parent calls for) instead of marking it failed.
+#[derive(Debug)]
+pub(crate) struct StackHold(pub String);
+
+impl std::fmt::Display for StackHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StackHold {}
+
 /// What a boot starts from: the decision [`boot_base`] makes, with the repository's default branch —
 /// the one answer only the boot can look up — left for it to fetch.
 #[derive(Debug)]

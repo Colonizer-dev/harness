@@ -580,6 +580,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // the parks above so a colony just parked is not yet due; the resumes queue behind the slot
     // rules like any other.
     resume_hold_parked(app).await;
+    resume_publish_holds(app).await;
     // Colonies parked by the automatic provider-error retry (issue #980) whose backoff step is due
     // resume on this same tick, after the parks above.
     resume_provider_retry_parked(app).await;
@@ -837,6 +838,60 @@ pub(crate) async fn park_expired_holds(app: &Shared, timeout: chrono::Duration) 
             format!("autopilot hold exceeded {minutes} min; parked to release its slot — worktree kept, resume to continue"),
         )
         .await;
+    }
+}
+
+/// Resumes the colonies whose publish was held (issue #1206): a push the colony can fix (a conflict
+/// with a branch that moved on GitHub, a secret-shaped literal) leaves it `stopped` with the note and
+/// `publish_resume_pending`, and the resume itself runs here, on the queue tick. A resume the handler
+/// refuses fails the colony with the reason — the one case left where a held publish ends in `failed`.
+pub(crate) async fn resume_publish_holds(app: &Shared) {
+    let ids: Vec<String> = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.publish_resume_pending && s.status == SessionStatus::Stopped)
+        .map(|s| s.id.clone())
+        .collect();
+    for id in ids {
+        let taken = app
+            .update_session(&id, |x| {
+                if !x.publish_resume_pending || x.status != SessionStatus::Stopped {
+                    return false;
+                }
+                x.publish_resume_pending = false;
+                true
+            })
+            .await
+            .is_some_and(|(_, taken)| taken);
+        if !taken {
+            continue;
+        }
+        app.session_log(&id, "info", "resuming to fix what held its publish".into())
+            .await;
+        if let Err(e) = crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None).await {
+            let message = format!(
+                "the publish was held and the colony could not be resumed to fix it: {}",
+                e.message()
+            );
+            app.session_log(&id, "error", message.clone()).await;
+            let mut attention = None;
+            app.update_session(&id, |x| {
+                if x.status != SessionStatus::Stopped {
+                    return;
+                }
+                x.status = SessionStatus::Failed;
+                x.resume_note = None;
+                x.error = Some(message.clone());
+                attention = x.clear_attention();
+            })
+            .await;
+            app.note_cleared_attention(&id, attention).await;
+            if let Some(s) = app.session(&id).await {
+                crate::claims::spawn_release_if_needed(app.clone(), &s);
+            }
+        }
     }
 }
 

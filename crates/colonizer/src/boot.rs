@@ -324,6 +324,10 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
         app.session_log(&id, "error", format!("session failed to start: {message}"))
             .await;
         teardown_vm(&app, &s).await;
+        // Issue #1206: a parent that cannot lend a branch moves the child, never fails it.
+        if e.downcast_ref::<stack::StackHold>().is_some() && requeue_stack_hold(&app, &id).await {
+            return;
+        }
         // A failed pre-warm boot (issue #701) is not a colony failure: the question is still open
         // and answerable, so the colony goes back to exactly what the suspension left.
         let mut attention = None;
@@ -355,6 +359,47 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             s.boot_retries = 0;
         })
         .await;
+    }
+}
+
+/// Puts a colony whose boot found its parent unable to lend a branch back where the parent's state
+/// says (issue #1206): blocked while the parent is paused, re-based on the default branch when the
+/// parent is gone for good, queued for the queue's own gate to decide otherwise (it walks a child of
+/// a failed parent up the stack or re-bases it). Never failed. `false` when the colony is no longer the boot's to move.
+async fn requeue_stack_hold(app: &Shared, id: &str) -> bool {
+    let sessions = app.sessions.read().await.clone();
+    let moved = app
+        .update_session(id, |x| {
+            if x.status != SessionStatus::Starting {
+                return None;
+            }
+            x.error = None;
+            x.updated_at = Utc::now();
+            Some(match crate::blocked::parent_state(x, &sessions) {
+                crate::blocked::ParentState::Paused(reason) => {
+                    x.status = SessionStatus::Blocked;
+                    x.blocked_reason = Some(reason.clone());
+                    format!("blocked: {reason}; no slot is held while it waits")
+                }
+                crate::blocked::ParentState::Gone(why) => {
+                    crate::blocked::rebase_on_default(x);
+                    x.status = SessionStatus::Queued;
+                    crate::blocked::rebased_message(&why)
+                }
+                crate::blocked::ParentState::Fine => {
+                    x.status = SessionStatus::Queued;
+                    "the colony it is stacked on cannot lend a branch yet; back in the queue".to_string()
+                }
+            })
+        })
+        .await
+        .and_then(|(_, message)| message);
+    match moved {
+        Some(message) => {
+            app.session_log(id, "info", message).await;
+            true
+        }
+        None => false,
     }
 }
 
@@ -888,10 +933,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             None => default_base(app, &s.repo, &log, boot_started_at).await?,
         },
         stack::BootBase::Default => default_base(app, &s.repo, &log, boot_started_at).await?,
+        // Issue #1206: neither is the child's failure; `boot` puts it back where its parent says.
         stack::BootBase::Wait { colony } => {
-            bail!("the colony `{colony}` this one is stacked on has no branch to build on yet")
+            return Err(stack::StackHold(format!(
+                "the colony `{colony}` this one is stacked on has no branch to build on yet"
+            ))
+            .into());
         }
-        stack::BootBase::Refuse(reason) => bail!("{reason}"),
+        stack::BootBase::Refuse(reason) => return Err(stack::StackHold(reason).into()),
     };
     let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
     app.update_session(id, |x| {
@@ -2730,6 +2779,67 @@ mod tests {
                 .any(|w| w.contains("retrying in 1 min") && w.contains("retry 1 of 3")),
             "{warned:?}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1206: a boot that finds its parent unable to lend a branch puts the colony back — never
+    /// `failed`: blocked behind a failed parent it strictly stacks on, re-based on the default branch
+    /// when the parent is gone, queued otherwise.
+    #[tokio::test]
+    async fn a_boot_that_finds_its_parent_unable_to_lend_a_branch_never_fails_the_colony() {
+        let (app, root) = crate::sessions::tests::app_with_colony("kid", SessionStatus::Starting).await;
+        let mut parent = crate::sessions::tests::colony("acme", SessionStatus::Failed);
+        parent.id = "parentparent".into();
+        parent.issue = Some(6);
+        let set = |parent: Session, stack: bool| {
+            let app = app.clone();
+            async move {
+                *app.sessions.write().await = {
+                    let mut kid = app
+                        .session("kid")
+                        .await
+                        .unwrap_or_else(|| crate::sessions::tests::colony("acme", SessionStatus::Starting));
+                    kid.id = "kid".into();
+                    kid.status = SessionStatus::Starting;
+                    kid.parent = Some("parentparent".into());
+                    kid.stack = stack;
+                    vec![kid, parent]
+                };
+            }
+        };
+
+        // A paused parent blocks the child, with a reason that names it; nothing fails.
+        let mut paused = parent.clone();
+        paused.status = SessionStatus::Stopped;
+        set(paused, true).await;
+        assert!(requeue_stack_hold(&app, "kid").await);
+        let s = app.session("kid").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Blocked);
+        assert!(
+            s.blocked_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("#6") && r.contains("stopped")),
+            "{:?}",
+            s.blocked_reason
+        );
+        assert!(s.error.is_none());
+
+        // A parent gone for good re-bases the child on the default branch, queued.
+        let mut gone = parent.clone();
+        gone.status = SessionStatus::NoChanges;
+        set(gone, true).await;
+        assert!(requeue_stack_hold(&app, "kid").await);
+        let s = app.session("kid").await.unwrap();
+        assert_eq!((s.status, s.parent.clone()), (SessionStatus::Queued, None));
+
+        // A failed parent goes back to the queue, whose gate walks the child up the stack or re-bases it.
+        set(parent, true).await;
+        assert!(requeue_stack_hold(&app, "kid").await);
+        assert_eq!(app.session("kid").await.unwrap().status, SessionStatus::Queued);
+
+        // A colony that is no longer the boot's to move is left alone.
+        app.update_session("kid", |x| x.status = SessionStatus::Stopped).await;
+        assert!(!requeue_stack_hold(&app, "kid").await);
         let _ = std::fs::remove_dir_all(root);
     }
 
