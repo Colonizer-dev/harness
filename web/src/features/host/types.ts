@@ -1,6 +1,16 @@
 import type { QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
 import type { AccountAlert, GitHubPause, ModelProviderStatus, StatusQuota } from "../providers/types";
 
+/** GET /api/status `backlog` (issue #1144): open issues (never pull requests) in the repositories of the orgs Colonizer works in, excluding forks, archived repositories and repositories with issues off. Cached about ten minutes, so `as_of` can be minutes old. */
+export interface Backlog {
+  issues: number;
+  repos: number;
+  /** When the counts were taken (RFC3339). */
+  as_of: string;
+  /** The same two numbers per org, keyed by login, for the selected workspace. */
+  by_org?: Record<string, { issues: number; repos: number }>;
+}
+
 export interface HarnessStatus {
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
   claude: {
@@ -68,6 +78,8 @@ export interface HarnessStatus {
   quota_cards?: QuotaCard[];
   /** Claude accounts that need the owner (issue #984): a rejected sign-in or an exhausted plan, with the colonies waiting on each. Empty when everything is fine; older mothership builds omit it. */
   account_alerts?: AccountAlert[];
+  /** The Nest frontier badge's counts (issue #1144); null until the first count lands, omitted by older mothership builds. */
+  backlog?: Backlog | null;
   /** The GitHub account's circuit breaker (issue #1074): paused while GitHub refuses the account, with the cause and the next step. Older mothership builds omit it. */
   github_pause?: GitHubPause;
   /**

@@ -2854,13 +2854,18 @@ pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
 }
 
 pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
-    // `gh api --paginate` takes seconds; the cockpit asks on every load, so serve the last list at
-    // once and refresh it behind the answer once it is a minute old.
-    let value = crate::cached_answer(&app, "repos", Duration::from_secs(60), |app| async move {
+    Ok(Json(repos_cached(&app).await?))
+}
+
+/// The repository list, served at once from the last answer and refreshed behind it once it is a
+/// minute old: `gh api --paginate` takes seconds, and the cockpit asks on every load. Also the
+/// source of the frontier badge's repository counts (backlog.rs).
+pub(crate) async fn repos_cached(app: &Shared) -> anyhow::Result<Vec<Value>> {
+    let value = crate::cached_answer(app, "repos", Duration::from_secs(60), |app| async move {
         fetch_repos(&app).await.map(Value::Array)
     })
     .await?;
-    Ok(Json(serde_json::from_value(value)?))
+    Ok(serde_json::from_value(value)?)
 }
 
 async fn fetch_repos(app: &Shared) -> anyhow::Result<Vec<Value>> {

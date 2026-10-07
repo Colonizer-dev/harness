@@ -141,7 +141,7 @@ The table row above describes most of the payload. The full answer also carries 
 configured image, size, `max_parallel`, the `msb` version and the colony Claude binary), `modules` (each
 kind's provider), `assets` (where the app's files were found), `reclaim` (`{reclaimable, unpushed}`
 counts), `ledger` (the notification rate-limit tallies), `model_providers`, `quota` (§6.5) and
-`account_alerts` (below). The
+`account_alerts` (below) and `backlog` (below). The
 `runtime` key is the other half: whether this machine can actually boot a colony — the checks the
 installer makes, answered whenever you ask.
 
@@ -170,6 +170,22 @@ missing or fails sets `ok: false` with an `error` sentence; output that does not
 shape still sets `ok`, but `version` falls back to the first line it printed. Each probe is bounded
 to a couple of seconds, so a command that hangs answers the same `ok: false` with a timeout in
 `error` instead of stalling the poll every open tab is waiting on.
+
+**The frontier badge.** `backlog` is what the Nest's tree badge shows (issue #1144): the open
+*issues* — never pull requests — in the repositories of the orgs Colonizer works in, found with the
+search API's `is:issue is:open` once per org. Forks, archived repositories and repositories with
+issues switched off are left out, and so is any org that is not a workspace (one the token merely
+sees, one awaiting the operator's answer, one switched off). It is `null` until the first count has
+landed; the count is cached for about ten minutes and refreshed behind the poll, which never waits
+for GitHub.
+
+```json
+{"issues": 21, "repos": 5, "as_of": "2026-10-07T14:07:12Z",
+ "by_org": {"acme": {"issues": 17, "repos": 3}, "tools": {"issues": 4, "repos": 2}}}
+```
+
+`repos` counts the repositories that are counted (not a fork, not archived, issues on), whether or
+not they have an open issue; `by_org` carries the same two numbers per org, for a selected workspace.
 
 **Claude account health.** `claude` carries `health_status` — `ok`, `auth_expired`, `unreachable` or `unchecked` —
 and `health_checked_at` for the default account, from a cheap Anthropic check the

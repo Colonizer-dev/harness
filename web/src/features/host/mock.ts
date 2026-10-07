@@ -349,6 +349,8 @@ export function hostMock(ms: MockState): HostApi {
       // The host strip's numbers (issue #205); ?runtime=kvm shows a host whose KVM the
       // user cannot use, so the strip reads "no KVM".
       host: mockHost(live),
+      // The Nest frontier badge (issue #1144): issues only, the demo's own orgs.
+      backlog: { issues: 17, repos: 2, as_of: new Date().toISOString(), by_org: { acme: { issues: 17, repos: 2 } } },
       // Reclamation counts for the sidebar's Storage dot (issue #223).
       reclaim: { reclaimable: 2, unpushed: 1 },
       // The drain flag (issue #880): off by default; ?draining=1 could model an update in flight.

@@ -194,6 +194,8 @@ pub struct App {
     /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
     /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
+    /// The Nest frontier badge's cached issue counts (backlog.rs).
+    pub backlog: crate::backlog::Cache,
     pub new_orgs: RwLock<BTreeMap<String, Option<String>>>,
     /// Each org's GitHub description, from the same `/user/orgs` fetch, for the workspace page.
     /// In-memory: the first refresh after a restart fills it again.
@@ -305,6 +307,7 @@ impl App {
             disk_cleanup: Default::default(),
             loops: crate::loops::LoopStore::new(&cfg.config_dir),
             memory: crate::memory::MemoryStore::new(cfg.data_dir.join("memory")),
+            backlog: Default::default(),
             new_orgs: RwLock::new(BTreeMap::new()),
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_failed_at: Mutex::new(None),
