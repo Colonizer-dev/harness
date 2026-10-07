@@ -4,13 +4,13 @@
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { Button, Spinner, cx, inputClass } from "../components/ui";
+import { RepoMultiSelect } from "../components/RepoMultiSelect";
 import { DetailSection, GroupedDetails, LoopCard, scheduleLine } from "./LoopCard";
 import { IconBook } from "./loopIcons";
 import { BUILTIN_HISTORY_ID, type DetailGroupDef, type DetailItem } from "./loopHistory";
 import {
   DOCS_INTERVALS,
   DOCS_KIND_LABEL,
-  allowEntryError,
   describeInterval,
   findingPlace,
   summarizeReport,
@@ -57,7 +57,6 @@ export function DocsLoopCard({ onOpenColony }: { onOpenColony: (id: string) => v
       dryRun={dryRun}
       busy={busy}
       onOpenColony={onOpenColony}
-      onTarget={(target, enabled) => void act(() => api.setDocsLoopTarget(target, enabled), setView)}
       onSave={(settings) => void act(() => api.saveDocsLoop(settings), setView)}
       onRun={(dry) =>
         void act(
@@ -82,7 +81,6 @@ export function DocsLoopPanel({
   dryRun,
   busy,
   now = Date.now(),
-  onTarget,
   onSave,
   onRun,
   onOpenColony,
@@ -93,24 +91,13 @@ export function DocsLoopPanel({
   dryRun: DocsReport | null;
   busy: boolean;
   now?: number;
-  onTarget: (target: string, enabled: boolean) => void;
   onSave: (settings: DocsLoopSettings) => void;
   onRun: (dryRun: boolean) => void;
   onOpenColony: (id: string) => void;
   /** Start with the detail drawer open (tests, links). */
   open?: boolean;
 }): ReactElement {
-  const [entry, setEntry] = useState("");
-  const [touched, setTouched] = useState(false);
-  const entryError = touched ? allowEntryError(entry) : null;
   const { settings } = view;
-  const add = () => {
-    setTouched(true);
-    if (allowEntryError(entry)) return;
-    onTarget(entry.trim(), true);
-    setEntry("");
-    setTouched(false);
-  };
   const report = dryRun ?? view.last_report;
   const ready = settings.allow.length > 0;
   return (
@@ -144,29 +131,9 @@ export function DocsLoopPanel({
         <div className="space-y-4">
           <div>
             <div className="mb-1.5 text-small-lg text-muted">Runs on</div>
-            <div className="flex flex-wrap items-center gap-1.5" aria-label="Runs on">
-              {settings.allow.map((a) => (
-                <span key={a} className="inline-flex items-center gap-1 rounded-full border border-border bg-panel px-2.5 py-1 font-mono text-meta-lg text-text">
-                  {a}
-                  <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-faint hover:text-text" aria-label={`stop running on ${a}`} disabled={busy} onClick={() => onTarget(a, false)}>
-                    ✕
-                  </button>
-                </span>
-              ))}
+            <div aria-label="Runs on">
+              <RepoMultiSelect label="repositories to run on" value={settings.allow} disabled={busy} onChange={(allow) => onSave({ ...settings, allow })} placeholder="Choose repositories or orgs" />
             </div>
-            <form
-              className="mt-2 flex flex-wrap items-center gap-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                add();
-              }}
-            >
-              <input className={cx(inputClass, "w-56")} placeholder="owner or owner/name" aria-label="repository or org to run on" value={entry} onChange={(e) => setEntry(e.target.value)} />
-              <Button size="sm" variant="primary" type="submit" disabled={busy}>
-                Enable
-              </Button>
-              {entryError && <span className="text-small text-err">{entryError}</span>}
-            </form>
           </div>
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-small-lg text-muted">
             <label className="flex items-center gap-2">

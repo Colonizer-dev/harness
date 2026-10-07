@@ -66,6 +66,8 @@ export const FIXED_PAGES: readonly PageInfo[] = [
   { id: "fleet", group: "fleet", slug: "fleet", label: "Fleet", hint: "Let other machines join this one" },
   { id: "live-map", group: "fleet", slug: "live-map", label: "Live map", hint: "Show this mothership as a dot on colonizer.dev" },
 
+  { id: "orgs", group: "workspaces", slug: "all-orgs", label: "Show or hide orgs", hint: "Choose which GitHub orgs Colonizer shows and acts on" },
+
   { id: "usage", group: "about", slug: "usage-data", label: "Usage data", hint: "An anonymous summary you read before anything is sent" },
   { id: "built-with", group: "about", slug: "built-with", label: "Built with", hint: "What this venture is built with" },
 ];
@@ -303,5 +305,6 @@ const PAGE_KEYWORDS: Partial<Record<SectionId, string[]>> = {
   "live-map": ["telemetry", "dot", "privacy", "colonizer.dev"],
   usage: ["telemetry", "privacy", "analytics", "anonymous"],
   updates: ["version", "release", "upgrade", "restart"],
+  orgs: ["hide", "hidden", "show", "organisations", "organizations", "workspaces", "archive", "all repositories"],
   "built-with": ["stack", "licences", "licenses", "credits", "about"],
 };

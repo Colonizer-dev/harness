@@ -10,6 +10,11 @@ export function orgEnabled(settings: OrgSettings | undefined): boolean {
   return settings?.enabled !== false;
 }
 
+/** Hidden from Colonizer (issue #1213): only an explicit true. Not the same as switched off. */
+export function orgHidden(settings: OrgSettings | undefined): boolean {
+  return settings?.hidden === true;
+}
+
 /**
  * The design's "Hide orgs with no colonies" toggle, persisted client-side under the house
  * `colonizer.*` naming. On matches the design's default; only an explicit "0" is off, so a
@@ -52,14 +57,16 @@ export interface OrgEntry {
 
 /**
  * Orgs from GET /api/orgs plus any org that only appears in the colony list; counts come from the
- * live list. An org switched off (`enabled: false`) is not a workspace choice, but it stays in
+ * live list. An org hidden from Colonizer (`hidden: true`, issue #1213) is in neither list: it is
+ * returned in `concealed` for Settings → Workspaces and the switcher's "Manage orgs…". An org switched off (`enabled: false`) is not a workspace choice, but it stays in
  * `hidden` with its counts so the switcher's disclosure can still reach its settings; one still
  * awaiting a decision is in neither — it is not a workspace until the operator says so, and the
  * prompt card is where that happens.
  */
-export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: OrgEntry[]; hidden: OrgEntry[] } {
+export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: OrgEntry[]; hidden: OrgEntry[]; concealed: OrgEntry[] } {
   const byKey = new Map<string, OrgEntry>();
   const off = new Set<string>();
+  const concealedKeys = new Set<string>();
   const entry = (org: string, avatar: string | null) => {
     const key = org.toLowerCase();
     let found = byKey.get(key);
@@ -74,6 +81,7 @@ export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: Org
     if (info.spend !== undefined) e.spend = info.spend;
     if (info.description) e.description = info.description;
     if (!orgEnabled(info.settings)) off.add(e.org.toLowerCase());
+    if (orgHidden(info.settings)) concealedKeys.add(e.org.toLowerCase());
   }
   for (const session of sessions) {
     const org = orgOf(session);
@@ -85,10 +93,14 @@ export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: Org
   }
   const visible: OrgEntry[] = [];
   const hidden: OrgEntry[] = [];
+  const concealed: OrgEntry[] = [];
   for (const e of [...byKey.values()].sort((a, b) => a.org.localeCompare(b.org))) {
-    (off.has(e.org.toLowerCase()) ? hidden : visible).push(e);
+    // Hidden orgs are in neither list: the switcher does not show them (their colonies keep running,
+    // and Settings → Workspaces lists them under "Hidden").
+    if (concealedKeys.has(e.org.toLowerCase())) concealed.push(e);
+    else (off.has(e.org.toLowerCase()) ? hidden : visible).push(e);
   }
-  return { visible, hidden };
+  return { visible, hidden, concealed };
 }
 
 /**

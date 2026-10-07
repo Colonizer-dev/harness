@@ -167,7 +167,7 @@ impl Default for Settings {
 
 /// An `owner` or `owner/repo` entry.
 fn valid_target(t: &str) -> bool {
-    valid_repo(t) || (!t.contains('/') && valid_repo(&format!("{t}/x")))
+    crate::repo_scope::valid_entry(t)
 }
 
 /// Checks and tidies a settings body before it is saved: entries trimmed, lowercased and
@@ -189,6 +189,11 @@ pub(crate) fn normalize(mut s: Settings) -> Result<Settings, String> {
     };
     tidy(&mut s.allow, "allow")?;
     tidy(&mut s.never, "never")?;
+    if s.never.iter().any(|e| crate::repo_scope::is_all(e)) {
+        return Err(
+            "never names orgs and repositories; leave a repository out of allow instead of never-listing all".to_string(),
+        );
+    }
     tidy(&mut s.local_checks, "local_checks")?;
     let bound = |value: u64, lo: u64, hi: u64, what: &str| -> Result<(), String> {
         if (lo..=hi).contains(&value) {
@@ -237,6 +242,14 @@ pub(crate) enum OptIn {
     In,
     NotOptedIn,
     Never(&'static str),
+}
+
+/// The saved settings with `*` in `allow` and `local_checks` resolved to the visible orgs, at use
+/// time, so a hidden org is left out of "all" (issue #1213).
+pub(crate) async fn resolve_settings(app: &crate::App, mut s: Settings) -> Settings {
+    s.allow = app.resolve_scope(&s.allow).await;
+    s.local_checks = app.resolve_scope(&s.local_checks).await;
+    s
 }
 
 /// The `never` list and the train's `merge_train_deny_orgs` beat the allowlist, which is empty by
@@ -2609,7 +2622,8 @@ pub(crate) async fn execute(app: &Shared, dry_requested: bool) -> Result<Report,
         Some(Running)
     };
     let dir = app.cfg.config_dir.clone();
-    let state = load(&dir).await;
+    let mut state = load(&dir).await;
+    state.settings = resolve_settings(app, state.settings).await;
     let sessions = app.sessions.read().await.clone();
     let train = merge_train::train_settings(app).await;
     let mut memory = state.repos.clone();

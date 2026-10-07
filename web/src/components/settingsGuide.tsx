@@ -444,6 +444,15 @@ const GUIDES: Record<string, Guide> = {
       { icon: "chat", label: "Composer" },
     ],
   },
+  orgs: {
+    icon: "org",
+    blurb: "Every GitHub org this login can reach. Hidden orgs leave the switcher, the repository pickers and every \u201CAll repositories\u201D choice; nothing is deleted and their colonies keep running.",
+    flow: [
+      { icon: "github", label: "GitHub orgs" },
+      { icon: "eye", label: "Shown" },
+      { icon: "ant", label: "Colonizer acts" },
+    ],
+  },
   org: {
     icon: "org",
     blurb: "Settings that apply only to this workspace's colonies.",

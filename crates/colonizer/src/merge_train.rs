@@ -532,6 +532,7 @@ async fn tick_once(app: &Shared) {
     // A repository the merge-train loop (issue #754) drives is its alone: two drivers would each
     // merge on their own reading, which is exactly the burst the loop exists to avoid.
     let looped = crate::merge_loop::load(&app.cfg.config_dir).await.settings;
+    let looped = crate::merge_loop::resolve_settings(app, looped).await;
     for (repo, group) in by_repo {
         let state = effective_state(&settings, repo);
         if crate::merge_loop::drives(&looped, repo) {

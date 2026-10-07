@@ -835,6 +835,7 @@ export function Cockpit({
         selectedOrg={selectedOrg}
         onSelectOrg={switchOrg}
         onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
+        onManageOrgs={onOpenSettings ? () => onOpenSettings("orgs") : undefined}
         needByOrg={needByOrg}
         view={view}
         onNavigate={navigate}

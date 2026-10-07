@@ -671,6 +671,11 @@ export function App() {
         setSidebarOpen(false);
         setOrgSettingsFor(org);
       }}
+      onManageOrgs={() => {
+        setSidebarOpen(false);
+        setSettingsSection("orgs");
+        setSettingsOpen(true);
+      }}
       view={view}
       onOpenMemory={openMemory}
       pendingMemory={pendingMemory}

@@ -967,3 +967,17 @@ async fn this_repository() {
     println!("checks: {:?}", s.checks);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn the_allowlist_takes_a_wildcard_next_to_orgs_and_repositories() {
+    let all = Settings {
+        allow: vec!["*".into(), "acme".into(), "acme/app".into()],
+        ..Settings::default()
+    };
+    assert_eq!(check_settings(&all).unwrap().allow, vec!["*", "acme", "acme/app"]);
+    let bad = Settings {
+        allow: vec!["**".into()],
+        ..Settings::default()
+    };
+    assert!(check_settings(&bad).is_err());
+}

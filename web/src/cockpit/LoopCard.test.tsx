@@ -57,7 +57,6 @@ const cards = () => ({
       view={{ name: "Docs & README", settings: { allow: [], interval_hours: 24, cooldown_hours: 24 }, enabled: false, next_run_at: null, last_report: null, history: [], limits: { min_interval_hours: 1, max_interval_hours: 168, max_cooldown_hours: 720 } }}
       dryRun={null}
       busy={false}
-      onTarget={() => {}}
       onSave={() => {}}
       onRun={() => {}}
       onOpenColony={() => {}}

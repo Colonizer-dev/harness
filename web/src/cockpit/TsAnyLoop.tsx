@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { Badge, Button, cx, inputClass } from "../components/ui";
+import { RepoMultiSelect } from "../components/RepoMultiSelect";
 import { DetailSection, GroupedDetails, LoopCard, scheduleLine } from "./LoopCard";
 import { IconBrackets } from "./loopIcons";
 import { BUILTIN_HISTORY_ID, type DetailGroupDef, type DetailItem } from "./loopHistory";
@@ -183,7 +184,6 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
   const toast = useToast();
   const [view, setView] = useState<LoopView | null>(null);
   const [draft, setDraft] = useState<TsAnySettings | null>(null);
-  const [allowText, setAllowText] = useState("");
   const [busy, setBusy] = useState<"save" | "dry" | "run" | null>(null);
   const [dry, setDry] = useState<TsAnyReport | null>(null);
 
@@ -192,7 +192,6 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
       (v) => {
         setView(v);
         setDraft((d) => d ?? v.settings);
-        setAllowText((t) => t || v.settings.allow.join(", "));
       },
       () => setView(null),
     );
@@ -211,7 +210,6 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
       const v = await api.saveTsAnyLoop(settings);
       setView(v);
       setDraft(v.settings);
-      setAllowText(v.settings.allow.join(", "));
       toast(v.settings.enabled ? `${v.name}: on for ${v.settings.allow.length || "no"} entr${v.settings.allow.length === 1 ? "y" : "ies"}` : `${v.name}: off`);
     } catch (e) {
       toast(errorMessage(e), "error");
@@ -238,7 +236,7 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
   };
 
   const s = view.settings;
-  const withAllow = { ...draft, allow: parseTsAnyAllow(allowText) };
+  const withAllow = draft;
   const shown = dry ?? view.last_report;
   const trend = trendOf(view.history);
   const ready = s.allow.length > 0;
@@ -282,10 +280,12 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
       </DetailSection>
       <DetailSection title="Settings">
         <div className="grid gap-3 text-small-lg sm:grid-cols-2">
-          <label className="sm:col-span-2">
+          <div className="sm:col-span-2">
             <span className="text-muted">Opted-in orgs and repositories (empty: nothing runs)</span>
-            <input className={cx(inputClass, "mt-1")} value={allowText} placeholder="acme, globex/web" onChange={(e) => setAllowText(e.target.value)} aria-label="allowlist" />
-          </label>
+            <div className="mt-1">
+              <RepoMultiSelect label="allowlist" value={draft.allow} onChange={(allow) => setDraft({ ...draft, allow })} disabled={busy !== null} placeholder="Choose orgs or repositories" />
+            </div>
+          </div>
           <label>
             <span className="text-muted">How often</span>
             <select className={cx(inputClass, "mt-1")} value={tsAnyCadenceChoice(draft.cadence)} onChange={(e) => setDraft({ ...draft, cadence: tsAnyCadenceFor(e.target.value as TsAnyCadenceChoice, draft.cadence) })} aria-label="cadence">

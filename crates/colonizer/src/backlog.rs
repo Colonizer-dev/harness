@@ -122,7 +122,7 @@ pub(crate) fn scope_orgs<'a>(
         .chain(colony_orgs)
         .filter(|org| !org.is_empty())
         .filter(|org| !awaiting.contains(*org) || saved.contains_key(*org))
-        .filter(|org| saved.get(*org).is_none_or(crate::orgs::org_enabled))
+        .filter(|org| saved.get(*org).is_none_or(|s| crate::orgs::org_enabled(s) && !s.hidden))
         .map(String::from)
         .collect()
 }
@@ -264,7 +264,7 @@ async fn refresh(app: &Shared) -> Result<Backlog> {
         &awaiting,
     );
     // The signed-in account's own repositories are a workspace unless switched off.
-    if !own.is_empty() && saved.get(&own).is_none_or(crate::orgs::org_enabled) {
+    if !own.is_empty() && saved.get(&own).is_none_or(|s| crate::orgs::org_enabled(s) && !s.hidden) {
         scope.insert(own.clone());
     }
     let orgs: Vec<(String, &'static str)> = scope

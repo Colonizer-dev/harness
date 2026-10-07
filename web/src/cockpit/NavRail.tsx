@@ -220,6 +220,8 @@ export function NavRail(props: {
   /** Switched-off orgs: not a choice, but listed so their settings (and the switch back on) stay reachable. */
   hiddenOrgs: OrgEntry[];
   onOpenOrgSettings: (org: string) => void;
+  /** "Manage orgs…": Settings → Workspaces → Show or hide orgs, where hidden orgs are listed (issue #1213). */
+  onManageOrgs?: () => void;
   selectedOrg: string | null;
   /** null is "every workspace". */
   onSelectOrg: (org: string | null) => void;
@@ -336,6 +338,7 @@ export function NavRail(props: {
         selectedOrg={selectedOrg}
         onSelectOrg={onSelectOrg}
         onOpenOrgSettings={onOpenOrgSettings}
+        onManageOrgs={props.onManageOrgs}
         needByOrg={needByOrg}
         expanded={expanded}
       />
@@ -455,6 +458,7 @@ function ScopeSwitcher({
   selectedOrg,
   onSelectOrg,
   onOpenOrgSettings,
+  onManageOrgs,
   needByOrg,
   expanded,
 }: {
@@ -463,6 +467,7 @@ function ScopeSwitcher({
   selectedOrg: string | null;
   onSelectOrg: (org: string | null) => void;
   onOpenOrgSettings: (org: string) => void;
+  onManageOrgs?: () => void;
   needByOrg: Record<string, number>;
   expanded: boolean;
 }): ReactElement {
@@ -658,9 +663,36 @@ function ScopeSwitcher({
                 ))}
               </div>
             )}
-            {settingsOrg && (
-              <>
-                <div role="separator" className="my-1 h-px bg-border" />
+            {(settingsOrg || onManageOrgs) && <div role="separator" className="my-1 h-px bg-border" />}
+            {settingsOrg && current && (
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={() => settings(settingsOrg)}
+                className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent p-2 text-left text-body-sm text-muted transition-colors hover:bg-panel-2 hover:text-text focus-visible:bg-panel-2 focus-visible:outline-none"
+              >
+                <Glyph name="settings" size={15} />
+                {`${current.org} settings`}
+              </button>
+            )}
+            {onManageOrgs ? (
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={() => {
+                  close(false);
+                  onManageOrgs();
+                }}
+                className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent p-2 text-left text-body-sm text-muted transition-colors hover:bg-panel-2 hover:text-text focus-visible:bg-panel-2 focus-visible:outline-none"
+              >
+                <Glyph name="settings" size={15} />
+                Manage orgs…
+              </button>
+            ) : (
+              settingsOrg &&
+              !current && (
                 <button
                   type="button"
                   role="menuitem"
@@ -669,9 +701,9 @@ function ScopeSwitcher({
                   className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent p-2 text-left text-body-sm text-muted transition-colors hover:bg-panel-2 hover:text-text focus-visible:bg-panel-2 focus-visible:outline-none"
                 >
                   <Glyph name="settings" size={15} />
-                  {current ? `${current.org} settings` : "Manage workspaces"}
+                  Manage workspaces
                 </button>
-              </>
+              )
             )}
           </div>
         </>

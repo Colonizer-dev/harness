@@ -192,6 +192,30 @@ colony in a GitHub loop may ask the mothership to merge (`pr_merge`, §6.12). Em
 refuses every merge, so a repository merges only once the operator lists it here. Each entry is
 validated as a repository name, and the compare is case-insensitive like `close_superseded_prs`.
 
+**Repository lists: `owner/name`, `owner` and `*` (issue #1212).** Every setting that takes a list of
+repositories reads the same three entry shapes, validated by `repo_scope::valid_entry`: `owner/name`
+for one repository, `owner` for every repository of that org, and `*` for every repository of every
+org the operator shows. The cockpit edits all of them with one multi-select (`RepoMultiSelect`).
+
+| Setting | `owner/name` | `owner` | `*` |
+|---|---|---|---|
+| Org `merge_prs`, `close_superseded_prs` | yes | yes | yes |
+| Merge train loop `allow`, `local_checks` | yes | yes | yes |
+| Merge train loop `never` | yes | yes | no (`400`; leave a repository out of `allow` instead) |
+| Docs & README loop `allow` | yes | yes | yes |
+| Supply-chain loop `allow`, TypeScript any loop `allow` | yes | yes | yes |
+| Push device `scope` (empty means all) | yes | yes | not used: empty is "all" |
+
+**Hiding an org (issue #1213).** `hidden: true` in an org's settings (default `false`, kept by a save
+that does not name it) takes the org out of sight without touching it: it leaves the workspace
+switcher, `GET /api/repos`, the repository multi-select, the backlog counts and the merge steward, and
+a `*` entry never reaches into it. `*` is resolved at use time by one helper (`repo_scope`,
+`App::resolve_scope`) against the shown workspaces, so hiding or un-hiding takes effect for every loop
+and setting on its next use. An entry that names the org or the repository outright is still the
+operator's explicit choice and still applies. Hiding is not `enabled: false`: colonies already running
+in a hidden org keep running, its settings are kept, and `GET /api/orgs` still lists it (with
+`settings.hidden: true`) so Settings → Workspaces can switch it back on.
+
 `agent.claude_account` names the Claude account the org's colonies run on (Connections, §4).
 `egress` is `{mode, allow, block}` on top of the sandbox module's egress policy: an org can widen its
 allow list or add blocks but never remove a global block ([sandbox-network.md](../sandbox-network.md)).

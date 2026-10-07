@@ -133,6 +133,7 @@ mod redteam;
 mod remote;
 mod repo_identity;
 mod repo_meta;
+mod repo_scope;
 mod restack;
 mod retry;
 mod routing;

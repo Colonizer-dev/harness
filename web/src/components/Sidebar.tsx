@@ -59,6 +59,7 @@ export function Sidebar({
   selectedOrg,
   onSelectOrg,
   onOpenOrgSettings,
+  onManageOrgs,
   view,
   onOpenMemory,
   pendingMemory,
@@ -84,6 +85,8 @@ export function Sidebar({
   selectedOrg: string | null;
   onSelectOrg: (org: string | null) => void;
   onOpenOrgSettings: (org: string) => void;
+  /** "Manage orgs…": Settings → Workspaces → Show or hide orgs (issue #1213). */
+  onManageOrgs?: () => void;
   view: MainView;
   onOpenMemory: () => void;
   pendingMemory: number;
@@ -139,7 +142,7 @@ export function Sidebar({
       </div>
 
       <div className="mx-3 mb-1 flex items-center gap-1.5">
-        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} onOpenSettings={onOpenOrgSettings} />
+        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} onOpenSettings={onOpenOrgSettings} onManageOrgs={onManageOrgs} />
         {selectedOrg && (
           <button
             type="button"
@@ -253,6 +256,7 @@ function OrgSwitcher({
   selected,
   onSelect,
   onOpenSettings,
+  onManageOrgs,
 }: {
   orgs: OrgInfo[];
   sessions: Session[];
@@ -260,6 +264,7 @@ function OrgSwitcher({
   onSelect: (org: string | null) => void;
   /** A hidden org is not a workspace choice, but its settings dialog must stay reachable — this is how. */
   onOpenSettings: (org: string) => void;
+  onManageOrgs?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
@@ -347,6 +352,21 @@ function OrgSwitcher({
               />
             ))}
           </ul>
+          {onManageOrgs && (
+            <div className="mt-1 border-t border-border pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  onManageOrgs();
+                }}
+                className="flex w-full cursor-pointer items-center gap-1.5 rounded-lg border-0 bg-transparent px-2.5 py-1.5 text-left text-small text-muted hover:bg-panel-2 hover:text-text"
+              >
+                <IconSettings size={12} />
+                Manage orgs…
+              </button>
+            </div>
+          )}
           {hidden.length > 0 && (
             <div className="mt-1 border-t border-border pt-1">
               <button

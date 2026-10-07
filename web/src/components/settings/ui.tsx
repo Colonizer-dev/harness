@@ -6,7 +6,7 @@ import { Badge, InfoButton, cx } from "../ui";
 // The shared pieces of every settings page: the pane frame and the row layout. The section ids the whole screen is keyed by live here too.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "cockpit" | "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | "built-with" | "secrets" | `module:${string}` | `org:${string}`;
+export type SectionId = "cockpit" | "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | "built-with" | "secrets" | "orgs" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 

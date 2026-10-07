@@ -117,10 +117,10 @@ fn repo_override(settings: &OrgSettings, repo: &str) -> Option<AutoColonize> {
         .map(|(_, v)| *v)
 }
 
-/// The org this feature treats as hidden. Today that is a workspace switched off (`enabled: false`),
-/// the only hiding there is; the per-org `hidden` switch of issue #1213 joins here when it lands.
+/// The org this feature treats as hidden: a workspace switched off (`enabled: false`) or hidden from
+/// Colonizer (`hidden: true`, issue #1213, the same switch `repo_scope` leaves out of `*`).
 pub(crate) fn org_hidden(settings: &OrgSettings) -> bool {
-    !orgs::org_enabled(settings)
+    !orgs::org_enabled(settings) || settings.hidden
 }
 
 /// The mode `repo` runs in, and whose setting that is: the repository's own, else its org's, else off.
