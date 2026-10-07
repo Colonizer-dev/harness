@@ -18,6 +18,16 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.10] - 2026-10-07
+
+### Added
+
+- **Queued colonies can jump the line.** The start queue orders by priority, then age. An org setting `queue_priority` (High, Normal or Low in the cockpit) sets where an org stands, `POST /api/sessions/{id}/priority`, `move-to-front` and `move-to-back` (Move to front and Move to back on a queued colony and in the Overview table) set one colony, and an org's `max_wait_hours` lifts a colony that has waited too long to High. The Nest header says which colony is next up. The global, org and per-repository limits still apply. ([#1156])
+
+### Fixed
+
+- **The Nest's frontier badge counts open issues, not open pull requests, in the repositories you colonize.** It used to sum GitHub's `open_issues_count` over every repository the token can see, which counts open pull requests too and includes forks, archived repositories, repositories with issues switched off and orgs Colonizer never works in; on one install it read 2671. The mothership now counts issues only, with the search API's `is:issue is:open` once per org, skips forks, archived and issues-off repositories, and in the all-workspaces view covers only your workspaces. `GET /api/status` carries it as `backlog: {issues, repos, as_of, by_org}`, cached about ten minutes and refreshed behind the status poll, so the badge no longer freezes at page load. Its tooltip reads "21 open issues in 5 repositories you colonize · as of 14:07". ([#1144])
+
 ## [v0.2.9] - 2026-10-07
 
 ### Added
@@ -2794,7 +2804,10 @@ Macs. ([#74])
 [#1140]: https://github.com/Colonizer-dev/harness/issues/1140
 [#1141]: https://github.com/Colonizer-dev/harness/issues/1141
 [#1143]: https://github.com/Colonizer-dev/harness/issues/1143
+[#1144]: https://github.com/Colonizer-dev/harness/issues/1144
 [#1145]: https://github.com/Colonizer-dev/harness/issues/1145
+[#1156]: https://github.com/Colonizer-dev/harness/issues/1156
+[v0.2.10]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.10
 [v0.2.9]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.9
 [v0.2.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.8
 [v0.2.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.7
