@@ -1,0 +1,22 @@
+/* A setting the search just jumped to (settings/flashField.ts): an accent ring that fades out. */
+@keyframes setting-flash {
+  0%,
+  35% {
+    box-shadow: 0 0 0 2px var(--accent), 0 0 0 7px var(--accent-ring);
+    background-color: var(--accent-soft);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent, 0 0 0 7px transparent;
+    background-color: transparent;
+  }
+}
+.setting-flash {
+  border-radius: 0.5rem;
+  animation: setting-flash 2.4s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .setting-flash {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+}

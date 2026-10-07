@@ -56,7 +56,7 @@ export function LiveMapPane({
         </p>
       ) : (
         <div className="space-y-4">
-          <Row id="live-map-switch" label="Show this mothership on the live map" inline>
+          <Row id="live-map-switch" label="Show this mothership on the live map" help="Adds one anonymous dot to colonizer.dev/live. Nothing about your code is sent." inline>
             <Switch
               id="live-map-switch"
               labelledBy="live-map-switch-label"

@@ -55,7 +55,7 @@ export function UsagePane({
         </p>
       ) : (
         <div className="space-y-4">
-          <Row id="usage-switch" label="Allow an anonymous usage batch" inline>
+          <Row id="usage-switch" label="Allow an anonymous usage batch" help="Sent at most once a day, and only to an endpoint you name. You can read the whole batch below first." inline>
             <Switch
               id="usage-switch"
               labelledBy="usage-switch-label"

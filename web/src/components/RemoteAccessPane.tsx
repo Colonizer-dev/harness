@@ -345,7 +345,7 @@ export function RemoteAccessPane({
         </p>
       ) : (
         <div className="space-y-4">
-          <Row id="remote-switch" label="Allow remote access" inline>
+          <Row id="remote-switch" label="Allow remote access" help="Opens this cockpit from your phone or another computer through the Colonizer relay." inline>
             <Switch
               id="remote-switch"
               labelledBy="remote-switch-label"
@@ -373,7 +373,7 @@ export function RemoteAccessPane({
             </p>
           </div>
 
-          <Row id="remote-github" label="Ask for GitHub sign-in first" inline>
+          <Row id="remote-github" label="Ask for GitHub sign-in first" help="Optional. On, every device signs in with GitHub before it can use the pair code; off, the pair code alone is enough." inline>
             <Switch
               id="remote-github"
               labelledBy="remote-github-label"
@@ -383,10 +383,7 @@ export function RemoteAccessPane({
               onChange={(checked) => void toggleGithub(checked)}
             />
           </Row>
-          <p className="text-small-lg text-muted">
-            Optional. On, the relay sends every device through GitHub sign-in as the link’s owner before the pair code; off, the
-            pair code alone is enough. The relay limits how often a device or the link may try, either way.
-          </p>
+          <p className="text-small-lg text-muted">The relay limits how often a device or the link may try, either way.</p>
 
           {remote.enabled && (
             <div className="space-y-4 border-t border-border pt-4">

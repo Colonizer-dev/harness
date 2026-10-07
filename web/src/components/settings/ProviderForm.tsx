@@ -29,6 +29,7 @@ import {
   type LimitKey,
   type ModelMapRow,
   type PricingDraft,
+  providerNeedsKey,
 } from "./providerCatalog";
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /** The saved-key state badge, shown on a provider row and on the form header. */
 export function KeyBadge({ provider }: { provider: ModelProvider }) {
-  if (provider.auth === "none") return <Badge>No key needed</Badge>;
+  if (!providerNeedsKey(provider)) return <Badge>No key needed</Badge>;
   return provider.has_key ? <Badge tone="ok">Key saved</Badge> : <Badge tone="warn">No key</Badge>;
 }
 

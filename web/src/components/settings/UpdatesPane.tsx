@@ -253,7 +253,7 @@ export function UpdatesPane({
             </div>
           )}
 
-          <Row id="update-check-switch" label="Check for new releases" inline>
+          <Row id="update-check-switch" label="Check for new releases" help="Looks for a newer Colonizer in the background and tells you here." inline>
             <Switch
               id="update-check-switch"
               labelledBy="update-check-switch-label"

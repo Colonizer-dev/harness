@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { errorMessage, useApi } from "../context";
 import type {
+  AutonomyStatus,
   BuiltWith,
   HarnessStatus,
   ModelOption,
@@ -40,7 +41,38 @@ import { NotificationsPane } from "./settings/NotificationsPane";
 import { ModulePane } from "./settings/ModulePane";
 import { ProvidersPane } from "./settings/ProvidersPane";
 import { draftOf, isDirty, kindInfo, type ModuleDraft } from "./settings/moduleFields";
-import { HeroContext, Pane, SectionNav, TopNav, type NavGroup, type SectionId } from "./settings/ui";
+import { CrumbContext, HeroContext, Pane, type SectionId } from "./settings/ui";
+import {
+  NeedsYou,
+  PageChips,
+  SettingsList,
+  SettingsRail,
+  SettingsSearchBox,
+  SettingsSearchResults,
+  SettingsSidebar,
+  type AttentionItem,
+  type NavGroupModel,
+  type NavPage,
+} from "./settings/SettingsNav";
+import {
+  FIXED_PAGES,
+  GROUPS,
+  buildSearchIndex,
+  groupInfo,
+  groupOf,
+  searchSettings,
+  sectionFromSettingsPath,
+  settingsPath,
+  worstAttention,
+  type Attention,
+  type SearchHit,
+} from "./settings/nav";
+import { providerMissingKey } from "./settings/providerCatalog";
+import { flashField } from "./settings/flashField";
+import "../settingsFlash.css";
+import { JUDGE_ALERT_AFTER, judgeAlertTitle } from "../cockpit/Header";
+import { go, usePath } from "../router";
+import { useOpenSecrets, providerSecretId } from "../secretsNav";
 
 // ---------------------------------------------------------------------------
 // The settings screen's shell and state. Every section pane lives in
@@ -207,10 +239,16 @@ export function SettingsBody({
 }) {
   const api = useApi();
   const narrow = useMediaQuery("(max-width: 699px)");
-  // A narrow window opens on the section list; a wide one on the first section.
-  const [section, setSection] = useState<SectionId | null>(() => initialSection ?? (narrow ? null : "connections"));
+  const wide = useMediaQuery("(min-width: 1024px)");
+  const openSecrets = useOpenSecrets();
+  // In the cockpit the address is the state: `/settings/<group>/<page>` names the page, so the page
+  // can be bookmarked and the back button walks the pages. The dialog keeps its own.
+  const path = usePath();
+  const [localSection, setLocalSection] = useState<SectionId | null>(() => (embedded ? null : (initialSection ?? null)));
+  const urlSection = embedded ? sectionFromSettingsPath(path) : null;
+  const section: SectionId | null = embedded ? urlSection : localSection;
   // Where focus returns when a narrow window goes back to the section list.
-  const lastSection = useRef<SectionId>(initialSection ?? "connections");
+  const lastSection = useRef<SectionId | undefined>(undefined);
   // "Set key" in a model picker: Model providers, opened on that provider's editor.
   const [focusProvider, setFocusProvider] = useState<string | undefined>(undefined);
   const openAt = (section: "providers", providerId?: string) => {
@@ -218,9 +256,28 @@ export function SettingsBody({
     select(section);
   };
   const select = (id: SectionId) => {
+    // Secrets is a page of its own, not a pane: it lives in the cockpit's Secrets view.
+    if (id === "secrets") {
+      openSecrets?.();
+      return;
+    }
     lastSection.current = id;
-    setSection(id);
+    if (embedded) go(settingsPath(id));
+    else setLocalSection(id);
   };
+  // An external jump ("open providers") lands here once, unless the address already names a page.
+  useEffect(() => {
+    if (embedded && initialSection && initialSection !== "secrets" && sectionFromSettingsPath(window.location.pathname) === null) {
+      go(settingsPath(initialSection));
+    }
+    // Once, on mount: the body is keyed on the request that opened it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // The search box: what is typed, and the field a result asked to land on.
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const [landing, setLanding] = useState<{ section: SectionId; label: string; n: number } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [modules, setModules] = useState<ModuleInfo[] | null>(null);
   const [modulesError, setModulesError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, ModuleDraft>>({});
@@ -284,12 +341,11 @@ export function SettingsBody({
     void loadProviders();
   }, [loadProviders]);
 
-  const active: SectionId | null = narrow ? section : (section ?? "connections");
+  const defaultSection: SectionId = setup?.autoOpen ? "setup" : "cockpit";
+  const active: SectionId | null = narrow ? section : (section ?? defaultSection);
 
   const github = status?.github;
   const claude = status?.claude;
-  const connectionsTone: Tone | null = !status ? null : github?.connected && claude?.configured ? "ok" : "err";
-  const runtimeBroken = Boolean(status && (!status.sandbox.msb_version || status.sandbox.claude_bin_error || meshBroken(status.mesh)));
   // The Setup summary tone shares one derivation with the pane itself.
   const setupToneValue: Tone | null = setup ? setupTone(setup) : null;
 
@@ -301,128 +357,159 @@ export function SettingsBody({
     onModulesChanged(next);
   };
 
-  const groups: NavGroup[] = [
-    {
-      label: "General",
-      items: [
-        {
-          id: "cockpit",
-          label: "Your cockpit",
-          hint: "The address to bookmark for this cockpit",
-        },
-        {
-          id: "setup",
-          label: "Setup",
-          hint: "The checklist for the first colony",
-          tone: setupToneValue,
-          toneText:
-            setupToneValue === "err" ? "Needs setup" : setupToneValue === "ok" ? "All set" : setupToneValue === "warn" ? "Not finished yet" : undefined,
-        },
-        {
-          id: "connections",
-          label: "Connections",
-          hint: "GitHub and Claude",
-          tone: connectionsTone,
-          toneText: connectionsTone === "ok" ? "All connected" : connectionsTone === "err" ? "Needs setup" : undefined,
-        },
-        {
-          id: "providers",
-          label: "Model providers",
-          hint: "Claude, and other Anthropic-compatible endpoints",
-          // Anthropic is always in the list as a built-in row, so the count follows what is on screen.
-          badge: providers ? String(providers.length + 1) : undefined,
-        },
-        { id: "runtime", label: "Runtime", hint: "Detected on this machine", tone: runtimeBroken ? "err" : null, toneText: runtimeBroken ? "Something is missing" : undefined },
-        {
-          id: "live-map",
-          label: "Live map",
-          hint: "This mothership as a dot on colonizer.dev",
-          badge: telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
-        },
-        {
-          id: "remote",
-          label: "Remote access",
-          hint: "Open this cockpit from your phone or another computer",
-          badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
-        },
-        {
-          id: "phone",
-          label: "Add your phone",
-          hint: "Pair your phone with a code, and revoke it here",
-        },
-        {
-          id: "tokens",
-          label: "API tokens",
-          hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
-        },
-        {
-          id: "fleet",
-          label: "Fleet",
-          hint: "Let other machines join this one, or join another's fleet, with a pairing code",
-        },
-        {
-          id: "updates",
-          label: "Updates",
-          hint: "Which Colonizer this is, and whether a newer one is out",
-          tone: update?.available ? "ok" : null,
-          toneText: update?.available ? `${update.latest?.version} available` : undefined,
-          badge: update && !update.available ? update.installed.version : undefined,
-        },
-        {
-          id: "usage",
-          label: "Usage data",
-          hint: "An anonymous batch, shown in full and sent only to an endpoint you name",
-          badge: usage ? (usage.enabled ? "On" : "Off") : undefined,
-        },
-        {
-          id: "notifications",
-          label: "Notifications",
-          hint: "What tells you a colony needs you when the tab is not in front",
-          // The badge follows the two opt-in channels; the in-tab layer is on by default and needs no advertising.
-          badge: notifications.sound || notifications.browser ? "On" : "Off",
-        },
-        {
-          id: "desktop",
-          label: "Desktop",
-          hint: "Install the cockpit as an app, start the mothership at login",
-        },
-        {
-          id: "built-with",
-          label: "Built with",
-          hint: "What this venture is built with, and the page that says so",
-        },
-      ],
-    },
-    {
-      label: "Modules",
-      loading: !modules && !modulesError,
-      error: modulesError,
-      items: (modules ?? []).map((m) => ({
-        id: `module:${m.kind}` as const,
-        label: kindInfo(m.kind).title,
-        hint: kindInfo(m.kind).description,
-        badge: m.enabled ? undefined : "Off",
-        dirty: isDirty(m, drafts[m.kind]),
-      })),
-    },
-    ...(orgs && orgs.length > 0
-      ? [
-          {
-            label: "Workspaces",
-            items: orgs
-              .filter((o) => !o.awaiting_decision)
-              .map((o) => ({
-                id: `org:${o.org}` as const,
-                label: o.org,
-                hint: `${o.colonies.live} live · ${o.colonies.total} ${o.colonies.total === 1 ? "colony" : "colonies"}`,
-                badge: orgEnabled(o.settings) ? undefined : "Off",
-              })),
-          },
-        ]
-      : []),
-  ];
+  // What the autonomy judge last said, for the red dot on Models → Autonomy. Older mothership builds
+  // have no such route; the dot simply never appears.
+  const [judge, setJudge] = useState<AutonomyStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .autonomyStatus()
+      .then((j) => !cancelled && setJudge(j))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
-  const back = narrow ? () => setSection(null) : undefined;
+  // Everything that needs the person, page by page: amber needs you, red is broken. The same list
+  // draws the dots in the menu and the callout at the top of the page, so they cannot disagree.
+  const attention: Partial<Record<SectionId, AttentionItem[]>> = {};
+  const flag = (id: SectionId, item: AttentionItem) => (attention[id] = [...(attention[id] ?? []), item]);
+  if (status) {
+    if (!github?.connected) flag("connections", { tone: "warn", text: "GitHub is not connected, so colonies cannot read or push code. Sign in below." });
+    if (!claude?.configured) flag("connections", { tone: "warn", text: "Claude is not connected, so colonies have nothing to think with. Log in or add a key below." });
+    if (!status.sandbox.msb_version) flag("runtime", { tone: "err", text: "microsandbox is missing, so colonies cannot start. The page lists how to install it." });
+    if (status.sandbox.claude_bin_error) flag("runtime", { tone: "err", text: `The Claude binary has a problem: ${status.sandbox.claude_bin_error}` });
+    if (meshBroken(status.mesh)) flag("runtime", { tone: "err", text: "The private network between the mothership and colonies is not healthy. See the Mesh module." });
+  }
+  if (setup && setupToneValue && setupToneValue !== "ok") flag("setup", { tone: "warn", text: setup.firstActionable ? `Next step: ${setup.firstActionable.title}.` : "Your setup checklist is not finished yet." });
+  const needKey = (providers ?? []).filter(providerMissingKey);
+  if (needKey.length > 0) {
+    flag("providers", {
+      tone: "warn",
+      text: `${needKey.length === 1 ? "One provider needs" : `${needKey.length} providers need`} a key: ${needKey.map((p) => p.name).join(", ")}.`,
+      action: openSecrets ? { label: "Set key", run: () => openSecrets(providerSecretId(needKey[0].id)) } : undefined,
+    });
+  }
+  if (judge && judge.consecutive_failures >= JUDGE_ALERT_AFTER) {
+    flag("module:autonomy", { tone: "err", text: judgeAlertTitle(judge), action: { label: "Open Model providers", run: () => select("providers") } });
+  } else if (judge?.enabled && judge.problem) {
+    flag("module:autonomy", { tone: "warn", text: judge.problem });
+  }
+  if (remote?.enabled && !remote.connected) flag("remote", { tone: "warn", text: "Remote access is on, but the tunnel is offline right now." });
+  const attentionOf = (id: SectionId): Attention | null => worstAttention((attention[id] ?? []).map((i) => i.tone));
+
+  // The pages, in the order each group lists them: the fixed ones, then modules by kind, then workspaces.
+  const pageBase = (id: SectionId): NavPage => {
+    if (id.startsWith("module:")) {
+      const info = kindInfo(id.slice("module:".length));
+      return { id, label: info.title, hint: info.description };
+    }
+    if (id.startsWith("org:")) {
+      const org = orgs?.find((o) => sameOrg(o.org, id.slice("org:".length)));
+      return { id, label: id.slice("org:".length), hint: org ? `${org.colonies.live} live · ${org.colonies.total} ${org.colonies.total === 1 ? "colony" : "colonies"}` : "Settings for this workspace" };
+    }
+    const page = FIXED_PAGES.find((p) => p.id === id);
+    return { id, label: page?.label ?? id, hint: page?.hint ?? "" };
+  };
+  const badges: Partial<Record<SectionId, string | undefined>> = {
+    providers: providers ? String(providers.length + 1) : undefined,
+    "live-map": telemetry ? (telemetry.enabled ? "On" : "Off") : undefined,
+    remote: remote ? (remote.enabled ? "On" : "Off") : undefined,
+    updates: update?.available ? `${update.latest?.version} available` : update ? update.installed.version : undefined,
+    usage: usage ? (usage.enabled ? "On" : "Off") : undefined,
+    // The badge follows the two opt-in channels; the in-tab layer is on by default and needs no advertising.
+    notifications: notifications.sound || notifications.browser ? "On" : "Off",
+  };
+  const sectionIds: SectionId[] = [
+    ...FIXED_PAGES.map((p) => p.id),
+    ...(modules ?? []).map((m) => `module:${m.kind}` as SectionId),
+    ...(orgs ?? []).filter((o) => !o.awaiting_decision).map((o) => `org:${o.org}` as SectionId),
+  ];
+  const groups: NavGroupModel[] = GROUPS.map((info) => {
+    const pages: NavPage[] = sectionIds
+      .filter((id) => groupOf(id) === info.id)
+      .map((id) => {
+        const base = pageBase(id);
+        const module = id.startsWith("module:") ? modules?.find((m) => `module:${m.kind}` === id) : undefined;
+        const org = id.startsWith("org:") ? orgs?.find((o) => sameOrg(o.org, id.slice(4))) : undefined;
+        return {
+          ...base,
+          attention: attentionOf(id),
+          attentionText: attention[id]?.[0]?.tone === "err" ? "broken" : "needs you",
+          badge: module ? (module.enabled ? undefined : "Off") : org ? (orgEnabled(org.settings) ? undefined : "Off") : badges[id],
+          dirty: module ? isDirty(module, drafts[module.kind]) : undefined,
+        };
+      });
+    return {
+      info,
+      pages,
+      attention: worstAttention(pages.map((p) => p.attention)),
+      loading: info.id === "runtime" && !modules && !modulesError,
+      error: info.id === "runtime" ? modulesError : null,
+    };
+  }).filter((g) => g.pages.length > 0 || g.info.id === "runtime");
+
+  // Search: pages, their fields, every module setting and every provider, found by label, help and synonyms.
+  const index = useMemo(
+    () =>
+      buildSearchIndex({
+        pages: groups.flatMap((g) => g.pages),
+        modules: (modules ?? []).map((m) => ({ kind: m.kind, title: kindInfo(m.kind).title, schema: m.schema })),
+        providers: (providers ?? []).map((p) => ({ name: p.name, models: p.models, missingKey: providerMissingKey(p) })),
+        orgs: (orgs ?? []).filter((o) => !o.awaiting_decision).map((o) => o.org),
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [modules, providers, orgs, status, setup, update, remote],
+  );
+  const crumbsOf = (entry: { section: SectionId; label: string; field: boolean }): string[] => {
+    const page = groups.flatMap((g) => g.pages).find((p) => p.id === entry.section);
+    const crumbs = [groupInfo(groupOf(entry.section)).label, page?.label ?? entry.label];
+    return entry.field && page?.label !== entry.label ? [...crumbs, entry.label] : crumbs;
+  };
+  const hits = searchSettings(index, crumbsOf, query);
+  const pick = (hit: SearchHit) => {
+    setQuery("");
+    setLanding({ section: hit.entry.section, label: hit.entry.field ? hit.entry.label : "", n: Date.now() });
+    select(hit.entry.section);
+  };
+  const searching = query.trim().length > 0;
+  const search = {
+    box: <SettingsSearchBox value={query} onChange={setQuery} onSubmit={() => hits[0] && pick(hits[0])} inputRef={searchRef} />,
+    results: searching ? <SettingsSearchResults query={query} hits={hits} onPick={pick} /> : null,
+  };
+
+  // "/" jumps to the search box from anywhere on the page that is not already a text field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true'], dialog:not([open])")) return;
+      if (!searchRef.current) return;
+      e.preventDefault();
+      searchRef.current.focus();
+      searchRef.current.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // A result for a field lands on its page, then finds the field's label there and flashes it. The
+  // page may still be loading its data, so the look is repeated for a moment.
+  useEffect(() => {
+    if (!landing || active !== landing.section) return;
+    if (!landing.label) {
+      contentRef.current?.scrollTo?.({ top: 0 });
+      return;
+    }
+    let tries = 0;
+    const look = window.setInterval(() => {
+      if ((contentRef.current && flashField(contentRef.current, landing.label)) || ++tries > 12) window.clearInterval(look);
+    }, 150);
+    return () => window.clearInterval(look);
+  }, [landing, active]);
+
+  const back = narrow ? () => (embedded ? go("/settings", { replace: true }) : setLocalSection(null)) : undefined;
 
   /** Two or three facts for the hero card, from what this screen already has loaded. */
   const heroStats = (id: SectionId): HeroStat[] => {
@@ -550,23 +637,34 @@ export function SettingsBody({
   const pane: ReactNode = active ? renderSection(active, sectionContext) : null;
 
   // What the page is for, as a card: Pane shows it at the top of its body; Setup and a workspace
-  // draw their own frame, so for them it sits above the pane instead.
-  const hero = active ? <SectionHero guide={guideFor(active)} stats={heroStats(active)} flow={active === "module:source" ? sourceFlow(drafts.source?.settings, sessions) : undefined} /> : null;
+  // draw their own frame, so for them it sits above the pane instead. What needs the person comes first.
+  const hero = active ? (
+    <>
+      <NeedsYou items={attention[active] ?? []} />
+      <SectionHero guide={guideFor(active)} stats={heroStats(active)} flow={active === "module:source" ? sourceFlow(drafts.source?.settings, sessions) : undefined} />
+    </>
+  ) : null;
   const ownFrame = active === "setup" || Boolean(active?.startsWith("org:"));
   const framed = (
     <SettingsNavContext.Provider value={openAt}>
-      <HeroContext.Provider value={ownFrame ? null : hero}>
-        {ownFrame ? (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="page-pad shrink-0 px-5 pt-4">{hero}</div>
-            {pane}
+      <CrumbContext.Provider value={active ? groupInfo(groupOf(active)).label : null}>
+        <HeroContext.Provider value={ownFrame ? null : hero}>
+          {/* Keyed on the page, so moving between pages starts the new one at its top. */}
+          <div key={active ?? "list"} ref={contentRef} className="flex min-h-0 min-w-0 flex-1 flex-col [--page-max:760px]">
+            {ownFrame ? (
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <div className="page-pad shrink-0 px-5 pt-4">{hero}</div>
+                {pane}
+              </div>
+            ) : (
+              pane
+            )}
           </div>
-        ) : (
-          pane
-        )}
-      </HeroContext.Provider>
+        </HeroContext.Provider>
+      </CrumbContext.Provider>
     </SettingsNavContext.Provider>
   );
+  const activeGroup = active ? groups.find((g) => g.pages.some((p) => p.id === active)) : undefined;
 
   return (
     <div className={cx("flex flex-col", embedded ? "h-full min-h-0" : "h-[min(680px,calc(100dvh-24px))]")}>
@@ -588,15 +686,35 @@ export function SettingsBody({
       )}
       {narrow ? (
         active === null ? (
-          <SectionNav layout="list" groups={groups} active={null} onSelect={select} initialFocus={lastSection.current} />
+          <SettingsList groups={groups} onSelect={select} initialFocus={lastSection.current} search={search} />
         ) : (
           framed
         )
       ) : (
-        <>
-          <TopNav groups={groups} active={active} onSelect={select} />
-          <div className="flex min-h-0 flex-1">{framed}</div>
-        </>
+        <div className="flex min-h-0 flex-1">
+          {wide ? (
+            <SettingsSidebar groups={groups} active={active} onSelect={select} search={search} />
+          ) : (
+            <SettingsRail groups={groups} active={active} onSelect={select} />
+          )}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {!wide && (
+              <div className="shrink-0 border-b border-border" data-search-scope>
+                <div className="mx-auto w-full max-w-[760px] px-5 py-2.5">{search.box}</div>
+              </div>
+            )}
+            {!wide && search.results ? (
+              <div data-search-scope className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+                <div className="mx-auto w-full max-w-[760px] px-3 py-3">{search.results}</div>
+              </div>
+            ) : (
+              <>
+                {!wide && <PageChips group={activeGroup} active={active} onSelect={select} />}
+                {framed}
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
