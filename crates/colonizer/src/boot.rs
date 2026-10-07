@@ -16,7 +16,7 @@ use crate::{
     sandbox::{self, BootSpec, Mount, Secret},
     sessions::{
         AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, ModelSubstitution, RunEndCause, Session, SessionLogger, SessionStatus,
-        agent_env, agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
+        agent_env, agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled, wait_until_ready,
     },
     stack,
     util::{append_line, random_token, truncate},
@@ -811,6 +811,23 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // the marker, and only a *fresh* boot reads it: a resume carries the work forward instead.
     let handoff = !resume && crate::handoff::seeded(&dir);
     let bare = app.bare_repo(&s.repo);
+    // A fresh colony's mirror sync (a `git fetch`) needs only the repository, not the issue or the
+    // base, so it runs while the issue is fetched (issue #1143). The sync holds the repository lock
+    // only for itself; the worktree is cut under the lock again afterwards. A resume syncs nothing.
+    let sync = (!resume).then(|| {
+        let (app, repo, bare, log) = (app.clone(), s.repo.clone(), bare.clone(), app.logger(id));
+        tokio::spawn(async move {
+            let lock = app.repo_lock(&repo).await;
+            let _guard = lock.lock().await;
+            github::with_boot_retry(
+                &format!("syncing the local clone of {repo}"),
+                Some(&log),
+                boot_started_at,
+                || github::sync_repo(&app, &repo, &bare, &log),
+            )
+            .await
+        })
+    });
     // A fresh colony reads its issue from GitHub, riding out blips on the boot retry budget; a
     // resumed one already has it — stored at its first boot, or recovered from its first brief —
     // and does not ask GitHub again, so a GitHub that refuses or is unreachable cannot fail it.
@@ -896,18 +913,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         refresh_base(app, &s.repo, &bare, &base, &log).await;
         admin
     } else {
-        let lock = app.repo_lock(&s.repo).await;
-        let _guard = lock.lock().await;
-        let synced = github::with_boot_retry(
-            &format!("syncing the local clone of {}", s.repo),
-            Some(&log),
-            boot_started_at,
-            || github::sync_repo(app, &s.repo, &bare, &log),
-        )
-        .await;
+        let synced = match sync.context("a fresh boot starts the mirror sync")?.await {
+            Ok(synced) => synced,
+            Err(e) => Err(anyhow::anyhow!("the mirror sync task failed: {e}")),
+        };
         if let Err(e) = synced {
             return Err(github::access_error(app, &s.repo, e).await);
         }
+        let lock = app.repo_lock(&s.repo).await;
+        let _guard = lock.lock().await;
         log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
             .await;
         // A hand-off names the branch the local session ran on; the worktree is cut from origin, so a
@@ -2137,6 +2151,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         let node = app.mesh().await?.wait_online(&s.sandbox, Duration::from_secs(120)).await?;
         let _ = app.store().remove_file(id, "vm/mesh-authkey").await;
         log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
+        // Bring the WireGuard path up now, so the first real request does not pay for the handshake.
+        let warmed = app.mesh().await?.warm(&node.ip).await;
+        app.session_log(id, "debug", format!("mesh path warm-up to {}: {warmed}", node.ip))
+            .await;
         app.update_session(id, |x| {
             x.mesh = Some(MeshInfo {
                 name: x.sandbox.clone(),
@@ -2152,12 +2170,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The base covers the guest's own start plus one health attempt left in flight when agentd
     // starts serving; a resume's readiness waits ride on top of it (issue #700, `restore_wait`).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90) + restore_wait;
-    loop {
-        match agentd_http(app, &s, "GET", "/v1/health").await {
-            Ok((200, _)) => break,
-            _ if tokio::time::Instant::now() > deadline => bail!("{}", AGENTD_NOT_READY),
-            _ => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
+    // Each attempt is cut off after a short limit and the next starts at once (issue #1143): the
+    // first dial through the mesh's SOCKS proxy can sit on a lost SYN for ~5 s before it fails.
+    let ready = wait_until_ready(
+        deadline,
+        || agentd_http(app, &s, "GET", "/v1/health"),
+        |n, took, outcome| async move {
+            app.session_log(id, "debug", format!("agentd readiness attempt {n}: {outcome} after {took:?}"))
+                .await
+        },
+    )
+    .await;
+    if !ready {
+        bail!("{}", AGENTD_NOT_READY);
     }
     log.info("agent daemon is ready").await;
     timing.mark("agentd");
