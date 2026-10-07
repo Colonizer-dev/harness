@@ -169,6 +169,8 @@ pub struct App {
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
     /// bypasses it.
     pub host_cache: Mutex<Option<crate::runtime::HostCached>>,
+    /// The live host probe behind `auto` sizing and admission, and its last verdict (issue #1141).
+    pub capacity: crate::capacity::Capacity,
     /// Response bodies kept with their ETag / Last-Modified, so a refresh re-asks GitHub and the
     /// registries conditionally and a 304 reuses the body (`<data_dir>/cache/http`).
     pub http_cache: crate::cache_store::DiskCache,
@@ -294,6 +296,7 @@ impl App {
             graft: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             host_cache: Mutex::new(None),
+            capacity: crate::capacity::Capacity::new(),
             http_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), crate::cache_store::HTTP_MAX_BYTES),
             img_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), crate::cache_store::IMG_MAX_BYTES),
             judge_health: Mutex::new(crate::autonomy::Health::default()),

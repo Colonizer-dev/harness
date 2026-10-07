@@ -83,6 +83,13 @@ describe("HostView", () => {
     expect(html).toContain("the mothership keeps no host history");
   });
 
+  it("shows the auto capacity line only in auto mode", () => {
+    const sandbox = { msb_version: null, image: "x", mode: "auto", running: 7, room_for: 2, waiting_reason: null, free_bytes: 18 * 1024 ** 3, load: 9, cpu_cores: 32, size: { cpus: 3, memory_gb: 11, slots: 10, reserve_gb: 12, reserve_cpus: 2 } } as HarnessStatus["sandbox"];
+    const html = render({ host, sandbox } as HarnessStatus);
+    expect(html).toContain("auto: 7 running · room for 2 more (18 GB free, load 9/32) · each colony 3 vCPUs, 11 GB");
+    expect(render({ host, sandbox: { ...sandbox, mode: "fixed" } } as HarnessStatus)).not.toContain("auto-capacity");
+  });
+
   it("says so while there is no host reading", () => {
     expect(render(null)).toContain("Waiting for the mothership");
   });

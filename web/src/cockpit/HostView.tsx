@@ -11,7 +11,7 @@ import { SESSION_STATUS, isLive, timeAgo } from "../components/ui";
 import type { FleetHost, HarnessStatus, Session, StorageSummary } from "../types";
 import { KpiStrip, Rules, Section, type KpiDef } from "./DashChart";
 import { sparkPoints, TONE_VAR } from "./dash";
-import { formatBytes, formatUptime } from "./host";
+import { autoCapacityLine, formatBytes, formatUptime } from "./host";
 import { parseSize, useHostHistory, type HostSample } from "./hostHistory";
 
 const pct = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? "—" : `${Math.round(v * 100)}%`);
@@ -111,6 +111,7 @@ export function HostView({
   const coloniesDisk = sessions.reduce((t, s) => t + (s.host_disk_bytes ?? 0), 0);
   const liveHere = sessions.filter((s) => isLive(s.status)).sort((a, b) => (b.boot_cpus ?? 0) - (a.boot_cpus ?? 0));
   const queued = sessions.filter((s) => s.status === "queued").length;
+  const capacityLine = autoCapacityLine(sandbox);
   const os = runtime?.os ? `${runtime.os.name}${runtime.os.version ? ` ${runtime.os.version}` : ""}` : null;
 
   if (!host) {
@@ -210,6 +211,12 @@ export function HostView({
           />
           <Meter label="microVM slots" used={host.microvms_live} total={host.microvms_ceiling} detail={`${host.microvms_live} of ${host.microvms_ceiling}${queued ? ` · ${queued} queued` : ""}`} />
         </Rules>
+        {capacityLine && (
+          <p className="mt-3 text-body-sm tabular-nums text-muted" data-testid="auto-capacity">
+            {capacityLine}
+            {sandbox?.size ? ` · each colony ${sandbox.size.cpus} vCPUs, ${sandbox.size.memory_gb} GB` : ""}
+          </p>
+        )}
       </Section>
 
       <Section

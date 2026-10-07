@@ -765,7 +765,7 @@ async fn launch_hunter(app: Shared, brief: Value) -> Result<Session, String> {
     session.instructions = brief["instructions"].as_str().unwrap_or_default().to_string();
     session.autopilot = brief["autopilot"].as_bool().unwrap_or(false);
     let modules = app.modules.read().await.clone();
-    let max_parallel = crate::orgs::global_max_parallel(&modules) as usize;
+    let max_parallel = crate::capacity::max_parallel(&app, &modules).await;
     let org_settings = app.org_settings(&owner);
     let org_limit = crate::orgs::org_max_parallel(&org_settings);
     let repo_limit = crate::queue::repo_limit(&modules, &org_settings);

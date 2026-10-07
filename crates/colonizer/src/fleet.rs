@@ -6,7 +6,7 @@
 //! who wants a given host to answer these polls sets that host's own `COLONIZER_BIND` to a private
 //! interface IP (never `0.0.0.0`). Nothing here changes that default or opens anything new.
 
-use crate::{Shared, orgs, runtime, sessions::SessionStatus};
+use crate::{Shared, runtime, sessions::SessionStatus};
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -144,7 +144,7 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
     let slots_in_use = sessions.iter().filter(|s| s.holds_slot()).count();
     let queue_depth = sessions.iter().filter(|s| s.status == SessionStatus::Queued).count();
     drop(sessions);
-    let slots_ceiling = orgs::global_max_parallel(&modules) as usize;
+    let slots_ceiling = crate::capacity::max_parallel(app, &modules).await;
     HostSummary {
         id: host.id.clone(),
         name: host.hostname.clone().unwrap_or_else(|| host.id.clone()),
