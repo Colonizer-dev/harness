@@ -406,6 +406,145 @@ fn valid_preset(preset: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Presets a base URL names: the built-in presets, then every catalogue entry whose URL has no
+/// `${VAR}` placeholder (`web/src/providerCatalog.ts`). A URL two entries share is left out, since it
+/// names neither; the first row wins for a URL a built-in preset also uses. The web test
+/// `providerPresetInference.test.ts` fails when this table drifts from the catalogue.
+const KNOWN_PRESETS: &[(&str, &str)] = &[
+    ("deepseek", "https://api.deepseek.com/anthropic"),
+    ("openai", "https://api.openai.com"),
+    ("zai", "https://api.z.ai/api/anthropic"),
+    (
+        "alibaba",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+    ),
+    ("9527code", "https://9527.codes"),
+    ("a6api", "https://api.a6api.com"),
+    ("aicodemirror", "https://api.aicodemirror.ai/api/claudecode"),
+    ("aicodewith", "https://api.aicodewith.ai"),
+    ("aicoding", "https://api.aicoding.inc"),
+    ("aigocode", "https://api.aigocode.app"),
+    ("aihubmix", "https://aihubmix.com"),
+    ("amux", "https://api.amux.ai"),
+    ("apikey-fun", "https://api.apikey.fan"),
+    ("apinebula", "https://apinebula.ai"),
+    ("atlascloud", "https://api.atlascloud.ai"),
+    ("baidu-qianfan-coding-plan", "https://qianfan.baidubce.com/anthropic/coding"),
+    (
+        "baidu-qianfan-token-plan",
+        "https://qianfan.baidubce.com/anthropic/tokenplan/personal",
+    ),
+    ("bailing", "https://api.tbox.cn/api/anthropic"),
+    ("byteplus", "https://ark.ap-southeast.bytepluses.com/api/coding"),
+    ("ccsub", "https://www.ccsub.net"),
+    ("cherryin", "https://open.cherryin.net"),
+    ("claudeapi", "https://gw.apito.ai"),
+    ("claudecn", "https://claudecn.top"),
+    ("code0", "https://code0.ai"),
+    ("compshare", "https://api.modelverse.cn"),
+    ("compshare-coding-plan", "https://cp.compshare.cn"),
+    ("crazyrouter", "https://cn.crazyrouter.com"),
+    ("cubence", "https://api.cubence.com"),
+    ("dmxapi", "https://www.dmxapi.cn"),
+    ("e-flowcode", "https://e-flowcode.cc"),
+    ("etok-ai", "https://api.etok.ai"),
+    ("fennoai", "https://api.fenno.ai"),
+    ("github-copilot", "https://api.githubcopilot.com"),
+    ("jiekou-ai", "https://api.jiekou.ai/anthropic"),
+    ("kimi", "https://api.moonshot.cn/anthropic"),
+    ("kimi-for-coding", "https://api.kimi.com/coding"),
+    ("longcat", "https://api.longcat.chat/anthropic"),
+    ("meta", "https://api.meta.ai"),
+    ("micu", "https://www.micuapi.ai"),
+    ("minimax", "https://api.minimaxi.com/anthropic"),
+    ("minimax-en", "https://api.minimax.io/anthropic"),
+    ("modelscope", "https://api-inference.modelscope.cn"),
+    ("novita-ai", "https://api.novita.ai/anthropic"),
+    ("nvidia", "https://integrate.api.nvidia.com"),
+    ("opencode-go", "https://opencode.ai/zen/go"),
+    ("openrouter", "https://openrouter.ai/api"),
+    ("packycode", "https://www.packyapi.ai"),
+    ("patewayai", "https://api.pateway.ai"),
+    ("pipellm", "https://cc-api.pipellm.ai"),
+    ("ppio", "https://api.ppio.com/anthropic"),
+    ("qwencloud", "https://dashscope-intl.aliyuncs.com/apps/anthropic"),
+    (
+        "qwencloud-for-coding",
+        "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
+    ),
+    ("qiniu", "https://api.qnaigc.com"),
+    ("relaxycode", "https://www.relaxycode.com"),
+    ("rightcode", "https://www.rightapi.ai/claude"),
+    ("runapi", "https://runapi.host"),
+    ("shengsuanyun", "https://router.shengsuanyun.com/api"),
+    ("siliconflow", "https://api.siliconflow.cn"),
+    ("siliconflow-en", "https://api.siliconflow.com"),
+    ("soleapi", "https://soleapi.com"),
+    ("sssaicode", "https://node-hk.sssaicodeapi.com/api"),
+    ("stepfun", "https://api.stepfun.com/step_plan"),
+    ("stepfun-en", "https://api.stepfun.ai/step_plan"),
+    ("subrouter", "https://subrouter.ai"),
+    ("sudocode-chat", "https://api.sudocode.chat"),
+    ("sudocode-us", "https://sudocode.us"),
+    ("teamorouter", "https://api.teamorouter.cn"),
+    ("tencent-token-plan", "https://api.lkeap.cloud.tencent.com/plan/anthropic"),
+    ("therouter", "https://api.therouter.ai"),
+    ("volcengine-doubao", "https://ark.cn-beijing.volces.com/api/compatible"),
+    ("xai-grok", "https://api.x.ai/v1"),
+    ("xiaomi-mimo", "https://api.xiaomimimo.com/anthropic"),
+    (
+        "xiaomi-mimo-token-plan-china",
+        "https://token-plan-cn.xiaomimimo.com/anthropic",
+    ),
+    ("xycai", "https://apicdn.xycai.us"),
+    ("zetaapi", "https://api.zetaapi.ai"),
+    ("zhipu-glm", "https://open.bigmodel.cn/api/anthropic"),
+    ("qianwen-ai", "https://dashscope.aliyuncs.com/apps/anthropic"),
+    ("qianwen-coding-plan", "https://coding.dashscope.aliyuncs.com/apps/anthropic"),
+    (
+        "qianwen-token-plan",
+        "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+    ),
+    ("volcengine-agent-plan", "https://ark.cn-beijing.volces.com/api/plan"),
+    ("volcengine-coding-plan", "https://ark.cn-beijing.volces.com/api/coding"),
+];
+
+/// `scheme://host[:port]/path` with the scheme and host lowercased, a default port and trailing
+/// slashes dropped. Mirrors `normalizeBaseUrl` in the web UI.
+fn normalize_base_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    // `split_url` takes lowercase schemes only; URL schemes are case-insensitive.
+    let (raw_scheme, rest) = url.split_once("://")?;
+    let (scheme, host, port, path) = split_url(&format!("{}://{rest}", raw_scheme.to_ascii_lowercase()))?;
+    let port = port.filter(|p| !matches!((scheme.as_str(), *p), ("http", 80) | ("https", 443)));
+    let mut out = format!("{scheme}://{}", host.to_ascii_lowercase());
+    if let Some(port) = port {
+        out.push_str(&format!(":{port}"));
+    }
+    out.push_str(path.trim_end_matches('/'));
+    Some(out)
+}
+
+/// The built-in or catalogue preset whose base URL is `base_url`, if any.
+pub(crate) fn preset_for_base_url(base_url: &str) -> Option<&'static str> {
+    let wanted = normalize_base_url(base_url)?;
+    KNOWN_PRESETS
+        .iter()
+        .find(|(_, known)| normalize_base_url(known).as_deref() == Some(wanted.as_str()))
+        .map(|(id, _)| *id)
+}
+
+/// A provider saved as `custom` (or with no preset) at a known vendor's URL is that vendor: its
+/// stored preset otherwise, or `custom`. What the listing reports, so a script-added DeepSeek wears
+/// DeepSeek's mark (#1166).
+pub(crate) fn resolved_preset<'a>(preset: &'a str, base_url: &str) -> &'a str {
+    if preset.is_empty() || preset == "custom" {
+        preset_for_base_url(base_url).unwrap_or("custom")
+    } else {
+        preset
+    }
+}
+
 /// The model env vars a colony can be pointed at, matched against the configured providers. The
 /// first four reach the runner as is (OpenCode's small model among them, which registers its own
 /// gateway route); the two tier models are the mothership's per-task routing and are stripped from
@@ -486,6 +625,37 @@ impl App {
             failures: 1,
             recovered_at: None,
         });
+    }
+
+    /// One-time migration on load (#1166): a provider saved as `custom` whose base URL is a known
+    /// vendor's becomes that vendor's preset, so the file itself says what the listing says. Only the
+    /// `preset` field changes; the key file, id and every other field stay as they were. A file that
+    /// will not read strictly is left alone ([`config_unreadable`] explains it to the operator), and a
+    /// second run finds nothing to rewrite. Returns how many providers moved.
+    pub(crate) async fn migrate_custom_presets(&self) -> usize {
+        let _config = self.config_write.lock().await;
+        let Ok(mut providers) = crate::util::read_json_or_default::<Vec<Provider>>(&self.providers_file()) else {
+            return 0;
+        };
+        let mut moved = 0;
+        for p in &mut providers {
+            if (p.preset.is_empty() || p.preset == "custom")
+                && let Some(id) = preset_for_base_url(&p.base_url)
+            {
+                p.preset = id.to_string();
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            match self.save_providers(&providers).await {
+                Ok(()) => println!("providers: {moved} saved as custom now carry their vendor's preset"),
+                Err(e) => {
+                    eprintln!("providers: could not record the vendor presets ({e:#}); they are still inferred on read");
+                    return 0;
+                }
+            }
+        }
+        moved
     }
 
     pub(crate) async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
@@ -967,7 +1137,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "wire": provider.wire,
         "has_key": app.provider_key(&provider.id).is_some(),
         "models": provider.models,
-        "preset": if provider.preset.is_empty() { "custom" } else { provider.preset.as_str() },
+        "preset": resolved_preset(&provider.preset, &provider.base_url),
         "timeout_secs": provider.timeout_secs(),
         "max_concurrent": provider.max_concurrent,
         "queue_timeout_secs": provider.queue_timeout_secs,
@@ -1309,6 +1479,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             "preset ids are lowercase letters, digits and dashes, up to 48 characters",
         ));
     }
+    let preset = resolved_preset(&preset, &req.base_url).to_string();
     if !in_range(req.timeout_secs, 30, 3600) {
         return Err(bad("request timeout must be 30-3600 seconds"));
     }
@@ -3043,6 +3214,114 @@ mod tests {
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(retried)).await.unwrap();
         assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
         assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- vendor inference for providers saved as `custom` (#1166) ----------------------------------
+
+    #[test]
+    fn a_base_url_names_its_vendor_whatever_its_case_slash_or_default_port() {
+        assert_eq!(preset_for_base_url("https://api.deepseek.com/anthropic"), Some("deepseek"));
+        assert_eq!(
+            preset_for_base_url("HTTPS://API.DeepSeek.com:443/anthropic///"),
+            Some("deepseek")
+        );
+        assert_eq!(preset_for_base_url("https://api.minimaxi.com/anthropic"), Some("minimax"));
+        assert_eq!(preset_for_base_url("https://api.meta.ai"), Some("meta"));
+        assert_eq!(
+            preset_for_base_url("https://api.z.ai/api/anthropic"),
+            Some("zai"),
+            "the built-in preset wins over a catalogue twin"
+        );
+        assert_eq!(
+            preset_for_base_url("https://api.deepseek.com/other"),
+            None,
+            "the path is part of the match"
+        );
+        assert_eq!(
+            preset_for_base_url("http://api.deepseek.com/anthropic"),
+            None,
+            "so is the scheme"
+        );
+        assert_eq!(
+            preset_for_base_url("https://api.deepseek.com:8443/anthropic"),
+            None,
+            "and a non-default port"
+        );
+        assert_eq!(preset_for_base_url("not a url"), None);
+        assert_eq!(
+            preset_for_base_url("https://tokenhub.tencentmaas.com/plan/anthropic"),
+            None,
+            "a URL two catalogue entries share names neither"
+        );
+    }
+
+    #[test]
+    fn only_custom_or_unset_presets_are_resolved_from_the_url() {
+        let url = "https://api.deepseek.com/anthropic";
+        assert_eq!(resolved_preset("custom", url), "deepseek");
+        assert_eq!(resolved_preset("", url), "deepseek");
+        assert_eq!(resolved_preset("zai", url), "zai", "a chosen preset is never overridden");
+        assert_eq!(resolved_preset("custom", "https://llm.example.com"), "custom");
+        assert_eq!(resolved_preset("", "https://llm.example.com"), "custom");
+    }
+
+    #[tokio::test]
+    async fn the_list_reports_the_vendor_of_a_custom_provider() {
+        let (app, root) = providers_app();
+        damaged_providers(
+            &app,
+            br#"[{"id":"ds","name":"DS","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","preset":"custom"},
+                {"id":"mine","name":"Mine","base_url":"https://llm.example.com","auth":"none","preset":"custom"}]"#,
+        );
+        let Json(listed) = list(State(app.clone())).await;
+        let preset = |id: &str| listed.iter().find(|p| p["id"] == id).unwrap()["preset"].clone();
+        assert_eq!(preset("ds"), json!("deepseek"));
+        assert_eq!(preset("mine"), json!("custom"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_load_migration_rewrites_custom_and_keeps_the_key_and_every_other_field() {
+        let (app, root) = providers_app();
+        let path = damaged_providers(
+            &app,
+            br#"[{"id":"mm","name":"MiniMax Coding","base_url":"https://api.minimaxi.com/anthropic/","auth":"bearer","preset":"custom",
+                  "models":["m1"],"trusted":true,"vendor":"minimax","context_tokens":200000,"disabled_tools":["WebSearch"]},
+                {"id":"mine","name":"Mine","base_url":"https://llm.example.com","auth":"none","preset":"custom"},
+                {"id":"zz","name":"Zed","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","preset":"zai"}]"#,
+        );
+        crate::util::write_secret(&app.provider_key_file("mm"), "sk-test-not-real").unwrap();
+
+        assert_eq!(app.migrate_custom_presets().await, 1);
+        let saved: Vec<Provider> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let by = |id: &str| saved.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by("mm").preset, "minimax");
+        assert_eq!(by("mm").name, "MiniMax Coding");
+        assert_eq!(by("mm").base_url, "https://api.minimaxi.com/anthropic/");
+        assert_eq!(by("mm").models, vec!["m1".to_string()]);
+        assert!(by("mm").trusted);
+        assert_eq!(by("mm").vendor.as_deref(), Some("minimax"));
+        assert_eq!(by("mm").context_tokens, Some(200000));
+        assert_eq!(by("mm").disabled_tools, vec!["WebSearch".to_string()]);
+        assert_eq!(
+            app.provider_key("mm").as_deref(),
+            Some("sk-test-not-real"),
+            "the key is untouched"
+        );
+        assert_eq!(by("mine").preset, "custom", "an unknown endpoint stays custom");
+        assert_eq!(by("zz").preset, "zai", "a chosen preset stays");
+
+        assert_eq!(app.migrate_custom_presets().await, 0, "a second run has nothing to move");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_load_migration_leaves_a_damaged_file_alone() {
+        let (app, root) = providers_app();
+        let path = damaged_providers(&app, b"{ not json");
+        assert_eq!(app.migrate_custom_presets().await, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
         let _ = std::fs::remove_dir_all(root);
     }
 }

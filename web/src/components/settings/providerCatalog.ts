@@ -197,6 +197,50 @@ export function uniqueDraft(preset: ProviderPreset, takenIds: string[]): Provide
   return { ...base, id: `${base.id}-${n}`, name: `${base.name} (${n})` };
 }
 
+/**
+ * `scheme://host[:port]/path` with the scheme and host lowercased, a default port and trailing
+ * slashes dropped; null for anything that is not a plain http(s) URL. The Mothership's
+ * `normalize_base_url` (providers.rs) does the same, so both sides agree on what a URL names.
+ */
+export function normalizeBaseUrl(url: string): string | null {
+  try {
+    const u = new URL(url.trim());
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || u.search || u.hash) return null;
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalised base URL → preset id: the built-in presets first, then catalogue entries; a URL two catalogue entries share names neither. */
+const PRESET_BY_URL: Map<string, string> = (() => {
+  const byUrl = new Map<string, string>();
+  for (const [id, draft] of Object.entries(PRESETS)) {
+    const url = id === "local" || id === "custom" ? null : normalizeBaseUrl(draft.base_url);
+    if (url && !byUrl.has(url)) byUrl.set(url, id);
+  }
+  const claimed = new Set(byUrl.keys());
+  const seen = new Map<string, string | null>();
+  for (const entry of PROVIDER_CATALOG) {
+    const url = entry.base_url.includes("${") ? null : normalizeBaseUrl(entry.base_url);
+    if (!url || claimed.has(url)) continue;
+    seen.set(url, seen.has(url) ? null : entry.id);
+  }
+  for (const [url, id] of seen) if (id) byUrl.set(url, id);
+  return byUrl;
+})();
+
+/**
+ * The vendor a provider really is. One saved as `custom` (or with no preset) at a known vendor's
+ * base URL is that vendor, so a script-added DeepSeek wears DeepSeek's mark (#1166); anything with
+ * a chosen preset, or an unknown URL, keeps what it has. Mirrors `resolved_preset` in providers.rs.
+ */
+export function effectivePreset(preset: string | undefined, baseUrl: string | undefined): string | undefined {
+  if (preset && preset !== "custom") return preset;
+  const url = baseUrl ? normalizeBaseUrl(baseUrl) : null;
+  return (url && PRESET_BY_URL.get(url)) || preset || (baseUrl ? "custom" : undefined);
+}
+
 /** A catalogue entry's label, for the form header and the mark's fallback initials. */
 export function presetLabel(preset: ProviderPreset): string {
   return PRESET_LABEL[preset] ?? CATALOG_BY_ID.get(preset)?.name ?? "Provider";
