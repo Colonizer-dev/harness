@@ -541,3 +541,56 @@ function fakeQuery(turn) {
       for await (const message of prompt) yield* turn(options);
     })();
 }
+
+// #1169: the path policy's placeholders are dotfiles an agent trips over; asking git or ls about
+// their NAMES is not reading a secret, and must neither be refused nor count as a control defeat.
+test('commands that only touch a secret path\'s name are allowed, ones that read it are not', () => {
+  const policy = policyIn('/repo');
+  const names = [
+    'git check-ignore -v .env',
+    'git check-ignore -v .env .envrc .netrc .npmrc',
+    'git status --porcelain --ignored .env',
+    'ls -la .env',
+    'ls .netrc .pypirc',
+    'test -e .env',
+    '[ -f .env ]',
+    '[ -f .git-credentials ] && echo present',
+    'for f in .env .envrc .netrc; do git check-ignore -v "$f"; done',
+  ];
+  for (const command of names) assert.equal(decide(policy, command, '/repo'), null, command);
+  const reads = [
+    'cat .env',
+    'cat .env && git status',
+    'git status; cat .env',
+    'ls .env | xargs cat',
+    'ls .env && source .env',
+    'git check-ignore -v .env < .env',
+    'git check-ignore --stdin < .env',
+    'ls $(cat .env)',
+    'ls `cat .env`',
+    'git -c core.pager="cat .env" status .env',
+    'git diff .env',
+    'git log -p -- .env',
+    'git status .env > /tmp/x; cat .env',
+    'test -e .env && printf < .env',
+    'ls ~/.ssh',
+    'ls .env.local; head -1 .env.local',
+    'for f in .env; do cat "$f"; done',
+    'for f in .env; do git check-ignore "$f" && cat "$f"; done',
+    'for f in .env; do git check-ignore -v "$(cat $f)"; done',
+    'for f in $(cat .env); do ls "$f"; done',
+    '[ -f .env ] || cat .env',
+    'git check-ignore -v .env | cat',
+    'ls --color=always .env',
+    // One other segment can change what a later name-only command runs.
+    'shopt -s expand_aliases\nalias ls=cat\nls .env',
+    'export PATH=/tmp/evil\nls .env',
+    'hash -p /bin/cat ls\nls .env',
+    'enable -n test\ntest -f .env',
+    'git config core.fsmonitor ./h.sh\ngit status .env',
+    'for f in .env; do ls "$f"\nhash -p /bin/cat ls\nls "$f"; done',
+  ];
+  for (const command of reads) {
+    assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+  }
+});

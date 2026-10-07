@@ -984,6 +984,10 @@ pub(crate) fn neutralize_close(text: &str, close: &str) -> String {
     out
 }
 
+/// The brief's line about the path policy's placeholders (issue #1169).
+pub(crate) const PLACEHOLDER_NOTE: &str =
+    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: don't inspect, gitignore or edit them.";
+
 pub fn build_prompt(
     s: &Session,
     issue: Option<&Value>,
@@ -1022,6 +1026,10 @@ pub fn build_prompt(
         "The repository is checked out at /workspace on the branch {branch}. You are running inside a disposable \
          microVM sandbox with internet access: install whatever you need and run builds and tests freely.\n"
     );
+    // The path policy's empty placeholders (docs/path-policy.md) are hidden from `git status`, but an
+    // agent can still stumble on them with `ls -a`; unprompted it gitignores or inspects them, and
+    // the exec policy refuses that as an attempt to reach a secret (issue #1169).
+    let _ = writeln!(p, "{PLACEHOLDER_NOTE}\n");
     if resumed {
         let _ = writeln!(
             p,
@@ -3435,6 +3443,22 @@ mod tests {
         let prompt = build_prompt(&me, None, "main", false, &[], None, None);
         assert!(prompt.contains("`changelog.d/`"), "{prompt}");
         assert!(prompt.contains("leave the changelog file itself alone"), "{prompt}");
+    }
+
+    /// Issue #1169: the brief says the empty dotfiles are harness placeholders, to leave alone.
+    #[test]
+    fn the_prompt_names_the_empty_dotfiles_as_placeholders_to_leave_alone() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        for resumed in [false, true] {
+            let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
+            assert!(
+                prompt.contains(
+                    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: \
+                     don't inspect, gitignore or edit them."
+                ),
+                "{prompt}"
+            );
+        }
     }
 
     /// Issue #508: instructions that arrived through a scoped API token are marked as external
