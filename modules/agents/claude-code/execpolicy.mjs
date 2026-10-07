@@ -384,6 +384,17 @@ export function splitCommands(command) {
   return segments.map((s) => s.trim()).filter(Boolean);
 }
 
+// tar and rsync `--exclude PATTERN` names what NOT to copy, so its pattern is not a path the command
+// touches: excluding the placeholder dotfiles while copying a repository is the safe thing to do
+// (#1169). Only the pattern itself goes; `--exclude-from FILE` reads FILE and keeps counting, and so
+// does every other word of the segment.
+const EXCLUDE_ARG = /(^|\s)--exclude(?:=|\s+)('[^']*'|"[^"]*"|[^\s;|&<>]+)/g;
+function withoutExcludes(segment) {
+  const first = String(segment ?? '').trim().split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && w !== 'sudo' && w !== 'env');
+  const bin = (first ?? '').split('/').pop();
+  return bin === 'tar' || bin === 'rsync' ? segment.replace(EXCLUDE_ARG, '$1') : segment;
+}
+
 /** The words of one command segment, cleaned of the punctuation that glues paths to words. */
 function words(text) {
   return String(text ?? '')
@@ -612,7 +623,7 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     if (text) scripts.push({ path, text });
   }
   const tokens = new Set();
-  for (const word of [...nameOnlyFiltered(command, segments).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
+  for (const word of [...nameOnlyFiltered(command, segments).map(withoutExcludes).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
     tokens.add(expandTilde(word));
   }
   const writes = segments.map((segment) => classifyWrite(segment, cwd, hostMounts)).filter(Boolean);
