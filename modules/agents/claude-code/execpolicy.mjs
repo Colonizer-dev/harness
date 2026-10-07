@@ -556,6 +556,8 @@ function isNameOnlySegment(segment) {
     return flags(ws.slice(2));
   }
   if (ws[0] === 'ls') return flags(ws.slice(1));
+  // `echo` of literal words (the caller already refused every expansion) only prints its own text.
+  if (ws[0] === 'echo') return true;
   const file = ['-e', '-f', '-d'];
   if (ws[0] === 'test') return ws.length === 3 && file.includes(ws[1]) && paths([ws[2]]);
   if (ws[0] === '[') return ws.length === 4 && file.includes(ws[1]) && paths([ws[2]]) && ws[3] === ']';
@@ -572,7 +574,8 @@ function isNameOnlySegment(segment) {
  */
 function nameOnlyFiltered(command, segments) {
   if (/\.ssh/.test(command)) return segments;
-  const loop = command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;|&<>`(){}\\]+?);?\s*done$/);
+  // One line only: a newline inside the body would hide a second command (`hash -p /bin/cat ls`).
+  const loop = !/[\r\n]/.test(command.trim()) && command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;|&<>`(){}\\]+?);?\s*done$/);
   if (loop) {
     const [, name, , body] = loop;
     const ref = new RegExp(`"?\\$(?:${name}|\\{${name}\\})"?`, 'g');
@@ -580,7 +583,10 @@ function nameOnlyFiltered(command, segments) {
     return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain) ? [] : segments;
   }
   if (UNSAFE_SHELL.test(command)) return segments;
-  return segments.filter((segment) => !isNameOnlySegment(segment));
+  // All or nothing: one other segment (`alias ls=cat`, `export PATH=...`, `hash -p /bin/cat ls`)
+  // can change what a later `ls` or `test` runs, so only a command made of name-only segments
+  // and nothing else drops its tokens.
+  return segments.every((segment) => !segment.trim() || isNameOnlySegment(segment)) ? [] : segments;
 }
 
 /**

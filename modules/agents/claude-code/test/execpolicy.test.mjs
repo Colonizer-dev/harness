@@ -582,6 +582,13 @@ test('commands that only touch a secret path\'s name are allowed, ones that read
     '[ -f .env ] || cat .env',
     'git check-ignore -v .env | cat',
     'ls --color=always .env',
+    // One other segment can change what a later name-only command runs.
+    'shopt -s expand_aliases\nalias ls=cat\nls .env',
+    'export PATH=/tmp/evil\nls .env',
+    'hash -p /bin/cat ls\nls .env',
+    'enable -n test\ntest -f .env',
+    'git config core.fsmonitor ./h.sh\ngit status .env',
+    'for f in .env; do ls "$f"\nhash -p /bin/cat ls\nls "$f"; done',
   ];
   for (const command of reads) {
     assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
