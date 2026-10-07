@@ -18,6 +18,33 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.9] - 2026-10-07
+
+### Added
+
+- **Claude account fallback: when the subscription runs out, Claude roles run on a model you choose until the reset.** The Claude Code module has a new setting, "If Claude runs out, use" (`account_fallback_model`, a `<provider>/<model>`, also in the Models popover). While the Claude plan is at its session or weekly limit, every role, per-colony override or org override that resolves to a Claude model runs on that model, decided at request time in the gateway, then goes back to Claude by itself at the reset: nothing saved changes, so there is nothing to switch back. Running colonies carry on, new ones start as usual and colonies the limit parked resume. Restricted-sensitivity tasks use the fallback only when its provider is marked trusted; otherwise they park with "needs a trusted provider: Claude is out until 19:51; MiniMax is not marked trusted". The plan bars and a banner say "Claude out, running on MiniMax until 19:51". A model switch now lists the Claude names it leaves in colony and org overrides, with a "Clear these too" option. With no fallback set, nothing changes. ([#1130])
+- **An unsigned macOS app in every release.** `Colonizer-arm64.dmg` holds an ad-hoc signed `Colonizer.app` that installs Colonizer from the archive it carries, sets up the login LaunchAgent and opens the cockpit; macOS asks you to approve it once (Privacy & Security, Open Anyway). It is in `SHA256SUMS` and the build attestation, and the curl installer stays the recommended path. Phase 1 of ([#1138]).
+- **The Automatic stack now sizes colonies to the machine and admits them from what it has free.** With the stack on Automatic and no number in Parallel sessions, each colony's vCPUs and memory come from the host (its cores and RAM, less a reserve of the larger of 8 GB or a tenth of RAM, and 2 vCPUs; 3 vCPUs and 11 GB on a 32-core, 124 GB machine), and a queued colony starts only while the live free memory (`MemAvailable` on Linux, free plus inactive pages on macOS) less the reserve holds it and the load average leaves room for its vCPUs. Builds and other services on the same machine lower how many colonies fit, admission stops below the reserve and resumes by itself when memory frees, and a running colony is never stopped for it. A safety cap, Safety cap on colonies (`auto_max_parallel`, default 32), stays whatever the host has free. A number in Parallel sessions, or any named stack, keeps today's fixed behaviour, and so does a host that cannot be measured; a `cpus` or `memory` you set still wins. `/api/status` reports `sandbox.mode`, the computed `size`, `room_for` and `waiting_reason` (memory, cpu or cap), and the host page reads "auto: 7 running · room for 2 more (18 GB free, load 9/32)". ([#1141])
+- **Red team: one run per repository, and a Cancel run button.** A second run on a repository that already has one is refused by the server with a 409 naming the run, however it is started (the dialog, the API, a schedule or a loop), and the burn-down skips such a repository; two starts racing for one repository make one run. The dialog shows that repository disabled with its progress, a link and Cancel run, and "All" skips it. `POST /api/redteam/runs/{id}/cancel` (owner only, activity-logged) stops every hunter of the run, queued ones included, marks it `cancelled` with who and when, keeps the findings validated so far and files nothing afterwards; the cockpit asks first and offers it on the run history entry and the hunter colony's inspector. Each repository row now reads its red-team history ("never hunted", "last hunted 3 d ago · 4 findings (2 filed)") and last push instead of an all-time colony count, rows are ordered never-hunted first, oldest hunt next, active last, and the "Who hunts" cards keep their full names with short, unwrapped status pills that stack one per row on a phone. ([#1145])
+
+### Changed
+
+- **History transcript search filters are a row of chips, not a stack of fields.** Repository, Agent, Status and Date open small popovers (a bottom sheet on a phone, where the row scrolls sideways); active filters show as removable chips with "Clear all". The search runs as you type or filter, so the Search button is gone, and the filters live in the address bar so a search can be shared or reloaded. The Workspace field is gone too: the search is scoped to the workspace switcher. ([#1124])
+- **A colony boots about 5 s faster: the wait for the agent no longer rides out the mesh proxy's first stalled dial.** Every boot spent a constant 5.5 s in the `agentd` phase, because the first health check through the mesh's SOCKS proxy stalled until the proxy gave up. Each readiness attempt is now cut off after 750 ms (then 1.5 s, then 3 s) and the next one starts at once, still inside the same 90 s overall wait, and the harness pings the new colony across the mesh as soon as it joins, so the path is up before the first real request. A fresh colony's `git fetch` of the local mirror now runs while its issue is fetched instead of after. Each readiness attempt and the warm-up ping log their duration at debug level in the session log. ([#1143])
+- colonizer-redact has a README on crates.io: what it catches, how to use it, and its functions.
+- The remote-access docs say the relay at my.colonizer.dev carries its fixes and pairing by code: it was redeployed on 2026-10-06.
+
+### Fixed
+
+- **The update notice in the cockpit reads as text, and says its line once.** Release notes in Settings → Updates were shown as raw Markdown (`###`, `**`, link syntax and the `` comment the per-release notes file opens with); they now render through a small safe renderer (no raw HTML, http/https links only, opened in a new tab). The critical / fixes-running line was shown both in the banner and again in the Updates pane, and now only in the banner. A development build says "This is a development build" with the command that switches it to releases, and the release workflow drops the leading comment from `docs/release-notes/<tag>.md` before it goes into the release body. ([#1125])
+- **A Sigstore timeout during install is no longer reported as a wrong attestation.** When `gh attestation verify` failed on the network (a TUF refresh timeout, a context deadline, a connection or DNS error), `install-release.sh` said the build attestation "does not verify: gh checked, and it is wrong". It now retries up to three times with a backoff (`COLONIZER_ATTESTATION_BACKOFF` seconds, default 2) and, if Sigstore stays unreachable, stops with "could not reach Sigstore to verify the build (network: …); nothing was installed". Only a real signature or digest mismatch still says it is wrong; both exit non-zero, and the in-app update shows the installer's message as it is. ([#1126])
+- **A stopped colony no longer takes every colony stacked on it down with it, and idle colonies give their slots back.** A dependent whose parent is stopped or parked now waits as `blocked` (no slot, no microVM, not failed, "waiting on #5 (`c8a6d23c`, stopped)") and runs again when the parent resumes or finishes; when the parent is gone for good it re-bases on the default branch and queues, so a stack never cascades into failed colonies. A colony that is idle, held or flagged, with no open question and no publish in flight, parks after the new Watchdog setting `idle_park_minutes` (default 15) instead of waiting for the 90 minute hold timeout, freeing its slot with its worktree kept; one whose last turn did not rewrite `/harness/out/pr.md` is first asked once to do so. Needs you now shows one entry per issue, drops failed or stopped colonies a newer colony for the same issue has overtaken and any cascade failure, and folds abandoned questions older than 72 hours into one row with Dismiss all. ([#1140])
+  <!-- colonizer-notice {"severity":"fixes-running","line":"Stacked chains no longer fail all at once, idle colonies stop holding slots, and Needs you stops listing superseded failures"} -->
+
+### Security
+
+- **The dependency audit is clean again.** The Claude Code module's locked `@modelcontextprotocol/sdk` moves from 1.30.0 to 1.32.1, which fixes GHSA-6qxp-vccf-f47h (an OAuth client could send credentials to an authorization server chosen by the MCP server), and the telemetry and relay services pin `sharp` 0.35.5 over the copy `wrangler` bundles, which fixes GHSA-wq5f-xc86-pv6w. Both are build and dev dependencies; nothing a user runs changes.
+
 ## [v0.2.8] - 2026-10-06
 
 ### Added
@@ -2758,6 +2785,16 @@ Macs. ([#74])
 [#1096]: https://github.com/Colonizer-dev/harness/issues/1096
 [#1097]: https://github.com/Colonizer-dev/harness/issues/1097
 [#1117]: https://github.com/Colonizer-dev/harness/issues/1117
+[#1124]: https://github.com/Colonizer-dev/harness/issues/1124
+[#1125]: https://github.com/Colonizer-dev/harness/issues/1125
+[#1126]: https://github.com/Colonizer-dev/harness/issues/1126
+[#1130]: https://github.com/Colonizer-dev/harness/issues/1130
+[#1138]: https://github.com/Colonizer-dev/harness/issues/1138
+[#1140]: https://github.com/Colonizer-dev/harness/issues/1140
+[#1141]: https://github.com/Colonizer-dev/harness/issues/1141
+[#1143]: https://github.com/Colonizer-dev/harness/issues/1143
+[#1145]: https://github.com/Colonizer-dev/harness/issues/1145
+[v0.2.9]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.9
 [v0.2.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.8
 [v0.2.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.7
 [v0.2.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.6
