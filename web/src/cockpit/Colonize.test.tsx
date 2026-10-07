@@ -174,23 +174,40 @@ const pane = (extra: Partial<Parameters<typeof ColonizePane>[0]> = {}) =>
   );
 
 describe("the Colonize pane", () => {
-  it("shows the free-form box above the issue list, paged ten at a time", () => {
+  it("is a Spotlight panel: the task box on top, the options as chips, the issues as rows, paged ten at a time", () => {
     const html = pane();
     expect(html).toContain('aria-label="colonize"');
-    expect(html).toContain(">Colonize</h2>");
+    expect(html).toContain("spot-panel");
     expect(html).toMatch(/<textarea[^>]*aria-label="describe new work"/);
-    expect(html).toContain("Dispatch right after creating");
-    expect(html).toMatch(/checked=""\/>Dispatch right after creating/);
-    expect(html).toContain("Draft issues");
-    expect(html).toContain("Launch without an issue");
+    expect(html).toMatch(/aria-pressed="true"[^>]*>Dispatch after creating/);
+    expect(html).toMatch(/aria-pressed="true"[^>]*>Autopilot/);
+    expect(html).toContain('aria-label="repository · all repos in scope"');
+    expect(html).toContain("Model");
     // The box comes first, then the list.
-    expect(html.indexOf("describe new work")).toBeLessThan(html.indexOf('aria-label="issues"'));
+    expect(html.indexOf("describe new work")).toBeLessThan(html.indexOf('role="listbox"'));
     // 13 issues across the scope, ten on the first page.
     expect(html).toContain("13 shown · 0 selected");
-    expect(html.match(/id="colonize-acme-/g)?.length).toBe(10);
+    expect(html.match(/role="option"/g)?.length).toBe(10);
     expect(html).toContain("1–10 of 13");
     expect(html).toContain('aria-label="filter by label"');
     expect(html).toContain("Dispatch 0 colonies");
+    // Nothing is selected until an arrow key picks a row, so ↵ cannot start a colony unasked.
+    expect(html).not.toContain('aria-selected="true"');
+  });
+
+  it("offers every launch path as a row once there is text: draft issues, a loop, or launch without an issue", () => {
+    const withText = (text: string) => pane({ initialDraft: { ...DRAFT_START, text } });
+    const html = withText("Add dark mode");
+    expect(html).toContain("Draft issues from this text");
+    expect(html).toContain("Launch without an issue");
+    expect(html).toMatch(/aria-selected="true"[^>]*>.*Draft issues from this text/);
+    const loop = withText("/loop 1h check the logs");
+    expect(loop).toContain("Create loop");
+    expect(loop).not.toContain("Launch without an issue");
+  });
+
+  it("starts the chosen repository, and lists the scope's repositories to pick from", () => {
+    expect(pane({ start: { repo: "acme/web" } })).toContain('aria-label="repository · acme/web"');
   });
 
   it("asks which repository when the scope has several and none is chosen", () => {
@@ -227,7 +244,7 @@ describe("the Colonize pane", () => {
     expect(html).toContain("2 issues drafted");
     expect(html).toContain('aria-label="create draft 2"');
     expect(html).toMatch(/<option value="acme\/web" selected="">/);
-    expect(html).toMatch(/<button type="button" class="ant-glyph-host[^"]*">.*Create 2 issues and dispatch/);
+    expect(html).toMatch(/<button type="button" class="spot-btn ant-glyph-host[^"]*">.*Create 2 issues and dispatch/);
   });
 });
 

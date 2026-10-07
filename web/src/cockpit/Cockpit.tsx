@@ -24,6 +24,7 @@ import { settlersOf, useSessionStream } from "../sessionStream";
 import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
+import { AskProvider } from "./spotlight/Ask";
 import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
@@ -861,6 +862,7 @@ export function Cockpit({
       onOpenLaunch={() => setView("launch")}
     >
     <SpotlightProvider host={spotlightHost}>
+    <AskProvider host={spotlightHost}>
     <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] bg-bg text-text">
       <NavRail
         orgs={workspaces}
@@ -1050,6 +1052,7 @@ export function Cockpit({
           Self-gating, so it renders null when it has nothing to say. */}
       {!welcome && !DEMO && <BookmarkPrompt />}
     </div>
+    </AskProvider>
     </SpotlightProvider>
     </ColonizeProvider>
   );

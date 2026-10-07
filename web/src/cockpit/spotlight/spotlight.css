@@ -8,7 +8,8 @@
   animation: spot-fade 160ms ease-out both;
 }
 
-.spot-panel {
+.spot-panel,
+.spot-surface {
   background: color-mix(in srgb, var(--panel) 78%, transparent);
   backdrop-filter: blur(36px) saturate(1.9);
   -webkit-backdrop-filter: blur(36px) saturate(1.9);
@@ -17,8 +18,10 @@
     0 36px 96px rgb(0 0 0 / 0.42),
     0 8px 24px rgb(0 0 0 / 0.16),
     inset 0 1px 0 rgb(255 255 255 / 0.07);
-  animation: spot-in 220ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
   transform-origin: 50% 0;
+}
+.spot-panel {
+  animation: spot-in 220ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
 }
 
 .spot-input {
@@ -26,6 +29,13 @@
   line-height: 1.2;
   letter-spacing: -0.012em;
   caret-color: var(--accent);
+}
+/* Menus that open under a control keep Spotlight's look at a quieter scale. */
+.spot-anchored .spot-input {
+  font-size: 1.0625rem;
+}
+.spot-anchored .spot-footer {
+  padding-inline: 0.875rem;
 }
 .spot-input::placeholder {
   color: var(--faint);
@@ -107,6 +117,150 @@
   animation: spot-rise 260ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
 }
 
+/* A panel opened under (or over) its control grows from that control's edge. */
+.spot-anchored {
+  transform-origin: 100% 0;
+}
+.spot-anchored.spot-above {
+  transform-origin: 50% 100%;
+  animation-name: spot-in-up;
+}
+
+/* On a phone a panel is a bottom sheet: it rises from the foot, with the same content. */
+.spot-sheet {
+  animation: spot-sheet 260ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+  transform-origin: 50% 100%;
+  border-bottom: 0;
+}
+
+/* A primary row (Colonize's "Draft issues") reads as the one action even before it is selected. */
+.spot-row-primary {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.spot-row[aria-selected="true"] .spot-check {
+  color: var(--on-accent);
+}
+.spot-row[aria-disabled="true"] {
+  background: transparent;
+}
+
+/* A row's own actions: quiet until the row is hovered, focused or selected; always on touch. */
+.spot-actions {
+  opacity: 0;
+  transition: opacity 90ms ease-out;
+}
+.spot-row:hover .spot-actions,
+.spot-row:focus-within .spot-actions,
+.spot-row[aria-selected="true"] .spot-actions {
+  opacity: 1;
+}
+@media (hover: none), (max-width: 639px) {
+  .spot-actions {
+    opacity: 1;
+  }
+}
+.spot-row[aria-selected="true"] .spot-actions button,
+.spot-row[aria-selected="true"] .spot-actions a {
+  background: color-mix(in srgb, var(--on-accent) 16%, transparent);
+  color: var(--on-accent);
+}
+/* On a touch screen only the selected row spends width on its buttons. */
+@media (hover: none), (max-width: 639px) {
+  .spot-row:not([aria-selected="true"]) .spot-actions {
+    display: none;
+  }
+}
+
+/* The small controls inside a panel (chips, toggles): one look everywhere. */
+.spot-chip {
+  display: inline-flex;
+  height: 1.75rem;
+  max-width: 100%;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.375rem;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  padding: 0 0.7rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  transition: background-color 90ms ease-out, border-color 90ms ease-out, color 90ms ease-out;
+}
+.spot-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.spot-chip[aria-pressed="true"],
+.spot-chip[data-on="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.spot-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.spot-btn {
+  display: inline-flex;
+  height: 2rem;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: 0.65rem;
+  border: 0;
+  background: var(--accent);
+  padding: 0 0.9rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--on-accent);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 32%, transparent);
+  transition: filter 90ms ease-out, transform 90ms ease-out;
+}
+.spot-btn:hover {
+  filter: brightness(1.08);
+}
+.spot-btn:active {
+  transform: scale(0.97);
+}
+.spot-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  box-shadow: none;
+}
+.spot-btn-quiet {
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+.spot-btn-quiet:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  filter: none;
+}
+.spot-card {
+  margin: 0 0.5rem 0.5rem;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+  padding: 0.75rem;
+}
+
+@keyframes spot-sheet {
+  from {
+    opacity: 0;
+    transform: translateY(32px);
+  }
+}
+@keyframes spot-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+}
 @keyframes spot-fade {
   from {
     opacity: 0;
@@ -129,6 +283,7 @@
   .spot-backdrop,
   .spot-panel,
   .spot-section,
+  .spot-sheet,
   .spot-fab {
     animation: none;
   }

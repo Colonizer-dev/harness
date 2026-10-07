@@ -2,11 +2,10 @@
 // knows — an exhausted plan reads red with its countdown, a probed balance with a limit draws used
 // against limit, a balance alone says the total isn't reported, and a plan reporting nothing says
 // so and shows its request count instead. Rendered to static markup: no DOM.
-import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { PlanUsage } from "../types";
-import { PlanList, agoWords, planView, sortPlans } from "./ModelPlans";
+import { agoWords, planView, sortPlans } from "./ModelPlans";
 
 const RESET = Date.UTC(2026, 9, 5, 19, 51, 58) / 1000;
 const NOW = (RESET - (2 * 3600 + 10 * 60)) * 1000;
@@ -86,33 +85,6 @@ describe("planView", () => {
     const sorted = sortPlans([plan({ id: "a" }), plan({ id: "b", exhausted: true }), plan({ id: "c" })]);
     expect(sorted.map((p) => p.id)).toEqual(["b", "a", "c"]);
     expect(agoWords(new Date(NOW - 5 * 60_000).toISOString(), NOW)).toBe("5 min ago");
-  });
-});
-
-describe("PlanList", () => {
-  it("renders a meter per plan, red for the exhausted one, and a count of plans out", () => {
-    const html = renderToStaticMarkup(
-      <PlanList
-        nowMs={NOW}
-        plans={[
-          plan({ id: "anthropic", name: "Claude", kind: "claude", used_by: ["orchestrator"] }),
-          plan({ exhausted: true, reset_unix: RESET }),
-        ]}
-      />,
-    );
-    expect(html).toContain('aria-label="plan usage"');
-    expect(html).toContain("1 out");
-    expect(html.match(/role="meter"/g)?.length).toBe(2);
-    expect(html).toContain('data-plan="byteplus" data-tone="err"');
-    expect(html).toContain('aria-valuenow="100"');
-    expect(html).toContain('aria-valuetext="limit not reported"');
-    expect(html.indexOf("byteplus")).toBeLessThan(html.indexOf("anthropic"));
-  });
-
-  it("says when it is loading, failed or empty", () => {
-    expect(renderToStaticMarkup(<PlanList plans={null} />)).toContain("Reading plan usage…");
-    expect(renderToStaticMarkup(<PlanList plans={[]} />)).toContain("No plan in use reports anything yet.");
-    expect(renderToStaticMarkup(<PlanList plans={null} error="403" />)).toContain("Plan usage unavailable: 403");
   });
 });
 

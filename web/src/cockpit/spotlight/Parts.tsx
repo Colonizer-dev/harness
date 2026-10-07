@@ -1,6 +1,6 @@
 // The small pieces of Spotlight: a result row, the icon tile, the highlighted title, the key caps,
 // the top-bar pill and the phone button. Presentational only.
-import { Fragment, useEffect, useRef, type ReactElement, type ReactNode } from "react";
+import { Fragment, type ReactElement, type ReactNode } from "react";
 
 import { Avatar } from "../../components/Avatar";
 import {
@@ -116,55 +116,6 @@ export function Highlight({ text, words }: { text: string; words: readonly strin
 
 export function Key({ children, className }: { children: ReactNode; className?: string }): ReactElement {
   return <kbd className={cx("spot-key", className)}>{children}</kbd>;
-}
-
-/** One result. The selected row is the solid accent one, as Spotlight's is blue. */
-export function ResultRow({
-  result,
-  words,
-  selected,
-  top,
-  id,
-  onPick,
-  onHover,
-}: {
-  result: Result;
-  words: readonly string[];
-  selected: boolean;
-  top: boolean;
-  id: string;
-  onPick: () => void;
-  onHover: () => void;
-}): ReactElement {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (selected) ref.current?.scrollIntoView?.({ block: "nearest" });
-  }, [selected]);
-  return (
-    <div
-      ref={ref}
-      id={id}
-      role="option"
-      aria-selected={selected}
-      data-section={result.section}
-      onMouseMove={onHover}
-      onClick={onPick}
-      className="spot-row flex cursor-pointer items-center gap-3 rounded-xl px-2.5 py-2"
-    >
-      <Tile icon={result.icon} org={result.org} tone={result.tone} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[0.9375rem] font-medium leading-tight">
-          <Highlight text={result.title} words={result.section === "ask" ? [] : words} />
-        </span>
-        {result.subtitle && <span className="spot-sub mt-0.5 block truncate text-small-lg leading-tight text-muted">{result.subtitle}</span>}
-      </span>
-      <span className="spot-hint flex shrink-0 items-center gap-2 text-small text-faint">
-        {result.writes && <span title="Held for your approval">needs approval</span>}
-        {top && !selected ? <span className="text-accent">Top hit</span> : result.hint && !result.writes ? <span className="max-sm:hidden">{result.hint}</span> : null}
-        {selected && <Key>↵</Key>}
-      </span>
-    </div>
-  );
 }
 
 /** The slim "Ask or search…" pill that sits in the middle of the top bar. */

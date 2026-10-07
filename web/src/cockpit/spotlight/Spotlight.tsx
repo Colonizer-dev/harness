@@ -5,12 +5,10 @@
 // full thread on the Chat page. Anything it does that changes something goes through the same
 // approval card the chat's tools use (#1217), so nothing runs without a click.
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 
 import { errorMessage, useApi, useToast } from "../../context";
 import type { SectionId } from "../../components/settings/ui";
-import { IconSearch } from "../../components/icons";
-import { Spinner, cx, store, stored } from "../../components/ui";
+import { cx, store, stored } from "../../components/ui";
 import type { ChatApproval, ChatToolNote, Repo, Session } from "../../types";
 import { ChatMarkdown } from "../chat/ChatMarkdown";
 import { ApprovalCard, ToolCalls, useApprovals } from "../chat/ToolCalls";
@@ -31,11 +29,11 @@ import {
   words,
   type Recent,
   type Result,
-  type Section,
   type SpotlightAction,
   type SpotlightData,
 } from "./logic";
-import { Key, MOD, ResultRow, SpotlightFab, SpotlightPill } from "./Parts";
+import { Key, MOD, SpotlightFab, SpotlightPill, Tile } from "./Parts";
+import { PanelFooter, PanelFrame, PanelInput, PanelList, type PanelHint, type PanelRow, type PanelSection } from "./Panel";
 import { useSpotlightData } from "./useSpotlightData";
 import "./spotlight.css";
 
@@ -185,15 +183,15 @@ export function SpotlightProvider({ host, children }: { host: SpotlightHost; chi
     <SpotlightContext.Provider value={handle}>
       {children}
       {!isOpen && <SpotlightFab onOpen={() => open()} />}
-      {isOpen && <SpotlightPanel host={host} seed={seed} onClose={close} />}
+      {isOpen && <SpotlightDialog host={host} seed={seed} onClose={close} />}
     </SpotlightContext.Provider>
   );
 }
 
 type Mode = { kind: "search" } | { kind: "answer"; question: string; n: number } | { kind: "approval"; approval: ChatApproval };
 
-/** The panel itself. Exported for the tests, which render it with a host and an api. */
-export function SpotlightPanel({ host, seed = "", onClose }: { host: SpotlightHost; seed?: string; onClose: () => void }): ReactElement {
+/** Spotlight itself, composed of the shared SpotlightPanel pieces. Exported for the tests, which render it with a host and an api. */
+export function SpotlightDialog({ host, seed = "", onClose }: { host: SpotlightHost; seed?: string; onClose: () => void }): ReactElement {
   const api = useApi();
   const toast = useToast();
   const colonize = useColonize();
@@ -233,21 +231,6 @@ export function SpotlightPanel({ host, seed = "", onClose }: { host: SpotlightHo
     input.current?.select();
   }, []);
   useEffect(() => setPickedId(null), [query]);
-  // Escape from anywhere in the panel, including a focused approval button.
-  useEffect(() => {
-    const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      if (mode.kind === "search") onClose();
-      else {
-        setMode({ kind: "search" });
-        input.current?.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [mode.kind, onClose]);
-
   const done = (result: Result) => {
     const next = remember(recents, result, Date.now());
     setRecents(next);
@@ -299,7 +282,7 @@ export function SpotlightPanel({ host, seed = "", onClose }: { host: SpotlightHo
     onClose();
   };
 
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const count = listing.results.length;
     if (e.nativeEvent.isComposing) return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -334,126 +317,89 @@ export function SpotlightPanel({ host, seed = "", onClose }: { host: SpotlightHo
     }
   };
 
-  const sections: { section: Section; rows: { result: Result; index: number }[] }[] = [];
+  const sections: PanelSection[] = [];
   listing.results.forEach((result, index) => {
+    const row: PanelRow = {
+      id: result.id,
+      title: result.title,
+      subtitle: result.subtitle,
+      leading: <Tile icon={result.icon} org={result.org} tone={result.tone} />,
+      trailing: result.writes ? <span title="Held for your approval">needs approval</span> : undefined,
+      hint: index === listing.top && query.trim() !== "" && result.section !== "ask" ? <span className="text-accent">Top hit</span> : result.hint && !result.writes ? result.hint : undefined,
+      onPick: () => go(result.action, result),
+    };
     const last = sections.at(-1);
-    if (last && last.section === result.section) last.rows.push({ result, index });
-    else sections.push({ section: result.section, rows: [{ result, index }] });
+    if (last && last.id === result.section) last.rows.push(row);
+    else sections.push({ id: result.section, title: SECTION_TITLE[result.section], rows: [row] });
   });
 
   const showList = mode.kind === "search";
   const scope = host.colony ? (host.colony.issue_title || host.colony.summary || host.colony.id) : (host.org ?? "All workspaces");
-  const body = (
-    <div className="fixed inset-0 z-[70]" data-testid="spotlight">
-      <div aria-hidden="true" className="spot-backdrop absolute inset-0" onClick={onClose} />
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center px-2 pt-[max(0.5rem,env(safe-area-inset-top))] sm:px-4 sm:pt-[11vh]">
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Ask or search"
-          className="spot-panel pointer-events-auto flex max-h-[calc(100dvh-1rem)] w-full max-w-[680px] flex-col overflow-hidden rounded-[22px] text-text sm:max-h-[78vh]"
-        >
-          <div className="flex shrink-0 items-center gap-3 px-4 py-3.5 sm:px-5 sm:py-4">
-            <span aria-hidden="true" className="grid size-6 shrink-0 place-items-center text-muted">
-              {mode.kind === "answer" ? <AntGlyph size={26} /> : <IconSearch size={20} />}
-            </span>
-            <input
-              ref={input}
-              role="combobox"
-              aria-expanded={showList}
-              aria-controls={listId}
-              aria-activedescendant={showList && selected ? `${listId}-${at}` : undefined}
-              aria-autocomplete="list"
-              aria-label="Ask or search"
-              autoComplete="off"
-              autoCorrect="off"
-              spellCheck={false}
-              enterKeyHint="go"
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setRecall(0);
-                if (mode.kind !== "search" && e.target.value.trim() === "") setMode({ kind: "search" });
-              }}
-              onKeyDown={onKeyDown}
-              placeholder={mode.kind === "answer" ? "Ask a follow-up…" : "Ask or search…"}
-              className="spot-input bare-field min-w-0 flex-1 border-0 bg-transparent p-0 text-text outline-none focus-visible:outline-none"
-            />
-            {loaded.loadingIssues && <Spinner className="size-3.5 shrink-0 text-faint" />}
-            <span title="Where this applies" className="hidden max-w-[40%] shrink-0 truncate rounded-full bg-panel-3/80 px-2.5 py-1 text-small text-muted sm:inline">
-              {scope}
-            </span>
-            <button type="button" onClick={onClose} aria-label="close" className="shrink-0 cursor-pointer border-0 bg-transparent p-0">
-              <Key>esc</Key>
-            </button>
-          </div>
+  const hints: PanelHint[] =
+    mode.kind === "search"
+      ? [
+          { keys: ["↑", "↓"], label: "select" },
+          { keys: ["↵"], label: selected?.section === "ask" ? "ask" : selected?.writes ? "review" : "open" },
+          { keys: ["⇥"], label: "next section" },
+          { keys: [MOD, "J"], label: "chat panel" },
+        ]
+      : mode.kind === "answer"
+        ? [
+            { keys: [MOD, "↵"], label: "expand to chat" },
+            { keys: ["esc"], label: "back" },
+          ]
+        : [{ keys: ["esc"], label: "back" }];
+  const onEscape = () => {
+    if (mode.kind === "search") return false;
+    setMode({ kind: "search" });
+    input.current?.focus();
+    return true;
+  };
+  return (
+    <PanelFrame label="Ask or search" placement="centered" sheet={false} onClose={onClose} onEscape={onEscape} testId="spotlight">
+      <PanelInput
+        inputRef={input}
+        value={query}
+        onChange={(value) => {
+          setQuery(value);
+          setRecall(0);
+          if (mode.kind !== "search" && value.trim() === "") setMode({ kind: "search" });
+        }}
+        placeholder={mode.kind === "answer" ? "Ask a follow-up…" : "Ask or search…"}
+        label="Ask or search"
+        icon={mode.kind === "answer" ? <AntGlyph size={26} /> : undefined}
+        busy={loaded.loadingIssues}
+        listId={listId}
+        activeId={showList && selected ? `${listId}-${at}` : undefined}
+        expanded={showList}
+        onKeyDown={onKeyDown}
+        onClose={onClose}
+        end={
+          <span title="Where this applies" className="hidden max-w-[40%] shrink-0 self-center truncate rounded-full bg-panel-3/80 px-2.5 py-1 text-small text-muted sm:inline">
+            {scope}
+          </span>
+        }
+      />
 
-          <div className="spot-collapse min-h-0" data-open={showList ? "true" : "false"}>
-            <div className="min-h-0">
-              {showList && (
-                <div id={listId} role="listbox" aria-label="results" className="scroll-thin max-h-[min(54vh,470px)] overflow-y-auto border-t border-border px-2 pb-2 pt-1 max-sm:max-h-[calc(100dvh-10.5rem)]">
-                  {sections.map(({ section, rows }) => (
-                    <div key={section} role="group" aria-label={SECTION_TITLE[section]} className="spot-section">
-                      <div className="px-2.5 pb-1 pt-2.5 text-meta-lg font-semibold uppercase tracking-[0.07em] text-faint">{SECTION_TITLE[section]}</div>
-                      {rows.map(({ result, index }) => (
-                        <ResultRow
-                          key={result.id}
-                          id={`${listId}-${index}`}
-                          result={result}
-                          words={ws}
-                          selected={index === at}
-                          top={index === listing.top && query.trim() !== "" && result.section !== "ask"}
-                          onHover={() => index !== at && setPickedId(result.id)}
-                          onPick={() => go(result.action, result)}
-                        />
-                      ))}
-                    </div>
-                  ))}
-                  {query.trim() !== "" && loaded.loadingIssues && !sections.some((s) => s.section === "issues") && <p className="m-0 px-3 py-2 text-small text-faint">Looking through open issues…</p>}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {mode.kind === "answer" && <AnswerPane host={host} question={mode.question} n={mode.n} chat={chat} onChat={setChat} onExpand={(id) => (host.onOpenChat(id), onClose())} />}
-          {mode.kind === "approval" && <ApprovalPane approval={mode.approval} onClose={onClose} />}
-
-          <footer className="flex shrink-0 items-center gap-4 border-t border-border bg-panel-2/40 px-4 py-2 text-small text-faint max-sm:hidden">
-            {mode.kind === "search" ? (
-              <>
-                <span className="inline-flex items-center gap-1.5">
-                  <Key>↑</Key>
-                  <Key>↓</Key> select
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Key>↵</Key> {selected?.section === "ask" ? "ask" : selected?.writes ? "review" : "open"}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Key>⇥</Key> next section
-                </span>
-              </>
-            ) : mode.kind === "answer" ? (
-              <>
-                <span className="inline-flex items-center gap-1.5">
-                  <Key>{MOD}</Key>
-                  <Key>↵</Key> expand to chat
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Key>esc</Key> back
-                </span>
-              </>
-            ) : (
-              <span className="inline-flex items-center gap-1.5">
-                <Key>esc</Key> back
-              </span>
-            )}
-            <span className="ml-auto">Colonizer</span>
-          </footer>
+      <div className="spot-collapse min-h-0" data-open={showList ? "true" : "false"}>
+        <div className="min-h-0">
+          {showList && (
+            <>
+              <PanelList listId={listId} sections={sections} selectedId={selected?.id} words={ws} onHover={(id) => id !== selected?.id && setPickedId(id)} className="max-sm:max-h-[calc(100dvh-10.5rem)]" />
+              {query.trim() !== "" && loaded.loadingIssues && !sections.some((s) => s.id === "issues") && <p className="m-0 px-5 pb-2 text-small text-faint">Looking through open issues…</p>}
+            </>
+          )}
         </div>
       </div>
-    </div>
+
+      {mode.kind === "answer" && <AnswerPane host={host} question={mode.question} n={mode.n} chat={chat} onChat={setChat} onExpand={(id) => (host.onOpenChat(id), onClose())} />}
+      {mode.kind === "approval" && <ApprovalPane approval={mode.approval} onClose={onClose} />}
+
+      <div className="max-sm:hidden">
+        <PanelFooter hints={hints} />
+      </div>
+    </PanelFrame>
   );
-  return typeof document === "undefined" ? body : createPortal(body, document.body);
 }
 
 /** A held write that Spotlight itself proposed, with the same card a chat's tool call gets. */
