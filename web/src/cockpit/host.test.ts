@@ -4,7 +4,7 @@
 // never a zero, never an "undefined".
 import { describe, expect, it } from "vitest";
 
-import { autoCapacityLine, colonyFacts, formatBootMs, formatBytes, formatLoad, formatUptime, hostFacts } from "./host";
+import { autoCapacityLine, autoCeilingLabel, colonyFacts, formatBootMs, formatBytes, formatLoad, formatUptime, hostFacts } from "./host";
 import type { HarnessStatus, HostInfo, Session } from "../types";
 
 const FULL_HOST: HostInfo = {
@@ -177,5 +177,17 @@ describe("autoCapacityLine", () => {
     expect(autoCapacityLine({ ...auto, free_bytes: undefined, load: undefined })).toBe("auto: 7 running · room for 2 more");
     expect(autoCapacityLine({ ...auto, mode: "fixed" })).toBeNull();
     expect(autoCapacityLine(undefined)).toBeNull();
+  });
+});
+
+describe("autoCeilingLabel", () => {
+  const sandbox = { msb_version: null, image: "x", mode: "auto", max_parallel: 14, auto_max_parallel: 32 } as const;
+  it("reads the effective ceiling and the cap", () => {
+    expect(autoCeilingLabel(sandbox)).toBe("auto: 14 now (cap 32)");
+  });
+  it("stays silent for a fixed limit or a build that omits the cap", () => {
+    expect(autoCeilingLabel({ ...sandbox, mode: "fixed" })).toBeNull();
+    expect(autoCeilingLabel({ ...sandbox, auto_max_parallel: undefined })).toBeNull();
+    expect(autoCeilingLabel(undefined)).toBeNull();
   });
 });

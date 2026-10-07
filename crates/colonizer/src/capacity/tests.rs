@@ -304,6 +304,9 @@ fn the_status_object_names_the_mode_the_size_and_what_the_next_colony_waits_on()
         (v["room_for"].as_u64(), v["waiting_reason"].as_str()),
         (Some(0), Some("memory"))
     );
+    // The effective ceiling and the auto size take the static keys (issue #1177).
+    assert_eq!(v["max_parallel"].as_u64(), Some(limit.max_parallel as u64));
+    assert_eq!((v["cpus"].as_u64(), v["memory"].as_str()), (Some(3), Some("11G")));
     assert_eq!((v["running"].as_u64(), v["free_bytes"].as_u64()), (Some(7), Some(gib(14))));
     assert_eq!((v["load"].as_f64(), v["cpu_cores"].as_u64()), (Some(9.0), Some(32)));
 }
@@ -425,4 +428,13 @@ fn the_cpu_commit_check_limits_vcpus_on_top_of_load() {
     let a = admission(&size, &host, 6, 0, 32, DEFAULT_AUTO_OVERCOMMIT);
     assert_eq!((a.room_for, a.limited_by), (0, Limiter::CpuCommit));
     assert_eq!(a.waiting_reason, Some(WaitReason::Cpu));
+}
+
+#[test]
+fn a_fixed_status_object_leaves_the_static_keys_to_the_settings() {
+    let mut modules = auto_modules();
+    modules.sandbox.settings.insert("max_parallel".into(), json!(5));
+    let v = evaluate(&modules, omarchy(14, 0.0), &running(2, SessionStatus::Running)).status_json();
+    assert_eq!(v["mode"], "fixed");
+    assert!(v.get("cpus").is_none() && v.get("memory").is_none() && v.get("max_parallel").is_none());
 }

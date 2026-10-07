@@ -290,6 +290,11 @@ pub(crate) async fn status(
         "cpus": setting_u64(&modules.sandbox, &sandbox_schema, "cpus"),
         "memory": config::setting_str(&modules.sandbox, &sandbox_schema, "memory"),
         "max_parallel": setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel"),
+        // The static settings, kept for the settings form: in auto mode the keys above carry the
+        // effective ceiling and the auto colony size instead (issue #1177).
+        "configured_cpus": setting_u64(&modules.sandbox, &sandbox_schema, "cpus"),
+        "configured_memory": config::setting_str(&modules.sandbox, &sandbox_schema, "memory"),
+        "configured_max_parallel": setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel"),
         "msb_version": msb_version.ok().map(|v| v.trim().to_string()),
         "claude_bin": claude_bin.as_ref().ok().map(|p| p.display().to_string()),
         "claude_bin_error": claude_bin.err().map(|e| format!("{e:#}")),

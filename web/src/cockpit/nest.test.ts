@@ -3,7 +3,7 @@
 // against hand-computed values for the default 880×470 plot.
 import { describe, expect, it } from "vitest";
 
-import { MAX_CHAMBERS, SURFACE_Y, branchPaths, chamberCount, normalizeBox, scaleFor, slotAt, surfaceGrass, tunnelPath, tunnelSeed } from "./nest";
+import { MAX_CHAMBERS, MAX_NEST_CHAMBERS, chamberSessions, SURFACE_Y, branchPaths, chamberCount, normalizeBox, scaleFor, slotAt, surfaceGrass, tunnelPath, tunnelSeed } from "./nest";
 
 const DEFAULT = normalizeBox(880, 470);
 
@@ -201,5 +201,42 @@ describe("surfaceGrass", () => {
       expect(tuft.top).toBeLessThan(SURFACE_Y);
       expect(tuft.top).toBeGreaterThanOrEqual(SURFACE_Y - 14);
     }
+  });
+});
+
+describe("one chamber per live colony (issue #1177)", () => {
+  it("never counts fewer chambers than live colonies, whatever the capacity says", () => {
+    expect(chamberCount(3, 14)).toBe(14);
+    expect(chamberCount(null, 14)).toBe(14);
+    expect(chamberCount(14, 0)).toBe(8);
+    expect(chamberCount(3, 500)).toBe(MAX_NEST_CHAMBERS);
+  });
+
+  it("lays out every chamber of a crowded nest inside the plot, apart from one another", () => {
+    for (const box of [DEFAULT, { width: 1400, height: 800 }]) {
+      const slots = Array.from({ length: 14 }, (_, i) => slotAt(i, box, 14));
+      for (const s of slots) {
+        expect(s.x - s.r).toBeGreaterThanOrEqual(0);
+        expect(s.x + s.r).toBeLessThanOrEqual(box.width);
+        expect(s.y - s.r).toBeGreaterThan(SURFACE_Y);
+        expect(s.y + s.r).toBeLessThanOrEqual(box.height);
+      }
+      for (let i = 0; i < slots.length; i++)
+        for (let j = i + 1; j < slots.length; j++)
+          expect(Math.hypot(slots[i].x - slots[j].x, slots[i].y - slots[j].y)).toBeGreaterThanOrEqual(slots[i].r + slots[j].r);
+    }
+    expect(() => slotAt(14, DEFAULT, 14)).toThrow(RangeError);
+  });
+
+  it("keeps every live session and fills the rest up to the count, in order", () => {
+    const rows = [
+      { id: "a", status: "done" },
+      { id: "b", status: "working" },
+      { id: "c", status: "done" },
+      { id: "d", status: "working" },
+    ];
+    const live = (s: string) => s === "working";
+    expect(chamberSessions(rows, 3, live).map((r) => r.id)).toEqual(["a", "b", "d"]);
+    expect(chamberSessions(rows, 1, live).map((r) => r.id)).toEqual(["b", "d"]);
   });
 });

@@ -16,6 +16,7 @@ export function LaunchView({
   statusKnown,
   autopilotDefault,
   maxParallel,
+  capacityNote = null,
   sessions,
   prefill = null,
   onOpenColony,
@@ -27,6 +28,8 @@ export function LaunchView({
   statusKnown: boolean;
   autopilotDefault: boolean;
   maxParallel: number | null;
+  /** Auto mode's ceiling in words (`auto: N now (cap M)`); replaces the static count. */
+  capacityNote?: string | null;
   /** The mothership's colony list, for the launch form's pre-submit duplicate check. */
   sessions: Session[];
   /** An issue a shared link named (issue #745): the repository preselected, the issue open. */
@@ -42,7 +45,7 @@ export function LaunchView({
       <p className="mt-2 text-body-lg text-pretty text-muted">
         Send a settler out{org ? ` into ${org}` : ""}:
         one colony each, in its own microvm on a fresh worktree
-        {maxParallel != null ? ` · queued past ${maxParallel} in parallel` : ""}.
+        {capacityNote ? ` · queued past the ceiling (${capacityNote})` : maxParallel != null ? ` · queued past ${maxParallel} in parallel` : ""}.
       </p>
       <p className="mt-1 text-small text-faint">
         Duplicate check is per-host; other motherships in the fleet are not consulted.

@@ -28,6 +28,7 @@ import { RedAnts } from "./RedAnts";
 import { useOpenQuestions } from "./questions";
 import {
   chamberCount,
+  chamberSessions,
   SURFACE_Y,
   branchPaths,
   normalizeBox,
@@ -247,6 +248,7 @@ function useCostRises(sessions: readonly Session[]): Readonly<Record<string, { d
 export function NestView({
   sessions,
   capacity = null,
+  capacityNote = null,
   selectedId,
   mothershipSelected,
   redRuns = [],
@@ -267,6 +269,8 @@ export function NestView({
   sessions: Session[];
   /** What the machine runs at once (`sandbox.max_parallel`); unknown reads as the default 5. */
   capacity?: number | null;
+  /** Auto mode's ceiling in words (`auto: N now (cap M)`), shown in place of `capacity`. */
+  capacityNote?: string | null;
   selectedId: string | null;
   mothershipSelected: boolean;
   /** Red-team runs (issue #212): a live one targeting this nest's org marches ants over the plot. */
@@ -328,8 +332,10 @@ export function NestView({
   const costRises = useCostRises(sessions);
   const now = Date.now();
 
-  const count = chamberCount(capacity);
-  const chambers = sessions.slice(0, count);
+  // One chamber per live colony, never fewer, whatever the capacity reads (issue #1177).
+  const liveCount = sessions.filter((s) => isLive(s.status)).length;
+  const count = chamberCount(capacity, liveCount);
+  const chambers = chamberSessions(sessions, count, isLive).slice(0, count);
 
   // A chamber click selects the colony AND zooms into it. An outside move drops the zoom —
   // the reducer ignores a selection naming the zoomed colony, so the opening click stays open.
@@ -356,13 +362,15 @@ export function NestView({
   // Side tunnels are the work a colony has done, and steps are only known for the open colony.
   const selectedSteps = settlers.reduce((total, settler) => total + settler.steps, 0);
   const mothershipX = Math.round(box.width / 2);
-  const returned = sessions.filter((s) => s.status === "pr_opened").slice(0, 3);
-  const queued = sessions.filter((s) => s.status === "queued").slice(0, 2);
+  // Surface ants belong to colonies with a chamber: one whose chamber is not drawn gets no ant
+  // standing free of every tunnel (issue #1177).
+  const chamberIds = new Set(chambers.map((s) => s.id));
+  const returned = sessions.filter((s) => s.status === "pr_opened" && chamberIds.has(s.id)).slice(0, 3);
+  const queued = sessions.filter((s) => s.status === "queued" && chamberIds.has(s.id)).slice(0, 2);
   const waiting = sessions.filter(needsYou);
   // What each waiting colony is asking, for its balloon and the needs-you rows.
   const questions = useOpenQuestions(sessions);
   const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
-  const liveCount = sessions.filter((s) => isLive(s.status)).length;
   const queuedCount = sessions.filter((s) => s.status === "queued").length;
   const next = nextUp(sessions);
   const known = new Set(sessions.map((s) => s.id));
@@ -371,7 +379,7 @@ export function NestView({
     `${liveCount} live`,
     `${queuedCount} queued`,
     next ? `next up: ${shortName(next)}` : null,
-    capacity != null ? `capacity ${liveCount}/${capacity}` : null,
+    capacityNote ?? (capacity != null ? `capacity ${liveCount}/${capacity}` : null),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -599,6 +607,7 @@ export function NestView({
                   return (
                     <div
                       key={`carry-${session.id}-${settler?.agent.id ?? "solo"}`}
+                      data-ride={ride}
                       className="absolute left-0 top-0 z-[3]"
                       style={{
                         offsetPath: `path("${ride}")`,
@@ -644,6 +653,7 @@ export function NestView({
             ].map(({ session, left, i, state }) => (
               <div
                 key={`walk-${session.id}`}
+                data-ride="surface"
                 className="absolute z-[3]"
                 style={{
                   left: Math.round(left),
