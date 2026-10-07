@@ -647,6 +647,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
                 "auto_max_parallel": {"type": "integer", "title": "Safety cap on colonies (automatic mode)", "minimum": 1, "maximum": 256, "default": crate::capacity::DEFAULT_AUTO_MAX_PARALLEL,
                     "description": "With the Automatic stack and no fixed number in Parallel sessions, colonies are sized from the host and admitted from its live free memory and load, with no fixed limit: this is the ceiling that stays whatever the host has free. Setting Parallel sessions to a number switches back to a fixed limit."},
+                "auto_overcommit": {"type": "number", "title": "Memory overcommit (automatic mode)", "minimum": 0.5, "maximum": 1.0, "default": crate::capacity::DEFAULT_AUTO_OVERCOMMIT,
+                    "description": "In automatic mode a colony is admitted only while the memory sizes of all live colonies, times this factor, plus the host's reserve, fit in RAM. A microVM allocates lazily, so free memory alone lets too many in at once. 0.75 means colonies may be sized up to a third beyond what the host holds; 1.0 commits no more than the RAM."},
                 "repo_max_parallel": {"type": "integer", "title": "Parallel sessions per repository", "minimum": 1, "maximum": 32, "default": 3,
                     "description": "Live colonies one repository may run at once, on top of the overall limit above and any org's own. An org can set its own figure in its settings."},
                 "egress": {"type": "string", "title": "Egress policy", "enum": ["open", "allowlist"], "default": "open",

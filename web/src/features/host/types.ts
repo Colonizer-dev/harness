@@ -43,6 +43,10 @@ export interface HarnessStatus {
     room_for?: number;
     /** Why the next colony waits, when none fits; null otherwise. */
     waiting_reason?: "memory" | "cpu" | "cap" | null;
+    /** Auto mode only: memory committed to live colonies (their sizes summed), in GB. */
+    committed_gb?: number;
+    /** Auto mode only: the tightest admission check. */
+    limited_by?: "cap" | "memory-commit" | "cpu-commit" | "free" | "load";
     /** Auto mode only: the safety cap that holds whatever the host has free. */
     auto_max_parallel?: number;
     /** Auto mode only, and only what the host measured: free memory for a new colony, the 1-minute load and the core count. */

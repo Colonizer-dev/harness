@@ -243,7 +243,7 @@ call — the host panel's key, distinct from telemetry's `install_id`, which is 
 when the live map is switched off). `checked_at` is an RFC 3339 timestamp and always present, saying
 when the measurements were taken. `microvms_live` is how many colonies currently hold a microVM
 against the parallel limit — the same "busy" count `queue::has_room` uses — and `microvms_ceiling`
-is the sandbox module's `max_parallel` — or, in automatic mode (issue #1141), the colonies running plus the ones that fit the live host right now: live against ceiling, like a resource gauge. `sandbox` carries the same picture: `mode` (`auto` or `fixed`), the computed `size` (`cpus`, `memory_gb`, `slots`, the reserve), `room_for`, `waiting_reason` (`memory`, `cpu`, `cap` or `null`), and in auto mode `free_bytes`, `load`, `cpu_cores` and `auto_max_parallel`.
+is the sandbox module's `max_parallel` — or, in automatic mode (issue #1141), the colonies running plus the ones that fit the live host right now: live against ceiling, like a resource gauge. `sandbox` carries the same picture: `mode` (`auto` or `fixed`), the computed `size` (`cpus`, `memory_gb`, `slots`, the reserve), `room_for`, `waiting_reason` (`memory`, `cpu`, `cap` or `null`), and in auto mode `free_bytes`, `load`, `cpu_cores`, `auto_max_parallel`, `committed_gb`, `overcommit` and `limited_by` (the tightest admission check: `cap`, `memory-commit`, `cpu-commit`, `free` or `load`; issue #1158).
 
 Every other key is optional and `OMITTED` — not `null`, not `0` — when it cannot be measured. On a Mac
 the memory, load and uptime figures come from `sysctl` and `vm_stat` instead of `/proc`, and any that
