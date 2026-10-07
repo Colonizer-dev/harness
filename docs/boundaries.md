@@ -94,7 +94,7 @@ event into the colony's trail, timed on the mothership's own receive clock, and 
 | :--- | :--- |
 | `repeated_denial` | 3 (`REPEATED_DENIALS`) events of the same kind and control within 10 minutes (`CONTROL_DEFEAT_WINDOW_MINUTES`) — a refused action retried with trivial variations matches the same rule each time. One denial, or one retry, is a wall the colony works around and fires nothing |
 | `ask_bypass` | Any `exec_policy_ask_bypass_attempt`: a rule a person refused, asking again |
-| `deny_then_reach` | A tool call whose input names a target a control refused within the last 30 minutes (`REACH_WINDOW_MINUTES`) — a host as `://host` or `@host`, a path as a whole path token — returns a successful result: the egress-denied host reached another way, the refused write target written through another tool, a path agentd could not bind read anyway. An errored result is the wall holding again |
+| `deny_then_reach` | A tool call whose input names a target a control refused within the last 30 minutes (`REACH_WINDOW_MINUTES`) — a host as `://host` or `@host`, a path as a whole path token, resolved against `/workspace`, naming the path itself, a path under it or a glob matching it (never just an ancestor such as the workspace root, and never the colony's own `/harness/out`) — returns a successful result: the egress-denied host reached another way, the refused write target written through another tool, a path agentd could not bind read anyway. An errored result is the wall holding again |
 | `publish_rewrite` | Any `publish_rewrite_refused`: colony output that crossed the publish wall |
 
 A `path_policy_unbound` alone fires nothing — off Linux every nested checkout produces one — but its

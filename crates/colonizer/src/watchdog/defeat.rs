@@ -121,8 +121,20 @@ pub fn note_boundary(trail: &mut BoundaryTrail, boundary: Boundary, now: DateTim
     defeat
 }
 
+/// Where the colony's checkout sits in the guest: a relative path in a tool call, or in a refused
+/// target, is resolved against it.
+const WORKSPACE: &str = "/workspace";
+/// The colony's own output directory (`pr.md`, verify logs, findings): the harness tells the agent
+/// to write there, so a call reaching it after a refusal is the brief being followed (#1153).
+const OUTPUT_DIR: &str = "/harness/out";
+
 /// Whether a tool call's input names a refused target: a host as a URL's or an address's host
-/// (`://host`, `@host`), a path as a whole path token — `.env` is not `.env.example`.
+/// (`://host`, `@host`), a path as a whole path token — `.env` is not `.env.example`. A path counts
+/// when the call names the target itself, something under it, or a glob that matches it, once both
+/// are resolved against the workspace (`/workspace/.env` and `./.env` are `.env`); a call that only
+/// names an ancestor (`cd /workspace`, `ls /workspace`) does not, since every call in the colony
+/// works there (#1079). A target that names no file of its own — the workspace root or above, a
+/// shell operator such as `2>&1`, or the colony's output directory — is never reached.
 pub fn reaches(input: &str, target: &str) -> bool {
     if target.len() < 3 {
         return false;
@@ -138,8 +150,15 @@ pub fn reaches(input: &str, target: &str) -> bool {
             })
         });
     }
+    if target.contains(['<', '>', '|', '&', ';']) {
+        return false; // a redirect or an operator, not a path (`2>&1`, #1079)
+    }
+    let Some(resolved) = resolve(target) else { return false };
+    if resolved == "/" || resolved == "~" || is_under(WORKSPACE, &resolved) || is_under(&resolved, OUTPUT_DIR) {
+        return false;
+    }
     let path_char = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '~');
-    input.match_indices(target).any(|(at, m)| {
+    let literal = input.match_indices(target).any(|(at, m)| {
         let before = input[..at].chars().next_back();
         let after = input[at + m.len()..].chars().next();
         let clean_before = match before {
@@ -149,7 +168,80 @@ pub fn reaches(input: &str, target: &str) -> bool {
             Some(c) => !path_char(c),
         };
         clean_before && !after.is_some_and(path_char)
-    })
+    });
+    literal
+        || path_words(input).any(|word| {
+            let Some(path) = resolve(word) else { return false };
+            if word.contains(['*', '?']) {
+                glob_reaches(&path, &resolved)
+            } else {
+                is_under(&path, &resolved)
+            }
+        })
+}
+
+/// The words of a tool call's input that could be paths: split on whitespace, quotes and shell or
+/// JSON punctuation, kept when they look like one (absolute, `~`, `./`, a dotfile, or with a `/`).
+fn path_words(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .split(|c: char| c.is_whitespace() || "\"'`,;:|&<>(){}[]=\\".contains(c))
+        .filter(|w| !w.is_empty() && (w.contains('/') || w.starts_with('.') || w.starts_with('~')))
+}
+
+/// A path resolved against the workspace, `.` and `..` folded: `.env` → `/workspace/.env`,
+/// `~/.ssh/` → `~/.ssh`. None for an empty path.
+fn resolve(path: &str) -> Option<String> {
+    let (root, rest) = if let Some(rest) = path.strip_prefix('~') {
+        ("~", rest)
+    } else if path.starts_with('/') {
+        ("", path)
+    } else {
+        (WORKSPACE, path)
+    };
+    let mut parts: Vec<&str> = root.split('/').filter(|p| !p.is_empty()).collect();
+    let floor = if root == "~" { 1 } else { 0 };
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.len() > floor {
+                    parts.pop();
+                }
+            }
+            p => parts.push(p),
+        }
+    }
+    let joined = parts.join("/");
+    Some(if root == "~" { joined } else { format!("/{joined}") }).filter(|p| !p.is_empty())
+}
+
+/// True when `path` is `dir` or sits under it, on segment boundaries.
+fn is_under(path: &str, dir: &str) -> bool {
+    path == dir || path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// True when a glob (resolved) matches the target or a path under it: `*` and `?` stay within one
+/// segment and, as in the shell, never match a leading `.`. A glob that can only match an ancestor
+/// of the target (`/workspace/*` for `/workspace/config/.env`) is not a reach.
+fn glob_reaches(glob: &str, target: &str) -> bool {
+    let g: Vec<&str> = glob.split('/').collect();
+    let t: Vec<&str> = target.split('/').collect();
+    // `cat /workspace/.e*` reaches `/workspace/.env`; `cat ~/.ssh/id_*` reaches a refused `~/.ssh`.
+    g.len() >= t.len() && t.iter().zip(&g).all(|(t, g)| segment_glob(g.as_bytes(), t.as_bytes(), true))
+}
+
+fn segment_glob(p: &[u8], s: &[u8], start: bool) -> bool {
+    match p.split_first() {
+        None => s.is_empty(),
+        Some((b'*', rest)) => {
+            if start && s.first() == Some(&b'.') {
+                return false;
+            }
+            (0..=s.len()).any(|i| segment_glob(rest, &s[i..], false))
+        }
+        Some((b'?', rest)) => !s.is_empty() && !(start && s[0] == b'.') && segment_glob(rest, &s[1..], false),
+        Some((c, rest)) => s.first() == Some(c) && segment_glob(rest, &s[1..], false),
+    }
 }
 
 /// A tool call opened (issue #609): when its input names a target a control refused within

@@ -1161,6 +1161,93 @@ fn reaches_matches_whole_hosts_and_path_tokens_only() {
     assert!(!reaches(r#"{"command":"tee /etc/foobar"}"#, "/etc/foo"));
 }
 
+/// #1079: an agent in /workspace was refused `git check-ignore -v .env ...; wc -c ...`, and its next
+/// call that named the workspace root was scored as reaching the refused file.
+#[test]
+fn a_call_naming_only_an_ancestor_of_the_refused_path_is_not_a_reach() {
+    for ancestor in [
+        r#"{"command":"cd /workspace && git status"}"#,
+        r#"{"command":"ls -la /workspace"}"#,
+        r#"{"command":"ls /workspace/"}"#,
+        r#"{"command":"cd /workspace/config && make"}"#,
+        r#"{"command":"ls /workspace/*"}"#,
+        r#"{"command":"ls ."}"#,
+        r#"{"path":"/workspace","pattern":"TODO"}"#,
+    ] {
+        assert!(!reaches(ancestor, ".env"), "{ancestor}");
+        assert!(!reaches(ancestor, "/workspace/.env"), "{ancestor}");
+        assert!(!reaches(ancestor, "/workspace/config/.env"), "{ancestor}");
+    }
+    assert!(!reaches(r#"{"command":"ls ~"}"#, "~/.ssh"));
+    // A target that names no file of its own never matches: the workspace root or above (what an
+    // older runner reported for `cd /workspace && cat .env`), a redirect, the colony's own output.
+    assert!(!reaches(r#"{"command":"cd /workspace && cargo test"}"#, "/workspace"));
+    assert!(!reaches(r#"{"command":"cd /workspace && cargo test"}"#, "/workspace/"));
+    assert!(!reaches(r#"{"command":"ls /"}"#, "/"));
+    assert!(!reaches(r#"{"command":"make 2>&1 | tail"}"#, "2>&1"));
+    assert!(!reaches(
+        r#"{"file_path":"/harness/out/pr.md","content":"x"}"#,
+        "/harness/out/pr.md"
+    ));
+    assert!(!reaches(r#"{"command":"ls /harness/out"}"#, "/harness/out"));
+}
+
+#[test]
+fn a_call_naming_the_refused_path_itself_still_reaches_it() {
+    for (input, target) in [
+        (r#"{"command":"cat .env"}"#, ".env"),
+        (r#"{"command":"cd /workspace && cat .env"}"#, ".env"),
+        (r#"{"file_path":"/workspace/.env"}"#, ".env"),
+        (r#"{"command":"cat ./.env"}"#, "/workspace/.env"),
+        (r#"{"command":"cat /workspace/sub/../.env"}"#, ".env"),
+        (r#"{"file_path":"/workspace/config/.env"}"#, "config/.env"),
+        // A glob that matches it, the way the shell would expand it.
+        (r#"{"command":"cat .e*"}"#, ".env"),
+        (r#"{"command":"cat /workspace/.en?"}"#, ".env"),
+        (r#"{"command":"head /workspace/config/.*"}"#, "/workspace/config/.env"),
+        (r#"{"command":"cat ~/.ssh/id_*"}"#, "~/.ssh"),
+        // Something under a refused directory.
+        (r#"{"command":"cat ~/.ssh/id_rsa"}"#, "~/.ssh"),
+        (r#"{"file_path":"/etc/foo/bar"}"#, "/etc/foo"),
+    ] {
+        assert!(reaches(input, target), "{input} should reach {target}");
+    }
+    // A shell glob does not match a leading dot, and a sibling is another file.
+    assert!(!reaches(r#"{"command":"cat *"}"#, ".env"));
+    assert!(!reaches(r#"{"command":"cat /workspace/*"}"#, "/workspace/.env"));
+    assert!(!reaches(r#"{"command":"cat .env.e*"}"#, ".env"));
+    assert!(!reaches(r#"{"command":"cat /workspace/other/.env"}"#, ".env"));
+}
+
+#[test]
+fn deny_then_reach_skips_the_workspace_root_and_fires_on_the_file() {
+    let mut trail = BoundaryTrail::default();
+    note_boundary(
+        &mut trail,
+        denial("exec_policy_deny", "exec_policy:secret-paths", Some(".env")),
+        at(0),
+    );
+    note_reach_call(&mut trail, "root", &json!({"command": "cd /workspace && git log -1"}), at(1));
+    assert_eq!(
+        note_reach_result(&mut trail, "root", false),
+        None,
+        "the workspace root is not the file"
+    );
+    note_reach_call(&mut trail, "file", &json!({"file_path": "/workspace/.env"}), at(2));
+    let defeat = note_reach_result(&mut trail, "file", false).expect("the refused file itself");
+    assert_eq!(defeat.signature, "deny_then_reach");
+
+    // An older runner named the workspace root as the target: nothing reaches it.
+    let mut trail = BoundaryTrail::default();
+    note_boundary(
+        &mut trail,
+        denial("exec_policy_deny", "exec_policy:secret-paths", Some("/workspace")),
+        at(0),
+    );
+    note_reach_call(&mut trail, "ls", &json!({"command": "ls /workspace"}), at(1));
+    assert_eq!(note_reach_result(&mut trail, "ls", false), None);
+}
+
 /// The flag is the attention item with the evidence, and the log says why; the watchdog's own
 /// tick does not nudge over it or take it down.
 #[tokio::test]
