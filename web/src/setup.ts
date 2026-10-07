@@ -53,6 +53,8 @@ export interface SetupInput {
   telemetry: TelemetryStatus | null;
   /** `modules.sandbox.settings.preset`; null or blank selects the automatic stack, read off each repository when the colony boots. */
   stackPreset: string | null;
+  /** Rows the person marked "don't ask again", kept server-side per host (GET /api/setup); only advisory rows can be in it. Absent or null is none. */
+  dismissed?: readonly string[] | null;
   /** How many sessions exist, any status. */
   sessionCount: number;
   /** The current time, milliseconds since the epoch — threaded in rather than read from the clock
@@ -67,21 +69,35 @@ export interface SetupView {
   firstActionable: SetupRow | null;
   autoOpen: boolean;
   launchEnabled: boolean;
+  /** A required row (machine, GitHub, Claude) is unmet, or anything is blocked. Advisory rows (the stack, the first launch, the live map) never set it. */
+  attention: boolean;
 }
+
+/** The rows that are advice, not requirements: they never turn the Settings / Setup dot amber. */
+export const ADVISORY_ROW_IDS: readonly SetupRowId[] = ["stack", "launch", "map"];
+/** The advisory rows a person can silence for good. */
+export const DISMISSIBLE_ROW_IDS: readonly SetupRowId[] = ["stack", "map"];
 
 /** The platforms a colony can boot on (docs/install.md); anything else reads as unsupported. */
 const SUPPORTED_PLATFORMS = ["linux-x86_64", "darwin-arm64"];
 
 /** The rows, in the order the issue pins: five checklist rows, then the live map. */
 export function setupRows(input: SetupInput): SetupRow[] {
+  const dismissed = new Set(input.dismissed ?? []);
   return [
     machineRow(input.status),
-    stackRow(input),
+    dismissable(stackRow(input), dismissed),
     githubRow(input.status),
     claudeRow(input.status, input.now),
     launchRow(input),
-    mapRow(input.telemetry),
+    dismissable(mapRow(input.telemetry), dismissed),
   ];
+}
+
+/** An advisory row the person silenced reads as done, whatever it would have said. */
+function dismissable(row: SetupRow, dismissed: ReadonlySet<string>): SetupRow {
+  if (!DISMISSIBLE_ROW_IDS.includes(row.id) || !dismissed.has(row.id) || row.state === "done") return row;
+  return { ...row, state: "done", detail: "Skipped; not asking again", error: undefined, fix: undefined };
 }
 
 /** Everything the Setup dialog needs, in one call. */
@@ -93,14 +109,16 @@ export function setupView(input: SetupInput): SetupView {
     firstActionable: firstActionableRow(rows),
     autoOpen: shouldAutoOpen(rows, input.sessionCount),
     launchEnabled: launchEnabled(rows),
+    attention: rows.some((row) => row.state === "blocked" || (row.gatesLaunch && row.state !== "done")),
   };
 }
 
 /** The checklist's one-word summary, for the Settings nav dot and the pane header: red while a
- *  blocking row is unmet, green at all five done, amber for a checklist only advisories hold open. */
-export function setupTone(view: Pick<SetupView, "autoOpen" | "progress">): "ok" | "warn" | "err" {
+ *  blocking row can auto-open Setup, amber while a required row is unmet, green otherwise. Advisory
+ *  rows (the stack, the first launch, the live map) never make it amber (issue #1200). */
+export function setupTone(view: Pick<SetupView, "autoOpen" | "attention">): "ok" | "warn" | "err" {
   if (view.autoOpen) return "err";
-  return view.progress.done === view.progress.total ? "ok" : "warn";
+  return view.attention ? "warn" : "ok";
 }
 
 /**
@@ -331,13 +349,16 @@ function stackRow(input: SetupInput): SetupRow {
       notes.push("The colony will download it when it boots.");
       break;
     case "idle":
+      // The mothership checks its image cache at startup and again before answering, so `idle`
+      // means it looked and the image is not there.
       state = "todo";
       detail = `${label} image is not cached`;
       break;
     default:
-      // No pull verdict at all: claim nothing about the image either way.
-      state = "todo";
-      detail = `${label} stack selected`;
+      // No pull verdict yet (the first fetch is in the air, or it failed): the image may well be
+      // cached, so this is unknown, never "still to do" (issue #1200).
+      state = "working";
+      detail = `Checking the ${label} image…`;
       break;
   }
 

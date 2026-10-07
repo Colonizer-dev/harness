@@ -97,6 +97,7 @@ export function SettingsDialog({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  onDismissedChanged,
   usage,
   onUsageChanged,
   notifications,
@@ -117,6 +118,7 @@ export function SettingsDialog({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  onDismissedChanged: (ids: string[]) => void;
   usage: UsageStatus | null;
   onUsageChanged: (usage: UsageStatus) => void;
   notifications: NotificationPrefs;
@@ -162,6 +164,7 @@ export function SettingsDialog({
           onModulesChanged={onModulesChanged}
           telemetry={telemetry}
           onTelemetryChanged={onTelemetryChanged}
+          onDismissedChanged={onDismissedChanged}
           usage={usage}
           onUsageChanged={onUsageChanged}
           notifications={notifications}
@@ -192,6 +195,7 @@ export function SettingsBody({
   onModulesChanged,
   telemetry,
   onTelemetryChanged,
+  onDismissedChanged,
   usage,
   onUsageChanged,
   notifications,
@@ -216,6 +220,7 @@ export function SettingsBody({
   onModulesChanged: (modules: ModuleInfo[]) => void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  onDismissedChanged: (ids: string[]) => void;
   usage: UsageStatus | null;
   onUsageChanged: (usage: UsageStatus) => void;
   notifications: NotificationPrefs;
@@ -606,6 +611,7 @@ export function SettingsBody({
     onStatusChanged,
     telemetry,
     onTelemetryChanged,
+    onDismissedChanged,
     usage,
     onUsageChanged,
     builtWith,
@@ -734,6 +740,7 @@ type SectionContext = {
   onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   telemetry: TelemetryStatus | null;
   onTelemetryChanged: (telemetry: TelemetryStatus) => void;
+  onDismissedChanged: (ids: string[]) => void;
   usage: UsageStatus | null;
   onUsageChanged: (usage: UsageStatus) => void;
   /** The venture's stack, for the Built with pane and its hero counts (issue #944). */
@@ -794,6 +801,7 @@ const SECTIONS: SectionEntry[] = [
         onStatusChanged={c.onStatusChanged}
         onSandboxSaved={c.onModuleSaved}
         onTelemetryChanged={c.onTelemetryChanged}
+        onDismissedChanged={c.onDismissedChanged}
         onLaunch={c.onLaunch}
         onDismiss={c.onSetupDismissed}
         onShown={c.onSetupShown}

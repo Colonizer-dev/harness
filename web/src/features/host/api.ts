@@ -2,7 +2,7 @@
 // The root `Api` interface composes this with the other features.
 import { del, post, put, request } from "../../http";
 import type { LoginView } from "../sessions/types";
-import type { ArchiveListing, HarnessStatus, HeadroomStatus, LoginItemStatus, PullStatus, RetentionPlan, RetentionRequest, StorageSummary, RestartOnNewVersion, TelemetryStatus, UpdateStatus, UsageStatus } from "./types";
+import type { ArchiveListing, HarnessStatus, HeadroomStatus, LoginItemStatus, PullStatus, RetentionPlan, RetentionRequest, StorageSummary, RestartOnNewVersion, SetupState, TelemetryStatus, UpdateStatus, UsageStatus } from "./types";
 
 export interface HostApi {
   /**
@@ -15,6 +15,10 @@ export interface HostApi {
   headroom(): Promise<HeadroomStatus>;
   headroomDownload(): Promise<HeadroomStatus>;
   telemetry(): Promise<TelemetryStatus>;
+  /** GET /api/setup: the advisory Setup rows marked "don't ask again" on this host. */
+  setupState(): Promise<SetupState>;
+  /** PUT /api/setup: dismiss (or bring back) one advisory row, kept server-side. */
+  setSetupDismissed(id: string, dismissed: boolean): Promise<SetupState>;
   update(): Promise<UpdateStatus>;
   setUpdateCheck(enabled: boolean): Promise<UpdateStatus>;
   applyUpdate(): Promise<{ started: boolean }>;
@@ -53,6 +57,8 @@ export const hostHttp: HostApi = {
   headroom: () => request("/api/headroom"),
   headroomDownload: () => post("/api/headroom/download"),
   telemetry: () => request("/api/telemetry"),
+  setupState: () => request("/api/setup"),
+  setSetupDismissed: (id, dismissed) => put("/api/setup", { id, dismissed }),
   update: () => request("/api/update"),
   setUpdateCheck: (enabled) => put("/api/update", { enabled }),
   applyUpdate: () => post("/api/update/apply"),

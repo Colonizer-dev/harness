@@ -142,6 +142,7 @@ mod server;
 mod services;
 mod sessions;
 mod setup;
+mod setup_state;
 mod snapshot;
 mod spend;
 mod stack;

@@ -486,6 +486,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::reclaim::start_tasks(app);
     crate::redteam::start_tasks(app);
     crate::remote::start_tasks(app, router);
+    crate::sandbox::start_tasks(app);
     crate::summaries::start_tasks(app);
     crate::telemetry::start_tasks(app);
     crate::ts_any_loop::start_tasks(app);
