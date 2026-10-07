@@ -132,7 +132,9 @@ test('buildOptions maps routing and memory settings into Claude Code options', (
   assert.equal(options.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '131072');
   assert.equal(options.model, 'opus');
   assert.equal(options.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:4545');
-  assert.equal(options.env.CLAUDE_CODE_SUBAGENT_MODEL, 'deepseek/deepseek-flash');
+  // A prefixed id rides an alias slot the orchestrator ('opus') and background model (haiku) are not using.
+  assert.equal(options.env.CLAUDE_CODE_SUBAGENT_MODEL, 'sonnet');
+  assert.equal(options.env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'deepseek/deepseek-flash');
   assert.equal(options.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'local/qwen-small');
   assert.equal(options.env.COLONIZER_PROVIDER_KEY_DEEPSEEK, undefined);
   assert.deepEqual(options.mcpServers, { [MEMORY_SERVER]: memoryServer });

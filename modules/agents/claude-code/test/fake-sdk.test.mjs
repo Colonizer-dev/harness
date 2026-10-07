@@ -835,3 +835,55 @@ test('rtk rewrites Bash commands through `rtk rewrite` and leaves every other ou
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a provider-prefixed subagent model goes through an alias slot, not the orchestrator (issue #1176)', () => {
+  const prefixed = buildOptions({ COLONIZER_MODEL: 'claude-opus-5-5', COLONIZER_SUBAGENT_MODEL: 'minimax/MiniMax-M3.1-Flash-Preview' }).options;
+  assert.equal(prefixed.model, 'claude-opus-5-5');
+  assert.equal(prefixed.env.CLAUDE_CODE_SUBAGENT_MODEL, 'sonnet');
+  assert.equal(prefixed.env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'minimax/MiniMax-M3.1-Flash-Preview');
+  assert.equal(prefixed.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1');
+
+  // The orchestrator on the sonnet alias keeps it; the next free slot carries the subagent model.
+  const alias = buildOptions({ COLONIZER_MODEL: 'sonnet', COLONIZER_SUBAGENT_MODEL: 'minimax/M' }).options;
+  assert.equal(alias.model, 'sonnet');
+  assert.equal(alias.env.ANTHROPIC_DEFAULT_SONNET_MODEL, undefined);
+  assert.equal(alias.env.CLAUDE_CODE_SUBAGENT_MODEL, 'opus');
+  assert.equal(alias.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'minimax/M');
+
+  // The background model owns the haiku slot.
+  const bg = buildOptions({ COLONIZER_MODEL: 'opus[1m]', COLONIZER_SUBAGENT_MODEL: 'minimax/M', COLONIZER_BACKGROUND_MODEL: 'minimax/B' }).options;
+  assert.equal(bg.env.CLAUDE_CODE_SUBAGENT_MODEL, 'sonnet');
+  assert.equal(bg.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'minimax/B');
+
+  // A plain Claude id is passed straight through.
+  const plain = buildOptions({ COLONIZER_SUBAGENT_MODEL: 'claude-haiku-4-5' }).options;
+  assert.equal(plain.env.CLAUDE_CODE_SUBAGENT_MODEL, 'claude-haiku-4-5');
+  assert.equal(plain.env.ANTHROPIC_DEFAULT_SONNET_MODEL, undefined);
+});
+
+test('unrecognized_model from a subagent on a completed turn is a warning (issue #1176)', async () => {
+  const marker = '[claude-code:unrecognized_model] {"model":"minimax/M","query_source":"agent:builtin:general-purpose"}';
+  const run = async (result) => {
+    const { query } = fakeQuery(async function* () {
+      yield { type: 'result', subtype: 'success', is_error: true, result, total_cost_usd: 0, duration_ms: 1 };
+    });
+    const events = [];
+    const commands = new AsyncQueue();
+    const emit = (event) => {
+      events.push(event);
+      if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+    };
+    commands.push({ type: 'user_message', text: 'go' });
+    await runAgent({ query, commands, emit, graceMs: 100 });
+    return events;
+  };
+  const warned = await run(marker);
+  assert.equal(warned.find((e) => e.type === 'turn_end').is_error, false);
+  assert.ok(warned.some((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('unrecognized_model')));
+
+  // The orchestrator's own model, or any other error, still fails the turn.
+  const own = await run('[claude-code:unrecognized_model] {"model":"x","query_source":"sdk"}');
+  assert.equal(own.find((e) => e.type === 'turn_end').is_error, true);
+  const other = await run('API Error: 500');
+  assert.equal(other.find((e) => e.type === 'turn_end').is_error, true);
+});

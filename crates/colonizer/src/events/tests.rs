@@ -10,7 +10,18 @@ fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
     ));
     assert!(matches!(autopilot_step(false, false, false, true, true), Autopilot::Wait(_)));
     assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, false, false, false, true), Autopilot::Hold(_)));
+    assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
+}
+
+/// Issue #1176: a turn that errored after writing a fresh pr.md goes on to verify and publish rather
+/// than holding a finished colony; an open question or an interrupt still wins, and a transient
+/// error still retries.
+#[test]
+fn an_errored_turn_with_a_fresh_pr_description_still_goes_to_verification() {
+    assert_eq!(autopilot_step(true, false, false, false, true), Autopilot::Publish);
+    assert!(matches!(autopilot_step(true, false, false, true, true), Autopilot::Wait(_)));
+    assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
+    assert!(matches!(autopilot_step(true, true, false, false, true), Autopilot::Retry(_)));
     assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
 }
 

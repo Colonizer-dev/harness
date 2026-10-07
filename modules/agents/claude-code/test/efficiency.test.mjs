@@ -23,7 +23,8 @@ const packageJson = `${JSON.stringify({ name: 'x' })}\n`;
 
 test('a subagent model is forced, so agents that pin their own model use it too', () => {
   const forced = buildOptions({ ...base, COLONIZER_SUBAGENT_MODEL: 'zai/glm-5.3-flash' }).options.env;
-  assert.equal(forced.CLAUDE_CODE_SUBAGENT_MODEL, 'zai/glm-5.3-flash');
+  assert.equal(forced.CLAUDE_CODE_SUBAGENT_MODEL, 'sonnet', 'a prefixed id rides an alias slot (issue #1176)');
+  assert.equal(forced.ANTHROPIC_DEFAULT_SONNET_MODEL, 'zai/glm-5.3-flash');
   assert.equal(forced.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1', 'Explore is `inherit` and would otherwise run on the orchestrator model');
 
   const unset = buildOptions({ ...base }).options.env;
