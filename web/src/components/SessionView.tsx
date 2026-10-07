@@ -12,6 +12,7 @@ import { ChatPanel } from "./ChatPanel";
 import { parseRoute } from "../routes";
 import { currentLocation, navigate, routerBase, subscribe } from "../router";
 import { DEMO } from "../demo";
+import { useAsk } from "../cockpit/spotlight/Ask";
 import {
   IconAlert,
   IconBranch,
@@ -70,6 +71,7 @@ export function SessionView({
 }) {
   const api = useApi();
   const toast = useToast();
+  const ask = useAsk();
   const { stream, state } = useSessionStream(api, sessionId);
   // The tab is part of the address (`/colonies/<id>/terminal`, issue #1180): a link opens on it,
   // and back and forward move between tabs.
@@ -343,6 +345,12 @@ export function SessionView({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Opens the Ask panel (issue #1228) with this colony attached. Absent outside the cockpit. */}
+            {ask && (
+              <Button variant="secondary" onClick={() => ask.open({ colony: session })} title="Ask Colonizer about this colony · ⌘J" aria-label="Ask about this colony">
+                <IconChat size={15} /> Ask about this colony
+              </Button>
+            )}
             {session.pr_url && (
               <a href={session.pr_url} target="_blank" rel="noopener noreferrer" className={buttonClass("secondary")}>
                 <IconGitPR size={15} /> View PR <IconExternal size={12} />

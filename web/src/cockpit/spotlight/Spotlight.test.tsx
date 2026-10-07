@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Api } from "../../api";
 import { ApiContext } from "../../context";
-import { SpotlightPanel, isSpotlightKey, type KeyLike, type SpotlightHost } from "./Spotlight";
+import { SpotlightDialog, isSpotlightKey, type KeyLike, type SpotlightHost } from "./Spotlight";
 
 const key = (over: Partial<KeyLike> = {}): KeyLike => ({ key: "k", metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: false, target: null, ...over });
 const el = (tagName: string, closest: string | null = null) => ({ tagName, isContentEditable: false, closest: (sel: string) => (closest && sel.includes(closest) ? {} : null) }) as unknown as EventTarget;
@@ -46,7 +46,7 @@ describe("the panel", () => {
     const api = { chats: async () => ({ chats: [] }), loops: async () => [], modules: async () => [], issues: async () => [] } as unknown as Api;
     const html = renderToStaticMarkup(
       <ApiContext.Provider value={api}>
-        <SpotlightPanel host={host} onClose={() => {}} />
+        <SpotlightDialog host={host} onClose={() => {}} />
       </ApiContext.Provider>,
     );
     expect(html).toContain('role="dialog"');

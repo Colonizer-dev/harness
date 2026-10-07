@@ -15,19 +15,21 @@
 //
 // The badge on the buttons is GitHub's own open-issue count until the pane has loaded the filtered one.
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactElement, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 
+import { Avatar } from "../components/Avatar";
 import { ApiError, epicMarker, heldByFor, isEpic, type Api } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
-import { Spinner, Switch, cx, sameOrg, stored, store } from "../components/ui";
+import { Spinner, cx, sameOrg, stored, store } from "../components/ui";
 import type { CreatedIssue, Issue, IssueDraft, Repo, Session } from "../types";
 import { AntGlyph } from "./chat/PersonaAnt";
 import { MicButton, appendHeard, useVoiceInput } from "./Composer";
 import { Pagination } from "./ListControls";
 import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
-import { isModelCommand, openModelSwitcher } from "./ModelSwitcher";
+import { isModelCommand, openModelSwitcher, shortModelName } from "./ModelSwitcher";
 import { usePagedFilter } from "./paging";
-import { EmptyList, IssueFilterBar, IssueRow, BulkBar, RepoSection } from "./IssueList";
+import { BulkBar, FilterChips, issueRow } from "./IssueList";
+import { SpotlightPanel, type PanelRow, type PanelSection } from "./spotlight/Panel";
+import { MOD, Tile } from "./spotlight/Parts";
 import { HIDDEN_KEY, NO_FILTERS, emptyHint, filtering, groupByRepo, issueFits, issueState, listOrder, loadHidden, saveHidden, statusCounts, type IssueFilters, type IssueState } from "./issuesList";
 
 /** Repositories fetched when the pane shows "all repos in scope": the most recently pushed first. */
@@ -476,8 +478,7 @@ export function ColonizePane({
 }): ReactElement {
   const api = useApi();
   const toast = useToast();
-  const panel = useRef<HTMLDivElement>(null);
-  const field = useRef<HTMLTextAreaElement>(null);
+  const field = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const [repo, setRepo] = useState<string>(start?.repo && scope.some((r) => r.full_name === start.repo) ? start.repo : "*");
   const [repoQuery, setRepoQuery] = useState("");
   const [lists, setLists] = useState<Record<string, ListState>>(preloaded ?? {});
@@ -619,22 +620,34 @@ export function ColonizePane({
   const allOn = pickable.length > 0 && pickable.every((i) => selected.has(issueKey(i.repo, i.number)));
   const target = draftRepo(scope, repo);
 
-  // Focus the text box on open; Escape closes the pane (or leaves the confirm step first).
+  const [view, setView] = useState<"main" | "repo">("main");
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [model, setModel] = useState<string | null>(null);
+  // The main model, for the chip: read once when the pane opens.
   useEffect(() => {
-    (field.current ?? panel.current)?.focus();
-  }, []);
-  const stepRef = useRef(draft.stage.step);
-  stepRef.current = draft.stage.step;
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      if (stepRef.current === "confirm") send({ type: "back" });
-      else onClose();
+    let live = true;
+    api
+      .modelAssignments()
+      .then((a) => live && setModel(shortModelName(a.install.roles.find((r) => r.role === "model")?.value ?? "", a.models)))
+      .catch(() => {});
+    return () => {
+      live = false;
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [api]);
+  // Esc steps back (the repository list, the confirm step) before it closes the panel.
+  const escapeRef = useRef<() => boolean>(() => false);
+  escapeRef.current = () => {
+    if (view === "repo") {
+      setView("main");
+      setRepoQuery("");
+      return true;
+    }
+    if (draft.stage.step === "confirm") {
+      send({ type: "back" });
+      return true;
+    }
+    return false;
+  };
 
   // What was heard lands after what is typed; the ref keeps a late transcript from using stale text.
   const draftTextRef = useRef(draft.text);
@@ -642,12 +655,10 @@ export function ColonizePane({
   const voice = useVoiceInput({ active: true, onHeard: (phrase) => send({ type: "text", text: appendHeard(draftTextRef.current, phrase) }) });
   const shown = voice.interim ? appendHeard(draft.text, voice.interim) : draft.text;
 
-  // The text box grows with what is in it, up to a point.
+  // What is typed also searches the open issues, so an existing one is found before a new one is drafted.
   useEffect(() => {
-    const el = field.current;
-    if (!el) return;
-    el.style.height = "0px";
-    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+    list.setQuery(shown.trim());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shown]);
 
   const dispatch = async (batch: readonly ScopedIssue[]) => {
@@ -763,275 +774,309 @@ export function ColonizePane({
 
   const repoChoices = repoQuery.trim() ? scope.filter((r) => r.full_name.toLowerCase().includes(repoQuery.trim().toLowerCase())) : scope;
   const stage = draft.stage;
+  const writing = stage.step === "write" || stage.step === "drafting";
+  const text = shown.trim();
+  const loop = parseLoopCommand(shown);
+  const ownerOf = (full: string) => full.split("/")[0];
 
-  const body = (
-    <>
-      <div aria-hidden="true" className="fixed inset-0 z-[60] bg-black/30" onClick={onClose} />
-      <div
-        ref={panel}
-        role="dialog"
-        aria-modal="true"
-        aria-label="colonize"
-        tabIndex={-1}
-        className="fixed inset-y-0 right-0 z-[61] flex w-full max-w-[520px] animate-[ck-in_160ms_ease-out_both] flex-col border-l border-border-strong bg-panel text-text shadow-[-16px_0_48px_rgb(0_0_0/0.35)] outline-none"
-      >
-        <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-3">
-          <span className="grid size-8 place-items-center rounded-lg bg-accent text-on-accent">
-            <AntGlyph size={24} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-lead font-semibold">Colonize</h2>
-            <p className="text-small text-muted">Describe new work, or pick open issues. One colony per issue.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
+  // --- What the list holds -------------------------------------------------------------------------
+  const sections: PanelSection[] = [];
+  if (view === "repo") {
+    const all = Math.min(ALL_REPOS_LIMIT, scope.filter((r) => r.open_issues_count > 0).length);
+    sections.push({
+      id: "repos",
+      title: "Repository",
+      rows: [
+        ...(repoQuery.trim()
+          ? []
+          : [
+              {
+                id: "repo:*",
+                title: "All repos in scope",
+                subtitle: `The ${all} with open issues, most recently pushed first`,
+                leading: <Tile icon="repo" />,
+                checked: repo === "*",
+                verb: "choose",
+                onPick: () => (setRepo("*"), setView("main"), setRepoQuery("")),
+              } satisfies PanelRow,
+            ]),
+        ...repoChoices.map(
+          (r): PanelRow => ({
+            id: `repo:${r.full_name}`,
+            title: r.full_name,
+            subtitle: `${r.open_issues_count} open ${r.open_issues_count === 1 ? "issue" : "issues"}${r.private ? " · private" : ""}`,
+            leading: <Avatar name={ownerOf(r.full_name)} src={avatarFor?.(ownerOf(r.full_name)) ?? undefined} size={32} rounded="md" />,
+            checked: repo === r.full_name,
+            verb: "choose",
+            onPick: () => (setRepo(r.full_name), setView("main"), setRepoQuery("")),
+          }),
+        ),
+      ],
+    });
+  } else if (writing) {
+    const doRows: PanelRow[] = [];
+    if (text && isModelCommand(text)) {
+      doRows.push({ id: "do:model", title: "Switch model…", subtitle: "Install-wide or per org", leading: <Tile icon="model" />, primary: true, verb: "open", onPick: switchModel });
+    } else if (text) {
+      doRows.push({
+        id: "do:draft",
+        title: loop ? "Create loop" : "Draft issues from this text",
+        subtitle: loop ? `Repeats ${describeLoopCadence(loop.cadence)}${target ? ` on ${target}` : ""}` : target ? `Filed on ${target}, then colonized` : "You pick the repository on the next step",
+        leading: <Tile icon="colonize" />,
+        primary: true,
+        disabled: !githubConnected || busy || stage.step === "drafting",
+        verb: loop ? "create the loop" : "draft",
+        onPick: () => void submit(),
+      });
+      if (!loop)
+        doRows.push({
+          id: "do:open",
+          title: "Launch without an issue",
+          subtitle: target ? `An open colony on ${target}, this text as its instructions` : "Pick a repository first",
+          leading: <Tile icon="colony" />,
+          disabled: !githubConnected || busy || stage.step === "drafting",
+          verb: "launch",
+          onPick: () => void launchOpen(),
+        });
+    }
+    sections.push({ id: "do", title: "Do", rows: doRows });
+    for (const group of groups) {
+      sections.push({
+        id: `repo:${group.repo}`,
+        title: group.repo,
+        aside: `${perRepo.get(group.repo) ?? group.rows.length}`,
+        rows: group.rows.map((issue) => {
+          const key = issueKey(issue.repo, issue.number);
+          const held = heldByFor(sessions, issue.repo, issue.number);
+          const epic = epicMarker(issue);
+          const result = results[key];
+          const state = states.get(key) ?? issueState(sessions, issue.repo, issue.number);
+          return issueRow({
+            id: `issue:${key}`,
+            issue,
+            state,
+            checked: held === null && epic === null && selected.has(key),
+            disabled: held !== null || epic !== null || running,
+            fresh: made.some((m) => issueKey(m.repo, m.number) === key),
+            hiddenRow: hidden.has(key),
+            // What this panel just did wins over the pill: the colony it started is the one holding the issue.
+            result: result ? <ResultBadge result={result} onOpen={onOpenColony} /> : null,
+            busy: acting || running,
+            actions: { onColonize: (i) => void dispatch([i]), onFront: (id) => void moveFront([id]), onHide: (i) => hide([i]), onUnhide: unhide, onOpenColony },
+            onToggle: () =>
+              setSelected((cur) => {
+                const next = new Set(cur);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              }),
+            onPick: () => state.colony && onOpenColony(state.colony.id),
+          });
+        }),
+      });
+    }
+  }
+
+  const emptyText = emptyHint({ githubConnected, total: shownIssues.length, hidden: hiddenCount, narrowed: filtering(list.filters, list.query) });
+  const chip = "spot-chip";
+  const below =
+    view === "repo" ? undefined : (
+      <>
+        <div className="scroll-thin flex items-center gap-2 overflow-x-auto px-4 pb-2.5 sm:px-5 [&>*]:shrink-0">
+          <button type="button" className={chip} aria-label={`repository · ${repo === "*" ? "all repos in scope" : repo}`} onClick={() => setView("repo")}>
+            <span className="text-faint">Repo</span>
+            <span className="max-w-[16ch] truncate font-mono sm:max-w-[28ch]">{repo === "*" ? "All in scope" : repo}</span>
+            <span aria-hidden="true">▾</span>
           </button>
+          <button type="button" className={chip} aria-label={`model · ${model ?? "main"}`} title="Switch the main model" onClick={switchModel}>
+            <span className="text-faint">Model</span> {model ?? "…"}
+          </button>
+          <button type="button" className={chip} aria-pressed={autopilot} title="Autopilot: colonies review and merge their own pull requests" onClick={() => setAutopilot((v) => !v)}>
+            Autopilot
+          </button>
+          <button type="button" className={chip} aria-pressed={dispatchAfter} onClick={() => setDispatchAfter((v) => !v)}>
+            Dispatch after creating
+          </button>
+          <button type="button" className={chip} aria-pressed={showInstructions || instructions !== ""} onClick={() => setShowInstructions((v) => !v)}>
+            Instructions{instructions !== "" ? " ·" : ""}
+          </button>
+          {onOpenLaunch && (
+            <button type="button" className={chip} onClick={onOpenLaunch} title="The full launch form">
+              Launch form
+            </button>
+          )}
         </div>
-
-        <div className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto">
-          {!githubConnected && <p className="m-0 border-b border-border px-4 py-3 text-body-sm text-warn">Connect GitHub in Settings to list, create and dispatch issues.</p>}
-
-          <div className="shrink-0 space-y-2 border-b border-border px-4 py-3">
-            <label className="block text-meta-lg font-medium uppercase tracking-wide text-faint" htmlFor="colonize-repo">
-              Repository
-            </label>
-            <div className="flex gap-2">
-              <input
-                value={repoQuery}
-                onChange={(e) => setRepoQuery(e.target.value)}
-                placeholder="Find a repository…"
-                aria-label="find a repository"
-                className="min-w-0 flex-1 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-body-sm outline-none focus:border-border-strong"
-              />
-              <select
-                id="colonize-repo"
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-                className="min-w-0 max-w-[240px] flex-1 rounded-md border border-border bg-panel-2 px-2 py-1.5 text-body-sm outline-none focus:border-border-strong"
-              >
-                <option value="*">All repos in scope ({Math.min(ALL_REPOS_LIMIT, scope.filter((r) => r.open_issues_count > 0).length)})</option>
-                {repoChoices.map((r) => (
-                  <option key={r.full_name} value={r.full_name}>
-                    {r.full_name} · {r.open_issues_count}
-                  </option>
-                ))}
-              </select>
-            </div>
+        {(showInstructions || instructions !== "") && (
+          <div className="px-4 pb-2.5 sm:px-5">
+            <input
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              placeholder="Optional instructions for every colony…"
+              aria-label="shared instructions"
+              className="w-full rounded-xl border border-border bg-panel-2/60 px-3 py-2 text-body-sm text-text outline-none placeholder:text-faint focus:border-accent"
+            />
           </div>
-
-          <section aria-label="describe new work" className="shrink-0 border-b border-border px-4 py-3">
-            {stage.step === "write" || stage.step === "drafting" ? (
-              <div className="rounded-xl border border-border-strong bg-panel-2 p-2 focus-within:border-accent">
-                <textarea
-                  ref={field}
-                  rows={2}
-                  value={shown}
-                  disabled={!githubConnected || stage.step === "drafting"}
-                  onChange={(e) => send({ type: "text", text: e.target.value })}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      void submit();
-                    }
-                  }}
-                  placeholder={voice.listening ? (voice.recording ? "Recording — press the mic again to transcribe" : "Listening…") : "Describe what you want done. It becomes issues, then colonies…"}
-                  aria-label="describe new work"
-                  className="bare-field block min-h-[44px] w-full resize-none border-0 bg-transparent px-1.5 py-1 text-body-lg leading-[1.55] text-text outline-none placeholder:text-faint focus-visible:outline-none"
-                />
-                {isModelCommand(shown) && (
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected="true"
-                    onClick={switchModel}
-                    className="mb-1 flex w-full cursor-pointer items-center justify-between rounded-lg border border-accent bg-accent-soft px-2.5 py-1.5 text-left text-body-sm text-text"
-                  >
-                    <span>Switch model…</span>
-                    <span className="text-meta-lg text-muted">install-wide or per org · ↵</span>
-                  </button>
-                )}
-                {voice.transcribing && (
-                  <p role="status" className="m-0 flex items-center gap-2 px-1.5 text-small text-muted">
-                    <Spinner className="size-3" /> Transcribing with {voice.label}…
-                  </p>
-                )}
-                {voice.left && <p className="m-0 px-1.5 text-small text-warn">{voice.left} left</p>}
-                {voice.error && <p className="m-0 px-1.5 text-small text-warn">{voice.error}</p>}
-                <div className="mt-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
-                  {voice.supported && <MicButton listening={voice.listening} busy={voice.transcribing} label={voice.label} onClick={() => (voice.listening ? voice.stop() : voice.start())} />}
-                  <button
-                    type="button"
-                    disabled={!githubConnected || busy || stage.step === "drafting" || !shown.trim()}
-                    onClick={() => void launchOpen()}
-                    title={target ? `Start an open colony on ${target} with this text as its instructions` : "Pick a repository above first"}
-                    className="cursor-pointer rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-small-lg text-muted hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Launch without an issue
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!githubConnected || busy || stage.step === "drafting" || !shown.trim()}
-                    onClick={() => void submit()}
-                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border-0 bg-accent px-3 py-1.5 text-small-lg font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {(stage.step === "drafting" || busy) && <Spinner className="size-3" />}
-                    {stage.step === "drafting" ? "Drafting…" : parseLoopCommand(shown) ? "Create loop" : "Draft issues"}
-                  </button>
-                </div>
-                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1">
-                  <DispatchAfter checked={dispatchAfter} onChange={setDispatchAfter} />
-                  <p className="m-0 text-meta-lg text-faint">
-                    <kbd className="font-sans">↵</kbd> drafts · <kbd className="font-sans">⇧↵</kbd> new line · <span className="font-mono">/loop 1h &lt;task&gt;</span> repeats it · <span className="font-mono">/model</span> switches models
-                    {onOpenLaunch && (
-                      <>
-                        {" · "}
-                        <button type="button" onClick={onOpenLaunch} className="cursor-pointer border-0 bg-transparent p-0 text-meta-lg text-muted underline underline-offset-2 hover:text-text">
-                          launch form
-                        </button>
-                      </>
-                    )}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <ConfirmDrafts
-                stage={stage}
-                scope={scope}
-                dispatchAfter={dispatchAfter}
-                onDispatchAfter={setDispatchAfter}
-                onEdit={(id, patch) => send({ type: "edit", id, patch })}
-                onRepo={(r) => send({ type: "repo", repo: r })}
-                onBack={() => send({ type: "back" })}
-                onCreate={() => void create()}
-              />
+        )}
+        {(voice.transcribing || voice.left || voice.error || draft.error || !githubConnected) && (
+          <div className="space-y-1 px-5 pb-2.5 text-small-lg">
+            {!githubConnected && <p className="m-0 text-warn">Connect GitHub in Settings to list, create and dispatch issues.</p>}
+            {voice.transcribing && (
+              <p role="status" className="m-0 flex items-center gap-2 text-muted">
+                <Spinner className="size-3" /> Transcribing with {voice.label}…
+              </p>
             )}
+            {voice.left && <p className="m-0 text-warn">{voice.left} left</p>}
+            {voice.error && <p className="m-0 text-warn">{voice.error}</p>}
             {draft.error && (
-              <p role="alert" className="m-0 mt-2 whitespace-pre-line text-small-lg text-err">
+              <p role="alert" className="m-0 whitespace-pre-line text-err">
                 {draft.error}
               </p>
             )}
-          </section>
-
-          <IssueFilterBar query={list.query} onQuery={list.setQuery} filters={list.filters} onFilters={list.setFilters} counts={counts} labels={labelCounts(shownIssues)} />
-
-          <BulkBar
-            shown={list.total}
-            selected={chosen.length}
-            allOn={allOn}
-            pickable={pickable.length}
-            busy={acting || running}
-            hidden={hiddenCount}
-            showHidden={showHidden}
-            frontable={frontable}
-            onToggleAll={() => setSelected((s) => toggleAll(s, pickable))}
-            onFront={() => void moveFront(chosen.flatMap((i) => (states.get(issueKey(i.repo, i.number))?.queued ? [states.get(issueKey(i.repo, i.number))!.colony!.id] : [])))}
-            onHide={() => hide(chosen)}
-            onClear={() => setSelected(new Set())}
-            onShowHidden={() => setShowHidden((v) => !v)}
-            loading={
-              loadingCount > 0 && (
-                <span className="inline-flex items-center gap-1.5">
-                  <Spinner className="size-3" /> loading {loadingCount}…
-                </span>
-              )
-            }
-          />
-
-          <ul aria-label="issues" className="m-0 shrink-0 list-none px-2 pb-1">
-            {errors.map((e) => (
-              <li key={e} className="px-2 py-1.5 text-small text-err">
-                {e}
-              </li>
-            ))}
-            {loadingCount === 0 && list.total === 0 && (
-              <EmptyList {...emptyHint({ githubConnected, total: shownIssues.length, hidden: hiddenCount, narrowed: filtering(list.filters, list.query) })} />
-            )}
-            {groups.map((group) => (
-              <RepoSection key={group.repo} group={group} total={perRepo.get(group.repo) ?? group.rows.length} avatar={avatarFor?.(group.repo.split("/")[0]) ?? null}>
-                {group.rows.map((issue) => {
-                  const key = issueKey(issue.repo, issue.number);
-                  const held = heldByFor(sessions, issue.repo, issue.number);
-                  const epic = epicMarker(issue);
-                  const result = results[key];
-                  const fresh = made.some((m) => issueKey(m.repo, m.number) === key);
-                  return (
-                    <IssueRow
-                      key={key}
-                      id={`colonize-${key.replace(/[^a-z0-9]/gi, "-")}`}
-                      issue={issue}
-                      state={states.get(key) ?? issueState(sessions, issue.repo, issue.number)}
-                      checked={held === null && epic === null && selected.has(key)}
-                      disabled={held !== null || epic !== null || running}
-                      fresh={fresh}
-                      hiddenRow={hidden.has(key)}
-                      // What this pane just did wins over the pill: the colony it started is the one holding the issue.
-                      result={result ? <ResultBadge result={result} onOpen={onOpenColony} /> : null}
-                      busy={acting || running}
-                      actions={{
-                        onColonize: (i) => void dispatch([i]),
-                        onFront: (id) => void moveFront([id]),
-                        onHide: (i) => hide([i]),
-                        onUnhide: unhide,
-                        onOpenColony,
-                      }}
-                      onToggle={() =>
-                        setSelected((cur) => {
-                          const next = new Set(cur);
-                          if (next.has(key)) next.delete(key);
-                          else next.add(key);
-                          return next;
-                        })
-                      }
-                    />
-                  );
-                })}
-              </RepoSection>
-            ))}
-          </ul>
-          <Pagination view={list} onPage={list.setPage} noun="issues" className="mb-2 px-4" />
-        </div>
-
-        <div className="shrink-0 space-y-2.5 border-t border-border px-4 py-3">
-          <textarea
-            value={instructions}
-            onChange={(e) => setInstructions(e.target.value)}
-            rows={2}
-            placeholder="Optional instructions for every colony…"
-            aria-label="shared instructions"
-            className="w-full resize-none rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-body-sm outline-none focus:border-border-strong"
-          />
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-2 text-small-lg text-muted">
-              <Switch checked={autopilot} onChange={setAutopilot} label="autopilot" />
-              Autopilot
-            </span>
-            <button
-              type="button"
-              disabled={chosen.length === 0 || running}
-              onClick={() => void dispatch(chosen)}
-              className="ant-glyph-host ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 py-2 text-body-sm font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {running ? <Spinner className="size-3.5" /> : <AntGlyph size={20} className="-mx-0.5" />}
-              Dispatch {chosen.length} {chosen.length === 1 ? "colony" : "colonies"}
-            </button>
           </div>
-        </div>
-      </div>
-    </>
-  );
-  // Portalled to <body>: rendered in place it sat inside the page's own stacking context, below the
-  // top bar, whose avatars and bell then covered the pane's title. (The static-markup tests have no document.)
-  return typeof document === "undefined" ? body : createPortal(body, document.body);
-}
+        )}
+        {writing && <FilterChips filters={list.filters} onFilters={list.setFilters} counts={counts} labels={labelCounts(shownIssues)} />}
+      </>
+    );
 
-function DispatchAfter({ checked, onChange }: { checked: boolean; onChange: (on: boolean) => void }): ReactElement {
+  const dock =
+    view === "main" && writing ? (
+      <>
+        {errors.map((e) => (
+          <p key={e} className="m-0 px-5 pb-1 text-small text-err">
+            {e}
+          </p>
+        ))}
+        {loadingCount === 0 && list.total === 0 && (
+          <p className="m-0 px-5 pb-3 text-small-lg text-muted">
+            <b className="font-medium text-text">{emptyText.title}.</b> {emptyText.body}
+          </p>
+        )}
+        <BulkBar
+          shown={list.total}
+          selected={chosen.length}
+          allOn={allOn}
+          pickable={pickable.length}
+          busy={acting || running}
+          hidden={hiddenCount}
+          showHidden={showHidden}
+          frontable={frontable}
+          onToggleAll={() => setSelected((s) => toggleAll(s, pickable))}
+          onFront={() => void moveFront(chosen.flatMap((i) => (states.get(issueKey(i.repo, i.number))?.queued ? [states.get(issueKey(i.repo, i.number))!.colony!.id] : [])))}
+          onHide={() => hide(chosen)}
+          onClear={() => setSelected(new Set())}
+          onShowHidden={() => setShowHidden((v) => !v)}
+          loading={
+            loadingCount > 0 && (
+              <span className="inline-flex items-center gap-1.5">
+                <Spinner className="size-3" /> loading {loadingCount}…
+              </span>
+            )
+          }
+        />
+        <Pagination view={list} onPage={list.setPage} noun="issues" className="mb-2 px-4" />
+      </>
+    ) : undefined;
+
+  const body =
+    view === "main" && !writing && (stage.step === "confirm" || stage.step === "creating") ? (
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto border-t border-border px-4 py-3 sm:px-5">
+        <ConfirmDrafts
+          stage={stage}
+          scope={scope}
+          dispatchAfter={dispatchAfter}
+          onDispatchAfter={setDispatchAfter}
+          onEdit={(id, patch) => send({ type: "edit", id, patch })}
+          onRepo={(r) => send({ type: "repo", repo: r })}
+          onBack={() => send({ type: "back" })}
+          onCreate={() => void create()}
+        />
+      </div>
+    ) : undefined;
+
   return (
-    <label className="inline-flex cursor-pointer items-center gap-1.5 text-small text-muted">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="size-3.5 cursor-pointer accent-[var(--accent)]" />
-      Dispatch right after creating
-    </label>
+    <SpotlightPanel
+      label="colonize"
+      placement="centered"
+      sheet
+      width={760}
+      onClose={onClose}
+      onEscape={() => escapeRef.current()}
+      query={view === "repo" ? repoQuery : shown}
+      onQuery={(v) => (view === "repo" ? setRepoQuery(v) : send({ type: "text", text: v }))}
+      inputRef={field}
+      multiline={view === "main"}
+      placeholder={
+        view === "repo"
+          ? "Find a repository…"
+          : voice.listening
+            ? voice.recording
+              ? "Recording — press the mic again to transcribe"
+              : "Listening…"
+            : "Describe the work or search issues…"
+      }
+      fieldLabel={view === "repo" ? "find a repository" : "describe new work"}
+      icon={
+        view === "repo" ? (
+          <button type="button" aria-label="back" onClick={() => (setView("main"), setRepoQuery(""))} className="grid size-6 cursor-pointer place-items-center rounded-md border-0 bg-transparent p-0 text-muted hover:text-text">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+          </button>
+        ) : (
+          <AntGlyph size={26} />
+        )
+      }
+      headerEnd={
+        view === "main" && voice.supported ? (
+          <span className="self-center">
+            <MicButton listening={voice.listening} busy={voice.transcribing} label={voice.label} onClick={() => (voice.listening ? voice.stop() : voice.start())} />
+          </span>
+        ) : undefined
+      }
+      below={below}
+      sections={sections}
+      empty={view === "repo" ? "No repository matches." : undefined}
+      dock={dock}
+      body={body}
+      autoSelect={view === "repo" || (writing && text !== "")}
+      resetOn={`${view}:${text}:${repoQuery}`}
+      onKeyDown={(e, sel) => {
+        if (e.nativeEvent.isComposing || view !== "main") return false;
+        // ⌥↵ ticks the highlighted issue; ⌘↵ dispatches the ticked ones (else the highlighted one).
+        if (e.key === "Enter" && e.altKey && sel?.id.startsWith("issue:")) {
+          e.preventDefault();
+          const key = sel.id.slice(6);
+          setSelected((cur) => {
+            const next = new Set(cur);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+          });
+          return true;
+        }
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          if (chosen.length > 0) void dispatch(chosen);
+          else sel?.onPick();
+          return true;
+        }
+        return false;
+      }}
+      extraHints={[
+        { keys: ["⌥", "↵"], label: "tick" },
+        { keys: [MOD, "↵"], label: chosen.length > 0 ? `dispatch ${chosen.length}` : "dispatch" },
+      ]}
+      footerEnd={
+        view === "main" && writing ? (
+          <button type="button" disabled={chosen.length === 0 || running} onClick={() => void dispatch(chosen)} className="spot-btn ant-glyph-host">
+            {running ? <Spinner className="size-3.5" /> : <AntGlyph size={18} className="-mx-0.5" />}
+            Dispatch {chosen.length} {chosen.length === 1 ? "colony" : "colonies"}
+          </button>
+        ) : (
+          <span>Colonize</span>
+        )
+      }
+    />
   );
 }
 
@@ -1097,7 +1142,7 @@ function ConfirmDrafts({
       </label>
       <ol className="m-0 list-none space-y-2 p-0">
         {stage.drafts.map((d, i) => (
-          <li key={d.id} className={cx("rounded-xl border bg-panel-2 p-2.5", d.keep ? "border-border-strong" : "border-border opacity-55")}>
+          <li key={d.id} className={cx("rounded-[14px] border bg-panel-2/60 p-2.5", d.keep ? "border-border-strong" : "border-border opacity-55")}>
             <div className="flex items-center gap-2">
               {stage.drafts.length > 1 && (
                 <input
@@ -1129,12 +1174,14 @@ function ConfirmDrafts({
         ))}
       </ol>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <DispatchAfter checked={dispatchAfter} onChange={onDispatchAfter} />
+        <button type="button" className="spot-chip" aria-pressed={dispatchAfter} onClick={() => onDispatchAfter(!dispatchAfter)}>
+          Dispatch after creating
+        </button>
         <button
           type="button"
           disabled={creating || kept === 0 || !stage.repo}
           onClick={onCreate}
-          className="ant-glyph-host ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 py-2 text-body-sm font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+          className="spot-btn ant-glyph-host ml-auto"
         >
           {creating ? <Spinner className="size-3.5" /> : <AntGlyph size={20} className="-mx-0.5" />}
           {creating ? "Creating…" : dispatchAfter ? `Create ${kept} ${noun} and dispatch` : `Create ${kept} ${noun}`}

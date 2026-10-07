@@ -6,9 +6,6 @@
 // says so, and shows what is known instead; nothing here is estimated.
 //
 // The words and the bar are pure functions (`planView`), so the tests pin them without a DOM.
-import type { ReactElement } from "react";
-
-import { cx } from "../components/ui";
 import { resetWords, untilWords } from "../resetTime";
 import type { PlanUsage } from "../types";
 
@@ -97,60 +94,4 @@ export function planView(plan: PlanUsage, nowMs: number = Date.now(), timeZone?:
 /** The plans with the exhausted ones first, then in the mothership's order (Claude, then providers). */
 export function sortPlans(plans: readonly PlanUsage[]): PlanUsage[] {
   return plans.map((p, i) => [p, i] as const).sort((a, b) => Number(b[0].exhausted) - Number(a[0].exhausted) || a[1] - b[1]).map(([p]) => p);
-}
-
-const FILL: Record<PlanTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", unknown: "bg-faint" };
-const FIGURE: Record<PlanTone, string> = { ok: "text-muted", warn: "text-warn", err: "text-err font-semibold", unknown: "text-faint" };
-
-/** One plan: name and figure, the bar, and its detail line. */
-export function PlanRow({ plan, nowMs }: { plan: PlanUsage; nowMs?: number }): ReactElement {
-  const v = planView(plan, nowMs);
-  const label = `${plan.name}: ${v.figure}. ${[v.usedBy, ...v.details].filter(Boolean).join(". ")}`;
-  return (
-    <li data-plan={plan.id} data-tone={v.tone} className={cx("rounded-lg px-2 py-1.5", plan.exhausted ? "bg-err-soft" : "bg-panel-2")} aria-label={label}>
-      <div className="flex items-baseline justify-between gap-2 text-small-lg">
-        <span className="min-w-0 truncate font-semibold text-text">{plan.name}</span>
-        <span className={cx("shrink-0 tabular-nums text-meta-lg", FIGURE[v.tone])}>{v.figure}</span>
-      </div>
-      <div
-        role="meter"
-        aria-label={`${plan.name} plan used`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={v.usedPct ?? undefined}
-        aria-valuetext={v.usedPct == null ? "limit not reported" : `${Math.round(v.usedPct)}% used`}
-        className={cx("mt-1 h-1.5 w-full overflow-hidden rounded-full", v.usedPct == null ? "border border-dashed border-border bg-transparent" : "bg-panel-3")}
-      >
-        {v.usedPct != null && <div className={cx("h-full rounded-full", FILL[v.tone])} style={{ width: `${Math.max(v.usedPct, 2)}%` }} />}
-      </div>
-      <p className="m-0 mt-1 text-meta leading-snug text-faint">
-        {[v.usedBy, ...v.details].filter(Boolean).join(" · ")}
-      </p>
-    </li>
-  );
-}
-
-/** The plans section of the popover: a loading line, an empty line, or the rows. */
-export function PlanList({ plans, error, nowMs }: { plans: PlanUsage[] | null; error?: string | null; nowMs?: number }): ReactElement {
-  return (
-    <section aria-label="plan usage" className="mb-3">
-      <div className="mb-1 flex items-baseline justify-between text-meta-lg text-muted">
-        <span>Plans in use</span>
-        {plans && plans.some((p) => p.exhausted) && <span className="text-err">{plans.filter((p) => p.exhausted).length} out</span>}
-      </div>
-      {error ? (
-        <p className="m-0 text-meta-lg text-faint">Plan usage unavailable: {error}</p>
-      ) : plans === null ? (
-        <p className="m-0 text-meta-lg text-faint">Reading plan usage…</p>
-      ) : plans.length === 0 ? (
-        <p className="m-0 text-meta-lg text-faint">No plan in use reports anything yet.</p>
-      ) : (
-        <ul className="m-0 list-none space-y-1.5 p-0">
-          {sortPlans(plans).map((p) => (
-            <PlanRow key={p.id} plan={p} nowMs={nowMs} />
-          ))}
-        </ul>
-      )}
-    </section>
-  );
 }
