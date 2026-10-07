@@ -43,13 +43,17 @@ const numeric = (value: string): number | null => {
   return value.trim() === "" || !Number.isFinite(n) || n < 0 ? null : n;
 };
 
-/** The archive's Clean up now form (issue #496): keep N days and/or cap at X GB, with a
+/** The keep field in days, as the request carries it: hours are converted (keep_days is fractional). */
+export const keepInDays = (value: number | null, unit: "hours" | "days"): number | null => (value == null ? null : unit === "hours" ? value / 24 : value);
+
+/** The archive's Clean up now form (issue #496): keep N hours or days and/or cap at X GB, with a
  *  Preview that words the plan and an Apply that only goes out once a preview is on the table,
  *  carrying its bundle list as `expect`. Changing any input voids the preview; a 409 — the
  *  archive moved under us — does the same and asks for a fresh one. Automatic retention is the
  *  Disk cleanup loop's "Session archives" category, not this. */
 function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) => Promise<RetentionPlan>; onApplied: () => void }): ReactElement {
   const [keepDays, setKeepDays] = useState("");
+  const [keepUnit, setKeepUnit] = useState<"hours" | "days">("days");
   const [maxGb, setMaxGb] = useState("");
   const [singleCopy, setSingleCopy] = useState(false);
   const [preview, setPreview] = useState<RetentionPlan | null>(null);
@@ -69,7 +73,7 @@ function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) =
     setError(null);
     try {
       const plan = await onRun({
-        keep_days: numeric(keepDays),
+        keep_days: keepInDays(numeric(keepDays), keepUnit),
         max_gb: numeric(maxGb),
         allow_single_copy: singleCopy,
         dry_run: dryRun,
@@ -100,7 +104,10 @@ function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) =
       <label className="flex items-center gap-1">
         keep
         <input type="number" min={0} value={keepDays} placeholder="—" onChange={(e) => retool(() => setKeepDays(e.target.value))} className={ARCHIVE_FIELD} />
-        days
+        <select aria-label="keep unit" value={keepUnit} onChange={(e) => retool(() => setKeepUnit(e.target.value === "hours" ? "hours" : "days"))} className="rounded-md border border-border bg-transparent px-1 py-0.5 text-meta text-text outline-none focus:border-border-strong">
+          <option value="hours">hours</option>
+          <option value="days">days</option>
+        </select>
       </label>
       <label className="flex items-center gap-1">
         cap
