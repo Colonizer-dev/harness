@@ -1,4 +1,5 @@
 import type { QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
+import type { MergeStewardStatus } from "../orgs/types";
 import type { AccountAlert, GitHubPause, ModelProviderStatus, StatusQuota } from "../providers/types";
 
 /** GET /api/status `backlog` (issue #1144): open issues (never pull requests) in the repositories of the orgs Colonizer works in, excluding forks, archived repositories and repositories with issues off. Cached about ten minutes, so `as_of` can be minutes old. */
@@ -90,6 +91,8 @@ export interface HarnessStatus {
   backlog?: Backlog | null;
   /** The GitHub account's circuit breaker (issue #1074): paused while GitHub refuses the account, with the cause and the next step. Older mothership builds omit it. */
   github_pause?: GitHubPause;
+  /** The merge steward's one banner per org whose GitHub Actions is blocked (issue #1172). Older mothership builds omit it. */
+  merge_steward?: MergeStewardStatus;
   /**
    * A drain is holding the queue while an update or a restart waits for the colonies still booting
    * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.

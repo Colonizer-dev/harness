@@ -340,6 +340,9 @@ pub(crate) async fn status(
         // Issue #1074: the GitHub account's circuit breaker, so the cockpit banners a suspension or
         // a revoked token above every view without a second poll. `{"paused": false}` when all is well.
         "github_pause": crate::github_breaker::status_json(&app, chrono::Utc::now()).await,
+        // Issue #1172: the merge steward's one banner per org whose GitHub Actions is blocked
+        // (billing or a spending limit). `{"ci_blocked": []}` when none is.
+        "merge_steward": crate::merge_steward::status_json(&app).await,
         // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
         "ledger": app.ledger.snapshot(),
         "modules": {

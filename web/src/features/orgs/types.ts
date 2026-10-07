@@ -26,6 +26,17 @@ export interface OrgSettings {
    * the default — only marks the colonies superseded and leaves their pull requests open.
    */
   close_superseded_prs?: string[];
+  /**
+   * The merge steward (issue #1172): whether Colonizer merges this org's colonies' own green pull
+   * requests itself. `green` merges a clean one; `green+rebase` also brings a stale branch up to
+   * date (GitHub's update-branch first, then the colony). Absent, null and `off` leave every merge
+   * to a person.
+   */
+  auto_merge?: AutoMergeMode | null;
+  /** How the steward merges; null is squash. */
+  merge_method?: MergeMethod | null;
+  /** Whether the steward deletes the branch after merging; null keeps it. */
+  delete_branch?: boolean | null;
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
@@ -222,4 +233,54 @@ export interface ActivityQuery {
   org?: string;
   repo?: string;
   q?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Merge steward (issue #1172)
+// ---------------------------------------------------------------------------
+
+export type AutoMergeMode = "off" | "green" | "green+rebase";
+export type MergeMethod = "squash" | "merge" | "rebase";
+
+/** What the steward is doing about one pull request. */
+export type StewardPhase = "waiting" | "merging" | "rebasing" | "fixing" | "ci_blocked" | "needs_attention";
+
+/** One pull request a colony opened, as GET /api/merge-steward lists it. */
+export interface StewardPr {
+  session: string;
+  repo: string;
+  url: string;
+  title: string;
+  /** The colony's own status, e.g. `pr_opened`, or `running` while it fixes something. */
+  colony_status: string;
+  state: StewardPhase;
+  /** Why it is in that state, in a sentence. */
+  reason: string;
+  /** When the steward last decided it; null before its first read. */
+  since: string | null;
+}
+
+/** An org whose GitHub Actions is blocked (billing or a spending limit). */
+export interface StewardBlock {
+  since: string;
+  reason: string;
+  message: string;
+}
+
+export interface StewardOrg {
+  org: string;
+  auto_merge: AutoMergeMode;
+  ci_blocked: StewardBlock | null;
+  prs: StewardPr[];
+}
+
+/** GET /api/merge-steward. */
+export interface MergeStewardInfo {
+  orgs: StewardOrg[];
+  last_cycle: string | null;
+}
+
+/** GET /api/status `merge_steward`: one entry per org whose Actions is blocked. */
+export interface MergeStewardStatus {
+  ci_blocked: (StewardBlock & { org: string; prs: number })[];
 }

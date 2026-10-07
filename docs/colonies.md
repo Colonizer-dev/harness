@@ -222,6 +222,36 @@ supply-chain loop started holds every finding it was given, so the Packages tab,
 at 500 paths. The API shapes are in
 [protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
 
+## The merge steward: getting a colony's pull request merged
+
+Off by default, per org. In **Settings → Workspaces → (org) → Pull requests**, **Auto-merge** is `off`,
+`green` or `green+rebase`, next to the **Merge method** (squash unless you pick otherwise) and
+**Delete branch** (off; a branch another colony's pull request is stacked on is always kept). The
+steward only looks at pull requests this mothership's colonies opened, and never calls GitHub for an
+org that has not opted in.
+
+Every five minutes it reads an org's pull requests with **one GraphQL query** and decides each one
+from what GitHub says. The decision is a pure function, `merge_steward::decide`:
+
+| What it finds | What it does |
+|---|---|
+| Green, GitHub says `CLEAN`, not a draft, no `hold` / `do-not-merge` / `needs-human` label, no open question on the colony | Merges, pinned to the head it read (`--match-head-commit`). A merge queue is asked for GitHub's auto-merge instead. At most one per repository per cycle. |
+| Behind or conflicting, in `green+rebase` | GitHub's **update-branch** first. If that conflicts, and the watcher's own rebase has flagged the colony (`needs_rebase`), the colony is resumed with a rebase task. |
+| A real failing check | The colony is resumed with the failing job's name and the tail of its log. Two rounds at most, and never twice for the same head; then the pull request is marked **needs attention**. |
+| Every failed job ended in under 10 s with no steps, or GitHub's annotation names billing or a spending limit | Marked **ci blocked**. No colony is spent on it, and one banner per org says GitHub Actions is blocked there. |
+| Anything else (running or missing checks, `BLOCKED`, a requested change, a fork) | Waits, and says why. |
+
+Branch protection is never second-guessed: only `mergeStateStatus: CLEAN` merges, so a pending or
+failing required check, a missing review or a merge queue is GitHub's to settle. The steward waits
+out an open GitHub circuit breaker ([GitHub failures](#github-failures)), and leaves a repository the
+publish module's merge train or the merge-train loop drives to them.
+
+The cockpit lists each pull request with its state (waiting, merging, rebasing, fixing, ci blocked,
+needs attention) and a **Merge now** button, which asks GitHub again and merges only a pull request
+GitHub itself calls mergeable. `GET /api/merge-steward` serves the list; `/api/status` carries the
+blocked orgs as `merge_steward.ci_blocked`. A pull request needs at least one check to report before
+the steward merges it.
+
 ## Epics are refused
 
 An epic is a planning issue whose work lives in its sub-issues. A colony on the epic itself would

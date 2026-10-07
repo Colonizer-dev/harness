@@ -93,6 +93,7 @@ mod mem0;
 mod memory;
 mod merge_head;
 mod merge_loop;
+mod merge_steward;
 mod merge_train;
 mod mesh;
 mod model_switch;

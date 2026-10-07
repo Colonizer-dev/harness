@@ -8,6 +8,7 @@ import { Avatar } from "./Avatar";
 import { IconX } from "./icons";
 import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
 import { ModelPicker } from "./ModelPicker";
+import { PullRequestsSection } from "./PullRequests";
 import { Button, Spinner, Switch, cx, inputClass, stored, store } from "./ui";
 
 type FieldKey =
@@ -20,6 +21,9 @@ type FieldKey =
   | "queue_priority"
   | "max_wait_hours"
   | "close_superseded_prs"
+  | "auto_merge"
+  | "merge_method"
+  | "delete_branch"
   | "budget_usd"
   | "host_disk"
   | "stack"
@@ -53,6 +57,9 @@ const FIELDS: FieldSpec[] = [
   { key: "queue_priority", group: "Colonies", label: "Queue priority", hint: "Where this org's queued colonies start relative to other orgs'; higher goes first, older first within a priority", kind: "priority" },
   { key: "max_wait_hours", group: "Colonies", label: "Starvation guard", hint: "After a colony has queued this long it counts as High, so a low priority never waits for ever; unset is off", kind: "number", min: 1, max: 8760, unit: "h" },
   { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories like acme/api whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
+  { key: "auto_merge", group: "Pull requests", label: "Auto-merge", hint: "Let Colonizer merge this org's colonies' pull requests once every check is green and GitHub calls them clean. Green+rebase also brings a stale branch up to date, and resumes the colony when it conflicts. A failing check resumes the colony twice at most; a PR that never got to run is marked CI blocked", kind: "choice" },
+  { key: "merge_method", group: "Pull requests", label: "Merge method", hint: "How the steward merges", kind: "choice" },
+  { key: "delete_branch", group: "Pull requests", label: "Delete branch", hint: "Remove the branch after the merge; one another pull request is stacked on is always kept", kind: "boolean" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
@@ -81,6 +88,10 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "close_superseded_prs":
       // One comma-separated line in the draft; an empty list reads as no override, like inherit.
       return settings.close_superseded_prs?.join(", ") ?? "";
+    case "auto_merge":
+    case "merge_method":
+    case "delete_branch":
+      return settings[key];
     case "budget_usd":
       return settings.budget_usd;
     case "host_disk":
@@ -131,6 +142,13 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "close_superseded_prs":
       // Org-only, with no module setting behind it: the default is an empty list, never closing.
       return "";
+    case "auto_merge":
+      // Org-only, with no module setting behind it: the steward is off until an org opts in.
+      return "off";
+    case "merge_method":
+      return "squash";
+    case "delete_branch":
+      return false;
     case "budget_usd":
       return setting("sandbox", "budget_usd");
     case "host_disk":
@@ -154,6 +172,7 @@ function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = 
     const list = typeof value === "string" ? parseRepoList(value) : [];
     return list.length ? list.join(", ") : "never closes";
   }
+  if (spec.key === "auto_merge" && typeof value === "string") return AUTO_MERGE_CHOICES.find(([id]) => id === value)?.[1] ?? value;
   if (spec.key === "queue_priority") return typeof value === "number" ? priorityLabel(value) : "Normal";
   if (spec.key === "max_wait_hours" && (value === undefined || value === null)) return "off";
   if (value === undefined || value === null) return "global default";
@@ -170,6 +189,18 @@ function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = 
   if (value === "") return spec.key === "model" ? "Claude Code default" : "same as orchestrator";
   return spec.unit ? `${value} ${spec.unit}` : String(value);
 }
+
+/** What the auto-merge select offers, in the words a person reads. */
+const AUTO_MERGE_CHOICES: readonly (readonly [string, string])[] = [
+  ["off", "Off"],
+  ["green", "Merge when green"],
+  ["green+rebase", "Merge when green, and rebase"],
+];
+const MERGE_METHOD_CHOICES: readonly (readonly [string, string])[] = [
+  ["squash", "Squash"],
+  ["merge", "Merge commit"],
+  ["rebase", "Rebase"],
+];
 
 /** The queue priority presets the select offers; any other saved integer shows as custom. */
 export const PRIORITY_PRESETS = [
@@ -263,6 +294,9 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     max_wait_hours: pick("max_wait_hours") as number | null,
     // There is nothing to inherit: not overridden is the default empty list, which closes nothing.
     close_superseded_prs: draft.close_superseded_prs.override ? parseRepoList(String(draft.close_superseded_prs.value)) : [],
+    auto_merge: pick("auto_merge") as OrgSettings["auto_merge"],
+    merge_method: pick("merge_method") as OrgSettings["merge_method"],
+    delete_branch: pick("delete_branch") as boolean | null,
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
@@ -615,9 +649,13 @@ export function OrgSettingsForm({
                         aria-label={`${spec.label} for ${org}`}
                         className={cx(inputClass, "w-40")}
                       >
-                        {(spec.key === "agent_module"
-                          ? (modules?.find((m) => m.kind === "agent")?.providers ?? []).map((p) => [p.id, p.name] as const)
-                          : (
+                        {(spec.key === "auto_merge"
+                          ? AUTO_MERGE_CHOICES
+                          : spec.key === "merge_method"
+                            ? MERGE_METHOD_CHOICES
+                            : spec.key === "agent_module"
+                              ? (modules?.find((m) => m.kind === "agent")?.providers ?? []).map((p) => [p.id, p.name] as const)
+                              : (
                               modules?.find((m) => m.kind === "sandbox")?.schema?.properties?.preset?.enum?.map(String) ?? []
                             ).map((id) => [id, id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1)] as const)
                         ).map(([id, label]) => (
@@ -658,6 +696,7 @@ export function OrgSettingsForm({
                 ))}
               </div>
             </section>
+            {group === "Pull requests" && <PullRequestsSection org={org} />}
             {group === "Models" && skillsetRows.length > 0 && (
               <section className="border-b border-border py-3 last:border-b-0">
                 <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Skillsets</h3>
