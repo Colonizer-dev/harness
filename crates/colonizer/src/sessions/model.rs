@@ -343,6 +343,10 @@ pub struct Session {
     /// person started. The event origin resolver (`events.rs`) reads the machine launchers back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// What the cockpit shows on a colony auto mode started (issue #1219): `auto: trusted author
+    /// @login`. `None` for every other colony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_note: Option<String>,
     /// The id of the scoped API token that launched this colony (issue #508, api_tokens.rs), when
     /// one did: the concurrency cap and daily budget count a token's own colonies by it, and the
     /// boot resolves the id back to the token's name to mark the instructions as external input.
@@ -715,6 +719,7 @@ impl Default for Session {
             stack: false,
             stack_fork: None,
             origin: None,
+            auto_note: None,
             launched_by_token: None,
             placement: None,
             worktree: String::new(),

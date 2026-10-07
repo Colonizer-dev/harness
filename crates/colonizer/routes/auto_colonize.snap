@@ -1,0 +1,3 @@
+/api/repos/{owner}/{name}/auto-colonize              GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/auto-colonize              PUT    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/issues/{number}/intake     POST   unauth=401    token=owner            activity=-

@@ -896,6 +896,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
     })
     .await?;
+    // A colony auto mode started (issue #1219) is vetted again right before it reads the issue: the
+    // author is still trusted, nobody outside the org edited it, and only trusted comments stay.
+    let issue = match issue {
+        Some(mut issue) if !resume && crate::auto_colonize::is_auto(&s) => {
+            crate::auto_colonize::vet_at_boot(app, &s, &mut issue)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            store_issue(app.store(), &s.id, &issue, &log).await;
+            Some(issue)
+        }
+        other => other,
+    };
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked

@@ -22,6 +22,7 @@ type FieldKey =
   | "max_wait_hours"
   | "close_superseded_prs"
   | "auto_merge"
+  | "auto_colonize"
   | "merge_method"
   | "delete_branch"
   | "budget_usd"
@@ -60,6 +61,7 @@ const FIELDS: FieldSpec[] = [
   { key: "auto_merge", group: "Pull requests", label: "Auto-merge", hint: "Let Colonizer merge this org's colonies' pull requests once every check is green and GitHub calls them clean. Green+rebase also brings a stale branch up to date, and resumes the colony when it conflicts. A failing check resumes the colony twice at most; a PR that never got to run is marked CI blocked", kind: "choice" },
   { key: "merge_method", group: "Pull requests", label: "Merge method", hint: "How the steward merges", kind: "choice" },
   { key: "delete_branch", group: "Pull requests", label: "Delete branch", hint: "Remove the branch after the merge; one another pull request is stacked on is always kept", kind: "boolean" },
+  { key: "auto_colonize", group: "Colonies", label: "Auto-colonize", hint: "Start a colony on a new issue by itself, but only when an org member, a collaborator with write access or an allowlisted login wrote it and nobody outside the org edited it. Strangers' issues wait in review; an issue labelled no-colonize or needs-human is left to a person. Only issues filed after you turn it on are taken", kind: "choice" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
@@ -89,6 +91,7 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       // One comma-separated line in the draft; an empty list reads as no override, like inherit.
       return settings.close_superseded_prs?.join(", ") ?? "";
     case "auto_merge":
+    case "auto_colonize":
     case "merge_method":
     case "delete_branch":
       return settings[key];
@@ -145,6 +148,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "auto_merge":
       // Org-only, with no module setting behind it: the steward is off until an org opts in.
       return "off";
+    case "auto_colonize":
+      // Org-only: nothing configured is off, so a stranger's issue never starts by itself.
+      return "off";
     case "merge_method":
       return "squash";
     case "delete_branch":
@@ -173,6 +179,7 @@ function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = 
     return list.length ? list.join(", ") : "never closes";
   }
   if (spec.key === "auto_merge" && typeof value === "string") return AUTO_MERGE_CHOICES.find(([id]) => id === value)?.[1] ?? value;
+  if (spec.key === "auto_colonize" && typeof value === "string") return AUTO_COLONIZE_CHOICES.find(([id]) => id === value)?.[1] ?? value;
   if (spec.key === "queue_priority") return typeof value === "number" ? priorityLabel(value) : "Normal";
   if (spec.key === "max_wait_hours" && (value === undefined || value === null)) return "off";
   if (value === undefined || value === null) return "global default";
@@ -195,6 +202,11 @@ const AUTO_MERGE_CHOICES: readonly (readonly [string, string])[] = [
   ["off", "Off"],
   ["green", "Merge when green"],
   ["green+rebase", "Merge when green, and rebase"],
+];
+/** What the auto-colonize select offers (issue #1219). */
+const AUTO_COLONIZE_CHOICES: readonly (readonly [string, string])[] = [
+  ["off", "Off"],
+  ["trusted", "On for trusted authors"],
 ];
 const MERGE_METHOD_CHOICES: readonly (readonly [string, string])[] = [
   ["squash", "Squash"],
@@ -295,6 +307,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     // There is nothing to inherit: not overridden is the default empty list, which closes nothing.
     close_superseded_prs: draft.close_superseded_prs.override ? parseRepoList(String(draft.close_superseded_prs.value)) : [],
     auto_merge: pick("auto_merge") as OrgSettings["auto_merge"],
+    auto_colonize: pick("auto_colonize") as OrgSettings["auto_colonize"],
     merge_method: pick("merge_method") as OrgSettings["merge_method"],
     delete_branch: pick("delete_branch") as boolean | null,
     budget_usd: pick("budget_usd") as number | null,
@@ -647,10 +660,12 @@ export function OrgSettingsForm({
                         value={String(draft[spec.key].value)}
                         onChange={(e) => set(spec.key, { value: e.target.value })}
                         aria-label={`${spec.label} for ${org}`}
-                        className={cx(inputClass, "w-40")}
+                        className={cx(inputClass, spec.key === "auto_colonize" ? "w-56" : "w-40")}
                       >
                         {(spec.key === "auto_merge"
                           ? AUTO_MERGE_CHOICES
+                          : spec.key === "auto_colonize"
+                            ? AUTO_COLONIZE_CHOICES
                           : spec.key === "merge_method"
                             ? MERGE_METHOD_CHOICES
                             : spec.key === "agent_module"

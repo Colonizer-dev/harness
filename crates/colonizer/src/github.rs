@@ -1091,13 +1091,29 @@ pub fn build_prompt(
         }
         let body = text(&issue["body"]);
         let _ = writeln!(p, "\n{}\n", if body.is_empty() { "(no description)" } else { &body });
-        for comment in issue["comments"].as_array().into_iter().flatten() {
+        // A colony auto mode started (issue #1219) reads only comments boot marked trusted: the issue
+        // came from a trusted author, but a comment under it may be anyone's.
+        let auto = crate::auto_colonize::is_auto(s);
+        let comments: Vec<&Value> = if auto {
+            crate::auto_colonize::brief_comments(issue).collect()
+        } else {
+            issue["comments"].as_array().into_iter().flatten().collect()
+        };
+        for comment in comments {
             let _ = writeln!(
                 p,
                 "--- Comment by @{} ({}) ---\n{}\n",
                 text(&comment["author"]["login"]),
                 text(&comment["createdAt"]),
                 text(&comment["body"])
+            );
+        }
+        if auto && let Some(omitted) = issue["omitted_comments"].as_u64().filter(|n| *n > 0) {
+            let _ = writeln!(
+                p,
+                "({omitted} comment{} from authors outside the org {} left out of this brief.)\n",
+                if omitted == 1 { "" } else { "s" },
+                if omitted == 1 { "was" } else { "were" }
             );
         }
         let _ = writeln!(p, "</issue>\n");
@@ -3104,7 +3120,7 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         "--limit",
         "200",
         "--json",
-        "number,title,body,labels,author,updatedAt,url",
+        "number,title,body,labels,author,createdAt,updatedAt,url",
     ]))
     .await?;
     let issues: Value = serde_json::from_str(&out)?;
@@ -3120,7 +3136,10 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         eprintln!("epic: could not read sub-issue totals for {repo} ({e:#}); marking epics by label and title only");
         Default::default()
     });
-    Ok(Json(crate::epic::annotate(filter.apply(issues), &totals)))
+    // Each issue also carries `intake` (issue #1219): whether auto mode takes it or a person must
+    // look first, and why.
+    let issues = crate::epic::annotate(filter.apply(issues), &totals);
+    Ok(Json(crate::auto_colonize::annotate(&app, &repo, issues).await))
 }
 
 /// The Source module's include labels as the operator typed them (case kept, duplicates dropped

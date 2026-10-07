@@ -33,6 +33,12 @@ export interface OrgSettings {
    * to a person.
    */
   auto_merge?: AutoMergeMode | null;
+  /**
+   * Trusted auto-colonize (issue #1219): a new issue written by an org member, a collaborator with
+   * write access or an allowlisted login becomes a queued colony without a click. Absent, null and
+   * `off` leave every issue to a person; a stranger's issue never starts by itself.
+   */
+  auto_colonize?: "off" | "trusted" | null;
   /** How the steward merges; null is squash. */
   merge_method?: MergeMethod | null;
   /** Whether the steward deletes the branch after merging; null keeps it. */
