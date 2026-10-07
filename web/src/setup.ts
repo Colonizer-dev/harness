@@ -2,12 +2,16 @@
 // few payloads beside it. The dialog renders rows; this module decides what they say, what is
 // blocking and what only advisory, and whether Launch may fire. Nothing here touches the browser.
 import { meshBroken } from "./components/ui";
+import { modelRoute } from "./modelRoute";
 import type { HarnessStatus, OsInfo, PullStatus, TelemetryStatus } from "./types";
 
 /** A row's place in the checklist, in display order. The live map is not one of the five. */
-export type SetupRowId = "machine" | "stack" | "github" | "claude" | "launch" | "map";
+export type SetupRowId = "machine" | "stack" | "github" | "model" | "launch" | "map";
 
-export const SETUP_ROW_IDS: SetupRowId[] = ["machine", "stack", "github", "claude", "launch"];
+/** The required row's title (issue #1211): any working route counts, not only a Claude login. */
+export const MODEL_ROW_TITLE = "A model colonies can use";
+
+export const SETUP_ROW_IDS: SetupRowId[] = ["machine", "stack", "github", "model", "launch"];
 export const LIVE_MAP_ROW_ID: SetupRowId = "map";
 
 /**
@@ -88,7 +92,7 @@ export function setupRows(input: SetupInput): SetupRow[] {
     machineRow(input.status),
     dismissable(stackRow(input), dismissed),
     githubRow(input.status),
-    claudeRow(input.status, input.now),
+    modelRow(input.status, input.now),
     launchRow(input),
     dismissable(mapRow(input.telemetry), dismissed),
   ];
@@ -182,7 +186,7 @@ export function shouldAutoOpen(rows: SetupRow[], sessionCount = 0): boolean {
  *  the colony fetches the image itself when it boots. */
 export function launchEnabled(rows: SetupRow[]): boolean {
   const byId = new Map(rows.map((row) => [row.id, row]));
-  return (["machine", "github", "claude"] as const).every((id) => byId.get(id)?.state === "done");
+  return (["machine", "github", "model"] as const).every((id) => byId.get(id)?.state === "done");
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +405,7 @@ function githubRow(status: HarnessStatus): SetupRow {
   };
 }
 
-function claudeRow(status: HarnessStatus, now: number): SetupRow {
+function modelRow(status: HarnessStatus, now: number): SetupRow {
   const claude = status.claude;
   const notes: string[] = [];
 
@@ -447,24 +451,20 @@ function claudeRow(status: HarnessStatus, now: number): SetupRow {
   const accountNote = claude.account_note?.trim();
   if (accountNote) notes.push(accountNote);
 
-  if (claude.configured) {
-    return {
-      id: "claude",
-      title: "Claude",
-      state: "done",
-      gatesLaunch: true,
-      detail: [claude.source ?? "Configured", claude.account ?? null].filter(Boolean).join(" · "),
-      notes,
-      retry: false,
-    };
+  const route = modelRoute(status);
+  if (route.ok) {
+    // The Claude advisories (host binary, expiry) are noise when another route carries the colonies.
+    const shown = route.via === "Claude" ? notes : [];
+    return { id: "model", title: MODEL_ROW_TITLE, state: "done", gatesLaunch: true, detail: route.detail, notes: shown, retry: false };
   }
+  const switchTo = route.alternative ? ` ${route.alternative} is connected: switch the orchestrator model to it, or connect another route.` : "";
   return {
-    id: "claude",
-    title: "Claude",
+    id: "model",
+    title: MODEL_ROW_TITLE,
     state: "blocked",
     gatesLaunch: true,
-    detail: "Not configured",
-    fix: "Sign in with your Claude subscription, or paste a token from `claude setup-token`.",
+    detail: "Not connected",
+    fix: `${route.reason ?? "No route to a model."}${switchTo || " Sign in to Claude or Codex, add a provider key, or point at a local server."}`,
     notes,
     retry: true,
   };

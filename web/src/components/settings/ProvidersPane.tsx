@@ -2,10 +2,13 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { ProviderQuotaCard, QuotaChangeSummary, runQuotaAction } from "../../cockpit/ProviderQuotaCard";
 import type { HarnessStatus, ModelOption, ModelProvider, PlanUsage, QuotaActionReply, QuotaCard } from "../../types";
-import { Spinner } from "../ui";
+import { Button, Spinner } from "../ui";
 import { AddProvider } from "./AddProvider";
 import { HealthStatus, type HealthView } from "./HealthStatus";
-import { ClaudeListRow, ProviderListRow } from "./ProviderRows";
+import { ProviderListRow } from "./ProviderRows";
+import { AgentSubscriptionRow, ClaudeSubscriptionRow } from "./SubscriptionRows";
+import { modelRoute } from "../../modelRoute";
+import { openModelSwitcher } from "../../cockpit/ModelSwitcher";
 import { ProviderForm } from "./ProviderForm";
 import { Pane, Code } from "./ui";
 import type { Editing } from "./providerCatalog";
@@ -19,9 +22,9 @@ export function ProvidersPane({
   error,
   setProviders,
   reload,
-  claude,
+  status,
   models,
-  onOpenConnections,
+  onStatusChanged,
   focusId,
   back,
 }: {
@@ -29,14 +32,17 @@ export function ProvidersPane({
   error: string | null;
   setProviders: (update: (list: ModelProvider[] | null) => ModelProvider[] | null) => void;
   reload: () => Promise<void>;
-  claude: HarnessStatus["claude"] | null;
+  status: HarnessStatus | null;
   models: ModelOption[];
-  onOpenConnections: () => void;
+  onStatusChanged: (fresh?: boolean) => Promise<void> | void;
   /** Opens this provider's editor when the pane appears — where a model picker's "Set key" lands. */
   focusId?: string;
   back?: () => void;
 }) {
   const api = useApi();
+  const claude = status?.claude ?? null;
+  const agents = (status?.agents ?? []).filter((a) => a.id !== "claude-code");
+  const route = status ? modelRoute(status) : null;
   const [editing, setEditing] = useState<Editing>(() => (focusId ? { mode: "edit", id: focusId } : null));
   useEffect(() => {
     if (focusId) setEditing({ mode: "edit", id: focusId });
@@ -94,24 +100,38 @@ export function ProvidersPane({
 
   const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
 
-  // The list is grouped rows; an open editor sits between two groups as a card of its own.
+  // The subscriptions sit in a group of their own above the API providers.
+  const subscriptions = (
+    <div className={LIST}>
+      <ClaudeSubscriptionRow
+        claude={claude}
+        models={models}
+        plan={claudePlan}
+        open={openId === "anthropic"}
+        onToggle={() => toggle("anthropic")}
+        onStatusChanged={onStatusChanged}
+      />
+      {agents.map((agent) => (
+        <AgentSubscriptionRow
+          key={agent.id}
+          agent={agent}
+          open={openId === `agent-${agent.id}`}
+          isOrchestrator={status?.orchestrator?.module === agent.id}
+          onToggle={() => toggle(`agent-${agent.id}`)}
+          onAddKey={(preset) => setEditing({ mode: "new", preset })}
+          onAddProvider={() => document.getElementById("add-provider")?.scrollIntoView({ block: "center" })}
+        />
+      ))}
+    </div>
+  );
+
+  // The API providers are grouped rows; an open editor sits between two groups as a card of its own.
   const groups: ReactNode[] = [];
   let run: ReactNode[] = [];
   const flush = () => {
     if (run.length) groups.push(<div key={`g${groups.length}`} className={LIST}>{run}</div>);
     run = [];
   };
-  run.push(
-    <ClaudeListRow
-      key="anthropic"
-      claude={claude}
-      models={models}
-      plan={claudePlan}
-      open={openId === "anthropic"}
-      onToggle={() => toggle("anthropic")}
-      onOpenConnections={onOpenConnections}
-    />,
-  );
   for (const provider of providers ?? []) {
     if (editing?.mode === "edit" && editing.id === provider.id) {
       flush();
@@ -158,7 +178,7 @@ export function ProvidersPane({
   return (
     <Pane
       title="Model providers"
-      subtitle="Claude, and other Anthropic-compatible endpoints"
+      subtitle="Every account and key your colonies can think with"
       back={back}
       info={
         <>
@@ -176,6 +196,10 @@ export function ProvidersPane({
     >
       <div className="space-y-3">
         <ProviderQuotaCards reloadProviders={reload} />
+        {route && <OrchestratorCard route={route} model={status?.orchestrator?.model ?? ""} agent={status?.orchestrator?.module ?? null} />}
+        <GroupHeading id="subscriptions-heading" title="Subscriptions" help="Sign in once; colonies use the account." />
+        {subscriptions}
+        <GroupHeading id="api-providers-heading" title="API providers" help="An endpoint and a key, or a server on your network." />
         {groups}
         {error && <p className="text-body-sm text-err">{error}</p>}
         {!providers && !error && (
@@ -184,7 +208,7 @@ export function ProvidersPane({
           </p>
         )}
         {providers && providers.length === 0 && editing?.mode !== "new" && (
-          <p className="rounded-xl border border-dashed border-border-strong px-3.5 py-4 text-center text-body-sm text-muted">No extra providers yet. Claude works without one.</p>
+          <p className="rounded-xl border border-dashed border-border-strong px-3.5 py-4 text-center text-body-sm text-muted">No API providers yet. A Claude login works without one.</p>
         )}
         {providers && editing?.mode === "new" && (
           <ProviderForm
@@ -200,7 +224,9 @@ export function ProvidersPane({
             }}
           />
         )}
-        <AddProvider disabled={!providers || editing !== null} onPick={(preset) => setEditing({ mode: "new", preset })} />
+        <div id="add-provider">
+          <AddProvider disabled={!providers || editing !== null} onPick={(preset) => setEditing({ mode: "new", preset })} />
+        </div>
       </div>
     </Pane>
   );
@@ -245,6 +271,38 @@ function ProviderQuotaCards({ reloadProviders }: { reloadProviders: () => Promis
           }}
         />
       ))}
+    </div>
+  );
+}
+
+function GroupHeading({ id, title, help }: { id: string; title: string; help: string }) {
+  return (
+    <div className="pt-1">
+      <h3 id={id} className="text-meta-lg font-medium uppercase tracking-wide text-muted">
+        {title}
+      </h3>
+      <p className="mt-0.5 text-small leading-snug text-faint">{help}</p>
+    </div>
+  );
+}
+
+/** Which model the orchestrator runs on and whether a colony can reach it: the Models card of issue #1211. */
+function OrchestratorCard({ route, model, agent }: { route: ReturnType<typeof modelRoute>; model: string; agent: string | null }) {
+  return (
+    <div data-orchestrator-route={route.ok ? "ok" : "broken"} className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border px-4 py-3">
+      <span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${route.ok ? "bg-ok" : "bg-err"}`} />
+      <div className="min-w-0 flex-1">
+        <p className="text-body-sm font-medium">{route.ok ? "Colonies can reach a model" : "Colonies have no model to use"}</p>
+        <p className="text-small text-muted [overflow-wrap:anywhere]">
+          {route.ok
+            ? `The orchestrator${model ? ` (${model})` : ""} runs through ${route.detail}.`
+            : (route.reason ?? "No route to a model.")}
+          {agent ? ` Agent: ${agent}.` : ""}
+        </p>
+      </div>
+      <Button size="sm" onClick={openModelSwitcher}>
+        Switch the orchestrator model
+      </Button>
     </div>
   );
 }

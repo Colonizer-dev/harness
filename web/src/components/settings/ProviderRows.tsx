@@ -7,7 +7,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Sparkline } from "../../cockpit/DashChart";
 import { sparkPoints } from "../../cockpit/dash";
 import { useApi } from "../../context";
-import type { HarnessStatus, ModelOption, ModelProvider, ModelSetting, PlanUsage, ProviderUsageReport } from "../../types";
+import type { ModelProvider, ModelSetting, ProviderUsageReport } from "../../types";
 import { IconChevron, IconNetwork, IconPencil } from "../icons";
 import { ProviderMark } from "../providerMark";
 import { Badge, Button, Spinner, cx, timeAgo } from "../ui";
@@ -16,7 +16,7 @@ import { BalanceChart } from "./BalanceChart";
 import { KeyBadge } from "./ProviderForm";
 import { HealthStatus, type HealthView } from "./HealthStatus";
 import { WIRE_LABEL, limitLabels } from "./providerCatalog";
-import { claudePlanText, dailySeries, gaugeOf, modelsSummary, providerStatus, resetText, resetUnixOf, type StatusTone } from "./providerOverview";
+import { dailySeries, gaugeOf, modelsSummary, providerStatus, resetText, resetUnixOf, type StatusTone } from "./providerOverview";
 
 const DOT: Record<StatusTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", idle: "bg-faint" };
 const FILL: Record<StatusTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", idle: "bg-faint" };
@@ -49,7 +49,7 @@ function GaugeBar({ pct, tone, label }: { pct: number | null; tone: StatusTone; 
 }
 
 /** One expandable row. The summary is the button; its details render only while open. */
-function Shell({
+export function Shell({
   id,
   mark,
   name,
@@ -126,7 +126,7 @@ function Shell({
 }
 
 /** A titled block inside an open row, with the one line that says what it shows. */
-function Block({ title, help, children }: { title: string; help: string; children: ReactNode }) {
+export function Block({ title, help, children }: { title: string; help: string; children: ReactNode }) {
   return (
     <section className="min-w-0">
       <h4 className="text-meta-lg font-medium uppercase tracking-wide text-muted">{title}</h4>
@@ -136,7 +136,7 @@ function Block({ title, help, children }: { title: string; help: string; childre
   );
 }
 
-function Chips({ items, extra = [], limit = 6 }: { items: string[]; extra?: string[]; limit?: number }) {
+export function Chips({ items, extra = [], limit = 6 }: { items: string[]; extra?: string[]; limit?: number }) {
   const [all, setAll] = useState(false);
   const shown = all ? items : items.slice(0, limit);
   return (
@@ -162,7 +162,7 @@ function Chips({ items, extra = [], limit = 6 }: { items: string[]; extra?: stri
 }
 
 /** The usage report for an open row, refreshed once a minute while it stays open. */
-function useUsage(id: string, enabled: boolean, days = 7) {
+export function useUsage(id: string, enabled: boolean, days = 7) {
   const api = useApi();
   const [report, setReport] = useState<ProviderUsageReport | null>(null);
   const [failed, setFailed] = useState(false);
@@ -256,7 +256,7 @@ function CreditsBlock({ provider, report, failed, onEdit, nowMs }: { provider: M
   );
 }
 
-function Facts({ rows }: { rows: [string, ReactNode][] }) {
+export function Facts({ rows }: { rows: [string, ReactNode][] }) {
   return (
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-small">
       {rows.map(([k, v]) => (
@@ -358,68 +358,3 @@ export function ProviderListRow({
     </Shell>
   );
 }
-
-/**
- * Claude, the first row. Not a provider anyone configured here: the default the harness falls back
- * to, so read-only. Its limit state and reset come from the account quota in /api/models/plans.
- */
-export function ClaudeListRow({
-  claude,
-  models,
-  plan,
-  open,
-  onToggle,
-  onOpenConnections,
-}: {
-  claude: HarnessStatus["claude"] | null;
-  models: ModelOption[];
-  plan: PlanUsage | null;
-  open: boolean;
-  onToggle: () => void;
-  onOpenConnections: () => void;
-}) {
-  const nowMs = Date.now();
-  const own = models.filter((m) => m.provider === "anthropic");
-  const state = claudePlanText(plan, nowMs);
-  const connected = claude?.configured;
-  const tone: StatusTone = connected === false ? "err" : state.tone === "idle" ? (connected ? "ok" : "idle") : state.tone;
-  const label = connected === false ? "Not connected" : state.status === "Limit reached" ? state.status : "Connected";
-  const { report } = useUsage("anthropic", open);
-  const last = plan?.last_limit;
-  return (
-    <Shell
-      id="anthropic"
-      mark={<ProviderMark preset="anthropic" name="Anthropic" />}
-      name="Anthropic"
-      tag={<Badge>Built-in</Badge>}
-      statusLabel={label}
-      tone={tone}
-      gauge={{ pct: state.tone === "err" ? 0 : null, text: state.tone === "err" ? "0%" : "subscription", tone: state.tone === "err" ? "err" : "idle" }}
-      reset={state.reset}
-      open={open}
-      onToggle={onToggle}
-    >
-      <Block title="Usage window" help="Claude reports its session and weekly limits only once one is hit.">
-        <p className="text-body-sm">
-          {plan?.exhausted ? <span className="text-err">Limit reached{state.reset ? `, ${state.reset}` : ""}.</span> : "Within its limits right now."}
-        </p>
-        <p className="mt-1 text-small text-faint">
-          {last ? `Last limit hit ${timeAgo(last.at) ?? "recently"}.` : "No limit hit since this Mothership started keeping track."}
-          {report && report.events.length > 0 ? ` ${report.events.filter((e) => e.kind === "exhausted").length} in the last ${report.days} days.` : ""}
-        </p>
-      </Block>
-      <Block title="Models" help="The default. A model id with no provider prefix, and a provider's fallback, go here.">
-        {own.length === 0 ? <p className="text-small text-faint">Model list not loaded.</p> : <Chips items={own.map((m) => m.id)} limit={8} />}
-      </Block>
-      <Block title="Connection" help="The subscription is signed in under Connections, not here.">
-        <Facts rows={[["Account", claude?.configured ? [claude.account, claude.source ?? "Connected"].filter(Boolean).join(" · ") : "Not connected"]]} />
-        <div className="mt-3">
-          <Button size="sm" onClick={onOpenConnections}>
-            Connections <IconChevron size={13} />
-          </Button>
-        </div>
-      </Block>
-    </Shell>
-  );
-}
-

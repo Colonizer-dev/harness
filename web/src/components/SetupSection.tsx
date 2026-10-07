@@ -7,7 +7,8 @@ import { errorMessage, useApi, useToast } from "../context";
 import { DISMISSIBLE_ROW_IDS, errorDetail, stackPresetOf, setupTone, type SetupRow, type SetupRowId, type SetupView } from "../setup";
 import type { HarnessStatus, ModuleInfo, TelemetryStatus } from "../types";
 import { type ImagePull } from "../useImagePull";
-import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
+import { GithubTokenForm } from "./Connections";
+import { openModelSwitcher } from "../cockpit/ModelSwitcher";
 import { IconCheck, IconChevron } from "./icons";
 import { OsLogo } from "./OsLogo";
 import { Badge, Button, Spinner, Switch, cx, seconds } from "./ui";
@@ -33,6 +34,7 @@ export function SetupSection({
   onShown,
   onOpenLiveMap,
   onOpenCockpit,
+  onOpenModels,
   back,
 }: {
   status: HarnessStatus | null;
@@ -50,6 +52,8 @@ export function SetupSection({
   onOpenLiveMap: () => void;
   /** Opens Settings → Your cockpit once the checklist is done, so the address can be bookmarked. */
   onOpenCockpit: () => void;
+  /** Opens Settings → Models → Model providers, where every AI account and key lives. */
+  onOpenModels: () => void;
   back?: () => void;
 }) {
   const api = useApi();
@@ -253,14 +257,23 @@ export function SetupSection({
     );
   };
 
-  const claudeBody = (row: SetupRow) => {
-    if (row.state === "done" && editing !== "claude")
+  // The required model row (issue #1211): a Claude login, a provider key and a local server all count,
+  // so the fix lives on the Models page; this row only says what is missing and links there.
+  const modelBody = (row: SetupRow) => {
+    if (row.state === "done" && editing !== "model")
       return notes(row).length > 0 ? <div className="space-y-1">{notes(row)}</div> : null;
     return (
       <div className="space-y-2">
         {row.fix && row.state !== "done" && <p className="text-body-sm">{row.fix}</p>}
         {retry(row)}
-        <ClaudeLoginSection claude={status.claude} onStatusChanged={onStatusChanged} />
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant={row.state === "done" ? undefined : "primary"} onClick={onOpenModels}>
+            Open Models
+          </Button>
+          <Button size="sm" onClick={openModelSwitcher}>
+            Switch the orchestrator model
+          </Button>
+        </div>
         {notes(row)}
       </div>
     );
@@ -314,8 +327,8 @@ export function SetupSection({
         return stackBody(row);
       case "github":
         return githubBody(row);
-      case "claude":
-        return claudeBody(row);
+      case "model":
+        return modelBody(row);
       case "launch":
         return launchBody(row);
       case "map":
@@ -357,7 +370,7 @@ export function SetupSection({
                         Ask again
                       </Button>
                     )}
-                    {(row.id === "stack" || row.id === "github" || row.id === "claude") && row.state === "done" && (
+                    {(row.id === "stack" || row.id === "github" || row.id === "model") && row.state === "done" && (
                       <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setEditing(editing === row.id ? null : row.id)}>
                         {editing === row.id ? "Close" : "Change"}
                       </Button>

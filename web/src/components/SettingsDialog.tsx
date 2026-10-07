@@ -16,6 +16,7 @@ import type {
 } from "../types";
 import { type NotificationPrefs } from "../notifications";
 import { useModels } from "../useModels";
+import { modelRoute } from "../modelRoute";
 import { type ImagePull } from "../useImagePull";
 import { setupTone, type SetupView } from "../setup";
 import { orgEnabled } from "../orgs";
@@ -382,7 +383,8 @@ export function SettingsBody({
   const flag = (id: SectionId, item: AttentionItem) => (attention[id] = [...(attention[id] ?? []), item]);
   if (status) {
     if (!github?.connected) flag("connections", { tone: "warn", text: "GitHub is not connected, so colonies cannot read or push code. Sign in below." });
-    if (!claude?.configured) flag("connections", { tone: "warn", text: "Claude is not connected, so colonies have nothing to think with. Log in or add a key below." });
+    const route = modelRoute(status);
+    if (!route.ok) flag("providers", { tone: "warn", text: `${route.reason ?? "No route to a model."} Sign in under Subscriptions or add a provider key.` });
     if (!status.sandbox.msb_version) flag("runtime", { tone: "err", text: "microsandbox is missing, so colonies cannot start. The page lists how to install it." });
     if (status.sandbox.claude_bin_error) flag("runtime", { tone: "err", text: `The Claude binary has a problem: ${status.sandbox.claude_bin_error}` });
     if (meshBroken(status.mesh)) flag("runtime", { tone: "err", text: "The private network between the mothership and colonies is not healthy. See the Mesh module." });
@@ -526,11 +528,15 @@ export function SettingsBody({
         return status
           ? [
               { label: "GitHub", value: github?.connected ? (github.login ?? "Connected") : "Not connected", tone: github?.connected ? "ok" : "err" },
-              { label: "Claude", value: claude?.configured ? "Connected" : "Not connected", tone: claude?.configured ? "ok" : "err" },
             ]
           : [];
       case "providers":
-        return providers ? [{ label: "Providers", value: String(providers.length + 1) }] : [];
+        return status
+          ? [
+              { label: "Model", value: modelRoute(status).ok ? "Connected" : "Not connected", tone: modelRoute(status).ok ? "ok" : "err" },
+              ...(providers ? [{ label: "API providers", value: String(providers.length) }] : []),
+            ]
+          : [];
       case "runtime":
         return status
           ? [
@@ -814,6 +820,7 @@ const SECTIONS: SectionEntry[] = [
         onShown={c.onSetupShown}
         onOpenLiveMap={() => c.select("live-map")}
         onOpenCockpit={() => c.select("cockpit")}
+        onOpenModels={() => c.select("providers")}
         back={c.back}
       />
     ),
@@ -838,9 +845,9 @@ const SECTIONS: SectionEntry[] = [
         error={c.providersError}
         setProviders={c.setProviders}
         reload={c.loadProviders}
-        claude={c.claude}
+        status={c.status}
         models={c.models}
-        onOpenConnections={() => c.select("connections")}
+        onStatusChanged={c.onStatusChanged}
         focusId={c.focusProvider}
         back={c.back}
       />

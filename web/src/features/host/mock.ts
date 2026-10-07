@@ -1,7 +1,7 @@
 // The `host` feature's mock methods and fixtures, split out of src/mock.ts (issue #827).
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { ago, ahead, clone, isLive, now, sleep } from "../../mockShared";
-import type { HarnessStatus, HeadroomStatus, LoginItemStatus, PullStatus, RetentionPlan, RuntimeInfo, TelemetryStatus, UpdateStatus, UsageStatus } from "../../types";
+import type { AgentLogin, HarnessStatus, HeadroomStatus, LoginItemStatus, PullStatus, RetentionPlan, RuntimeInfo, TelemetryStatus, UpdateStatus, UsageStatus } from "../../types";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
 import type { HostApi } from "./api";
@@ -333,6 +333,22 @@ export let mockUsage: UsageStatus = {
   },
 };
 
+/** GET /api/status `agents` (issue #1211): Claude from its login, the rest the way each runner reads a credential. */
+function mockAgents(ms: MockState): AgentLogin[] {
+  const routes = ms.providers.filter((p) => p.has_key || p.auth === "none");
+  const checked_at = new Date().toISOString();
+  const via = routes.length === 0 ? null : routes.length === 1 ? `via ${routes[0].name}` : `via ${routes.length} providers`;
+  const gateway = (id: string, name: string): AgentLogin => ({ id, name, signed_in: routes.length > 0, account: via, kind: "gateway", checked_at });
+  return [
+    { id: "claude-code", name: "Claude Code", signed_in: ms.claude.configured, account: ms.claude.account ?? ms.claude.source, kind: "subscription", checked_at },
+    { id: "codex", name: "Codex", signed_in: false, account: null, kind: "api_key", checked_at },
+    { id: "grok-build", name: "Grok Build", signed_in: false, account: null, kind: "api_key", checked_at },
+    gateway("opencode", "OpenCode"),
+    gateway("pi", "Pi"),
+    gateway("hermes", "Hermes"),
+  ];
+}
+
 export function hostMock(ms: MockState): HostApi {
   return {
     status: () =>
@@ -341,6 +357,9 @@ export function hostMock(ms: MockState): HostApi {
     return {
       github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: ms.githubSource },
       claude: ms.claude,
+      // Issue #1211: which agent modules have a credential, and what the orchestrator runs on.
+      agents: mockAgents(ms),
+      orchestrator: { module: "claude-code", model: "" },
       sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, mode: "auto", size: { cpus: 3, memory_gb: 11, slots: 10, reserve_gb: 12, reserve_cpus: 2 }, running: live, room_for: Math.max(0, 8 - live), waiting_reason: live >= 8 ? "memory" : null, auto_max_parallel: 32, free_bytes: 19_327_352_832, load: 0.4, cpu_cores: 8, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
       mesh: mockMesh(live + 1),
       // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
@@ -372,6 +391,8 @@ export function hostMock(ms: MockState): HostApi {
       model_providers: ms.providers.map((p) => ({
         id: p.id,
         name: p.name,
+        has_key: p.has_key,
+        keyless: p.auth === "none",
         requests: p.usage?.requests ?? 0,
         failure_pct: p.health?.failure_pct ?? 0,
         avg_latency_ms: p.health?.avg_latency_ms ?? 0,

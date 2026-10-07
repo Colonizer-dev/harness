@@ -99,7 +99,7 @@ const row = (of: SetupInput, id: SetupRowId): SetupRow => setupRows(of).find((r)
 
 describe("setupRows", () => {
   it("lays the rows out in the issue's order, live map last", () => {
-    expect(setupRows(input()).map((r) => r.id)).toEqual(["machine", "stack", "github", "claude", "launch", "map"]);
+    expect(setupRows(input()).map((r) => r.id)).toEqual(["machine", "stack", "github", "model", "launch", "map"]);
   });
 
   describe("row 1 — This machine", () => {
@@ -250,7 +250,7 @@ describe("setupRows", () => {
       const machine = row(old, "machine");
       expect(machine.state).toBe("done");
       expect(machine.error).toBeUndefined();
-      expect(row(old, "claude").notes).toEqual([]);
+      expect(row(old, "model").notes).toEqual([]);
       expect(shouldAutoOpen(setupRows(old))).toBe(false);
       expect(launchEnabled(setupRows(old))).toBe(true);
     });
@@ -279,7 +279,7 @@ describe("setupRows", () => {
         const rows = setupRows(soft);
         expect(row(soft, "machine").state).toBe("done");
         expect(row(soft, "github").state).toBe("done");
-        expect(row(soft, "claude").state).toBe("done");
+        expect(row(soft, "model").state).toBe("done");
         expect(row(soft, "stack").state).not.toBe("blocked");
         expect(row(soft, "stack").gatesLaunch).toBe(false);
         expect(launchEnabled(rows)).toBe(true);
@@ -328,17 +328,17 @@ describe("setupRows", () => {
     });
   });
 
-  describe("row 4 — Claude", () => {
+  describe("row 4 — a model colonies can use", () => {
     it("names the login source when configured", () => {
-      expect(row(input(), "claude")).toMatchObject({ state: "done", detail: "Claude subscription" });
+      expect(row(input(), "model")).toMatchObject({ state: "done", detail: "Claude subscription" });
     });
 
     it("blocks when Claude is not configured", () => {
       const down = input({ status: status({ claude: { configured: false, source: null, kind: null } }) });
-      const claude = row(down, "claude");
+      const claude = row(down, "model");
       expect(claude.state).toBe("blocked");
       expect(claude.gatesLaunch).toBe(true);
-      expect(claude.fix).toContain("setup-token");
+      expect(claude.fix).toContain("Claude is not signed in");
       expect(shouldAutoOpen(setupRows(down))).toBe(true);
       expect(launchEnabled(setupRows(down))).toBe(false);
     });
@@ -350,7 +350,7 @@ describe("setupRows", () => {
           mesh: { enabled: true, provider: "headscale", state: "unavailable", harness_ip: null, nodes: 0, error: null },
         }),
       });
-      const claude = row(macNoBin, "claude");
+      const claude = row(macNoBin, "model");
       expect(claude.state).toBe("done"); // configured — the row is green, the note rides along
       expect(claude.notes.join(" ")).toContain("a saved token still works");
       expect(claude.notes.join(" ")).toContain("executable file not found");
@@ -361,14 +361,14 @@ describe("setupRows", () => {
 
     it("says nothing about an expiry that is well in the future", () => {
       const future = input({ status: claudeWith({ expires_at: new Date(NOW + 90 * DAY).toISOString() }) });
-      const claude = row(future, "claude");
+      const claude = row(future, "model");
       expect(claude.state).toBe("done");
       expect(claude.notes).toEqual([]);
     });
 
     it("notes a real expiry within 30 days, without changing anything else about the row", () => {
       const soon = input({ status: claudeWith({ expires_at: new Date(NOW + 12 * DAY).toISOString() }) });
-      const claude = row(soon, "claude");
+      const claude = row(soon, "model");
       expect(claude.notes).toEqual(["The Claude token expires in 12 days; sign in again to refresh it."]);
       expect(claude.state).toBe("done");
       expect(claude.gatesLaunch).toBe(true);
@@ -376,14 +376,14 @@ describe("setupRows", () => {
     });
 
     it("draws the 30-day line exactly where the credential panel does — 30 days warns, a hair more does not", () => {
-      const at30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY).toISOString() }) }), "claude");
+      const at30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY).toISOString() }) }), "model");
       expect(at30.notes.join(" ")).toContain("expires in 30 days");
-      const justPast30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY + 1).toISOString() }) }), "claude");
+      const justPast30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY + 1).toISOString() }) }), "model");
       expect(justPast30.notes).toEqual([]);
     });
 
     it("counts a partly-lived last day as one day", () => {
-      const hoursLeft = row(input({ status: claudeWith({ expires_at: new Date(NOW + 5 * 3_600_000).toISOString() }) }), "claude");
+      const hoursLeft = row(input({ status: claudeWith({ expires_at: new Date(NOW + 5 * 3_600_000).toISOString() }) }), "model");
       expect(hoursLeft.notes.join(" ")).toContain("expires in 1 day");
       expect(hoursLeft.notes.join(" ")).not.toContain("days");
     });
@@ -392,7 +392,7 @@ describe("setupRows", () => {
       // The mothership guesses a subscription token's expiry from the save date plus a year;
       // the note has to say so instead of presenting the date as Anthropic's.
       const guessed = input({ status: claudeWith({ expires_at: new Date(NOW + 10 * DAY).toISOString(), expires_estimated: true }) });
-      const claude = row(guessed, "claude");
+      const claude = row(guessed, "model");
       expect(claude.notes).toEqual([
         "The Claude token is estimated to expire in 10 days — a guess from when the token was saved, not a date Anthropic gave.",
       ]);
@@ -401,14 +401,14 @@ describe("setupRows", () => {
 
     it("says plainly when the token is already past a real expiry", () => {
       const past = input({ status: claudeWith({ expires_at: new Date(NOW - 3 * DAY).toISOString() }) });
-      const claude = row(past, "claude");
+      const claude = row(past, "model");
       expect(claude.notes).toEqual(["The Claude token expired on 2026-09-15; sign in again to get a fresh one."]);
       expect(claude.state).toBe("done");
     });
 
     it("does not state a passed estimated expiry as fact either", () => {
       const past = input({ status: claudeWith({ expires_at: new Date(NOW - 3 * DAY).toISOString(), expires_estimated: true }) });
-      const claude = row(past, "claude");
+      const claude = row(past, "model");
       expect(claude.notes).toEqual([
         "The Claude token is past its estimated expiry (2026-09-15) — a guess from when the token was saved, not a date Anthropic gave; sign in again to be sure.",
       ]);
@@ -416,7 +416,7 @@ describe("setupRows", () => {
 
     it("invents no expiry note for a timestamp it cannot parse", () => {
       const unparseable = input({ status: claudeWith({ expires_at: "not a date" }) });
-      expect(row(unparseable, "claude").notes).toEqual([]);
+      expect(row(unparseable, "model").notes).toEqual([]);
     });
 
     it("passes the mothership's account note through when it could not identify an account", () => {
@@ -426,7 +426,7 @@ describe("setupRows", () => {
           account_note: "this token is only allowed to make model requests, so Anthropic will not say which account it belongs to",
         }),
       });
-      const claude = row(unidentified, "claude");
+      const claude = row(unidentified, "model");
       expect(claude.notes).toContain(
         "this token is only allowed to make model requests, so Anthropic will not say which account it belongs to",
       );
@@ -445,7 +445,7 @@ describe("setupRows", () => {
       ];
       for (const advisory of advisories) {
         const withIt = input({ status: claudeWith(advisory) });
-        const claude = row(withIt, "claude");
+        const claude = row(withIt, "model");
         const which = JSON.stringify(advisory);
         expect(claude.notes.length, which).toBeGreaterThan(0);
         expect(claude.state, which).toBe("done"); // never red
@@ -506,7 +506,7 @@ describe("setupProgress", () => {
 describe("firstActionableRow", () => {
   it("lands on row 4 when rows 1-3 are done and Claude is not yet configured", () => {
     const partial = input({ status: status({ claude: { configured: false, source: null, kind: null } }) });
-    expect(firstActionableRow(setupRows(partial))?.id).toBe("claude");
+    expect(firstActionableRow(setupRows(partial))?.id).toBe("model");
   });
 
   it("walks past a pull that is running on its own", () => {
@@ -514,7 +514,7 @@ describe("firstActionableRow", () => {
       pull: pull("pulling"),
       status: status({ claude: { configured: false, source: null, kind: null } }),
     });
-    expect(firstActionableRow(setupRows(waiting))?.id).toBe("claude");
+    expect(firstActionableRow(setupRows(waiting))?.id).toBe("model");
   });
 
   it("is null when everything is settled", () => {
@@ -708,7 +708,7 @@ describe("issue #1200 — advisory rows and the Settings dot", () => {
   });
 
   it("never lets a required or unknown id be dismissed away", () => {
-    const sneaky = input({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }), dismissed: ["github", "machine", "claude"] });
+    const sneaky = input({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }), dismissed: ["github", "machine", "model"] });
     expect(row(sneaky, "github").state).toBe("blocked");
     expect(launchEnabled(setupRows(sneaky))).toBe(false);
   });
@@ -755,5 +755,84 @@ describe("setupView", () => {
     expect(view.autoOpen).toBe(true);
     expect(view.launchEnabled).toBe(false);
     expect(setupTone(view)).toBe("err");
+  });
+});
+
+// Issue #1211: the required row is "a model colonies can use", not "Claude is signed in".
+describe("a model colonies can use (issue #1211)", () => {
+  const noClaude = { configured: false, source: null, kind: null } as HarnessStatus["claude"];
+  const healthy = (over: Partial<SetupInput>) => setupView(input(over));
+  const minimax = { id: "minimax", name: "MiniMax", has_key: true, keyless: false, requests: 4, failure_pct: 0, avg_latency_ms: 300, degraded: false };
+
+  it("is complete with a MiniMax orchestrator and no Claude login", () => {
+    const view = input({
+      status: status({
+        claude: noClaude,
+        model_providers: [minimax],
+        orchestrator: { module: "opencode", model: "minimax/MiniMax-M2" },
+        agents: [{ id: "opencode", name: "OpenCode", signed_in: true, kind: "gateway", account: "via MiniMax" }],
+      }),
+    });
+    expect(row(view, "model")).toMatchObject({ state: "done", title: "A model colonies can use", detail: "MiniMax · minimax/MiniMax-M2" });
+    expect(launchEnabled(setupRows(view))).toBe(true);
+  });
+
+  it("clears the needs-you dot once any working route exists", () => {
+    const healthyRoute = healthy({
+      status: status({ claude: noClaude, model_providers: [minimax], orchestrator: { module: "claude-code", model: "minimax/MiniMax-M2" } }),
+    });
+    expect(healthyRoute.attention).toBe(false);
+    expect(setupTone(healthyRoute)).toBe("ok");
+    const none = healthy({ status: status({ claude: noClaude, model_providers: [], orchestrator: { module: "claude-code", model: "" } }) });
+    expect(none.attention).toBe(true);
+  });
+
+  it("blocks when the orchestrator names a provider with no key, and points at the connected one", () => {
+    const view = input({
+      status: status({
+        claude: { configured: true, source: "Claude subscription", kind: null },
+        model_providers: [{ ...minimax, has_key: false }],
+        orchestrator: { module: "claude-code", model: "minimax/MiniMax-M2" },
+      }),
+    });
+    const r = row(view, "model");
+    expect(r.state).toBe("blocked");
+    expect(r.fix).toContain("MiniMax has no key");
+    expect(r.fix).toContain("Claude is connected");
+  });
+
+  it("blocks when the provider's plan is out", () => {
+    const view = input({
+      status: status({
+        claude: noClaude,
+        model_providers: [minimax],
+        quota: { paused: false, reason: null, reset_at: null, reset_unix: null, providers: ["minimax"] } as HarnessStatus["quota"],
+        orchestrator: { module: "claude-code", model: "minimax/MiniMax-M2" },
+      }),
+    });
+    expect(row(view, "model").fix).toContain("plan is out");
+  });
+
+  it("counts a signed-in Codex when Codex is the agent module", () => {
+    const view = input({
+      status: status({
+        claude: noClaude,
+        orchestrator: { module: "codex", model: "" },
+        agents: [{ id: "codex", name: "Codex", signed_in: true, kind: "api_key", account: "OpenAI API key" }],
+      }),
+    });
+    expect(row(view, "model")).toMatchObject({ state: "done", detail: "Codex · OpenAI API key" });
+  });
+
+  it("keeps Claude advisories off when another route carries the colonies", () => {
+    const view = input({
+      status: status({
+        claude: noClaude,
+        model_providers: [minimax],
+        orchestrator: { module: "opencode", model: "minimax/m" },
+        runtime: { ...LINUX, host_claude_bin: null },
+      }),
+    });
+    expect(row(view, "model").notes).toEqual([]);
   });
 });
