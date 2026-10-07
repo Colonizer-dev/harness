@@ -55,10 +55,12 @@ fn auto_modules() -> ModulesConfig {
 fn sizes_colonies_for_these_host_shapes() {
     // (cores, RAM GiB) -> (vCPUs, GiB, planned colonies, reserve GiB)
     for ((cores, ram), (cpus, memory_gib, slots, reserve_gib)) in [
-        ((8, 16), (6, 8, 1, 8)),
+        ((8, 16), (2, 4, 3, 3)),
+        ((4, 16), (2, 4, 3, 3)),
+        ((4, 8), (2, 6, 1, 2)),
         ((32, 124), (3, 11, 10, 12)),
         ((40, 125), (3, 11, 10, 12)),
-        ((10, 32), (2, 8, 3, 8)),
+        ((10, 32), (2, 6, 4, 8)),
     ] {
         let size = AutoSize::for_host(cores, gib(ram), 32);
         assert_eq!(
@@ -140,6 +142,78 @@ fn admission_follows_free_memory_load_and_the_cap() {
     assert_eq!((a.room_for, a.waiting_reason), (0, Some(WaitReason::Memory)));
     let a = admission(&size, &omarchy(100, 29.0), 5, 0, 32);
     assert_eq!((a.room_for, a.waiting_reason), (0, Some(WaitReason::Cpu)));
+}
+
+/// The CI runner of the v0.2.9 regression: 4 cores, 16 GiB, `free` GiB available.
+fn ci_runner(free: u64, load1: f64) -> HostSample {
+    HostSample {
+        cores: Some(4),
+        memory_total: Some(gib(16)),
+        memory_available: Some(gib(free)),
+        load1: Some(load1),
+    }
+}
+
+#[test]
+fn a_16g_ci_host_admits_one_then_a_second_only_if_memory_allows() {
+    let size = AutoSize::for_host(4, gib(16), 32);
+    assert_eq!((size.cpus, size.memory_gib, size.reserve_gib), (2, 4, 3));
+    // Idle, 14 GiB free: (14 - 3) / 4 = 2 fit, but the load leaves CPU for one 2-vCPU colony.
+    let a = admission(&size, &ci_runner(14, 0.0), 0, 0, 32);
+    assert_eq!(a.room_for, 1);
+    // Nothing running, memory short and the host loaded: still one.
+    let a = admission(&size, &ci_runner(3, 9.0), 0, 0, 32);
+    assert_eq!((a.room_for, a.waiting_reason), (1, None));
+    // One running and 9 GiB free: (9 - 3) / 4 = 1 more, CPU permitting.
+    let a = admission(&size, &ci_runner(9, 0.0), 1, 0, 32);
+    assert_eq!(a.room_for, 1);
+    // One running and 6 GiB free: a second would eat the reserve, so it waits.
+    let a = admission(&size, &ci_runner(6, 0.0), 1, 0, 32);
+    assert_eq!((a.room_for, a.waiting_reason), (0, Some(WaitReason::Memory)));
+    // The first colony never waits on CPU either, and the cap still holds.
+    let a = admission(&size, &ci_runner(14, 40.0), 0, 0, 32);
+    assert_eq!(a.room_for, 1);
+    let a = admission(&size, &ci_runner(14, 0.0), 0, 0, 0);
+    assert_eq!((a.room_for, a.waiting_reason), (0, Some(WaitReason::Cap)));
+}
+
+#[test]
+fn an_8g_host_admits_one_colony_at_a_reduced_size() {
+    let host = HostSample {
+        cores: Some(4),
+        memory_total: Some(gib(8)),
+        memory_available: Some(gib(5)),
+        load1: Some(0.5),
+    };
+    let limit = evaluate(&auto_modules(), host, &[]);
+    assert_eq!((limit.mode(), limit.max_parallel), ("auto", 1));
+    let planned = AutoSize::for_host(4, gib(8), 32);
+    assert_eq!((planned.memory_gib, planned.slots), (6, 1));
+    let fitted = planned.fit_to(&host);
+    assert_eq!(fitted.memory_gib, 4, "5 GiB free less the 1 GiB small reserve");
+    let starved = planned.fit_to(&HostSample {
+        memory_available: Some(gib(1)),
+        ..host
+    });
+    assert_eq!(starved.memory_gib, 2, "never under 2 GiB");
+    assert!(starved.cpus >= 1);
+}
+
+#[test]
+fn a_probe_that_reads_zero_or_garbage_falls_back_to_fixed() {
+    let zeros = HostSample {
+        cores: Some(0),
+        memory_total: Some(0),
+        memory_available: Some(0),
+        load1: Some(f64::NAN),
+    };
+    let limit = evaluate(&auto_modules(), zeros, &[]);
+    assert_eq!((limit.mode(), limit.max_parallel), ("fixed", 3));
+    let negative = HostSample {
+        load1: Some(-1.0),
+        ..zeros
+    };
+    assert_eq!(evaluate(&auto_modules(), negative, &[]).mode(), "fixed");
 }
 
 #[test]
@@ -240,7 +314,8 @@ async fn the_capacity_reads_its_probe_and_remembers_the_verdict() {
     assert_eq!(capacity.last(), None);
     let first = capacity.limit(&auto_modules(), &[]).await;
     assert_eq!(first.room_for(), 8);
-    let second = capacity.limit(&auto_modules(), &[]).await;
+    let busy = running(1, SessionStatus::Running);
+    let second = capacity.limit(&auto_modules(), &busy).await;
     assert_eq!(second.room_for(), 0);
     assert_eq!(capacity.last(), Some(second));
 }
