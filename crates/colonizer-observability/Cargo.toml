@@ -20,7 +20,7 @@ name = "colonizer-observability"
 path = "src/main.rs"
 
 [dependencies]
-colonizer-redact = { version = "0.2.10", path = "../colonizer-redact" }
+colonizer-redact = { version = "0.2.11", path = "../colonizer-redact" }
 # gzip for OTLP/HTTP `Content-Encoding: gzip`.
 flate2 = "1"
 # The OTLP messages only: no SDK, no tonic client (`gen-tonic-messages` is prost structs alone).

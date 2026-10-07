@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "colonizer-redact"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "serde_json",
 ]
