@@ -651,6 +651,7 @@ pub async fn create(
         hold_resumes: 0,
         hold_cause: None,
         hold_cause_repeats: 0,
+        verify_fix_rounds: 0,
         provider_retries: 0,
         agent_session: None,
         pending_answer: None,

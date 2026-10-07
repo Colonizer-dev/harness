@@ -106,6 +106,7 @@ impl Session {
     pub(crate) fn clear_hold_cause(&mut self) {
         self.hold_cause = None;
         self.hold_cause_repeats = 0;
+        self.verify_fix_rounds = 0;
     }
 
     /// Drop the attention flag the watchdog or autopilot set (`stalled`, `nudges_exhausted`,
@@ -567,6 +568,11 @@ pub struct Session {
     pub hold_cause: Option<String>,
     #[serde(default)]
     pub hold_cause_repeats: u32,
+    /// How many automatic fix rounds a contradicted verification has already sent this colony's
+    /// agent (issue #1186). Capped at [`crate::verify::FIX_ROUNDS_MAX`]; cleared when a publish
+    /// goes ahead.
+    #[serde(default)]
+    pub verify_fix_rounds: u32,
     /// How many automatic continues have been scheduled after a transient provider error
     /// (issue #980): the 1-based attempt the colony is backing off for, so the delay already
     /// spent is `provider_retries - 1` into the schedule. Reset to 0 on a successful turn and
@@ -744,6 +750,7 @@ impl Default for Session {
             hold_resumes: 0,
             hold_cause: None,
             hold_cause_repeats: 0,
+            verify_fix_rounds: 0,
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,

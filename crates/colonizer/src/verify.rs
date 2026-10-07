@@ -96,7 +96,25 @@ pub struct Verification {
     pub snapshot: Option<String>,
     /// Total wall time — the cost. No model calls.
     pub ms: u64,
+    /// The failing head checks' evidence, for the automatic fix round (issue #1186). Never
+    /// persisted or sent as an event: the log tail lives in `out/verify-*.log`.
+    #[serde(skip)]
+    pub failures: Vec<Failure>,
 }
+
+/// One failing check's evidence: what ran, which tests failed, the end of its output.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Failure {
+    pub command: String,
+    pub tests: Vec<String>,
+    pub tail: String,
+}
+
+/// How many automatic fix rounds a colony gets per contradicted verification before autopilot
+/// holds it for a person (issue #1186).
+pub(crate) const FIX_ROUNDS_MAX: u32 = 2;
+/// The log lines a fix message carries.
+const FIX_LOG_LINES: usize = 60;
 
 impl Verification {
     /// The host chain event body: this record plus its `type`.
@@ -124,6 +142,7 @@ impl Verification {
             files_changed: Vec::new(),
             snapshot: None,
             ms: 0,
+            failures: Vec::new(),
         }
     }
 
@@ -908,15 +927,22 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner, delays: &[Durat
                     // merge-base, in the same kind of fresh checkout, before a hold.
                     Outcome::Failed(code) => {
                         all_green = false;
+                        let evidence = ran.tail.clone().filter(|t| !t.trim().is_empty());
                         match base_run(app, s, admin, &cwd, &merge_base, check, runner, delays).await {
                             BaseOut::FailsToo => record
                                 .inconclusive
                                 .push(format!("`{}` fails on the base commit as well", check.command)),
-                            BaseOut::Passes => contradictions.push(head_failure(&cwd, check, code, ran.tail).await),
-                            BaseOut::Unchecked(why) => contradictions.push(format!(
-                                "{} (the base commit could not be checked: {why})",
-                                head_failure(&cwd, check, code, ran.tail).await
-                            )),
+                            BaseOut::Passes => {
+                                record.failures.push(failure_of(check, evidence));
+                                contradictions.push(head_failure(&cwd, check, code, ran.tail).await)
+                            }
+                            BaseOut::Unchecked(why) => {
+                                record.failures.push(failure_of(check, evidence));
+                                contradictions.push(format!(
+                                    "{} (the base commit could not be checked: {why})",
+                                    head_failure(&cwd, check, code, ran.tail).await
+                                ))
+                            }
                         }
                     }
                     // Everything else is the image's or the sandbox's: unverifiable, named plainly.
@@ -1158,6 +1184,110 @@ async fn head_failure(cwd: &Path, check: &Check, code: i32, tail: Option<String>
         msg.push_str(&format!(" (last {LOG_LINES} lines in out/{file})"));
     }
     msg
+}
+
+fn failure_of(check: &Check, tail: Option<String>) -> Failure {
+    let tail = tail.unwrap_or_default();
+    Failure {
+        command: check.command.clone(),
+        tests: failing_tests(&tail).0,
+        tail,
+    }
+}
+
+/// The message that sends a contradicted verification back to the agent (issue #1186): the failing
+/// check and command, the failing test names, the last lines of the log with secrets redacted, and
+/// what to do. The redaction runs here, on what leaves the host, never on the stored log.
+pub(crate) fn fix_message(failures: &[Failure], round: u32) -> String {
+    let mut out =
+        format!("Verification of your work failed in a fresh checkout (automatic fix round {round} of {FIX_ROUNDS_MAX}).\n");
+    for f in failures {
+        out.push_str(&format!("\nFailing check: `{}`\n", f.command));
+        if !f.tests.is_empty() {
+            out.push_str(&format!("Failing tests: {}\n", f.tests.join(", ")));
+        }
+        let lines: Vec<&str> = f.tail.lines().collect();
+        let tail = lines[lines.len().saturating_sub(FIX_LOG_LINES)..].join("\n");
+        out.push_str(&format!(
+            "Last {} lines of its output:\n```\n{}\n```\n",
+            lines.len().min(FIX_LOG_LINES),
+            colonizer_redact::redact_text(&tail)
+        ));
+    }
+    out.push_str(
+        "\nFix the failure, re-run the check, and update /harness/out/pr.md. If the failure is not caused by \
+         your change, say so in pr.md.",
+    );
+    out
+}
+
+/// What autopilot does with a contradicted verification (issue #1186).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FixStep {
+    /// Send the agent this fix round.
+    Send(u32),
+    /// A check also fails on the base commit: not the agent's to fix; held with `preexisting_failure`.
+    Preexisting,
+    /// The rounds are spent, or there is no evidence to send; held with `verify_failed_repeatedly`.
+    Exhausted,
+}
+
+pub(crate) fn fix_step(v: &Verification, rounds_used: u32) -> FixStep {
+    if !v.inconclusive.is_empty() {
+        FixStep::Preexisting
+    } else if v.failures.is_empty() || rounds_used >= FIX_ROUNDS_MAX {
+        FixStep::Exhausted
+    } else {
+        FixStep::Send(rounds_used + 1)
+    }
+}
+
+/// The contradicted branch of autopilot: a fix round when one is due, else the hold.
+async fn handle_contradicted(app: &Shared, id: &str, v: &Verification, detail: &str) {
+    let rounds = app.session(id).await.map_or(0, |s| s.verify_fix_rounds);
+    let step = fix_step(v, rounds);
+    if let FixStep::Send(round) = step {
+        let rt = app.runtime(id).await;
+        crate::recovery::send_user_message(&rt, "verify-fix", &fix_message(&v.failures, round));
+        app.session_log(
+            id,
+            "warn",
+            format!(
+                "autopilot: the completion claim was contradicted — {detail}; sent the failure to the agent \
+                 (fix round {round} of {FIX_ROUNDS_MAX})"
+            ),
+        )
+        .await;
+        app.update_session(id, |x| x.verify_fix_rounds = round).await;
+        return;
+    }
+    let (reason, why) = match step {
+        FixStep::Preexisting => (
+            "preexisting_failure",
+            "a failing check fails on the base commit too, so it is not the agent's to fix",
+        ),
+        _ => (
+            "verify_failed_repeatedly",
+            "the automatic fix rounds are spent or there is nothing to send",
+        ),
+    };
+    app.session_log(
+        id,
+        "warn",
+        format!(
+            "autopilot: not publishing, the completion claim was contradicted — {detail}; {why}; \
+             press Create PR when the work is ready"
+        ),
+    )
+    .await;
+    app.update_session(id, |x| {
+        x.note_hold(&format!("verification: {detail}"));
+        x.attention = Some(json!({
+            "reason": reason,
+            "since": chrono::Utc::now(), "nudges": 0, "detail": detail
+        }));
+    })
+    .await;
 }
 
 /// Strips ANSI escape sequences (colour, cursor movement) so run output matches plainly.
@@ -1461,6 +1591,7 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
     let summary = verification.summary.clone();
     let advisories = verification.advisories.clone();
     let event = verification.event();
+    let held_copy = verification.clone();
     app.update_session(&id, |x| x.verification = Some(verification)).await;
     app.session_log(
         &id,
@@ -1538,23 +1669,7 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
                     .await;
             }
         }
-        Autopilot::Hold(_) => {
-            app.session_log(
-                &id,
-                "warn",
-                format!(
-                    "autopilot: not publishing, the completion claim was contradicted — {detail}; \
-                     press Create PR when the work is ready"
-                ),
-            )
-            .await;
-            app.update_session(&id, |x| {
-                x.note_hold(&format!("verification: {detail}"));
-                x.attention =
-                    Some(json!({"reason": "autopilot_held", "since": chrono::Utc::now(), "nudges": 0, "detail": detail}));
-            })
-            .await;
-        }
+        Autopilot::Hold(_) => handle_contradicted(&app, &id, &held_copy, &detail).await,
         // verdict_step never waits on a verdict, nor schedules a provider-error retry.
         Autopilot::Wait(_) | Autopilot::Retry(_) => {}
     }
@@ -1565,6 +1680,92 @@ pub(crate) mod tests {
     use super::*;
     use crate::sessions::{SessionStatus, tests::app_with_colony};
     use std::path::PathBuf;
+
+    fn failing_verification(inconclusive: bool) -> Verification {
+        let mut v = Verification::blank();
+        v.verdict = Verdict::Contradicted;
+        v.contradictions = vec!["`cargo test` exited 101 in a fresh checkout".into()];
+        if inconclusive {
+            v.inconclusive = vec!["`cargo test` fails on the base commit as well".into()];
+        }
+        v.failures = vec![Failure {
+            command: "cargo test".into(),
+            tests: vec!["api::reconnects".into()],
+            tail: "test api::reconnects ... FAILED\ntoken ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked".into(),
+        }];
+        v
+    }
+
+    /// Issue #1186: a contradicted verify sends the agent a fix message with the test name and a
+    /// redacted log tail; a second sends one more; a third holds with `verify_failed_repeatedly`.
+    #[tokio::test]
+    async fn a_contradicted_verify_sends_two_fix_rounds_then_holds() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let mut rx = app.runtime("abc").await.commands_rx.lock().await.take().unwrap();
+        let v = failing_verification(false);
+        for round in 1..=2u32 {
+            handle_contradicted(&app, "abc", &v, "boom").await;
+            let sent = rx.try_recv().expect("a fix message is sent");
+            assert_eq!(sent["type"], "user_message");
+            let text = sent["text"].as_str().unwrap();
+            assert!(text.contains("api::reconnects") && text.contains("`cargo test`"), "{text}");
+            assert!(text.contains(&format!("fix round {round} of 2")), "{text}");
+            assert!(text.contains("update /harness/out/pr.md"), "{text}");
+            assert!(
+                !text.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                "the tail is redacted: {text}"
+            );
+            assert!(app.session("abc").await.unwrap().attention.is_none());
+        }
+        handle_contradicted(&app, "abc", &v, "boom").await;
+        assert!(rx.try_recv().is_err(), "a third contradiction sends nothing");
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(s.attention.unwrap()["reason"], "verify_failed_repeatedly");
+        assert_eq!(s.verify_fix_rounds, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A failure also present on the base is not the agent's: held at once, nothing sent.
+    #[tokio::test]
+    async fn a_failure_also_on_base_holds_with_preexisting_failure() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let mut rx = app.runtime("abc").await.commands_rx.lock().await.take().unwrap();
+        handle_contradicted(&app, "abc", &failing_verification(true), "boom").await;
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            app.session("abc").await.unwrap().attention.unwrap()["reason"],
+            "preexisting_failure"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_fix_step_is_bounded_and_skips_the_base_failures() {
+        assert_eq!(fix_step(&failing_verification(false), 0), FixStep::Send(1));
+        assert_eq!(fix_step(&failing_verification(false), 1), FixStep::Send(2));
+        assert_eq!(fix_step(&failing_verification(false), 2), FixStep::Exhausted);
+        assert_eq!(fix_step(&failing_verification(true), 0), FixStep::Preexisting);
+        assert_eq!(fix_step(&Verification::blank(), 0), FixStep::Exhausted);
+    }
+
+    /// The real run path records the evidence the fix message needs.
+    #[tokio::test]
+    async fn a_failing_run_records_its_failures_for_the_fix_round() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("exit 101"), "did the work", true).await;
+        let runner = phased_runner(
+            "uncommitted.txt",
+            (0, Some(0)),
+            (101, Some(101)),
+            "test api::reconnects ... FAILED\n",
+        );
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(v.failures.len(), 1);
+        assert_eq!(v.failures[0].tests, vec!["api::reconnects".to_string()]);
+        assert_eq!(fix_step(&v, 0), FixStep::Send(1));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn the_verdict_never_confirms_without_a_green_run() {
