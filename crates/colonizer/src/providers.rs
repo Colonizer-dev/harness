@@ -99,6 +99,10 @@ pub struct QuotaProbe {
     pub pointer: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_pointer: Option<String>,
+    /// Names the moment the plan refills, in the same answer: a unix time (seconds or milliseconds)
+    /// or an RFC 3339 string. The providers page shows "resets in 3 h 12 min" from it (#1204).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_pointer: Option<String>,
 }
 
 /// Per-provider dialect quirks: what one endpoint rejects that the Anthropic wire otherwise allows.
@@ -1148,6 +1152,8 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "disabled_tools": provider.disabled_tools,
         "trusted": provider.trusted,
         "quota": provider.quota,
+        // The last plan-balance reading, so the list can draw a gauge without probing (#1204).
+        "balance": app.gateway.history.latest_balance(&provider.id),
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
         "queued": queued,
@@ -1545,10 +1551,22 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
                     "quota limit JSON pointer must start with / (RFC 6901), like /data/total_tokens, or be empty",
                 ));
             }
+            let reset_pointer = quota
+                .reset_pointer
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string);
+            if reset_pointer.as_deref().is_some_and(|p| !p.starts_with('/')) {
+                return Err(bad(
+                    "quota reset JSON pointer must start with / (RFC 6901), like /data/reset_at, or be empty",
+                ));
+            }
             Some(Some(QuotaProbe {
                 url: url.into(),
                 pointer: quota.pointer.trim().into(),
                 limit_pointer,
+                reset_pointer,
             }))
         }
         None => None,
@@ -1746,6 +1764,7 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     // A provider that no longer exists must not keep its usage record forever.
     app.gateway.forget_usage(&id);
     app.gateway.forget_quota(&id);
+    app.gateway.history.forget(&id);
     // Nor its probe answer: a later provider reusing the id must be probed fresh.
     forget_probe(&app, &id).await;
     Ok(Json(json!({"ok": true})))
@@ -2971,6 +2990,7 @@ mod tests {
             url: "https://balances.example.com/plan".into(),
             pointer: "/data/remaining".into(),
             limit_pointer: None,
+            reset_pointer: None,
         });
         let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -2994,6 +3014,7 @@ mod tests {
                 url: url.into(),
                 pointer: "/data/remaining".into(),
                 limit_pointer: None,
+                reset_pointer: None,
             });
             let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -3014,6 +3035,7 @@ mod tests {
                 url: "https://api.deepseek.com/plan".into(),
                 pointer: pointer.into(),
                 limit_pointer: None,
+                reset_pointer: None,
             });
             let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -3032,6 +3054,7 @@ mod tests {
             url: "https://api.deepseek.com/plan/".into(),
             pointer: " /data/remaining ".into(),
             limit_pointer: None,
+            reset_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
         let saved = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
@@ -3041,6 +3064,7 @@ mod tests {
                 url: "https://api.deepseek.com/plan".into(),
                 pointer: "/data/remaining".into(),
                 limit_pointer: None,
+                reset_pointer: None,
             })
         );
 
@@ -3055,6 +3079,7 @@ mod tests {
             url: "  ".into(),
             pointer: String::new(),
             limit_pointer: None,
+            reset_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
         let cleared = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
@@ -3182,6 +3207,7 @@ mod tests {
             url: "https://api.deepseek.com/plan".into(),
             pointer: "/data/remaining".into(),
             limit_pointer: None,
+            reset_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
 
@@ -3210,6 +3236,7 @@ mod tests {
             url: "https://api.example.com/plan".into(),
             pointer: "/data/remaining".into(),
             limit_pointer: None,
+            reset_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(retried)).await.unwrap();
         assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");

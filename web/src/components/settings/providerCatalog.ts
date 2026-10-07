@@ -21,6 +21,16 @@ export const DEFAULT_TIMEOUT = 600;
 const DEFAULT_LIMITS: ProviderLimits = { timeout_secs: DEFAULT_TIMEOUT, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
 
 const PRESETS: Record<ProviderPreset, ProviderDraft> = {
+  // Anthropic's own API with a key, billed per token: a provider beside the built-in Claude subscription.
+  "anthropic-api": {
+    id: "anthropic-api",
+    name: "Anthropic API",
+    base_url: "https://api.anthropic.com",
+    auth: "x-api-key",
+    wire: "anthropic",
+    models: ["claude-sonnet-5", "claude-haiku-4-5"],
+    ...DEFAULT_LIMITS,
+  },
   deepseek: {
     id: "deepseek",
     name: "DeepSeek",
@@ -140,6 +150,7 @@ export function limitLabels(limits: Partial<ProviderLimits>): string[] {
 }
 
 const PRESET_LABEL: Record<ProviderPreset, string> = {
+  "anthropic-api": "Anthropic API",
   deepseek: "DeepSeek",
   openai: "OpenAI",
   zai: "Z.AI",
@@ -151,6 +162,7 @@ const PRESET_LABEL: Record<ProviderPreset, string> = {
 
 /** Shown while adding a provider, where the base URL is the thing people get wrong. */
 export const PRESET_HINT: Partial<Record<ProviderPreset, string>> = {
+  "anthropic-api": "An Anthropic API key, billed per token. Your Claude subscription is already the built-in default.",
   zai: "Uses your Z.AI coding plan key as a bearer token.",
   alibaba: "This is the token plan's host. A coding plan key needs coding-intl.dashscope.aliyuncs.com instead — the two are not interchangeable.",
 };
@@ -247,10 +259,13 @@ export function presetLabel(preset: ProviderPreset): string {
 }
 
 export const ADD_PRESETS: { preset: ProviderPreset; label: string }[] = [
+  { preset: "anthropic-api", label: "Anthropic API" },
+  { preset: "openrouter", label: "OpenRouter" },
   { preset: "deepseek", label: "DeepSeek" },
-  { preset: "openai", label: "OpenAI" },
+  { preset: "minimax", label: "MiniMax" },
   { preset: "zai", label: "Z.AI" },
   { preset: "alibaba", label: "Alibaba" },
+  { preset: "openai", label: "OpenAI" },
   { preset: "local", label: "Local server" },
   { preset: "custom", label: "Custom" },
 ];
@@ -298,7 +313,7 @@ export interface ProviderSaveInput {
   preset: ProviderPreset;
   api_key?: string;
   pricing?: ProviderPricing;
-  quota: { url: string; pointer: string };
+  quota: { url: string; pointer: string; reset_pointer?: string };
   timeout_secs: number | null;
   max_concurrent: number | null;
   queue_timeout_secs: number | null;
@@ -328,7 +343,7 @@ export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest 
     preset: input.preset,
     api_key: input.api_key,
     pricing: input.pricing,
-    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim() },
+    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim(), reset_pointer: input.quota.reset_pointer?.trim() || undefined },
     timeout_secs: input.timeout_secs,
     max_concurrent: input.max_concurrent,
     queue_timeout_secs: input.queue_timeout_secs,

@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
-import { IconChevron } from "../icons";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { IconChevron, IconInfo } from "../icons";
 import { Badge, InfoButton, cx } from "../ui";
 
 // ---------------------------------------------------------------------------
@@ -170,6 +170,35 @@ export function ConnectionCard({
         {detail && <span className={cx("text-small-lg [overflow-wrap:anywhere]", detailTone === "err" ? "text-err" : "text-muted")}>{detail}</span>}
       </div>
       <div className="space-y-3 border-t border-border px-4 py-3">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * A page's one-line help with a small "i" that shows its hero diagram on demand, for pages where
+ * the list is the point and a third of the screen of illustration before it is not.
+ */
+export function IntroLine({ text, label, children }: { text: string; label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-3">
+      <p className="flex items-start gap-1.5 text-small-lg leading-snug text-muted">
+        <span className="min-w-0 flex-1">{text}</span>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={label}
+          title={label}
+          onClick={() => setOpen((v) => !v)}
+          className={cx(
+            "-mt-0.5 grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-faint transition-colors hover:bg-panel-2 hover:text-text",
+            open && "bg-panel-2 text-text",
+          )}
+        >
+          <IconInfo size={15} />
+        </button>
+      </p>
+      {open && <div className="mt-3">{children}</div>}
     </div>
   );
 }

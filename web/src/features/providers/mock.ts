@@ -1,7 +1,7 @@
 // The `providers` feature's mock methods and fixtures, split out of src/mock.ts (issue #827).
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, now, sleep } from "../../mockShared";
-import type { DownloadableSkillset, ModelOption, ModelProvider } from "../../types";
+import type { DownloadableSkillset, ModelOption, ModelProvider, ProviderUsageReport } from "../../types";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
 import type { ProvidersApi } from "./api";
@@ -20,8 +20,73 @@ export function tickGraft(): DownloadableSkillset {
   return mockGraft;
 }
 
+/** A small seeded generator, so the demo's history is the same on every load. */
+function seeded(seed: string): () => number {
+  let h = 2166136261;
+  for (const c of seed) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return () => {
+    h = Math.imul(h ^ (h >>> 15), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * GET /api/providers/{id}/usage?days= for the mock: per-day requests scaled to the provider's own
+ * tally, and — for a provider with a balance reader — a sawtooth of readings whose current cycle ends
+ * at the reader's reset time and lands on the balance the list shows.
+ */
+function usageReport(p: ModelProvider | null, id: string, days: number): ProviderUsageReport {
+  const rand = seeded(id);
+  const DAY = 86_400_000;
+  const nowMs = Date.now();
+  const total = p?.usage?.requests ?? 0;
+  const failPct = (p?.health?.failure_pct ?? 0) / 100;
+  const weights = Array.from({ length: days }, (_, i) => 0.55 + rand() * 0.9 + (i === days - 1 ? -0.2 : 0));
+  const wsum = weights.reduce((a, b) => a + b, 0);
+  const perDay = total > 0 ? Math.max(1, total / Math.max(30, days * 4)) * days : 0;
+  const daily = weights.map((w, i) => {
+    const date = new Date(nowMs - (days - 1 - i) * DAY).toISOString().slice(0, 10);
+    const requests = Math.round((perDay * w) / wsum);
+    const failures = Math.round(requests * Math.max(0, failPct * (0.6 + rand() * 0.8)));
+    return { date, requests, failures, avg_latency_ms: requests ? Math.round((p?.health?.avg_latency_ms ?? 2000) * (0.8 + rand() * 0.4)) : 0 };
+  });
+  const b = p?.balance;
+  const balance: ProviderUsageReport["balance"] = [];
+  const events: ProviderUsageReport["events"] = [];
+  if (b?.limit && b.reset_unix) {
+    const limit = b.limit;
+    const resetMs = b.reset_unix * 1000;
+    const r = b.remaining / limit;
+    const P = id === "byteplus" ? 5 * DAY : 7 * DAY;
+    const frac = (t: number) => ((((t - (resetMs - P)) / P) % 1) + 1) % 1;
+    const nowFrac = frac(nowMs);
+    const nowCycleStart = resetMs - P;
+    const curve = (f: number, top: number) => Math.min(1, top) * Math.pow(f, 0.7);
+    const topNow = (1 - r) / Math.pow(nowFrac, 0.7);
+    for (let t = nowMs - days * DAY; t <= nowMs; t += 2 * 3600_000) {
+      const cycleStart = nowCycleStart - Math.ceil((nowCycleStart - t) / P) * P;
+      const f = frac(t);
+      const top = cycleStart >= nowCycleStart ? topNow : 0.8 + rand() * 0.2;
+      balance.push({ at: new Date(t).toISOString(), remaining: Math.round(limit * (1 - curve(f, top))), limit });
+      if (f < 2 * 3600_000 / P && t > nowMs - days * DAY + 3 * 3600_000) events.push({ at: new Date(cycleStart).toISOString(), kind: "reset" });
+    }
+    balance.push({ at: new Date(nowMs).toISOString(), remaining: b.remaining, limit, reset_unix: b.reset_unix });
+  }
+  const report: ProviderUsageReport = { provider: id, days, daily, balance, events, has_balance: balance.length > 0 };
+  if (p?.quota_exhausted) report.exhausted = { reset_at: p.quota_exhausted.reset_at ?? null, reset_unix: p.quota_exhausted.reset_unix ?? null };
+  return report;
+}
+
 export function providersMock(ms: MockState): ProvidersApi {
   return {
+    providerUsage: async (id, days = 7) => {
+      const provider = ms.providers.find((p) => p.id === id) ?? null;
+      if (!provider && id !== "anthropic") throw new ApiError("no such provider", 404);
+      await sleep(180);
+      return clone(usageReport(provider, id, days));
+    },
     graftSkillset: async () => clone(tickGraft()),
     graftDownload: async () => {
       if (mockGraft.state === "idle" || mockGraft.state === "failed") {
@@ -106,7 +171,7 @@ export function providersMock(ms: MockState): ProvidersApi {
       body.quota === undefined
         ? existing?.quota ?? null
         : body.quota.url.trim()
-          ? { url: body.quota.url.trim(), pointer: body.quota.pointer.trim() }
+          ? { url: body.quota.url.trim(), pointer: body.quota.pointer.trim(), ...(body.quota.reset_pointer ? { reset_pointer: body.quota.reset_pointer } : null) }
           : null,
     // Omitted keeps the saved mark; the model map and disabled tools follow the same convention.
     trusted: body.trusted ?? existing?.trusted ?? false,

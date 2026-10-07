@@ -33,6 +33,7 @@ import { cx } from "./ui";
  */
 const PRESET_MARK: Partial<Record<ProviderPreset | "anthropic", ComponentType<IconProps>>> = {
   anthropic: BrandClaude,
+  "anthropic-api": BrandClaude,
   deepseek: BrandDeepSeek,
   alibaba: BrandAlibabaCloud,
   local: IconServer,

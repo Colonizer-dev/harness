@@ -113,6 +113,7 @@ mod prescan;
 mod presets;
 mod previews;
 mod protocol;
+mod provider_history;
 mod provider_quota;
 mod providers;
 mod publish;
