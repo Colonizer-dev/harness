@@ -145,6 +145,8 @@ pub(crate) fn verify_network_held_attention(cause: &str) -> Value {
 }
 
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
+/// A turn that errored after writing a fresh `pr.md` still goes on to verification (issue #1176): the
+/// error may be a late one (a subagent's model, a closing call) and the claim check is the gate.
 fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
     if open_question {
         Autopilot::Wait("a question is open")
@@ -152,7 +154,7 @@ fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_questi
         Autopilot::Wait("the turn was interrupted")
     } else if errored && transient {
         Autopilot::Retry("the agent's turn ended with a transient provider error")
-    } else if errored {
+    } else if errored && !pr_written {
         Autopilot::Hold("the agent's turn ended with an error")
     } else if !pr_written {
         Autopilot::Wait(crate::idle_park::PR_NOT_WRITTEN)

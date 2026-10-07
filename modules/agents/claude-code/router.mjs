@@ -12,7 +12,7 @@ import { Readable } from 'node:stream';
 import { Agent, fetch as undiciFetch } from 'undici';
 
 const AUTH_MODES = new Set(['x-api-key', 'bearer', 'none']);
-const PROVIDER_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]*\//;
+export const PROVIDER_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]*\//;
 const HEADER_NAME = /^[A-Za-z0-9-]+$/;
 const MODEL_VARS = ['COLONIZER_MODEL', 'COLONIZER_SUBAGENT_MODEL', 'COLONIZER_BACKGROUND_MODEL'];
 // Hop-by-hop and length/encoding headers are recomputed by fetch and node:http.

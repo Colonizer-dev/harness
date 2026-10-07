@@ -34,7 +34,7 @@ import { createWaitServer, WAIT_PROMPT_APPEND, WAIT_SERVER } from './wait.mjs';
 import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
 import { createRecallServer, RECALL_PROMPT_APPEND, RECALL_SERVER } from './recall.mjs';
-import { routeEnv, routingPlan, startRouter } from './router.mjs';
+import { PROVIDER_PREFIX, routeEnv, routingPlan, startRouter } from './router.mjs';
 import { subagentDefinitions } from './subagents.mjs';
 
 export const SYSTEM_PROMPT_APPEND = [
@@ -440,6 +440,46 @@ export function toolResultText(content) {
   return text.slice(0, MAX_TOOL_OUTPUT - suffix.length) + suffix;
 }
 
+const ALIAS_SLOTS = [
+  { alias: 'sonnet', envVar: 'ANTHROPIC_DEFAULT_SONNET_MODEL' },
+  { alias: 'opus', envVar: 'ANTHROPIC_DEFAULT_OPUS_MODEL' },
+  { alias: 'haiku', envVar: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' },
+];
+
+/**
+ * The Claude Code alias slot that can carry a provider-prefixed subagent model (issue #1176): one the
+ * orchestrator does not run on (COLONIZER_MODEL may itself be an alias such as `opus[1m]`) and that no
+ * other setting already fills (the background model owns the haiku slot).
+ */
+export function subagentAliasSlot(env, claudeEnv = {}) {
+  const orchestrator = String(env.COLONIZER_MODEL ?? '').toLowerCase();
+  return (
+    ALIAS_SLOTS.find(
+      ({ alias, envVar }) =>
+        !orchestrator.startsWith(alias) && !claudeEnv[envVar] && !(alias === 'haiku' && env.COLONIZER_BACKGROUND_MODEL),
+    ) ?? null
+  );
+}
+
+const UNRECOGNIZED_MODEL = /\[claude-code:unrecognized_model\]\s*(\{[^\n]*\})?/;
+
+/**
+ * A subagent whose model Claude Code did not recognise reports `unrecognized_model` even when the turn
+ * went on and finished (issue #1176). Returns the warning text when the result is only that, else null.
+ */
+export function unrecognizedModelWarning(msg) {
+  if (!msg?.is_error || (msg.subtype && msg.subtype !== 'success')) return null;
+  const text = [msg.result, ...(Array.isArray(msg.errors) ? msg.errors : [])].filter((t) => typeof t === 'string').join('\n');
+  const match = UNRECOGNIZED_MODEL.exec(text);
+  if (!match) return null;
+  let source = '';
+  try {
+    source = String(JSON.parse(match[1] ?? '{}').query_source ?? '');
+  } catch {}
+  // Only a subagent's model: the orchestrator's own unrecognised model really did fail the turn.
+  return source.startsWith('agent:') ? match[0] : null;
+}
+
 export function childEnv(env) {
   const out = {};
   for (const [key, value] of Object.entries(env)) {
@@ -486,7 +526,12 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   if (routerUrl) claudeEnv.ANTHROPIC_BASE_URL = routerUrl;
   for (const [key, value] of Object.entries(routeEnv(routes, env))) claudeEnv[key] ??= value;
   if (env.COLONIZER_SUBAGENT_MODEL) {
-    claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = env.COLONIZER_SUBAGENT_MODEL;
+    // A provider-prefixed id (`minimax/...`) is not a model Claude Code's built-in agents accept: they end
+    // the turn on `unrecognized_model` (issue #1176). Hand it over through an alias slot instead; the router
+    // sees the real id in the request. A plain Claude id passes straight through, as before.
+    const slot = PROVIDER_PREFIX.test(env.COLONIZER_SUBAGENT_MODEL) ? subagentAliasSlot(env, claudeEnv) : null;
+    if (slot) claudeEnv[slot.envVar] = env.COLONIZER_SUBAGENT_MODEL;
+    claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL = slot ? slot.alias : env.COLONIZER_SUBAGENT_MODEL;
     // Without FORCE, an agent whose definition names a model keeps it: Claude Code's built-in Explore is `inherit`,
     // so it ran on the orchestrator's model and did most of a colony's reading at that price.
     claudeEnv.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1';
@@ -1184,9 +1229,11 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
       return;
     }
     const usage = summariseUsage(msg.modelUsage);
+    const modelWarning = unrecognizedModelWarning(msg);
+    if (modelWarning) emit({ type: 'log', level: 'warn', message: `A subagent's model was not recognised; the turn is not treated as failed: ${modelWarning}` });
     emit({
       type: 'turn_end',
-      is_error: Boolean(msg.is_error),
+      is_error: modelWarning ? false : Boolean(msg.is_error),
       result,
       // Claude models only when the SDK says which model cost what; the SDK's total prices routed models as Claude.
       cost_usd: usage ? usage.claudeCostUsd : typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd : null,
