@@ -1585,9 +1585,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ("GIT_DIR".into(), admin.display().to_string()),
         ("GIT_WORK_TREE".into(), "/workspace".into()),
         ("GIT_INDEX_FILE".into(), "/tmp/colonizer-git-index".into()),
-        ("GIT_CONFIG_COUNT".into(), "1".into()),
+        ("GIT_CONFIG_COUNT".into(), "2".into()),
         ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
         ("GIT_CONFIG_VALUE_0".into(), "*".into()),
+        ("GIT_CONFIG_KEY_1".into(), "core.excludesFile".into()),
+        ("GIT_CONFIG_VALUE_1".into(), crate::path_policy::GUEST_EXCLUDE_FILE.into()),
     ];
     let mut mounts = vec![
         Mount {
@@ -2087,6 +2089,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     crate::path_policy::write_list(
         &vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE),
         &planned.placeholder_names(),
+    )?;
+    // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
+    // credential files about to be committed, and the agent goes to ignore or inspect them.
+    crate::path_policy::write_list(
+        &vm_dir.join(crate::path_policy::EXCLUDE_FILE),
+        &crate::path_policy::exclude_lines(&planned),
     )?;
     crate::path_policy::apply(&wt, &planned)?;
     log.info(crate::path_policy::summary(&policy, &planned)).await;

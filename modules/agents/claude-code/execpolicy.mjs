@@ -532,6 +532,57 @@ function classifyWrite(segment, cwd, hostMounts) {
   return best;
 }
 
+// --- name-only commands (#1169) ------------------------------------------------------------
+
+// Commands that can only learn a path's NAME or existence, never its bytes: `git check-ignore`,
+// `git status`, `ls`, `test -e|-f|-d` and `[ -e|-f|-d P ]`. The path policy's empty placeholders
+// (.env, .netrc, ...) show up to an agent as dotfiles, and asking git whether one is ignored is
+// not an attempt to read a secret, so such a segment does not feed the `touches` predicate.
+const SHORT_FLAGS = /^-[A-Za-z]+$/;
+const LONG_FLAGS = /^--[a-z][a-z-]*$/; // no `=value`: nothing here takes an argument worth smuggling
+// Anything that can feed or redirect bytes, or run another command, and so turn a name-only
+// segment into a read: pipes, redirects, substitutions, subshells, braces and backslash escapes.
+const UNSAFE_SHELL = /[|<>`$(){}\\]/;
+
+/** True when one segment (already split on `;`, `&&` and the like) only asks about path names. */
+function isNameOnlySegment(segment) {
+  const ws = segment.trim().split(/\s+/).map((w) => w.replace(/^["']|["']$/g, ''));
+  if (!ws.length || ws.some((w) => /["']/.test(w))) return false;
+  const paths = (rest) => rest.every((w) => !w.startsWith('-'));
+  const flags = (rest) => rest.filter((w) => w.startsWith('-')).every((w) => SHORT_FLAGS.test(w) || LONG_FLAGS.test(w));
+  if (ws[0] === 'git') {
+    // The subcommand must come first: `git -c core.pager=... status` could run a command.
+    if (!['check-ignore', 'status'].includes(ws[1])) return false;
+    return flags(ws.slice(2));
+  }
+  if (ws[0] === 'ls') return flags(ws.slice(1));
+  const file = ['-e', '-f', '-d'];
+  if (ws[0] === 'test') return ws.length === 3 && file.includes(ws[1]) && paths([ws[2]]);
+  if (ws[0] === '[') return ws.length === 4 && file.includes(ws[1]) && paths([ws[2]]) && ws[3] === ']';
+  return false;
+}
+
+/**
+ * The segments whose words feed the `touches` predicate: all of them, minus the name-only ones,
+ * when the whole command is plain (no pipe, redirect, substitution or subshell anywhere, so no
+ * other segment can consume what a name-only one prints, and nothing hides bytes in a segment).
+ * The one loop the incident ran, `for f in .env .netrc; do git check-ignore -v "$f"; done`, counts
+ * as name-only when its body is. Anything touching `.ssh` keeps counting; any other segment, such
+ * as `cat .env`, keeps its tokens and is refused as before.
+ */
+function nameOnlyFiltered(command, segments) {
+  if (/\.ssh/.test(command)) return segments;
+  const loop = command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;|&<>`(){}\\]+?);?\s*done$/);
+  if (loop) {
+    const [, name, , body] = loop;
+    const ref = new RegExp(`"?\\$(?:${name}|\\{${name}\\})"?`, 'g');
+    const plain = body.replace(ref, 'X');
+    return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain) ? [] : segments;
+  }
+  if (UNSAFE_SHELL.test(command)) return segments;
+  return segments.filter((segment) => !isNameOnlySegment(segment));
+}
+
 /**
  * Everything the predicates see, derived from the command alone: its segments, the tokens the
  * `touches` globs match against (the command's words and every script's words), the scripts it
@@ -555,7 +606,7 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     if (text) scripts.push({ path, text });
   }
   const tokens = new Set();
-  for (const word of [...segments.flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
+  for (const word of [...nameOnlyFiltered(command, segments).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
     tokens.add(expandTilde(word));
   }
   const writes = segments.map((segment) => classifyWrite(segment, cwd, hostMounts)).filter(Boolean);
