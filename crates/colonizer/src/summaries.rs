@@ -445,6 +445,7 @@ fn live(status: SessionStatus) -> bool {
     matches!(
         status,
         SessionStatus::Queued
+            | SessionStatus::Blocked
             | SessionStatus::Starting
             | SessionStatus::Running
             | SessionStatus::WaitingForAnswer

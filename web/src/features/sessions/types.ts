@@ -2,6 +2,8 @@ import type { BoundaryRecord } from "../events/types";
 
 export type SessionStatus =
   | "queued"
+  /** Waiting on the colony it is stacked on, which is stopped or parked (issue #1140): no slot, not failed. */
+  | "blocked"
   | "starting"
   | "running"
   | "waiting_for_answer"
@@ -23,6 +25,8 @@ export type AttentionReason =
   | "autopilot_held"
   | "provider_quota_exhausted"
   | "hold_timeout"
+  /** Parked for sitting idle past the watchdog's `idle_park_minutes` (issue #1140): nobody has to act, Resume brings it back. */
+  | "idle_timeout"
   /** Parked because the repo's daily PR cap was reached (issue #910); the worktree is kept and the colony resumes at the next UTC day. */
   | "repo_pr_rate_limit"
   | "model_error"
@@ -277,6 +281,8 @@ export interface Session {
    * at, which also pushes "resolved" to every other device. Older mothership builds omit the field.
    */
   unseen_failure?: boolean;
+  /** Why a `blocked` colony waits: "waiting on #5 (`c8a6d23c`, stopped)" (issue #1140). */
+  blocked_reason?: string | null;
   /**
    * Set while the colony is paused with its question outstanding (issue #562): the microVM is
    * stopped and it holds no parallelism slot, but `status` stays `waiting_for_answer` and the

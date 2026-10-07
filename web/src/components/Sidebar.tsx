@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, duplicateHolder, epicMarker, heldByFor, heldInBatch, isEpic } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
-import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
+import { colonyLabel, needsYouFeed, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, sessionCost } from "../spend";
@@ -509,7 +509,7 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
  * can follow.
  */
 function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpenColony: (session: Session) => void }) {
-  const needing = useMemo(() => sortSessions(sessions.filter(needsYou)), [sessions]);
+  const needing = useMemo(() => sortSessions(needsYouFeed(sessions).rows), [sessions]);
   if (needing.length === 0) return null;
   return (
     <div role="region" aria-label={needsYouLabel(needing.length)} className="mx-3 mt-2 rounded-xl border border-warn/40 bg-warn-soft px-2 py-2">

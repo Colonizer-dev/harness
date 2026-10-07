@@ -116,6 +116,7 @@ pub fn status_of(status: SessionStatus, pr_url: Option<&str>) -> (String, bool) 
     };
     match status {
         Queued => ("queued".into(), false),
+        Blocked => ("waiting on the colony it is stacked on".into(), false),
         Starting | Running | Idle => ("running".into(), false),
         WaitingForAnswer => ("waiting for an answer".into(), false),
         Publishing => ("opening a pull request".into(), false),

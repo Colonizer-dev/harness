@@ -248,6 +248,12 @@ enum Claim {
     /// rather than being retired. Nothing failed, so the colony stays `Queued`; the caller persists
     /// and broadcasts the moved record.
     Reparent(Session),
+    /// The colony's parent is stopped or parked (issue #1140): it leaves the queue for `Blocked`, which
+    /// holds no slot, until the parent runs again. The caller persists and broadcasts the move.
+    Block(Session),
+    /// The colony's parent is gone for good (issue #1140): it is cut loose from the stack and stays
+    /// `Queued`, to branch from the default branch like any other colony. The message says why.
+    Rebase(Session, String),
 }
 
 /// What holds a queued colony back before the slot rules even apply, decided on the snapshot: the
@@ -267,6 +273,12 @@ enum Gate {
     /// its own has nothing to move onto and yields `Hold` instead — the child waits forever rather
     /// than failing, since the record is gone only when the parent itself is.
     Reparent(String),
+    /// Its parent is stopped, parked or itself blocked (issue #1140): the colony becomes `Blocked`
+    /// with this reason rather than failing, and takes no slot.
+    Block(String),
+    /// Its parent is gone for good (issue #1140): the colony re-bases on the default branch, for the
+    /// stated reason, instead of failing.
+    Rebase(String),
 }
 
 fn gate(s: &Session, sessions: &[Session]) -> Gate {
@@ -313,6 +325,13 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
         return Gate::Admit;
     };
     let parent = sessions.iter().find(|p| p.id == parent_id);
+    // Issue #1140: a paused parent blocks the child without a slot, and one gone for good cuts the
+    // child loose onto the default branch — neither fails it, so a stack never cascades.
+    match crate::blocked::parent_state(s, sessions) {
+        crate::blocked::ParentState::Paused(reason) => return Gate::Block(reason),
+        crate::blocked::ParentState::Gone(reason) => return Gate::Rebase(reason),
+        crate::blocked::ParentState::Fine => {}
+    }
     // Issue #982: a failed parent can never provide a branch, but its own parent — one rung up the
     // stack — might still. Re-parent the child onto it rather than failing the child (which would
     // cascade the failure down every colony stacked on it), one generation per tick until it lands
@@ -324,13 +343,15 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     {
         return match parent.parent.clone() {
             Some(grandparent) => Gate::Reparent(grandparent),
-            None => Gate::Hold,
+            // Nothing is left to stack on: the default branch is the safe fallback (issue #1140).
+            None => Gate::Rebase(format!("colony `{parent_id}` failed and has no parent of its own")),
         };
     }
     match restack::queue_decision(parent_id, parent, s.stack) {
         Stacked::Ready(_) => Gate::Admit,
         Stacked::Wait => Gate::Hold,
-        Stacked::Refuse(reason) => Gate::Retire(reason),
+        // A parent that can never lend a branch no longer fails the child (issue #1140).
+        Stacked::Refuse(reason) => Gate::Rebase(reason),
     }
 }
 
@@ -453,6 +474,29 @@ fn claim_reparent(s: &mut Session, new_parent_id: &str) -> Option<Claim> {
     Some(Claim::Reparent(s.clone()))
 }
 
+/// Issue #1140: a queued colony whose parent is stopped or parked waits as `Blocked` — no slot, no
+/// microVM, not failed — until the parent runs again. Guarded on the status like [`claim_refused`].
+fn claim_block(s: &mut Session, reason: &str) -> Option<Claim> {
+    if s.status != SessionStatus::Queued {
+        return None; // claimed by something else between the snapshot and the lock
+    }
+    s.status = SessionStatus::Blocked;
+    s.blocked_reason = Some(reason.to_string());
+    s.updated_at = Utc::now();
+    Some(Claim::Block(s.clone()))
+}
+
+/// Issue #1140: a queued colony whose parent is gone for good is cut loose from the stack and keeps
+/// its place in the queue, to start from the default branch.
+fn claim_rebase(s: &mut Session, reason: &str) -> Option<Claim> {
+    if s.status != SessionStatus::Queued {
+        return None;
+    }
+    crate::blocked::rebase_on_default(s);
+    s.updated_at = Utc::now();
+    Some(Claim::Rebase(s.clone(), reason.to_string()))
+}
+
 /// The queued colony this tick acts on, oldest first: the first one nothing holds back and that fits.
 /// A colony still waiting for its stacked-on parent's branch is looked past, so a slow parent cannot
 /// stall the colonies behind it, and the first one whose parent can never provide a branch stops the
@@ -467,6 +511,8 @@ fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<
             Gate::Hold => continue,
             Gate::Retire(reason) => return Some((candidate, Gate::Retire(reason))),
             Gate::Reparent(new_parent) => return Some((candidate, Gate::Reparent(new_parent))),
+            Gate::Block(reason) => return Some((candidate, Gate::Block(reason))),
+            Gate::Rebase(reason) => return Some((candidate, Gate::Rebase(reason))),
             Gate::Admit => {
                 if room(candidate) {
                     return Some((candidate, Gate::Admit));
@@ -484,12 +530,18 @@ pub(crate) async fn start_queued(app: &Shared) {
     // A colony parked on its repository's daily PR cap (issue #910) requeues the same tick a new
     // UTC day brings, since the cap is counted in UTC days.
     resume_repo_pr_rate_limit_parked(app).await;
+    // Issue #1140: stacked dependents whose paused parent runs again rejoin the queue, and those
+    // whose parent is gone for good re-base on the default branch, ahead of admission.
+    crate::blocked::release_blocked(app).await;
     // Read once per tick, so a settings save applies at once — to the hold timeout here and the
     // suspension settings just below (issue #562).
     let modules = app.modules.read().await.clone();
     // Holds past their timeout park on this same tick, ahead of admission, so the slots they release
     // are visible to the loop below.
     park_expired_holds(app, orgs::hold_timeout(&modules)).await;
+    // Issue #1140: idle, held and flagged colonies with nothing open park the same way, on the
+    // watchdog's shorter `idle_park_minutes`, so a dead colony stops holding a slot the queue needs.
+    crate::idle_park::park_idle(app, orgs::idle_park(&modules)).await;
     // Hold-parked colonies whose backoff step is due resume on this same tick (issue #876), after
     // the parks above so a colony just parked is not yet due; the resumes queue behind the slot
     // rules like any other.
@@ -615,6 +667,8 @@ pub(crate) async fn start_queued(app: &Shared) {
                     // Issue #982: the parent failed and its own parent may still lend a branch; move
                     // the child up the stack rather than retiring it.
                     Gate::Reparent(new_parent) => claim_reparent(s, &new_parent),
+                    Gate::Block(reason) => claim_block(s, &reason),
+                    Gate::Rebase(reason) => claim_rebase(s, &reason),
                     // The drain is re-read here, under the lock, beside `room`: one that began
                     // between the tick's snapshot and this claim must not let the boot through
                     // (issue #880). The colony keeps its place for the next tick.
@@ -663,6 +717,20 @@ pub(crate) async fn start_queued(app: &Shared) {
                     "its parent failed; moved onto that parent's own parent instead of failing".into(),
                 )
                 .await;
+                continue;
+            }
+            Some(Claim::Block(blocked)) => {
+                // Issue #1140: nothing failed and nothing started; the colony waits without a slot.
+                app.persist_and_broadcast(&blocked).await;
+                let why = blocked.blocked_reason.clone().unwrap_or_default();
+                app.session_log(&blocked.id, "info", format!("blocked: {why}; no slot is held while it waits"))
+                    .await;
+                continue;
+            }
+            Some(Claim::Rebase(rebased, why)) => {
+                app.persist_and_broadcast(&rebased).await;
+                app.session_log(&rebased.id, "info", crate::blocked::rebased_message(&why))
+                    .await;
                 continue;
             }
             Some(Claim::Start(starting)) => {
@@ -2360,53 +2428,42 @@ mod tests {
     }
 
     #[test]
-    fn a_child_whose_failed_parent_has_no_parent_of_its_own_keeps_waiting() {
+    fn a_child_whose_failed_parent_has_no_parent_of_its_own_re_bases_on_the_default_branch() {
         // Nothing to move onto: the failed parent sits at the bottom of the stack, so there is no
-        // grandparent and no branch to borrow. The child waits rather than failing (issue #982).
+        // grandparent and no branch to borrow. Issue #1140: the child is cut loose to start from the
+        // default branch rather than waiting for a colony that will never publish.
         let sessions = vec![
             queued_child("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::Failed, ""),
         ];
-        assert!(
-            next_queued(&sessions, |_| true).is_none(),
-            "the child waits; there is nobody further up the stack to build on"
-        );
-        // And the gate says so directly: held, never retired.
-        assert!(matches!(gate(&sessions[0], &sessions), Gate::Hold));
+        let (picked, gate_result) = next_queued(&sessions, |_| true).expect("the child can move");
+        assert_eq!(picked.id, "child");
+        assert!(matches!(gate_result, Gate::Rebase(_)), "re-based, never retired");
     }
 
     #[test]
-    fn a_parent_that_made_no_changes_still_retires_the_child_by_name_and_reason() {
-        // Issue #982 stopped a failed parent from failing the child, but a parent whose work made no
-        // changes still has no branch anywhere to build on: the child is retired as before.
+    fn a_parent_that_made_no_changes_re_bases_the_child_by_name_and_reason() {
+        // A parent whose work made no changes has no branch anywhere to build on. Issue #1140: the
+        // child no longer fails for it; it is re-based on the default branch and says why.
         let sessions = vec![
             queued_child("child", "parent", Utc::now()),
             parent_colony("parent", SessionStatus::NoChanges, "colonizer/issue-1-parent"),
         ];
         let Some((picked, gate)) = next_queued(&sessions, |_| true) else {
-            panic!("the child is retired, not left sitting at the head of the queue");
+            panic!("the child is moved, not left sitting at the head of the queue");
         };
         assert_eq!(picked.id, "child", "the child is what this tick acts on");
-        let Gate::Retire(reason) = gate else {
+        let Gate::Rebase(reason) = gate else {
             panic!("a parent that made no changes can never lend a branch");
         };
-        assert!(reason.contains("parent"), "the parent is named: {reason}");
         assert!(reason.contains("made no changes"), "and the reason is named: {reason}");
-
-        // The claim takes the child out of the queue with that reason as its error.
         let mut queued = queued_child("child", "parent", Utc::now());
-        let claim = claim_refused(&mut queued, &reason);
-        assert!(matches!(claim, Some(Claim::Retire(..))), "retired, not started");
-        assert_eq!(queued.status, SessionStatus::Failed, "out of the queue for good");
-        assert_eq!(queued.error.as_deref(), Some(reason.as_str()));
-        assert!(
-            queued.unseen_failure,
-            "the badge counts the retirement until someone looks (#744)"
-        );
+        assert!(matches!(claim_rebase(&mut queued, &reason), Some(Claim::Rebase(..))));
+        assert_eq!(queued.status, SessionStatus::Queued, "still in the queue, not failed");
+        assert!(queued.parent.is_none() && queued.error.is_none());
         // A colony claimed in the meantime is left alone.
         let mut starting = colony("acme", SessionStatus::Starting);
-        assert!(claim_refused(&mut starting, &reason).is_none());
-        assert_eq!(starting.status, SessionStatus::Starting);
+        assert!(claim_rebase(&mut starting, &reason).is_none());
     }
 
     /// A queued colony that is resuming: a kept worktree means `boot_inner` will reuse the base it
@@ -3159,31 +3216,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_queue_holds_a_waiting_child_and_retires_one_whose_parent_is_gone() {
+    async fn the_queue_holds_a_waiting_child_and_re_bases_one_whose_parent_is_gone() {
         let root = std::env::temp_dir().join(format!("colonizer-queue-{}", crate::util::short_id()));
         let app = crate::tests::test_app(&root);
         let mut waiting = queued_child("waits", "live-parent", Utc::now());
         waiting.created_at = Utc::now() - chrono::Duration::minutes(2);
-        // This child's parent had its record deleted outright, so there is nothing left to re-parent
-        // onto and it is retired. A *failed* parent is treated quite differently (issue #982): that
-        // child re-parents onto the grandparent, or waits when there is none — never this.
+        // This child's parent had its record deleted outright. Issue #1140: it is cut loose onto the
+        // default branch instead of failing.
         let mut doomed = queued_child("doomed", "dead-parent", Utc::now());
         doomed.created_at = Utc::now() - chrono::Duration::minutes(1);
-        let sessions = vec![
+        let mut sessions = vec![
             parent_colony("live-parent", SessionStatus::Running, "colonizer/issue-1-live"),
             waiting,
             doomed,
         ];
+        // Every slot is taken, so the re-based child stays queued and nothing boots or reaches for
+        // GitHub or a microVM.
+        for i in 0..3 {
+            let mut filler = colony("acme", SessionStatus::Running);
+            filler.id = format!("filler-{i}");
+            sessions.push(filler);
+        }
         *app.sessions.write().await = sessions;
-        // No colony here can start, so nothing is booted and nothing reaches for GitHub or a microVM.
         start_queued(&app).await;
         let sessions = app.sessions.read().await;
         let held = sessions.iter().find(|s| s.id == "waits").unwrap();
         assert_eq!(held.status, SessionStatus::Queued, "its parent is still running");
-        let retired = sessions.iter().find(|s| s.id == "doomed").unwrap();
-        assert_eq!(retired.status, SessionStatus::Failed, "its parent's record is gone");
-        let error = retired.error.as_deref().unwrap_or_default();
-        assert!(error.contains("dead-parent") && error.contains("no colony"), "{error}");
+        assert_eq!(held.parent.as_deref(), Some("live-parent"));
+        let rebased = sessions.iter().find(|s| s.id == "doomed").unwrap();
+        assert_eq!(
+            rebased.status,
+            SessionStatus::Queued,
+            "its parent's record is gone, and that is not its failure"
+        );
+        assert!(rebased.parent.is_none() && !rebased.stack && rebased.error.is_none());
         drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4204,5 +4270,206 @@ mod tests {
         assert_eq!(resumed.status, SessionStatus::Queued, "the colony rejoins the queue");
         assert!(resumed.parked.is_none(), "the park goes with the resume");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- issue #1140: a stack never cascades into failures --------------------------------------
+
+    /// A stacked chain `root` <- `c1` <- `c2` <- ... with the root in `root_status`; every dependent
+    /// is queued, oldest first, and the root is issue 5.
+    fn chain(root_status: SessionStatus, dependents: usize) -> Vec<Session> {
+        let mut root = parent_colony("c8a6d23c-root", root_status, "colonizer/issue-5-root");
+        root.issue = Some(5);
+        let mut sessions = vec![root];
+        for i in 1..=dependents {
+            let parent = if i == 1 {
+                "c8a6d23c-root".to_string()
+            } else {
+                format!("c{}", i - 1)
+            };
+            sessions.push(queued_child(
+                &format!("c{i}"),
+                &parent,
+                Utc::now() + chrono::Duration::seconds(i as i64),
+            ));
+        }
+        sessions
+    }
+
+    /// Runs the queue's decision over `sessions` until nothing moves, applying each claim the way the
+    /// tick does, and returns the ids it blocked and the ids it re-based.
+    fn settle(sessions: &mut [Session]) -> (Vec<String>, Vec<String>) {
+        let (mut blocked, mut rebased) = (Vec::new(), Vec::new());
+        for _ in 0..64 {
+            let snapshot = sessions.to_vec();
+            let Some((next, gate_result)) = next_queued(&snapshot, |_| false) else {
+                break;
+            };
+            let id = next.id.clone();
+            let s = sessions.iter_mut().find(|s| s.id == id).unwrap();
+            match gate_result {
+                Gate::Block(reason) => {
+                    assert!(matches!(claim_block(s, &reason), Some(Claim::Block(_))));
+                    blocked.push(id);
+                }
+                Gate::Rebase(reason) => {
+                    assert!(matches!(claim_rebase(s, &reason), Some(Claim::Rebase(..))));
+                    rebased.push(id);
+                }
+                Gate::Reparent(parent) => {
+                    claim_reparent(s, &parent);
+                }
+                other => panic!("nothing else moves without room: {}", matches!(other, Gate::Admit)),
+            }
+        }
+        (blocked, rebased)
+    }
+
+    #[test]
+    fn a_stopped_root_leaves_its_whole_chain_blocked_and_none_failed() {
+        for root_status in [SessionStatus::Stopped, SessionStatus::Parked] {
+            let mut sessions = chain(root_status, 15);
+            let (blocked, rebased) = settle(&mut sessions);
+            assert_eq!(blocked.len(), 15, "every dependent waits, {root_status:?}");
+            assert!(rebased.is_empty());
+            assert!(
+                sessions.iter().skip(1).all(|s| s.status == SessionStatus::Blocked),
+                "blocked, never failed: {sessions:?}"
+            );
+            assert!(sessions.iter().all(|s| s.status != SessionStatus::Failed));
+            let first = &sessions[1];
+            let reason = first.blocked_reason.as_deref().unwrap();
+            assert!(reason.contains("waiting on #5") && reason.contains("c8a6d23c"), "{reason}");
+            assert!(reason.contains(root_status.as_str()), "{reason}");
+            assert!(
+                sessions.iter().all(|s| !s.holds_slot()),
+                "a blocked colony holds no slot, no microVM"
+            );
+            assert!(!SessionStatus::Blocked.is_live() && !SessionStatus::Blocked.is_terminal());
+            assert!(!SessionStatus::Blocked.busy());
+        }
+    }
+
+    #[tokio::test]
+    async fn resuming_the_root_runs_the_blocked_dependents_again() {
+        let root_dir = std::env::temp_dir().join(format!("colonizer-blocked-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root_dir);
+        let mut sessions = chain(SessionStatus::Stopped, 3);
+        settle(&mut sessions);
+        for s in &sessions {
+            tokio::fs::create_dir_all(app.session_dir(&s.id)).await.unwrap();
+        }
+        *app.sessions.write().await = sessions.clone();
+        // Still stopped: the blocked colonies stay blocked.
+        crate::blocked::release_blocked(&app).await;
+        assert!(
+            app.sessions
+                .read()
+                .await
+                .iter()
+                .skip(1)
+                .all(|s| s.status == SessionStatus::Blocked)
+        );
+        // The root resumes and runs: the first dependent waits in the queue as before, no longer blocked.
+        app.update_session("c8a6d23c-root", |s| s.status = SessionStatus::Running)
+            .await;
+        crate::blocked::release_blocked(&app).await;
+        let after = app.sessions.read().await.clone();
+        let c1 = after.iter().find(|s| s.id == "c1").unwrap();
+        assert_eq!(c1.status, SessionStatus::Queued, "the colony it waited on is running again");
+        assert!(c1.blocked_reason.is_none());
+        assert!(
+            matches!(gate(c1, &after), Gate::Hold),
+            "it waits for the root's branch, as before"
+        );
+        // The root publishes: the head of the chain is admitted.
+        app.update_session("c8a6d23c-root", |s| s.status = SessionStatus::PrOpened)
+            .await;
+        let after = app.sessions.read().await.clone();
+        assert!(
+            matches!(gate(&after[1], &after), Gate::Admit),
+            "the parent's branch is on the remote"
+        );
+        let _ = std::fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn a_root_that_is_gone_for_good_re_bases_the_chain_on_the_default_branch() {
+        // Failed with no parent of its own, closed unmerged, no changes, cleaned up while stopped.
+        let mut cleaned = chain(SessionStatus::Stopped, 2);
+        cleaned[0].cleaned_up = true;
+        let mut closed = chain(SessionStatus::Closed, 2);
+        for s in closed.iter_mut().skip(1) {
+            s.stack = false;
+        }
+        for mut sessions in [
+            chain(SessionStatus::Failed, 2),
+            chain(SessionStatus::NoChanges, 2),
+            cleaned,
+            closed,
+        ] {
+            let (blocked, rebased) = settle(&mut sessions);
+            assert!(
+                blocked.is_empty(),
+                "nothing is waiting on a colony that can never run: {sessions:?}"
+            );
+            assert_eq!(
+                rebased,
+                ["c1"],
+                "only the direct dependent is cut loose; the next one follows c1"
+            );
+            let c1 = &sessions[1];
+            assert!(c1.parent.is_none() && !c1.stack && c1.stack_fork.is_none(), "{c1:?}");
+            assert_eq!(c1.status, SessionStatus::Queued, "it queues, it does not fail");
+            assert!(
+                sessions
+                    .iter()
+                    .all(|s| s.status != SessionStatus::Failed || s.id.ends_with("root"))
+            );
+            assert!(
+                matches!(gate(&sessions[1], &sessions), Gate::Admit),
+                "main is the base now: it starts like any other colony"
+            );
+        }
+        // A parent that no longer exists at all.
+        let mut orphan = vec![queued_child("orphan", "deleted", Utc::now())];
+        let (blocked, rebased) = settle(&mut orphan);
+        assert!(blocked.is_empty());
+        assert_eq!(rebased, ["orphan"]);
+        assert_eq!(orphan[0].status, SessionStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn a_blocked_colony_whose_parent_goes_away_re_bases_instead_of_failing() {
+        let root_dir = std::env::temp_dir().join(format!("colonizer-blocked-gone-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root_dir);
+        let mut sessions = chain(SessionStatus::Stopped, 1);
+        settle(&mut sessions);
+        tokio::fs::create_dir_all(app.session_dir("c1")).await.unwrap();
+        *app.sessions.write().await = sessions;
+        // The root is cleaned up for good.
+        app.update_session("c8a6d23c-root", |s| s.cleaned_up = true).await;
+        crate::blocked::release_blocked(&app).await;
+        let c1 = app.session("c1").await.unwrap();
+        assert_eq!(c1.status, SessionStatus::Queued);
+        assert!(c1.parent.is_none() && !c1.stack, "re-based on main");
+        let log = std::fs::read_to_string(app.session_dir("c1").join("harness.jsonl")).unwrap();
+        assert!(log.contains("re-based on the default branch"), "{log}");
+        let _ = std::fs::remove_dir_all(root_dir);
+    }
+
+    #[tokio::test]
+    async fn the_queue_tick_blocks_a_dependent_of_a_stopped_parent_and_takes_no_slot() {
+        let root_dir = std::env::temp_dir().join(format!("colonizer-blocked-tick-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root_dir);
+        let sessions = chain(SessionStatus::Stopped, 2);
+        for s in &sessions {
+            tokio::fs::create_dir_all(app.session_dir(&s.id)).await.unwrap();
+        }
+        *app.sessions.write().await = sessions;
+        start_queued(&app).await;
+        let after = app.sessions.read().await.clone();
+        assert!(after.iter().skip(1).all(|s| s.status == SessionStatus::Blocked), "{after:?}");
+        assert!(after.iter().all(|s| s.status != SessionStatus::Failed));
+        let _ = std::fs::remove_dir_all(root_dir);
     }
 }

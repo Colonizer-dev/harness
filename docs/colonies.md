@@ -412,6 +412,27 @@ held. It removes the microVM and keeps the worktree. The full design, including 
 a VM snapshot, is in
 [architecture.md, Suspending colonies that wait for an answer](architecture.md#suspending-colonies-that-wait-for-an-answer).
 
+A Watchdog setting, `idle_park_minutes` (default 15, 1 to 1440), parks a colony sooner when it is
+doing nothing. A colony that is idle, held by autopilot or flagged by the watchdog, with no open
+question and no publish or verification in flight, is parked once it has sat that long: its microVM
+stops and its slot is freed, the worktree and branch are kept, and Resume brings it back. A colony
+with an open question keeps the behaviour above. When the colony is idle because its last turn did
+not write or update `/harness/out/pr.md` (for example after a redacted description was held), it
+first gets one automatic message asking it to rewrite the description; if that does not help, it
+parks like any other.
+
+## Stacked colonies that wait
+
+A colony stacked on another (`after`) builds on that colony's branch, and one failure used to take
+the whole chain with it. Now a dependent whose parent is stopped or parked goes to `blocked`
+instead: it holds no slot and no microVM and is not failed, and its card says what it waits on
+("waiting on #5 (`c8a6d23c`, stopped)"). It is `queued` again when the parent resumes or finishes,
+and waits for the parent's branch as before. When the parent is gone for good (failed with no
+parent of its own, cleaned up before it published, a closed pull request, no changes, or deleted)
+the dependent re-bases on the default branch and queues like any other colony; a conflict is then
+handled by the normal rebase path. A cascade never produces `failed`. A blocked colony can be
+stopped (Leave the queue) or deleted like a queued one.
+
 ## Stop, resume and delete
 
 - **Stop** (`colonizer stop <id>`, the MCP tool `stop_colony`, or the cockpit) removes the

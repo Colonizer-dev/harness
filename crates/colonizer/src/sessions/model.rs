@@ -8,6 +8,10 @@ use super::*;
 pub enum SessionStatus {
     /// Waiting for a free slot: no microVM, no worktree, nothing claimed yet.
     Queued,
+    /// Waiting on the colony it is stacked on, which is stopped or parked (issue #1140): no slot, no
+    /// microVM, not failed. It is `Queued` again the moment that colony resumes or finishes, and
+    /// re-bases on the default branch when it is gone for good. Neither live nor finished.
+    Blocked,
     Starting,
     Running,
     WaitingForAnswer,
@@ -63,6 +67,7 @@ impl SessionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::Blocked => "blocked",
             Self::Starting => "starting",
             Self::Running => "running",
             Self::WaitingForAnswer => "waiting_for_answer",
@@ -428,6 +433,15 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<crate::verify::Verification>,
     pub error: Option<String>,
+    /// Why a `Blocked` colony waits, in words a person can act on: "waiting on #5 (`c8a6d23c`,
+    /// stopped)" (issue #1140). `None` in every other status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    /// Whether the one automatic message asking the agent to rewrite `/harness/out/pr.md` has been
+    /// sent for the "didn't write or update its PR description" case (issue #1140), so a colony is
+    /// asked once and then left to park.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pr_rewrite_nudged: bool,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
     /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
     /// [`Session::total_cost_usd`] is the two added up.
@@ -669,6 +683,8 @@ impl Default for Session {
             rebase_orphaned: false,
             unseen_failure: false,
             queued_behind: None,
+            blocked_reason: None,
+            pr_rewrite_nudged: false,
             claim_wait: false,
             verify: None,
             verification: None,

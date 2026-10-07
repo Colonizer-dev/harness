@@ -367,6 +367,8 @@ export function Inspector({
   const statusText =
     session?.status === "queued" && queuedBehind
       ? `Queued behind ${queuedBehind}${position}`
+      : session?.status === "blocked" && session.blocked_reason
+        ? `Blocked: ${session.blocked_reason}`
       : (session
         ? [statusLabel(session), inRestore ? `${ordinal(inRestore)} in line` : ""].filter(Boolean).join(" · ")
         : "");

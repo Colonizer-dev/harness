@@ -292,7 +292,7 @@ on by default; setting `require_review` = true; off lets only `repo` notes skip 
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|idle_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -334,7 +334,12 @@ signatures"): set when the colony's `boundary` events complete a control-defeat 
 replaces it, and only a person's own `user_message` (or the colony stopping) clears it. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `parked` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
-announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
+announce here either. A colony that is `idle`, held or flagged with no open question and no publish in flight parks after
+the watchdog module's `idle_park_minutes` (default 15, 1 to 1440; issue #1140): `status` `parked`,
+`attention.reason` `idle_timeout`, worktree kept, resumable, and not counted as needing a person.
+A colony stacked on a stopped or parked colony has `status` `blocked` with `blocked_reason` naming
+what it waits on; it holds no slot, is neither live nor terminal, and returns to `queued` when its
+parent runs again (or re-bases on the default branch when the parent is gone for good). A hold that waits longer than the sandbox module's `hold_timeout_minutes`
 (default 30) parks the same way ([#213]): an `idle` colony with `attention.reason` `autopilot_held`
 past the timeout parks with `attention.reason` `hold_timeout`, so its microVM slot
 frees for queued colonies (one org's held colonies cannot block every other org past the timeout)

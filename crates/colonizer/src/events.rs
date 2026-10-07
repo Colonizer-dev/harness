@@ -155,7 +155,7 @@ fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_questi
     } else if errored {
         Autopilot::Hold("the agent's turn ended with an error")
     } else if !pr_written {
-        Autopilot::Wait("the agent didn't write or update its PR description this turn")
+        Autopilot::Wait(crate::idle_park::PR_NOT_WRITTEN)
     } else {
         Autopilot::Publish
     }
@@ -896,7 +896,29 @@ pub(crate) async fn finish_turn(
                 }
                 Autopilot::Wait(reason) => {
                     app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
-                        .await
+                        .await;
+                    // Issue #1140: the turn ended without a PR description (typically after a
+                    // redaction held the first one), and an idle colony parks soon after: ask the
+                    // agent once to rewrite /harness/out/pr.md before that happens.
+                    if crate::idle_park::wants_pr_rewrite(reason, &s) {
+                        let first = app
+                            .update_session(id, |x| {
+                                let first = !x.pr_rewrite_nudged;
+                                x.pr_rewrite_nudged = true;
+                                first
+                            })
+                            .await
+                            .is_some_and(|(_, first)| first);
+                        if first {
+                            app.session_log(
+                                id,
+                                "info",
+                                "autopilot: asking the agent once to rewrite /harness/out/pr.md".into(),
+                            )
+                            .await;
+                            crate::recovery::send_user_message(rt, "pr-rewrite", crate::idle_park::PR_REWRITE_MESSAGE);
+                        }
+                    }
                 }
                 // Issue #980: a transient provider error is retried automatically instead of held.
                 // Each attempt parks the colony — releasing its parallel slot — until the backoff

@@ -75,7 +75,86 @@ export function needsYou(session: Session): boolean {
   // An automatic retry of a provider error is still pending (issue #1093): the mothership continues
   // the colony itself, so nothing waits on a person until the retries run out and it is held.
   if (reason === "provider_retry") return false;
+  // A colony parked for sitting idle (issue #1140) only waits to be resumed: nothing asks for a person.
+  if (reason === "idle_timeout") return false;
   return true;
+}
+
+/** How old an `abandoned_question` failure must be before Needs you folds it into one row (issue #1140). */
+export const OLD_QUESTION_MS = 72 * 3_600_000;
+
+/** The error a colony is failed with when its question stayed unanswered through every retry; mirrors `ABANDONED_QUESTION_REASON` in queue.rs. */
+export const ABANDONED_QUESTION = "abandoned_question";
+
+/** Statuses of a newer colony that make an older failed or stopped one for the same issue moot. */
+const SUPERSEDING_STATUSES: ReadonlySet<SessionStatus> = new Set([
+  "queued",
+  "blocked",
+  "starting",
+  "running",
+  "waiting_for_answer",
+  "idle",
+  "publishing",
+  "pr_opened",
+  "merged",
+]);
+
+/**
+ * A failure that only exists because the colony it was stacked on stopped or failed (issue #1140):
+ * "colony `x` was stopped or parked, so it cannot be stacked on", "… has no branch to build on".
+ * The mothership no longer produces these (a dependent is blocked or re-based instead); records
+ * written before that still carry them, and they must never reach Needs you.
+ */
+export function isCascadeFailure(session: Pick<Session, "status" | "error">): boolean {
+  if (session.status !== "failed") return false;
+  return /no branch to build on|cannot be stacked on|stopped or parked, so/i.test(session.error ?? "");
+}
+
+/** Whether a failed or stopped colony has been overtaken by a newer queued, running, open or merged colony for the same issue. */
+export function supersededByNewer(session: Session, sessions: readonly Session[]): boolean {
+  if ((session.status !== "failed" && session.status !== "stopped") || session.issue == null) return false;
+  const created = Date.parse(session.created_at);
+  return sessions.some(
+    (other) =>
+      other.id !== session.id &&
+      other.repo === session.repo &&
+      other.issue === session.issue &&
+      SUPERSEDING_STATUSES.has(other.status) &&
+      Date.parse(other.created_at) > created,
+  );
+}
+
+/** What Needs you shows: one row per colony that still asks for a person, and the old abandoned questions folded apart. */
+export interface NeedsYouFeed {
+  rows: Session[];
+  /** `abandoned_question` failures older than 72 h, shown as one "N old questions" row with Dismiss all. */
+  oldQuestions: Session[];
+}
+
+/**
+ * The Needs-you list (issue #1140): [`needsYou`] per colony, then noise removed. One entry per issue
+ * (the newest colony); a failed or stopped colony a newer one for the same issue has overtaken, and
+ * cascade failures, leave it; and abandoned questions past 72 h fold into `oldQuestions`. The
+ * sidebar strip, the bell, the inbox and the badge all read this, so none of them can disagree.
+ */
+export function needsYouFeed(sessions: readonly Session[], now: number = Date.now()): NeedsYouFeed {
+  const candidates = sessions.filter((s) => needsYou(s) && !isCascadeFailure(s) && !supersededByNewer(s, sessions));
+  const newest = new Map<string, Session>();
+  const rows: Session[] = [];
+  const oldQuestions: Session[] = [];
+  for (const session of candidates) {
+    if (session.issue == null) continue;
+    const key = `${session.repo}#${session.issue}`;
+    const held = newest.get(key);
+    if (!held || Date.parse(session.created_at) > Date.parse(held.created_at)) newest.set(key, session);
+  }
+  for (const session of candidates) {
+    if (session.issue != null && newest.get(`${session.repo}#${session.issue}`) !== session) continue;
+    const abandoned = session.status === "failed" && session.error === ABANDONED_QUESTION;
+    if (abandoned && now - Date.parse(session.updated_at) > OLD_QUESTION_MS) oldQuestions.push(session);
+    else rows.push(session);
+  }
+  return { rows, oldQuestions };
 }
 
 /** `(2) Colonizer` while colonies wait; at zero, exactly the title index.html ships with. */
@@ -89,7 +168,8 @@ export function tabTitle(count: number): string {
  * the phone's agree by construction (issue #744).
  */
 export function attentionCount(sessions: Session[]): number {
-  return sessions.filter(needsYou).length;
+  const { rows, oldQuestions } = needsYouFeed(sessions);
+  return rows.length + (oldQuestions.length > 0 ? 1 : 0);
 }
 
 // The favicon lives in index.html as an inline SVG data URL — the outpost hexagon in the brand

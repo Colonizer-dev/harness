@@ -766,6 +766,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "stall_minutes": {"type": "integer", "title": "Nudge after minutes without progress", "minimum": 1, "maximum": 1440, "default": 15},
                 "max_nudges": {"type": "integer", "title": "Nudges before flagging", "minimum": 0, "maximum": 20, "default": 3},
                 "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30},
+                "idle_park_minutes": {"type": "integer", "title": "Park an idle colony after minutes", "description": "A colony that is idle, held or flagged, with no open question and no publish in flight, is parked after this long: its microVM stops and its slot is freed, the worktree is kept, and Resume brings it back.", "minimum": 1, "maximum": 1440, "default": 15},
                 "provider_retry_max_attempts": {"type": "integer", "title": "Automatic retries for a provider error before holding", "description": "A turn that ends on a model gateway error (a 5xx or 529, a dropped connection, a gateway restart) is continued automatically this many times before the colony is held for you. 0 turns the automatic retry off.", "minimum": 0, "maximum": 10, "default": 3},
                 "provider_retry_schedule_minutes": {"type": "string", "title": "Wait before each automatic retry (minutes)", "description": "Comma-separated, one wait per retry; retries past the end of the list wait its last entry.", "default": "1, 5, 15"}
             }}),

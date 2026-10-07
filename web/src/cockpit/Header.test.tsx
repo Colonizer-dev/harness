@@ -110,8 +110,9 @@ describe("Header running workspaces", () => {
 });
 
 describe("Header notifications bell", () => {
+  // One issue each: Needs you lists one entry per issue (issue #1140), so colonies of one issue would collapse.
   const colony = (id: string, status: string): Session =>
-    ({ id, repo: "acme/web", issue: 7, issue_title: "t", status, created_at: "2026-09-24T00:00:00Z", updated_at: "2026-09-24T00:00:00Z" }) as unknown as Session;
+    ({ id, repo: "acme/web", issue: id.charCodeAt(0), issue_title: "t", status, created_at: "2026-09-24T00:00:00Z", updated_at: "2026-09-24T00:00:00Z" }) as unknown as Session;
   const withBell = (sessions: Session[]) =>
     renderToStaticMarkup(
       <Header

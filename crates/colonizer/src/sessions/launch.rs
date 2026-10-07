@@ -613,6 +613,8 @@ pub async fn create(
         // A fresh colony has no failure behind it, unseen or otherwise.
         unseen_failure: false,
         queued_behind,
+        blocked_reason: None,
+        pr_rewrite_nudged: false,
         // Set by admission when the launch waits for the issue's holder (issue #321).
         claim_wait: false,
         verify: Some(

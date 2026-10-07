@@ -35,6 +35,7 @@ pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: b
         // Nothing to build on yet — and an open pull request is still work unmerged, so the child
         // waits for the merge rather than stacking onto a branch that may yet be deleted.
         SessionStatus::Queued
+        | SessionStatus::Blocked
         | SessionStatus::Starting
         | SessionStatus::Running
         | SessionStatus::WaitingForAnswer

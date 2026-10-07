@@ -274,18 +274,24 @@ pub fn needs_you(session: &Session) -> bool {
     {
         return false;
     }
+    // A colony parked for sitting idle (issue #1140) only waits to be resumed: nobody has to act.
+    if attention["reason"].as_str() == Some(crate::idle_park::IDLE_PARK_REASON) {
+        return false;
+    }
     true
 }
 
-/// The app badge: how many colonies need a person ([`needs_you`]).
+/// The app badge: how many rows Needs you has ([`needs_you`] per colony, less the noise
+/// `needs_feed` removes: superseded and cascade failures, one entry per issue, old questions folded).
 pub fn attention_count(sessions: &[Session]) -> usize {
-    sessions.iter().filter(|s| needs_you(s)).count()
+    crate::needs_feed::rows(sessions, chrono::Utc::now())
 }
 
 /// [`attention_count`] with one colony left out — the one a resolution just closed (see
 /// [`resolved`], which sends the count as the badge).
 fn attention_count_without(sessions: &[Session], id: &str) -> usize {
-    sessions.iter().filter(|s| s.id != id && needs_you(s)).count()
+    let rest: Vec<Session> = sessions.iter().filter(|s| s.id != id).cloned().collect();
+    attention_count(&rest)
 }
 
 // ---------------------------------------------------------------------------

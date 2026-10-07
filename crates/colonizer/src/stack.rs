@@ -27,6 +27,7 @@ pub(crate) fn stacked_on(parent_id: &str, parent: Option<&Session>) -> Stacked {
     match parent.status {
         // The branch exists only once the parent's work is published, so until then the child waits.
         SessionStatus::Queued
+        | SessionStatus::Blocked
         | SessionStatus::Starting
         | SessionStatus::Running
         | SessionStatus::WaitingForAnswer
