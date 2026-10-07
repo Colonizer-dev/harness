@@ -328,6 +328,10 @@ pub(crate) async fn status(
         }),
         "quota_cards": quota_cards,
         "account_alerts": account_alerts,
+        // The Nest frontier badge (issue #1144): open issues, not pull requests, in the repositories
+        // of the orgs Colonizer works in. The last counts, `null` until the first refresh lands; a
+        // refresh runs behind this answer, so the poll never waits for GitHub.
+        "backlog": crate::backlog::status_json(&app).await,
         // Issue #1074: the GitHub account's circuit breaker, so the cockpit banners a suspension or
         // a revoked token above every view without a second poll. `{"paused": false}` when all is well.
         "github_pause": crate::github_breaker::status_json(&app, chrono::Utc::now()).await,

@@ -252,6 +252,7 @@ export function NestView({
   settlers,
   liveDetail = null,
   backlogCount,
+  backlogTitle,
   avatarFor,
   onSelect,
   onOpen,
@@ -277,8 +278,10 @@ export function NestView({
    * the colony-level feed line as the fallback.
    */
   liveDetail?: string | null;
-  /** Open issues across the workspace's repositories; the frontier's badge. */
-  backlogCount: number;
+  /** Open issues across the workspace's repositories; the frontier's badge. Null while uncounted. */
+  backlogCount: number | null;
+  /** The frontier's tooltip: what the count covers and when it was taken. */
+  backlogTitle?: string;
   /** The org's avatar, for the chamber's own badge; null when nothing knows one. */
   avatarFor: (org: string) => string | null;
   onSelect: (id: string) => void;
@@ -486,8 +489,8 @@ export function NestView({
             <button
               type="button"
               onClick={onLaunch}
-              title={`frontier · ${backlogCount} open issues`}
-              aria-label={`frontier: ${backlogCount} open issues, launch a colony`}
+              title={backlogTitle ?? `frontier · ${backlogCount ?? "…"} open issues`}
+              aria-label={`frontier: ${backlogTitle ?? `${backlogCount ?? "…"} open issues`}, launch a colony`}
               className="absolute flex -translate-x-1/2 -translate-y-full cursor-pointer flex-col items-center transition-transform hover:scale-105"
               style={{ left: Math.round(box.width * 0.86), top: SURFACE_Y }}
             >
@@ -496,7 +499,7 @@ export function NestView({
                 <span className="absolute left-[30px] top-5 h-[38px] w-10 rounded-full bg-ok opacity-[0.32]" />
                 <span className="absolute left-[14px] top-0 h-[42px] w-11 rounded-full bg-ok opacity-[0.42]" />
                 <span className="absolute -right-1 -top-1 min-w-5 rounded-[10px] border border-ok bg-panel px-1.5 text-center font-mono text-micro-lg font-semibold leading-[18px] text-ok tabular-nums">
-                  {backlogCount}
+                  {backlogCount ?? "…"}
                 </span>
               </span>
               <span aria-hidden="true" className="-mt-2 h-5 w-1.5 rounded-sm bg-border-strong" />

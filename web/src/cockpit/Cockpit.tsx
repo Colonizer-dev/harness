@@ -50,6 +50,7 @@ import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuot
 import { AccountBanner } from "./AccountBanner";
 import { GitHubBanner } from "./GitHubBanner";
 import { needCountByOrg } from "./feed";
+import { backlogBadge } from "./backlog";
 import { providerSnapshots } from "./dash";
 import { GATEWAY_RETRY_MESSAGE } from "./questions";
 
@@ -314,9 +315,8 @@ export function Cockpit({
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
   const spend = sumCosts(inOrg.map(sessionCost));
-  const backlogCount = repos
-    .filter((r) => !selectedOrg || sameOrg(r.full_name.split("/")[0], selectedOrg))
-    .reduce((total, r) => total + r.open_issues_count, 0);
+  // Counted by the mothership (issues only, Colonizer's own orgs) and refreshed with the status poll.
+  const backlog = useMemo(() => backlogBadge(status?.backlog, selectedOrg), [status?.backlog, selectedOrg]);
 
   const selectColony = useCallback(
     (id: string) => {
@@ -712,7 +712,8 @@ export function Cockpit({
             // The single open stream's live detail: the selected chamber's balloon escalates to
             // it while non-empty, every other chamber reading its colony-level feed line.
             liveDetail={state.agentDetail}
-            backlogCount={backlogCount}
+            backlogCount={backlog.count}
+            backlogTitle={backlog.title}
             avatarFor={avatarFor}
             onSelect={selectColony}
             onOpen={openColonyById}

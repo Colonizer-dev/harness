@@ -19,6 +19,7 @@ mod archive;
 mod auth;
 mod authority;
 mod autonomy;
+mod backlog;
 mod blocked;
 mod boot;
 mod boundary;

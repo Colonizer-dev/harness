@@ -223,4 +223,28 @@ describe("planBalloons", () => {
     expect(shown).not.toContain("old");
     expect(shown).toContain("far");
   });
+
+  it("words the frontier's tooltip from the mothership's count, and shows … until it has one", () => {
+    const render = (backlogCount: number | null, backlogTitle?: string) =>
+      renderToStaticMarkup(
+        <NestView
+          sessions={[]}
+          selectedId={null}
+          mothershipSelected={false}
+          settlers={[]}
+          backlogCount={backlogCount}
+          backlogTitle={backlogTitle}
+          avatarFor={() => null}
+          onSelect={noop}
+          onOpen={noop}
+          onSelectMothership={noop}
+          onLaunch={noop}
+        />,
+      );
+    const counted = render(21, "21 open issues in 5 repositories you colonize · as of 14:07");
+    expect(counted).toContain('title="21 open issues in 5 repositories you colonize · as of 14:07"');
+    expect(counted).toContain('aria-label="frontier: 21 open issues in 5 repositories you colonize · as of 14:07, launch a colony"');
+    expect(counted).toContain(">21</span>");
+    expect(render(null)).toContain(">…</span>");
+  });
 });
