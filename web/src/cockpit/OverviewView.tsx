@@ -356,7 +356,7 @@ export function OverviewView({
           </div>
         ) : null}
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-5">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
             <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">Overview</h1>
             {colonize}

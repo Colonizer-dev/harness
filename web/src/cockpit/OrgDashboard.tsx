@@ -352,7 +352,7 @@ export function OrgDashboard({
         </button>
         {/* The primary action shares the title's row and centres on it; narrow, it wraps under the
             title rather than floating mid-block. The range controls stay below, at the right. */}
-        <div data-org-title-row className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+        <div data-org-title-row className="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
           <h1 className="m-0 flex min-w-0 items-center gap-3 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">
             <OrgTile org={org.org} avatar={org.avatar} size={28} />
             <span className="truncate">{org.org}</span>
