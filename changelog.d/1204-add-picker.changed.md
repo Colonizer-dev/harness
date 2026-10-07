@@ -1,1 +1,0 @@
-**Add a provider starts from logo tiles.** Anthropic API, OpenRouter, DeepSeek, MiniMax, Z.AI, Alibaba, OpenAI, Local and Custom are one tap away and open a short form (the key, with the models prefilled from the catalogue); "Search 83 more…" opens the rest of the catalogue, and the disclaimers are one muted line with a "Why?" for the full text. ([#1204])
