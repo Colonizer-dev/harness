@@ -230,10 +230,7 @@ pub(super) async fn proxy(
         _ => None,
     };
     let Some((body, retry_uri)) = retry else {
-        eprintln!(
-            "gateway: provider \"{id}\" is out of quota and its fallback {to}/{model} {}; no retry",
-            skip.unwrap_or("could not take the request")
-        );
+        tracing::error!( provider = %id, "gateway: provider \"{id}\" is out of quota and its fallback {to}/{model} {}; no retry", skip.unwrap_or("could not take the request") );
         // No retry is coming after all, so the colony is blocked on this provider (#760, #767).
         if let Some(colony) = &colony {
             app.gateway.note_colony_quota(colony, &id);
@@ -241,7 +238,7 @@ pub(super) async fn proxy(
         return response;
     };
     drop(response);
-    eprintln!("gateway: provider \"{id}\" is out of quota; retrying on its fallback {to}/{model}");
+    tracing::warn!( provider = %id, "gateway: provider \"{id}\" is out of quota; retrying on its fallback {to}/{model}" );
     proxy_to(app, to, method, retry_uri, headers, body, true).await
 }
 
@@ -520,7 +517,7 @@ async fn proxy_to(
                 body = Bytes::from(policy);
             }
             if let Some((normalized, note)) = normalize_anthropic_body(&body, provider.quirks()) {
-                eprintln!("gateway: provider \"{id}\": normalized request body preemptively ({note})");
+                tracing::info!( provider = %id, "gateway: provider \"{id}\": normalized request body preemptively ({note})" );
                 body = normalized;
             }
             // Normalization rewrites fields, never the model: what goes out is the requested model,
@@ -833,8 +830,12 @@ async fn anthropic_error(
         // leaving it idle with a failed turn. Quota hits skip this: parking the colony and
         // pausing the queue already say what is wrong.
         match wrong_route_hint(status.as_u16(), &hit) {
-            Some(hint) => eprintln!("gateway: provider \"{}\" for colony {colony}: {hint}", provider.id),
-            None => eprintln!("gateway: provider \"{}\" answered {status} for colony {colony}", provider.id),
+            Some(hint) => {
+                tracing::warn!( provider = %provider.id, colony = %colony, "gateway: provider \"{}\" for colony {colony}: {hint}", provider.id )
+            }
+            None => {
+                tracing::warn!( provider = %provider.id, colony = %colony, "gateway: provider \"{}\" answered {status} for colony {colony}", provider.id )
+            }
         }
         flag_model_error(app, colony).await;
     }
@@ -1035,7 +1036,7 @@ pub(super) async fn openai_response(
                 // tell the colony the same, so a wrong base reads as one instead of an outage.
                 let hint = wrong_route_hint(upstream_status, &hit);
                 if let Some(hint) = &hint {
-                    eprintln!("gateway: provider \"{id}\": {hint}");
+                    tracing::warn!( provider = %id, "gateway: provider \"{id}\": {hint}" );
                 }
                 let message = match hint {
                     Some(hint) => format!("{message} ({hint})"),
@@ -1051,7 +1052,7 @@ pub(super) async fn openai_response(
                         // rejects, and any 4xx/5xx flags the colony for attention instead of leaving
                         // it idle with a failed turn. Quota hits skip this: parking the colony and
                         // pausing the queue already say what is wrong.
-                        eprintln!("gateway: provider \"{id}\" answered {upstream_status} for colony {colony}");
+                        tracing::warn!( provider = %id, colony = %colony, "gateway: provider \"{id}\" answered {upstream_status} for colony {colony}" );
                         flag_model_error(app, colony).await;
                     }
                 } else if let Some(audit) = &audit {

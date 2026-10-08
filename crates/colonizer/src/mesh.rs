@@ -346,7 +346,7 @@ taildrop:
         let policy = match serde_json::to_vec_pretty(&policy_json(members)) {
             Ok(policy) => policy,
             Err(e) => {
-                eprintln!("mesh: could not serialize the fleet policy: {e}");
+                tracing::error!( error = %e, "mesh: could not serialize the fleet policy: {e}" );
                 return;
             }
         };
@@ -354,14 +354,14 @@ taildrop:
         if let Err(e) =
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).and_then(|()| std::fs::write(&path, &policy))
         {
-            eprintln!("mesh: could not write {}: {e}", path.display());
+            tracing::error!( path = %path.display(), error = %e, "mesh: could not write {}: {e}", path.display() );
             return;
         }
         let pid = self.running.lock().await.as_ref().and_then(|r| r.headscale.id());
         if let Some(pid) = pid
             && let Err(e) = std::process::Command::new("kill").args(["-HUP", &pid.to_string()]).status()
         {
-            eprintln!("mesh: could not signal headscale ({pid}) to reload the policy: {e}");
+            tracing::warn!( pid = %pid, error = %e, "mesh: could not signal headscale ({pid}) to reload the policy: {e}" );
         }
     }
 
@@ -782,7 +782,7 @@ pub(crate) async fn start_tasks(app: &crate::Shared) {
                         break;
                     }
                     Err(e) => {
-                        eprintln!("mesh: attempt {attempt} failed: {e:#}");
+                        tracing::warn!( attempt = attempt, error = %format!("{e:#}"), "mesh: attempt {attempt} failed: {e:#}" );
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(60));
                     }

@@ -1,3 +1,3 @@
 /api/colonize/draft                                  POST   unauth=401    token=owner            activity=-
 /api/repos/{owner}/{name}/issues                     GET    unauth=401    token=owner            activity=-
-/api/repos/{owner}/{name}/issues                     POST   unauth=401    token=owner            activity=colonize.issue
+/api/repos/{owner}/{name}/issues                     POST   unauth=401    token=repo>=launch     activity=colonize.issue

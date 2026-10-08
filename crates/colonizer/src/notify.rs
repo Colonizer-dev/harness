@@ -910,7 +910,7 @@ pub async fn run(app: Shared) {
         .build()
         .ok();
     if client.is_none() {
-        eprintln!("notify: could not build an HTTP client; the webhook channel is off");
+        tracing::warn!("notify: could not build an HTTP client; the webhook channel is off");
     }
     let mut seen: HashMap<String, Seen> = HashMap::new();
     // Per provider: whether its failure rate has already been announced as degraded. A restart starts
@@ -1428,7 +1428,7 @@ async fn deliver_routed(
                 }
             }
             Err(reason) if reasons.desktop != Some(reason) => {
-                eprintln!("notify: desktop notifications stay off: {reason}");
+                tracing::warn!( reason = %reason, "notify: desktop notifications stay off: {reason}" );
                 reasons.desktop = Some(reason);
             }
             Err(_) => {}
@@ -1471,10 +1471,7 @@ async fn post_webhook(
     }
     if !webhook_valid(&settings.webhook_url) {
         if reasons.webhook.as_deref() != Some(settings.webhook_url.as_str()) {
-            eprintln!(
-                "notify: the webhook stays off: {} is not an http:// or https:// address",
-                settings.webhook_url
-            );
+            tracing::warn!( webhook_url = %settings.webhook_url, "notify: the webhook stays off: {} is not an http:// or https:// address", settings.webhook_url );
             reasons.webhook = Some(settings.webhook_url.clone());
         }
         return false;
@@ -1522,11 +1519,12 @@ async fn post_webhook(
 
 /// Where a failed channel's line goes: into the colony's log when the event is about a colony, so it
 /// lands where the person it was meant for is looking — as the watchdog and autonomy log — or onto
-/// stderr when it is about a provider, which has no colony to log into.
+/// stderr when it is about a provider, which has no colony to log into. The session log calls it
+/// `warn`; this arm matches it.
 async fn report_failure(app: &App, session: Option<&Session>, what: String) {
     match session {
         Some(session) => app.session_log_as(Origin::Notify, &session.id, "warn", what).await,
-        None => eprintln!("{what}"),
+        None => tracing::warn!("{what}"),
     }
 }
 

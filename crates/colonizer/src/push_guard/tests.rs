@@ -49,6 +49,15 @@ fn context_and_removed_lines_and_lockfiles_are_not_scanned() {
 }
 
 #[test]
+fn a_route_scope_line_is_not_a_credential() {
+    let line = "/api/sessions/{id}/publish                                  POST   unauth=401    token=session>=launch  activity=colony.publish";
+    assert!(
+        scan_diff(&diff_with(line)).is_empty(),
+        "issue #1206: `session>=launch` is a scope, not a value"
+    );
+}
+
+#[test]
 fn a_second_hunk_restarts_the_line_count() {
     let key = stripe();
     let diff =

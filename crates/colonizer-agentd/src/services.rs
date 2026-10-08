@@ -171,11 +171,15 @@ fn resolve_cwd(workspace: &Path, cwd: Option<&str>) -> PathBuf {
 async fn wait_ready(spec: &ServiceSpec) -> Result<Option<f64>, ()> {
     let Some(ready) = spec.ready.as_deref() else { return Ok(None) };
     let (probe, started) = (probe(ready), Instant::now());
+    let timeout = Duration::from_secs(spec.timeout_secs);
     loop {
-        if answering(&probe, ready).await {
+        // A server that accepts but never answers must not hold the attempt past the timeout.
+        let remaining = timeout.saturating_sub(started.elapsed()).max(POLL);
+        let answered = tokio::time::timeout(remaining, answering(&probe, ready)).await;
+        if answered.unwrap_or(false) {
             return Ok(Some(started.elapsed().as_secs_f64()));
         }
-        if started.elapsed() >= Duration::from_secs(spec.timeout_secs) {
+        if started.elapsed() >= timeout {
             return Err(());
         }
         tokio::time::sleep(POLL).await;
@@ -197,11 +201,18 @@ fn probe(ready: &str) -> Probe {
     let (scheme, rest) = ready.split_once("://").unwrap_or(("http", ready));
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let default_port = if scheme == "https" { 443 } else { 80 };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
-            (host.trim_matches(['[', ']']), port.parse().unwrap_or(default_port))
-        }
-        _ => (authority, default_port),
+    // A bracketed IPv6 literal (`[::1]`, `[::1]:8080`) holds colons of its own.
+    let (host, port) = match authority.strip_prefix('[').and_then(|a| a.split_once(']')) {
+        Some((host, rest)) => (
+            host,
+            rest.strip_prefix(':').and_then(|p| p.parse().ok()).unwrap_or(default_port),
+        ),
+        None => match authority.rsplit_once(':') {
+            Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                (host, port.parse().unwrap_or(default_port))
+            }
+            _ => (authority.trim_end_matches(':'), default_port),
+        },
     };
     Probe::Url { host: host.into(), port }
 }
@@ -503,6 +514,9 @@ mod tests {
         assert_eq!(probe("http://127.0.0.1:9000/x"), url("127.0.0.1", 9000));
         assert_eq!(probe("https://example.com"), url("example.com", 443));
         assert_eq!(probe("http://localhost/"), url("localhost", 80));
+        assert_eq!(probe("http://[::1]/health"), url("::1", 80));
+        assert_eq!(probe("http://[::1]:8080/"), url("::1", 8080));
+        assert_eq!(probe("http://localhost:/"), url("localhost", 80));
         assert_eq!(resolve_cwd(Path::new("/w"), Some("web")), PathBuf::from("/w/web"));
         assert_eq!(resolve_cwd(Path::new("/w"), Some("/tmp/x")), PathBuf::from("/tmp/x"));
         assert_eq!(resolve_cwd(Path::new("/w"), None), PathBuf::from("/w"));
@@ -604,5 +618,24 @@ mod tests {
             message.contains("Not ready: `api` (no answer on :1 after 1 s, log /tmp/colonizer-svc-api.log)"),
             "{message}"
         );
+    }
+
+    /// A server that accepts but never answers still lets the probe give up inside its timeout.
+    #[tokio::test]
+    async fn a_silent_server_times_out_instead_of_hanging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let holder = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut silent = spec("silent", "exec true", Some(&url));
+        silent.timeout_secs = 1;
+        let waited = tokio::time::timeout(Duration::from_secs(5), wait_ready(&silent)).await;
+        holder.abort();
+        assert_eq!(waited, Ok(Err(())), "not ready, and not hung");
     }
 }
