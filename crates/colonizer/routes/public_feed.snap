@@ -1,0 +1,2 @@
+/api/public/feed                                     GET    unauth=404    token=owner            activity=-
+/api/public/feed/stream                              GET    unauth=404    token=owner            activity=-
