@@ -65,6 +65,7 @@ node scripts/bench.mjs run  --repo owner/bench --label before
 # change one thing: a prompt, a module setting, a model
 node scripts/bench.mjs run  --repo owner/bench --label after
 node scripts/bench.mjs compare bench-before.json bench-after.json
+node scripts/bench.mjs rate  bench-before.json bench-after.json   # the resolved rate, split by harness · model
 node scripts/bench.mjs jev  bench-before.json bench-after.json   # grade Jev compaction across the runs
 node scripts/bench.mjs routing                          # is Jev routing act mode justified? (below)
 node scripts/bench.mjs clean --repo owner/bench         # close the bench's pull requests and delete their branches
@@ -107,6 +108,70 @@ number to watch.
 The [offline evolver](evolver.md) builds on these run files: it clusters diagnosed failures into classes,
 turns one class into a prompt-only proposal, and retains the proposal only when a rerun of the same tasks
 beats a baseline — judged with the same per-task honesty as `compare`, single regressions included.
+
+## The resolved rate
+
+`compare` reads down one column per task. `rate` reads across the whole run and answers the question
+the issue asks: how much work actually landed, for which harness × model. It counts three stages
+separately, because a pull request opened, checks green and merged are three different questions — a
+colony can open a pull request it cannot finish, finish one it cannot get merged, and get merged on a
+branch the repository's own CI never ran. Collapsing the three into one "resolved" number flatters
+whichever model is quickest at producing a plausible diff, and hides the failure mode where work is
+opened and then dropped.
+
+```sh
+node scripts/bench.mjs rate bench-before.json bench-after.json   # --data <dir> names a non-default mothership
+node scripts/bench.mjs rate --json bench-before.json             # the same report as JSON, stable enough to diff in CI
+```
+
+It reads two sources and unions them: the `bench-<label>.json` files named on the command line, and
+the real colony session store at `<data dir>/sessions.json` — the same resolution rule `jev`, `brief`,
+`routing` and the colony report already use (`--data`, else `COLONIZER_DATA_DIR`, else
+`~/.local/share/colonizer`). Every record is split by harness · model and counted per stage, each cell
+counted over the records that stage could speak for and printed as `green/measured (rate)`:
+
+```text
+| Harness · model | Source | Colonies | PR opened | Tests green | Merged |
+| --- | --- | --- | --- | --- | --- |
+| claude-code · zai/glm-5.3-flash | bench | 24 | 21/24 (88%) | 14/24 (58%) | 0/24 (0%) |
+| codex · gpt-5.1-codex | colonies | 12 | 10/12 (83%) | 9/12 (75%) | 0/12 (0%) |
+| claude-code · zai/glm-5.3-flash | colonies | 9 | 9/9 (100%) | 7/9 (78%) | 4/9 (44%) |
+| – | overall | 45 | 40/45 (89%) | 30/45 (67%) | 4/45 (9%) |
+```
+
+**Those numbers are illustrative, not a measurement of anything.** This repository carries no committed
+bench run files and no committed colony store, so there is nothing real to publish; inventing a table
+and calling it a result is exactly the failure the rest of this page refuses. The block above is the
+verbatim output of `rateReport` and `formatRateReport` over synthetic records built to the same shape,
+not a run of this repository's bench: it shows the *shape* `rate` prints — the columns, the `·`
+separator, the group order (biggest sample first), the `overall` row that pools counts rather than
+averaging per-group rates. Running the command against a real store replaces every figure in it, and
+only that run's numbers should ever be quoted.
+
+What the columns do and do not mean, stated plainly:
+
+- `–` means **never measured**, never "failed". A stage that did not run is not a stage that failed;
+  the same convention the `jev` and `brief` rates use. A `0` means measured, and nothing qualified.
+- **A colony still in flight reads `–` in all three columns.** `queued`, `blocked`, `starting`,
+  `running`, `waiting_for_answer`, `publishing` and `idle` have not reached the pull-request stage yet,
+  so they drop out of every denominator — counting them would be measuring the clock, not the model.
+  The same goes for a colony still `parked`, and for a status missing or unknown: unmeasured, never a
+  zero. Only a status the store can leave a colony in when its run is over (`pr_opened`, `merged`,
+  `closed`, `no_changes`, `stopped`, `failed`) says anything about any of the three stages.
+- **Bench rows are measurable from the first stage.** A bench task ran to a scored result, so all of
+  them count towards PR opened and only some opened one — a bench row can read a partial rate like
+  `21/24 (88%)`. Colonies are measured from the moment they settle.
+- **Tests green** for bench rows is the bench's own hidden check passing (`visible`), not CI. The
+  bench scratch repository has no CI, so there is no CI result to report for it.
+- **The bench never merges.** `clean` closes the bench's pull requests and deletes their branches, so
+  Merged for bench rows reads `0` unless the merge loop got there first. That column is only
+  meaningful for real colonies; a bench-only table's `0` says nothing about any model.
+- **One colony is one sample.** The same caveat that governs `compare` above: a difference of a few
+  colonies between two harness × model rows is noise until it repeats.
+
+To reproduce a report you have already published, keep the run files and point `--data` at the same
+mothership data directory the colonies ran on, then diff the `--json` output between revisions —
+the JSON is stable and ordered, so a CI job can regenerate it and fail on a change nobody intended.
 
 ## Grading Jev compaction
 
