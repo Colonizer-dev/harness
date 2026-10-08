@@ -9,6 +9,7 @@ Commands:
   help         Print this message, or a command's own help; `help glossary` explains this CLI's words in ordinary language (issue #904)
   update       Install the newest release against a running mothership and restart into it
   setup        Install this version's release over a `cargo install` build, which has no app beside it
+  doctor       Say whether this host can run colonies — kernel features, `/dev/kvm`, the mesh and microVM binaries — and name the fix for whatever is missing
   open         Print the cockpit sign-in link and open it in a browser
   login-item   Start the control plane (the mothership) at login (macOS LaunchAgent, Linux systemd user unit)
   telemetry    Show or change anonymous usage reporting (no network, no daemon needed)
@@ -32,6 +33,7 @@ Commands:
   loop         Manage loops: saved prompts that launch a colony on a schedule — the cockpit's Loops page from a terminal. `colonizer loop create --help` shows the cadence grammar
   redteam      Start and list red-team runs: hunters that find and report bugs, or security defects with `--preset security`
   token        Manage the control plane's (the mothership's) scoped API tokens (the owner token only)
+  feed-key     Manage the public feed's read-only keys (issue #895). Local: it reads and writes the config dir, no mothership and no token
   fleet        Export this machine's stats, logs and colony history, or import another machine's (issue #687)
 
 Options:
