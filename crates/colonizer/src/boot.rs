@@ -2152,11 +2152,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &planned.placeholder_names(),
     )?;
     // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
-    // credential files about to be committed, and the agent goes to ignore or inspect them.
-    crate::path_policy::write_list(
-        &vm_dir.join(crate::path_policy::EXCLUDE_FILE),
-        &crate::path_policy::exclude_lines(&planned),
-    )?;
+    // credential files about to be committed, and the agent goes to ignore or inspect them. The
+    // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise.
+    let mut excludes = crate::path_policy::exclude_lines(&planned);
+    excludes.extend(crate::path_policy::ua_exclude_lines(&plugin_names));
+    crate::path_policy::write_list(&vm_dir.join(crate::path_policy::EXCLUDE_FILE), &excludes)?;
     crate::path_policy::apply(&wt, &planned)?;
     log.info(crate::path_policy::summary(&policy, &planned)).await;
     if let Some(note) = crate::path_policy::opt_outs(&policy) {

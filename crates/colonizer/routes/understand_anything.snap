@@ -1,0 +1,2 @@
+/api/plugins/understand-anything                     GET    unauth=401    token=owner            activity=-
+/api/plugins/understand-anything/download            POST   unauth=401    token=owner            activity=-

@@ -468,6 +468,19 @@ pub(crate) fn exclude_lines(planned: &Materialized) -> Vec<String> {
         .collect()
 }
 
+/// The directories the understand-anything skillset writes into the repository it analyses, as
+/// gitignore-syntax lines. Its knowledge graph is generated data about the checkout, not a change
+/// anyone wants staged, so it is hidden from the colony's `git status` like the placeholders —
+/// but only for a colony that actually has the skillset switched on, since an exclude is the
+/// colony's own view of its worktree and a skillset it does not have never writes these.
+pub(crate) fn ua_exclude_lines(skillsets: &[String]) -> Vec<String> {
+    if !skillsets.iter().any(|name| name == crate::understand_anything::NAME) {
+        return Vec::new();
+    }
+    // `.understand-anything/` is the name upstream used before it renamed the directory.
+    ["/.ua/", "/.understand-anything/"].map(String::from).to_vec()
+}
+
 /// Creates what [`plan`] decided on — and only after the boot has written the intended placeholder
 /// list to disk, so a placeholder that gets created is always one publish knows to remove. Best
 /// effort per entry: a path that grew a symlink between the plan and here is skipped rather than
@@ -1177,6 +1190,45 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(exclude_lines(&odd), vec!["/a\\*b\\#c"]);
+        wt.close();
+    }
+
+    /// Issue #1014: the understand-anything skillset writes a knowledge graph into `.ua/` of the
+    /// repository it analyses (`.understand-anything/` before upstream renamed it). It is generated
+    /// data about the checkout, so the colony's `git status` must not offer to commit it — but only
+    /// for a colony that has the skillset switched on.
+    #[test]
+    fn the_skillset_knowledges_dirs_are_hidden_only_where_the_skillset_is_on() {
+        use crate::verify::tests::{git, git_commit};
+        assert_eq!(ua_exclude_lines(&[]), Vec::<String>::new(), "off: nothing to hide");
+        assert_eq!(
+            ua_exclude_lines(&["archify".into()]),
+            Vec::<String>::new(),
+            "another skillset does not write these"
+        );
+        let on = ua_exclude_lines(&["archify".into(), "understand-anything".into()]);
+        assert_eq!(on, vec!["/.ua/", "/.understand-anything/"]);
+
+        let wt = tempfile("ua-excludes");
+        git(&wt.path, &["init", "-q", "-b", "main"]);
+        std::fs::write(wt.path.join("README.md"), "x").unwrap();
+        git(&wt.path, &["add", "-A"]);
+        git_commit(&wt.path, "base");
+        std::fs::create_dir_all(wt.path.join(".ua")).unwrap();
+        std::fs::write(wt.path.join(".ua/knowledge-graph.json"), "{}").unwrap();
+        std::fs::create_dir_all(wt.path.join(".understand-anything")).unwrap();
+        std::fs::write(wt.path.join(".understand-anything/graph.json"), "{}").unwrap();
+        std::fs::write(wt.path.join("src.rs"), "").unwrap();
+
+        let file = wt.path.join("exclude.list");
+        write_list(&file, &on).unwrap();
+        let excludes = format!("core.excludesFile={}", file.display());
+        let status = git(&wt.path, &["-c", &excludes, "status", "--porcelain", "-uall"]);
+        assert!(
+            git(&wt.path, &["status", "--porcelain", "-uall"]).contains(".ua/knowledge-graph.json"),
+            "without the excludes the graph reads as a new file"
+        );
+        assert_eq!(status.replace("?? exclude.list", "").trim(), "?? src.rs");
         wt.close();
     }
 
