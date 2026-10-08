@@ -104,6 +104,11 @@ pub struct App {
     /// apart from `storage_alert` so a later write failure cannot overwrite it and its `.corrupt-`
     /// path, nor a later save mark it recovered.
     pub load_damage: Option<StorageAlert>,
+    /// Test-only redirect for a Jev ask ([`decide::decide_for`]): `(base_url, api_key)` of a loopback
+    /// mock, set by the one test that owns this `App` and read at ask time — per-app, so concurrent
+    /// tests never see each other's mock. Not present in release builds.
+    #[cfg(test)]
+    pub(crate) test_ask: std::sync::Mutex<Option<(String, String)>>,
     pub runtimes: Mutex<HashMap<String, Arc<sessions::Runtime>>>,
     pub(crate) repo_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// One lifecycle lock per colony id. It serialises the moments a colony gains or loses its
@@ -278,6 +283,8 @@ impl App {
             storage_alert: RwLock::new(None),
             disk_verdict: Mutex::new(Default::default()),
             load_damage: boot.load_damage,
+            #[cfg(test)]
+            test_ask: std::sync::Mutex::new(None),
             runtimes: Mutex::new(HashMap::new()),
             repo_locks: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(HashMap::new()),
