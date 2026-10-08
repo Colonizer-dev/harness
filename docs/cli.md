@@ -54,11 +54,15 @@ COLONIZER_TOKEN=col_… colonizer --host mothership.tailnet list
 
 ## The commands
 
+New to the words? `colonizer help glossary` says what a colony, a settler and the mothership
+actually are, in ordinary language. `colonizer help <command>` prints any command's own help.
+
 On this machine:
 
 ```sh
 colonizer version             # what this build is, and whether it is a release (also --version)
 colonizer about               # what Colonizer is built with, from the vendored Factory Zero stack entry
+colonizer help glossary       # what this CLI's words mean, in ordinary language
 colonizer update              # install the newest release against a running mothership, restart into it
 colonizer update --force      # also over a development build, or a build newer than the latest release
 colonizer update --check      # say whether a newer release exists and stop; no mothership needed
