@@ -1013,7 +1013,10 @@ async fn the_webhook_carries_the_event_id_in_a_header_and_the_body() {
             format!("sha256={}", signature("test-signing-secret", timestamp, body)),
             "the signature covers the body, id included"
         );
-        assert!(!body.contains("test-signing-secret"), "the secret never travels in the payload");
+        assert!(
+            !body.contains("test-signing-secret"),
+            "the secret never travels in the payload"
+        );
         ids.insert(header.to_string());
     }
     assert_eq!(ids.len(), 1, "a resent event keeps its id: {ids:?}");
