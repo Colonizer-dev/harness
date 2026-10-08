@@ -70,7 +70,7 @@ than a silent no-op: the status says `no OTLP endpoint is configured` and names 
 the one the OpenTelemetry specification defines:
 
 ```sh
-OTEL_EXPORTER_OTLP_HEADERS='Authorization=Basic%20aGVsbG86d29ybGQ=,x-honeycomb-team=abc123'
+OTEL_EXPORTER_OTLP_HEADERS='Authorization=Basic%20<base64>,x-honeycomb-team=<team-key>'
 ```
 
 - Pairs are separated by `,`, and whitespace around a pair, a name or a value is trimmed.
