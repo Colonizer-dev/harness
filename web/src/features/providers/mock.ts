@@ -6,18 +6,32 @@ import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
 import type { ProvidersApi } from "./api";
 
-export let mockGraft: DownloadableSkillset = { name: "graft", release: "0.19.0-1", installed_release: null, state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null };
 export const GRAFT_BYTES = 84_213_760;
-/** Advances the mock graft download: about four seconds from start to installed. */
-export function tickGraft(): DownloadableSkillset {
-  if (mockGraft.state === "downloading" && mockGraft.started_at) {
-    const bytes = Math.min(GRAFT_BYTES, Math.round(((Date.now() - Date.parse(mockGraft.started_at)) / 4000) * GRAFT_BYTES));
-    mockGraft =
-      bytes >= GRAFT_BYTES
-        ? { ...mockGraft, state: "installed", installed_release: mockGraft.release, bytes, total: GRAFT_BYTES, finished_at: new Date().toISOString() }
-        : { ...mockGraft, bytes, total: GRAFT_BYTES };
-  }
-  return mockGraft;
+/** The skillset the mock offers second: a much smaller tarball. */
+export const UNDERSTAND_ANYTHING_BYTES = 3_145_728;
+
+/**
+ * Every mock download, by skillset name. Each row advances on its own, exactly as the real
+ * endpoints do — one status per skillset, not one for "the" skillset.
+ */
+const mockDownloads: Record<string, DownloadableSkillset> = {
+  graft: { name: "graft", release: "0.19.0-1", installed_release: null, state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null },
+  "understand-anything": { name: "understand-anything", release: "v2.9.0", installed_release: null, state: "idle", bytes: 0, total: null, started_at: null, finished_at: null, error: null },
+};
+
+const downloadBytes = (name: string) => (name === "graft" ? GRAFT_BYTES : UNDERSTAND_ANYTHING_BYTES);
+
+/** Advances one mock download: about four seconds from start to installed. */
+export function tickGraft(name = "graft"): DownloadableSkillset {
+  const status = mockDownloads[name] ?? mockDownloads.graft;
+  if (status.state !== "downloading" || !status.started_at) return status;
+  const total = downloadBytes(name);
+  const bytes = Math.min(total, Math.round(((Date.now() - Date.parse(status.started_at)) / 4000) * total));
+  mockDownloads[name] =
+    bytes >= total
+      ? { ...status, state: "installed", installed_release: status.release, bytes, total, finished_at: new Date().toISOString() }
+      : { ...status, bytes, total };
+  return mockDownloads[name];
 }
 
 /** A small seeded generator, so the demo's history is the same on every load. */
@@ -87,12 +101,17 @@ export function providersMock(ms: MockState): ProvidersApi {
       await sleep(180);
       return clone(usageReport(provider, id, days));
     },
-    graftSkillset: async () => clone(tickGraft()),
-    graftDownload: async () => {
-      if (mockGraft.state === "idle" || mockGraft.state === "failed") {
-        mockGraft = { ...mockGraft, state: "downloading", bytes: 0, total: GRAFT_BYTES, started_at: new Date().toISOString(), finished_at: null, error: null };
+    skillset: async (name) => {
+      if (!mockDownloads[name]) throw new ApiError("no such skillset", 404);
+      return clone(tickGraft(name));
+    },
+    skillsetDownload: async (name) => {
+      if (!mockDownloads[name]) throw new ApiError("no such skillset", 404);
+      const status = mockDownloads[name];
+      if (status.state === "idle" || status.state === "failed") {
+        mockDownloads[name] = { ...status, state: "downloading", bytes: 0, total: downloadBytes(name), started_at: new Date().toISOString(), finished_at: null, error: null };
       }
-      return clone(mockGraft);
+      return clone(mockDownloads[name]);
     },
     plugins: () =>
       ms.later(() => ({
@@ -119,11 +138,14 @@ export function providersMock(ms: MockState): ProvidersApi {
         commands: 1,
       },
       // Once downloaded, graft is an ordinary local skillset.
-      ...(tickGraft().state === "installed"
+      ...(tickGraft("graft").state === "installed"
         ? [{ name: "graft", description: "A code map of the colony's repository (graft by Nanonets)", version: "0.19.0", source: "local" as const, shadows_vendored: false, skills: 1, agents: 0, commands: 0 }]
         : []),
+      ...(tickGraft("understand-anything").state === "installed"
+        ? [{ name: "understand-anything", description: "A knowledge graph of the colony's repository (understand-anything by Egonex)", version: "2.9.0", source: "local" as const, shadows_vendored: false, skills: 9, agents: 0, commands: 9 }]
+        : []),
     ],
-    downloadable: [clone(tickGraft())],
+    downloadable: Object.keys(mockDownloads).map((name) => clone(tickGraft(name))),
       })),
     providers: () => ms.later(() => ms.providers),
     saveProvider: async (id, body) => {

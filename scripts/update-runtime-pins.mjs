@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// Proposes new pins for the colony images (crates/colonizer/images.lock) and the guest Claude Code
-// build (crates/colonizer/claude-code.lock) when their upstreams move.
+// Proposes new pins for the colony images (crates/colonizer/images.lock), the guest Claude Code
+// build (crates/colonizer/claude-code.lock) and the understand-anything skillset
+// (crates/colonizer/understand-anything.lock) when their upstreams move.
 //
 //   node scripts/update-runtime-pins.mjs                       report what moved upstream (changes nothing, exits 1 when stale)
 //   node scripts/update-runtime-pins.mjs --check               the same check, named for CI
-//   node scripts/update-runtime-pins.mjs --write               also rewrite both lock files
+//   node scripts/update-runtime-pins.mjs --write               also rewrite every lock file
 //   node scripts/update-runtime-pins.mjs --summary out.md      write the report as Markdown (a PR or issue body)
-//   node scripts/update-runtime-pins.mjs --images p --agent p  use other lock files (for testing)
+//   node scripts/update-runtime-pins.mjs --images p --agent p --understand-anything p
+//                                                             use other lock files (for testing)
 //
 // An image pin is resolved through the registry's own API: an anonymous pull token from
 // auth.docker.io, then a HEAD manifest request whose Docker-Content-Digest header names the
@@ -17,14 +19,17 @@
 // manifest, the one scripts/fetch-agent-binary.sh used before it read the lock: the stable channel
 // names a version and manifest.json carries a checksum per guest platform, so the 200 MB binaries
 // never have to be downloaded. A platform the manifest does not cover fails the run — a checksum
-// is never invented.
+// is never invented. The understand-anything skillset comes from GitHub's own release API: the
+// latest release's tag resolves to the commit behind it, and the tarball of that commit is
+// downloaded and hashed, because the mothership fetches the same tarball and checks this checksum
+// fail-closed before it unpacks anything.
 //
 // Nothing here decides to trust an update: images.lock is compiled into the mothership itself
 // (include_str! in src/presets.rs), so a digest bump is a binary change, and every pin lands as a
 // pull request that a person reads and merges.
 
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -34,6 +39,7 @@ const flag = (name) => args.includes(name);
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 const imagesPath = option('--images') ?? join(root, 'crates/colonizer/images.lock');
 const agentPath = option('--agent') ?? join(root, 'crates/colonizer/claude-code.lock');
+const understandAnythingPath = option('--understand-anything') ?? join(root, 'crates/colonizer/understand-anything.lock');
 
 // --check names the read-only mode the default already is, so CI can say what it means; it refuses
 // to travel with --write, which asks for the opposite.
@@ -45,10 +51,14 @@ if (flag('--check') && flag('--write')) {
 const REGISTRY = 'https://registry-1.docker.io/v2';
 const TOKEN = 'https://auth.docker.io/token?service=registry.docker.io&scope=repository';
 const ANTHROPIC = 'https://downloads.claude.ai/claude-code-releases';
+const UNDERSTAND_ANYTHING_REPO = 'Egonex-AI/Understand-Anything';
+const UNDERSTAND_ANYTHING_API = `https://api.github.com/repos/${UNDERSTAND_ANYTHING_REPO}`;
+const UNDERSTAND_ANYTHING_CODELOAD = `https://codeload.github.com/${UNDERSTAND_ANYTHING_REPO}/tar.gz`;
 const USER_AGENT = 'colonizer-runtime-pins';
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const VERSION = /^\d[\w.+-]*$/;
+const COMMIT = /^[0-9a-f]{40}$/;
 // The index types are the multi-arch ones; the single-manifest types are in Accept only so the
 // registry answers at all, and a single-manifest answer is rejected below rather than pinned.
 const INDEX_TYPES = 'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json';
@@ -163,6 +173,65 @@ async function releaseManifest(version) {
   return manifest;
 }
 
+/**
+ * The headers a GitHub request carries. The repository is public, so this works anonymously; the
+ * workflow's own token is used when there is one, which is the difference between 60 and 5000
+ * requests an hour.
+ */
+function githubHeaders() {
+  const headers = { accept: 'application/vnd.github+json', 'user-agent': USER_AGENT, 'x-github-api-version': '2022-11-28' };
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
+}
+
+/** The latest published release's tag, or the error GitHub gave. The pin moves on releases only. */
+async function latestReleaseTag() {
+  const response = await fetch(`${UNDERSTAND_ANYTHING_API}/releases/latest`, { headers: githubHeaders() });
+  if (!response.ok) throw new Error(`the latest ${UNDERSTAND_ANYTHING_REPO} release: HTTP ${response.status}`);
+  const tag = (await response.json())?.tag_name;
+  if (typeof tag !== 'string' || !tag.trim()) throw new Error('the latest release names no tag');
+  return tag.trim();
+}
+
+/**
+ * The commit a tag points at. codeload serves a tarball of a ref too, but the lock pins the commit
+ * so the URL cannot move under the checksum if the tag is ever repointed.
+ */
+async function commitOfTag(tag) {
+  const response = await fetch(`${UNDERSTAND_ANYTHING_API}/commits/${encodeURIComponent(tag)}`, { headers: githubHeaders() });
+  if (!response.ok) throw new Error(`the ${tag} commit: HTTP ${response.status}`);
+  const sha = (await response.json())?.sha;
+  if (!COMMIT.test(sha ?? '')) throw new Error(`${tag} resolved to no 40-hex commit (got ${JSON.stringify(sha)})`);
+  return sha;
+}
+
+/** The sha256 of the exact tarball the mothership downloads. Hashed here rather than trusted. */
+async function tarballSha(commit) {
+  const response = await fetch(`${UNDERSTAND_ANYTHING_CODELOAD}/${commit}`, { headers: { 'user-agent': USER_AGENT } });
+  if (!response.ok) throw new Error(`the ${commit} tarball: HTTP ${response.status}`);
+  return createHash('sha256').update(Buffer.from(await response.arrayBuffer())).digest('hex');
+}
+
+/**
+ * One understand-anything lock line as an object, or null when the line is not one. The row is the
+ * six lock columns: name, version (the upstream tag), platform `any`, kind, sha256, tarball URL.
+ */
+export function parseUnderstandAnythingLock(line) {
+  const text = String(line ?? '').trim();
+  if (!text || text.startsWith('#')) return null;
+  const [name, version, platform, kind, sha, url, ...rest] = text.split(/\s+/);
+  if (rest.length || name !== 'understand-anything' || !version || !platform || !kind) return null;
+  if (!SHA256.test(sha ?? '')) return null;
+  if (!/^https:\/\/codeload\.github\.com\//.test(url ?? '')) return null;
+  return { name, version, platform, kind, sha, url };
+}
+
+/** The lock line for a pin, in the column order parseUnderstandAnythingLock reads. */
+export function formatUnderstandAnythingLock({ version, sha, commit }) {
+  return ['understand-anything', version, 'any', 'source', sha, `${UNDERSTAND_ANYTHING_CODELOAD}/${commit}`].join('  ');
+}
+
 function parseLock(text, path) {
   const lines = text.split('\n');
   const entries = [];
@@ -173,6 +242,15 @@ function parseLock(text, path) {
     entries.push({ index, name, version, platform, kind, sha, url });
   });
   return { lines, entries };
+}
+
+/**
+ * A rewritten lock file keeps the trailing newline the hand-written one has. `parseLock` splits on
+ * `\n` and the rewrite joins on `\n`, so the file's own last line (empty, for a file ending in a
+ * newline) round-trips; this only puts it back for a lock file that somehow lost it.
+ */
+export function withTrailingNewline(text) {
+  return text.endsWith('\n') ? text : `${text}\n`;
 }
 
 /** The lock line with the new pin. Only the fields that moved change, so the header comments,
@@ -255,6 +333,41 @@ async function proposeAgent(lines, entries) {
   return rows.length ? [agentSection(rows, version)] : [];
 }
 
+function understandAnythingSection(entry, { version, sha, commit }) {
+  return [
+    `### \`understand-anything\`: ${entry.version} → [${version}](https://github.com/${UNDERSTAND_ANYTHING_REPO}/releases/tag/${version})`,
+    '',
+    `commit \`${entry.url.split('/').pop()}\` → \`${commit}\``,
+    '',
+    `sha256 \`${entry.sha}\` → \`${sha}\``,
+    '',
+    'The tarball of that commit was downloaded and hashed here; the mothership checks the same checksum before it unpacks anything, and refuses a download that does not match.',
+  ].join('\n');
+}
+
+async function proposeUnderstandAnything(lines, entries) {
+  const sections = [];
+  for (const entry of entries) {
+    const pinned = parseUnderstandAnythingLock(lines[entry.index]);
+    if (!pinned) throw new Error(`${UNDERSTAND_ANYTHING_REPO}: the lock row is not a six-column skillset row`);
+    const version = await latestReleaseTag();
+    const commit = await commitOfTag(version);
+    // Already on this commit: the checksum was computed against the same bytes the mothership would
+    // download, so there is nothing to say.
+    if (pinned.url.endsWith(`/${commit}`)) {
+      console.log(`${pinned.name} ${version}: current (${commit})`);
+      continue;
+    }
+    const sha = await tarballSha(commit);
+    console.log(`${pinned.name} ${pinned.version}/${pinned.sha.slice(0, 12)} -> ${version}/${sha.slice(0, 12)}`);
+    // The whole data line is rewritten: the version and the URL both move, and applyUpdate's
+    // field-by-field replace cannot put the commit in the URL. Header comments are untouched.
+    lines[entry.index] = formatUnderstandAnythingLock({ version, sha, commit });
+    sections.push(understandAnythingSection(pinned, { version, sha, commit }));
+  }
+  return sections;
+}
+
 async function main() {
   const read = (path) => {
     const text = readFileSync(path, 'utf8');
@@ -262,40 +375,72 @@ async function main() {
   };
   const images = read(imagesPath);
   const agent = read(agentPath);
-  // Everything resolves before anything writes: a failure above leaves both files untouched.
+  // The skillset lock is optional until the mothership ships it: a run without it only reports the
+  // other two pins, and nothing here invents a file that does not exist yet.
+  const understandAnything = existsSync(understandAnythingPath) ? read(understandAnythingPath) : null;
+  // Everything resolves before anything writes: a failure above leaves every file untouched.
   const sections = [
     ...(await proposeImages(images.lines, images.entries.filter((entry) => entry.kind === 'image'))),
     ...(await proposeAgent(agent.lines, agent.entries.filter((entry) => entry.kind === 'agent'))),
   ];
+  // The skillset comes from GitHub's API, which answers 403 to an unauthenticated or rate-limited
+  // request and 404 to a repository that moved. That says nothing about the other two pins, so this
+  // one is reported and stepped over rather than failing the whole run — under --check it simply
+  // cannot say whether the skillset moved, and says that instead of claiming a pin is current.
+  let understandAnythingFailure;
+  if (understandAnything) {
+    try {
+      sections.push(...(await proposeUnderstandAnything(understandAnything.lines, understandAnything.entries)));
+    } catch (error) {
+      understandAnythingFailure = error.message;
+      console.warn(`warning: ${UNDERSTAND_ANYTHING_REPO}: could not check the skillset pin: ${error.message}`);
+      console.warn('warning: the other runtime pins are unaffected; re-run with GITHUB_TOKEN to check the skillset too');
+    }
+  }
 
   const changed = sections.length > 0;
   if (changed && flag('--write')) {
     for (const [path, before, lines] of [
       [imagesPath, images, images.lines],
       [agentPath, agent, agent.lines],
+      // A run that failed part-way through the skillset rows has half of them rewritten in memory;
+      // writing that would pin a mixture of two releases, so the file is left exactly as it was.
+      ...(understandAnything && !understandAnythingFailure
+        ? [[understandAnythingPath, understandAnything, understandAnything.lines]]
+        : []),
     ]) {
       const after = lines.join('\n');
       if (after === before.text) continue;
-      writeFileSync(path, after);
+      writeFileSync(path, withTrailingNewline(after));
       console.log(`wrote ${relative(process.cwd(), path)}`);
     }
   }
   const summary = option('--summary');
   if (summary) {
+    const skipped = understandAnythingFailure
+      ? ['', `The \`understand-anything\` pin was not checked: ${understandAnythingFailure}. Re-run with \`GITHUB_TOKEN\` set, or run the script by hand.`]
+      : [];
     mkdirSync(dirname(summary), { recursive: true });
     writeFileSync(
       summary,
       changed
         ? [
-            'Upstream moved for these runtime pins. `crates/colonizer/images.lock` and `crates/colonizer/claude-code.lock` below pin the new digests and checksums.',
+            'Upstream moved for these runtime pins. `crates/colonizer/images.lock`, `crates/colonizer/claude-code.lock` and `crates/colonizer/understand-anything.lock` below pin the new digests, checksums and skillset release.',
             '',
             'These pins are what a release runs: images.lock is compiled into the mothership (include_str! in src/presets.rs), so a digest bump is a binary change, and every colony built from the next release boots the exact bytes the new digest names. Nothing here merges on its own — read the digest-to-digest diffs before merging.',
             '',
             ...sections,
+            ...skipped,
             '',
             '_Opened by `.github/workflows/runtime-pin-updates.yml`._',
           ].join('\n')
-        : 'Every runtime pin is at its upstream.\n',
+        : [
+            understandAnythingFailure
+              ? 'Every runtime pin this run could check is at its upstream.'
+              : 'Every runtime pin is at its upstream.',
+            ...skipped,
+            '',
+          ].join('\n'),
     );
   }
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed}\n`);
