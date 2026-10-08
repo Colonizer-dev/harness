@@ -46,6 +46,7 @@ use crate::{
     sessions::{self, NewSession, Session, SessionStatus},
     util::{truncate, valid_repo, write_atomic},
 };
+use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Query, State},
@@ -2449,7 +2450,7 @@ impl Ops for GhOps<'_> {
         }
         let body = dispatch_body(&d);
         let req: NewSession = serde_json::from_value(body).map_err(|e| format!("{e}"))?;
-        match sessions::create(State(self.app.clone()), None, Json(req)).await {
+        match sessions::create(State(self.app.clone()), None, HeaderMap::new(), Json(req)).await {
             Ok(Json(session)) => {
                 if let Dispatch::Redo { session: old, .. } = &d {
                     self.app

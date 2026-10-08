@@ -937,6 +937,8 @@ mod tests {
             origin: None,
             auto_note: None,
             launched_by_token: None,
+            external_ref: None,
+            idempotency_key: None,
             placement: None,
             worktree: "/home/me/.local/share/colonizer/worktrees/acme-corp/secret-project/issue-42-a1b2c3d4".into(),
             git_admin_dir: Some("/home/me/.local/share/colonizer/repos/git-admin".into()),

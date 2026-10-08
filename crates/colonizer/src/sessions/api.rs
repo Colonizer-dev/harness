@@ -13,12 +13,38 @@ use std::{collections::VecDeque, sync::LazyLock};
 pub(crate) struct ListQuery {
     limit: Option<String>,
     cursor: Option<String>,
+    /// The caller's own name for a colony (issue #901), matched exactly: `GET /api/sessions
+    /// ?external_ref=<ref>`. Absent, the query says nothing about it.
+    external_ref: Option<String>,
+    /// The launcher tag a colony was created with (`Some("burn_down")`, `Some("redteam")`, …),
+    /// matched exactly: `GET /api/sessions ?origin=<tag>`. Absent, the query says nothing about it.
+    origin: Option<String>,
 }
 
 impl ListQuery {
     /// Whether the query asks for a page at all: either field present changes the reply shape.
     fn paginated(&self) -> bool {
         self.limit.is_some() || self.cursor.is_some()
+    }
+
+    /// The two exact-match filters as `(field, value)` pairs, or `Err` naming the field that named
+    /// nothing: a filter sent blank is a **400**, never a filter that matches every colony (the
+    /// shape a client gets for a bad `cursor`, §7.7). Values are trimmed, so `?origin=%20redteam%20`
+    /// filters the way `?origin=redteam` does.
+    fn filters(&self) -> Result<Vec<(&'static str, &str)>, &'static str> {
+        let mut out = Vec::new();
+        for (field, value) in [
+            ("external_ref", self.external_ref.as_deref()),
+            ("origin", self.origin.as_deref()),
+        ] {
+            let Some(raw) = value else { continue };
+            let value = raw.trim();
+            if value.is_empty() {
+                return Err(field);
+            }
+            out.push((field, value));
+        }
+        Ok(out)
     }
 }
 
@@ -71,6 +97,23 @@ pub(crate) async fn visible_sessions(
     out
 }
 
+/// The colony an `Idempotency-Key` already created for this caller (issue #901): looked up through
+/// the same [`visible_sessions`] rule the list answers with, so a key can only ever hand back a
+/// colony the caller could already have read — a key that names one outside a scoped token's
+/// org/repo limits finds nothing, and the launch goes on as an ordinary new one. Newest first, as
+/// the list is: a key reused long after its colony was removed finds nothing here and starts a
+/// fresh colony.
+pub(crate) async fn session_by_idempotency_key(
+    app: &App,
+    scoped: Option<&axum::Extension<crate::api_tokens::ScopedToken>>,
+    key: &str,
+) -> Option<Session> {
+    visible_sessions(app, scoped)
+        .await
+        .into_iter()
+        .find(|session| session.idempotency_key.as_deref() == Some(key))
+}
+
 /// The colony list the cockpit's sockets read beside the HTTP one (`stream.rs`) and
 /// `diagnosis` builds on: the same newest-first, visibility-filtered `Session` array
 /// `GET /api/sessions` answers without pagination params, decorated, as the hub has always
@@ -81,6 +124,26 @@ pub(crate) async fn list_bare(
 ) -> Json<Vec<Session>> {
     let visible = visible_sessions(&app, scoped.as_ref()).await;
     Json(decorated(&app, visible).await)
+}
+
+/// The list narrowed by the query's `external_ref` / `origin` filters (issue #901), on top of the
+/// visibility filter rather than around it: a colony a scoped token may not read stays out of the
+/// answer whether or not it matches the filter. Matching is exact on the stored value, so a filter
+/// naming nothing finds nothing — an empty list, not an error.
+pub(crate) fn filtered(visible: Vec<Session>, query: &ListQuery) -> Result<Vec<Session>, &'static str> {
+    let filters = query.filters()?;
+    if filters.is_empty() {
+        return Ok(visible);
+    }
+    Ok(visible
+        .into_iter()
+        .filter(|session| {
+            filters.iter().all(|(field, value)| match *field {
+                "external_ref" => session.external_ref.as_deref() == Some(value),
+                _ => session.origin.as_deref() == Some(value),
+            })
+        })
+        .collect())
 }
 
 /// The visible list with each colony's live activity attached — the one decoration loop, so the
@@ -127,20 +190,30 @@ pub(crate) async fn paged_list(app: &App, visible: Vec<Session>, query: &ListQue
 
 /// The **400** `invalid_input` a malformed pagination query answers (§7.7): envelope when the
 /// request speaks UHP, Colonizer's string error with the code as a sibling otherwise.
-fn wrong_input(uhp: bool, headers: &HeaderMap, message: impl std::fmt::Display) -> Response {
+pub(crate) fn wrong_input(uhp: bool, headers: &HeaderMap, message: impl std::fmt::Display) -> Response {
     crate::uhp::error_for(uhp, headers, StatusCode::BAD_REQUEST, "invalid_input", message, None)
 }
 
 /// `GET /api/sessions`: the cockpit's bare array, newest first, unless the query asks for a page
 /// (`limit`/`cursor`, issue #651) — then `{"sessions": […], "next_cursor": …}`, the §7 shape,
-/// with the page's items alone decorated with their live activity.
+/// with the page's items alone decorated with their live activity. `external_ref` and `origin`
+/// (issue #901) narrow either shape; only `limit`/`cursor` change it.
 pub async fn list(
     State(app): State<Shared>,
     Query(query): Query<ListQuery>,
     headers: HeaderMap,
     scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
 ) -> Response {
-    let visible = visible_sessions(&app, scoped.as_ref()).await;
+    let visible = match filtered(visible_sessions(&app, scoped.as_ref()).await, &query) {
+        Ok(visible) => visible,
+        Err(field) => {
+            return wrong_input(
+                false,
+                &headers,
+                format!("`{field}` names nothing; send the value it filters on, or leave it out"),
+            );
+        }
+    };
     if !query.paginated() {
         return Json(decorated(&app, visible).await).into_response();
     }

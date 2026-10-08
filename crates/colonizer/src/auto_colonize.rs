@@ -35,6 +35,7 @@ use std::{
     time::Duration,
 };
 
+use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, State},
@@ -1295,7 +1296,7 @@ async fn sweep_repo(app: &Shared, state: &mut Memory, repo: &str, group: &[Found
         let Ok(new_session) = serde_json::from_value::<crate::sessions::NewSession>(body) else {
             continue;
         };
-        match crate::sessions::create(State(app.clone()), None, Json(new_session)).await {
+        match crate::sessions::create(State(app.clone()), None, HeaderMap::new(), Json(new_session)).await {
             Ok(Json(session)) => {
                 let note = format!("auto: trusted author @{}", verdict.author);
                 app.update_session(&session.id, |s| s.auto_note = Some(note.clone())).await;

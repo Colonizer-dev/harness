@@ -4,6 +4,7 @@
 use super::*;
 use crate::sessions::SessionStatus;
 use crate::sessions::tests::colony;
+use axum::http::HeaderMap;
 use chrono::TimeZone;
 
 // In-crate fixtures, named through the manifest dir so the path does not read as one that leaves
@@ -793,14 +794,14 @@ async fn the_loop_the_api_and_the_cli_give_the_same_answer_for_one_finding() {
     );
     assert_eq!(
         refused_holder(
-            sessions::create(State(app.clone()), None, Json(api_request(false))).await,
+            sessions::create(State(app.clone()), None, HeaderMap::new(), Json(api_request(false))).await,
             "the API"
         ),
         holder
     );
     assert_eq!(
         refused_holder(
-            sessions::create(State(app.clone()), None, Json(cli_request(false))).await,
+            sessions::create(State(app.clone()), None, HeaderMap::new(), Json(cli_request(false))).await,
             "the CLI"
         ),
         holder
@@ -812,7 +813,7 @@ async fn the_loop_the_api_and_the_cli_give_the_same_answer_for_one_finding() {
     let app = app_at(&dir);
     app.drain.enter();
     opt_in(&app, "acme").await;
-    let Json(hand) = sessions::create(State(app.clone()), None, Json(api_request(false)))
+    let Json(hand) = sessions::create(State(app.clone()), None, HeaderMap::new(), Json(api_request(false)))
         .await
         .unwrap();
     let sessions_now = app.sessions.read().await.clone();
@@ -836,24 +837,24 @@ async fn the_loop_the_api_and_the_cli_give_the_same_answer_for_one_finding() {
     );
     assert_eq!(
         refused_holder(
-            sessions::create(State(app.clone()), None, Json(api_request(false))).await,
+            sessions::create(State(app.clone()), None, HeaderMap::new(), Json(api_request(false))).await,
             "the API"
         ),
         hand.id
     );
     assert_eq!(
         refused_holder(
-            sessions::create(State(app.clone()), None, Json(cli_request(false))).await,
+            sessions::create(State(app.clone()), None, HeaderMap::new(), Json(cli_request(false))).await,
             "the CLI"
         ),
         hand.id
     );
     // The way out is the same everywhere a person launches.
-    let Json(again) = sessions::create(State(app.clone()), None, Json(api_request(true)))
+    let Json(again) = sessions::create(State(app.clone()), None, HeaderMap::new(), Json(api_request(true)))
         .await
         .unwrap_or_else(|e| panic!("allow_duplicate through the API: {}", e.message()));
     assert_ne!(again.id, hand.id, "a second colony through the API");
-    let Json(again) = sessions::create(State(app.clone()), None, Json(cli_request(true)))
+    let Json(again) = sessions::create(State(app.clone()), None, HeaderMap::new(), Json(cli_request(true)))
         .await
         .unwrap_or_else(|e| panic!("allow_duplicate through the CLI: {}", e.message()));
     assert_ne!(again.id, hand.id, "a second colony through the CLI");

@@ -79,6 +79,11 @@ pub struct NewSession {
     /// `Some("burn_down")` so `POST /api/burn-down/stop` can find them again.
     #[serde(default)]
     pub origin: Option<String>,
+    /// The caller's own stable name for this colony (issue #901): recorded on the `Session` as
+    /// `external_ref`, never changed afterwards, and what `GET /api/sessions ?external_ref=`
+    /// filters on. Blank or over-long is a **400**.
+    #[serde(default)]
+    pub external_ref: Option<String>,
     /// Pin this colony to a named fleet member (issue #688): its id or its display name, or this
     /// member's own. Cross-member execution is not built yet, so a pin to a peer is refused with the
     /// reason; omitting it lets placement pick a member and record why, without moving the colony.
@@ -294,10 +299,48 @@ pub(crate) fn verify_default(agents: &[AgentModule], modules: &ModulesConfig) ->
     setting_str(&modules.publish, &schema, "verify")
 }
 
+/// The longest caller-chosen identifier `POST /api/sessions` accepts, for `external_ref` in the
+/// body and for the `Idempotency-Key` header alike (issue #901): a ticket or request id with room
+/// to spare, and short enough that it can never be mistaken for a path or a colony id. Both are
+/// recorded verbatim on the `Session` and matched exactly by the list filters, so neither needs a
+/// shape of its own beyond "not blank, not absurdly long".
+const MAX_CALLER_REF: usize = 200;
+
+/// One caller-chosen identifier as it is stored: trimmed, and refused when it is blank, longer than
+/// [`MAX_CALLER_REF`] characters, or carries a control character — the last because the value ends
+/// up in a JSON record, a log line and a query string, none of which should carry one.
+fn caller_ref(raw: &str, what: &str) -> Result<String, crate::AppError> {
+    let value = raw.trim();
+    let blank = value.is_empty();
+    if blank || value.chars().any(char::is_control) || value.chars().count() > MAX_CALLER_REF {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("`{what}` must be 1 to {MAX_CALLER_REF} printable characters"),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// The `Idempotency-Key` header of a create (issue #901), cleaned: `Ok(None)` when the request
+/// carries none at all, and the stored value when it carries a usable one. A header that is present
+/// but unusable — blank, non-ASCII, too long — is a **400** naming it, never read as "no key": a
+/// client that sent a key it cannot get back is a client that will retry into a second colony.
+/// Header bytes that are not visible ASCII never decode to a valid `HeaderValue` in the first place.
+fn idempotency_key(headers: &axum::http::HeaderMap) -> Result<Option<String>, crate::AppError> {
+    let Some(raw) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|_| client_error(StatusCode::BAD_REQUEST, "`Idempotency-Key` must be printable ASCII"))?;
+    caller_ref(raw, "Idempotency-Key").map(Some)
+}
+
 #[allow(clippy::result_large_err)]
 pub async fn create(
     State(app): State<Shared>,
     scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<NewSession>,
 ) -> ApiResult<Session> {
     let repo = req.repo.trim().to_string();
@@ -319,6 +362,37 @@ pub async fn create(
             StatusCode::FORBIDDEN,
             &format!("this API token's org/repo limits do not include {repo}"),
         ));
+    }
+    // Issue #901: the caller's own name for this colony, and the key that makes a retry safe. Both
+    // are checked before anything expensive, so a bad one is a plain **400** rather than a launch
+    // refused halfway.
+    let external_ref = req
+        .external_ref
+        .as_deref()
+        .map(|raw| caller_ref(raw, "external_ref"))
+        .transpose()?;
+    let key = idempotency_key(&headers)?;
+    // A repeat of a key answers the colony that key created, without spending a launch. Asked
+    // through the list's own visibility rule with this request's own scoped token, so a key names
+    // nothing for a caller that could not have read the colony anyway. Asked before the caps below,
+    // because a retry of a launch that already happened is not a new launch and must not be
+    // charged one.
+    let scoped_token = scoped.clone().map(axum::Extension);
+    if let Some(key) = key.as_deref()
+        && let Some(existing) = super::api::session_by_idempotency_key(&app, scoped_token.as_ref(), key).await
+    {
+        // The same key on a different repository is not a retry, it is a second colony that would
+        // have been silently swallowed by the first: say so rather than answer with the wrong one.
+        if existing.repo != repo {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                &format!(
+                    "this `Idempotency-Key` already created colony {} on {}; use a new key to start one on {repo}",
+                    existing.id, existing.repo
+                ),
+            ));
+        }
+        return Ok(Json(existing));
     }
     if let Some(token) = &scoped
         && let Some(reason) = crate::api_tokens::launch_cap_error(token, &app.sessions.read().await, Utc::now())
@@ -580,6 +654,10 @@ pub async fn create(
         origin: req.origin.clone(),
         auto_note: None,
         launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
+        // Issue #901: the caller's own name for this colony, and the key a retry finds it by.
+        // Both taken from the request and never changed afterwards.
+        external_ref,
+        idempotency_key: key,
         placement: Some(placement_reason),
         worktree: app
             .cfg
