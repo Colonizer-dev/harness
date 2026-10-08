@@ -664,7 +664,8 @@ enum TokenCommand {
     Create {
         /// A name that says who uses it ("ci", "rachel's assistant")
         name: String,
-        /// How much it may do: read (watch), operate (answer, stop, resume), launch (start colonies)
+        /// How much it may do: read (watch), operate (answer, stop, resume),
+        /// launch (start colonies, publish a branch or pull request, file an issue)
         #[arg(long, value_enum)]
         scope: TokenScope,
         /// Limit it to these orgs (repeat the flag); none listed means no limit

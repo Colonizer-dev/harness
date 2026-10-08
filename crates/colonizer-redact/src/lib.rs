@@ -861,6 +861,18 @@ fn is_secret_value(value: &str, quoted: bool) -> bool {
         if identifier_path {
             return false;
         }
+        // A comparison between two identifiers (`session>=read`, `repo>=launch`): code, not a value.
+        if v.split_once(">=").is_some_and(|(a, b)| {
+            let operand = |p: &str| {
+                !p.is_empty()
+                    && p.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                    && p.bytes()
+                        .all(|c| c.is_ascii_alphabetic() || matches!(c, b'_' | b'-' | b'?' | b'!' | b'>'))
+            };
+            operand(a) && operand(b)
+        }) {
+            return false;
+        }
     }
     true
 }
@@ -1366,6 +1378,10 @@ mod tests {
             r#"label={auth === "bearer" ? "Token" : "API key"} and the token is a secret: owner-only"#,
             "const B64: &[u8] = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";",
             "tailscale up --auth-key=file:/colonizer/mesh-authkey",
+            "/api/sessions/{id}/publish  POST  unauth=401  token=session>=launch  activity=colony.publish",
+            "token=session>=read unauth=401 activity=sessions.read",
+            "token=session>=operate token=response>=read",
+            "token=repo>=launch token=colony>=operate",
         ];
         for line in untouched {
             assert_eq!(r(line), line, "left alone");
@@ -1380,6 +1396,17 @@ mod tests {
             !redact_value(&mut ids),
             "identifier and signature fields skip the entropy layer: {ids}"
         );
+    }
+
+    #[test]
+    fn a_comparison_suffix_does_not_exempt_a_credential() {
+        check(&[
+            ("token=abcdefghabcdefghabcdefgh==", "abcdefghabcdefghabcdefgh==", "token"),
+            ("token=hunter22>=read", "hunter22>=read", "token"),
+            // The key rule wins over the AWS prefix here, and it takes `>=read` with it.
+            ("token=AKIAIOSFODNN7EXAMPLF>=read", "AKIAIOSFODNN7EXAMPLF>=read", "token"),
+            ("token=dXNlcjpwYXNzd29yZA==>=read", "dXNlcjpwYXNzd29yZA==>=read", "token"),
+        ]);
     }
 
     #[test]

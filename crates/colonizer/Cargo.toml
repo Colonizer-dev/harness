@@ -37,7 +37,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10"
 # Secret redaction (crate::redact): its own crate so the observability add-on shares the detectors.
 # The version is required to publish this crate; the two are released together.
-colonizer-redact = { version = "0.2.14", path = "../colonizer-redact" }
+colonizer-redact = { version = "0.2.15", path = "../colonizer-redact" }
 # Cratefield's module-telemetry (Cratefield/harness#413): the payload grammar the usage batch is
 # validated with (`payload::Batch::parse`) and the consent helpers. Published on crates.io, so
 # colonizer can publish too (#741); the wire contract is docs/usage-data.md. The collector half runs on
