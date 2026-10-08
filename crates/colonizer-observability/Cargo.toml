@@ -3,7 +3,7 @@ name = "colonizer-observability"
 # Versioned with colonizer-harness: the mothership checks the add-on's version before it spawns it
 # (docs/design/observability.md, Contract). Not published to crates.io; it ships as its own release
 # tarball, so the mothership never links OpenTelemetry or protobuf code.
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 description = "Colonizer's observability add-on: OTLP export of a mothership's logs, traces and metrics"
 license = "MIT"
@@ -20,7 +20,7 @@ name = "colonizer-observability"
 path = "src/main.rs"
 
 [dependencies]
-colonizer-redact = { version = "0.2.12", path = "../colonizer-redact" }
+colonizer-redact = { version = "0.2.13", path = "../colonizer-redact" }
 # gzip for OTLP/HTTP `Content-Encoding: gzip`.
 flate2 = "1"
 # The OTLP messages only: no SDK, no tonic client (`gen-tonic-messages` is prost structs alone).

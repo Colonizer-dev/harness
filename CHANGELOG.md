@@ -18,6 +18,17 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.13] - 2026-10-07
+
+### Changed
+
+- **Every menu has the Spotlight look, and chat is one key away.** The model menu, Colonize, the workspace switcher, the notifications and the composer's repository picker are now built on one frosted `SpotlightPanel` (a search box, sections with small headers, a solid accent selection row, a footer of key hints, ↑ ↓ ⇥ ↵ and Esc the same everywhere, a bottom sheet on a phone). The model menu lists Roles, Providers (credits and reset) and Quick switches; Colonize is one panel with the task box, repository, model and options as chips; workspaces are grouped as Pinned, Recent and All; notifications as Needs you, Updates and Done. A new round Ask button (and ⌘J / Ctrl-J) opens a compact chat panel on every view but Chat, with the colony you are on attached, and a colony page gets an "Ask about this colony" action. Settings still merge and every call is unchanged. ([#1228])
+
+### Fixed
+
+- **Checking the placeholder dotfiles no longer puts a finished colony on a security hold.** The exec policy's `secret-paths` rule now also lets through commands that only learn a secret path's name or size: `stat`, `wc -c`, `test -s` and `[ -s x ]` join `git check-ignore`, `ls` and `test -e`, and such a command may fold stderr in with `2>&1`, discard output to `/dev/null` and pipe into `head`, `tail`, `sort`, `uniq` or `wc` (with no path of their own). Anything that reads the bytes (`cat`, `head .env`, `grep`, `cp`, `source`, `base64`, `wc -l`, a pipe into `cat` or `xargs`) is still refused. An exec-policy denial now names the path its rule matched as its target instead of the first path in the command, so `cd /workspace && …` no longer makes the workspace root the refused target. The watchdog's deny-then-reach signature resolves paths against the workspace and counts a later call only when it names the refused path, something under it or a glob that matches it; a call that only names an ancestor (`cd /workspace`, `ls /workspace`) does not, and neither does a write to the colony's own `/harness/out` after a refusal there. ([#1079], [#1153])
+- **A test the colony broke gets a fix round even when the base commit fails the same check for another reason.** Verification used to compare the head with the base commit check by check, so when `cargo test` failed on the base for any reason, a different test failing only on the colony's branch counted as preexisting and the colony was parked with `preexisting_failure` instead of being sent the failure. It now compares the failing tests themselves wherever the run names them (cargo's `test … FAILED` lines and closing `failures:` list, vitest and jest marks, node --test's `✖`, durations ignored), and falls back to the check only when a side names none. A test failing on the branch alone contradicts the claim and is sent for a fix round, and a fix round is sent whenever the change has a failure of its own, even if another check is inconclusive. A colony is held as `preexisting_failure` only when every failure is shared with the base, and the hold now names the checks and tests that fail there. ([#1231])
+
 ## [v0.2.12] - 2026-10-07
 
 ### Added
@@ -2848,6 +2859,7 @@ Macs. ([#74])
 [#1062]: https://github.com/Colonizer-dev/harness/issues/1062
 [#1074]: https://github.com/Colonizer-dev/harness/issues/1074
 [#1075]: https://github.com/Colonizer-dev/harness/issues/1075
+[#1079]: https://github.com/Colonizer-dev/harness/issues/1079
 [#1083]: https://github.com/Colonizer-dev/harness/issues/1083
 [#1084]: https://github.com/Colonizer-dev/harness/issues/1084
 [#1086]: https://github.com/Colonizer-dev/harness/issues/1086
@@ -2865,6 +2877,7 @@ Macs. ([#74])
 [#1143]: https://github.com/Colonizer-dev/harness/issues/1143
 [#1144]: https://github.com/Colonizer-dev/harness/issues/1144
 [#1145]: https://github.com/Colonizer-dev/harness/issues/1145
+[#1153]: https://github.com/Colonizer-dev/harness/issues/1153
 [#1156]: https://github.com/Colonizer-dev/harness/issues/1156
 [#1158]: https://github.com/Colonizer-dev/harness/issues/1158
 [#1166]: https://github.com/Colonizer-dev/harness/issues/1166
@@ -2891,6 +2904,9 @@ Macs. ([#74])
 [#1217]: https://github.com/Colonizer-dev/harness/issues/1217
 [#1218]: https://github.com/Colonizer-dev/harness/issues/1218
 [#1219]: https://github.com/Colonizer-dev/harness/issues/1219
+[#1228]: https://github.com/Colonizer-dev/harness/issues/1228
+[#1231]: https://github.com/Colonizer-dev/harness/issues/1231
+[v0.2.13]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.13
 [v0.2.12]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.12
 [v0.2.11]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.11
 [v0.2.10]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.10
