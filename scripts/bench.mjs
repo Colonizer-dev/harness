@@ -12,6 +12,7 @@
 //   node scripts/bench.mjs jev bench-before.json bench-after.json   # grade Jev compaction across the runs
 //   node scripts/bench.mjs brief bench-before.json bench-after.json  # grade Jev's boot brief picks against use
 //   node scripts/bench.mjs routing [--threshold 0.8] [--json]       # the tier rule against Jev's second opinion
+//   node scripts/bench.mjs rate bench-*.json [--json]         # resolved rate by harness · model, stage by stage
 //   node scripts/bench.mjs clean --repo owner/bench-repo    # close the bench's PRs and delete their branches
 //
 // `routing` reads <data dir>/routing.jsonl and sessions.json (`--data`, else COLONIZER_DATA_DIR, else
@@ -26,6 +27,14 @@
 // rule) and grades the shadow boot brief of #585: the notes and skill packs Jev picked against the ones the
 // colony was later seen to use, per colony, per run and overall. Mandatory notes (always loaded, never
 // offered) are out of the universe; precision over no picks and recall over no uses read as undefined.
+//
+// `rate` reads `<data dir>/sessions.json` (same `--data`/COLONIZER_DATA_DIR/`~/.local/share/colonizer`
+// rule) and, when they are given, the `results` of the bench run files named on the command line; with no
+// files it reads the session store alone. It counts the two sources separately and groups each by the
+// harness that ran it and the model it resolved to (#912) — `compare` prints that pair per task and never
+// adds it up. Three stages, each counted on its own denominator: a pull request opened, that pull
+// request's checks green, and the pull request merged. A stage a record cannot speak for is not a failure
+// of it: a run that never got one reads –, not 0.
 //
 // `run` needs a mothership on COLONIZER_URL (default http://127.0.0.1:7878) with GitHub and an agent
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
@@ -906,6 +915,120 @@ function clean(repo) {
   if (prs.length === 0) console.log('nothing to close');
 }
 
+// ------------------------------------------------------------------------------------------------- rate
+
+// Resolved rate by harness · model (#912): `compare` prints a Harness · model column per task but never
+// adds it up. This adds it up, over two sources read separately — the colonies' own sessions.json and any
+// bench run files named on the command line — through three stages a colony has to pass to be resolved:
+// a pull request opened, that pull request's checks green, and the pull request merged. A stage is only
+// counted where it was observable at all; a run that never reached one reads –, not a zero it never had
+// a chance at.
+
+// Per source, per stage: `observable` is whether the record can say anything about the stage, `green`
+// whether it did. The bench scores the check itself (`visible`), so it can measure a green its colony
+// never saw; a colony learns it from the pull request's own CI (`ci_state`).
+
+// A colony in one of these is still moving, so it has not had its chance at any of the three stages yet:
+// counting it as "no pull request", "checks not green" or "not merged" would be measuring the clock, not
+// the model. The same gate covers all three — a colony still running has not reached "tests green" or
+// "merged" either. Only a status the store can actually leave a colony in when its run is over
+// (`SessionStatus::is_terminal` in crates/colonizer/src/sessions/model.rs: pr_opened, merged, closed,
+// no_changes, stopped, failed) says anything about any of the three. Everything else — the seven in
+// flight, `parked`, and a status missing or unknown — reads as unmeasured rather than as a failure, for
+// the same reason `–` exists everywhere else in this file.
+const COLONY_SETTLED = new Set(['pr_opened', 'merged', 'closed', 'no_changes', 'stopped', 'failed']);
+const colonySettled = (r) => COLONY_SETTLED.has(r.status);
+
+const RATE_STAGES = {
+  bench: {
+    // A bench row ran its task to a scored result, so the pull-request stage is observable for every one
+    // of them; only whether the colony got as far as opening one is in question.
+    pr_opened: { observable: () => true, green: (r) => r.pr_url != null },
+    tests_green: { observable: (r) => r.visible != null, green: (r) => r.visible === true },
+    merged: { observable: (r) => r.status != null || r.merged_at != null, green: (r) => r.status === 'merged' || r.merged_at != null },
+  },
+  colonies: {
+    pr_opened: { observable: colonySettled, green: (r) => r.pr_url != null || r.pr_opened_at != null },
+    tests_green: { observable: (r) => colonySettled(r) && r.ci_state != null, green: (r) => r.ci_state === 'success' },
+    merged: { observable: (r) => colonySettled(r) || r.merged_at != null, green: (r) => r.status === 'merged' || r.merged_at != null },
+  },
+};
+
+const RATE_STAGE_KEYS = ['pr_opened', 'tests_green', 'merged'];
+
+const emptyStages = () => Object.fromEntries(RATE_STAGE_KEYS.map((k) => [k, { green: 0, measured: 0 }]));
+
+/** Resolved rate per (harness, model, source). `records` are the two sources read already, each carrying
+ *  its own `source` ('bench' or 'colonies') — a bench result row and a session record side by side, since
+ *  they answer the same three stages from different evidence. The model is a launch override, else what
+ *  boot recorded the routing as, else the model's own name: null renders –, never a guess. A tier is a
+ *  label, not a model, so it never stands in for one (same rule as the `compare` rows above). */
+export function rateReport(records) {
+  const groups = new Map();
+  for (const r of records ?? []) {
+    if (!r || typeof r !== 'object') continue;
+    const source = r.source === 'bench' ? 'bench' : 'colonies';
+    const harness = r.agent ?? null;
+    const model = r.model_override ?? r.model_routing?.model ?? r.model ?? null;
+    const key = `${source} ${harness ?? ''} ${model ?? ''}`;
+    if (!groups.has(key)) groups.set(key, { harness, model, source, n: 0, stages: emptyStages() });
+    const g = groups.get(key);
+    g.n += 1;
+    for (const stage of RATE_STAGE_KEYS) {
+      const { observable, green } = RATE_STAGES[source][stage];
+      if (!observable(r)) continue;
+      g.stages[stage].measured += 1;
+      if (green(r)) g.stages[stage].green += 1;
+    }
+  }
+  // Biggest sample first, then by name: the same table every run, whatever order the records came in.
+  const out = [...groups.values()].sort((a, b) => b.n - a.n || (a.harness ?? '').localeCompare(b.harness ?? '') || (a.model ?? '').localeCompare(b.model ?? ''));
+  // The overall row pools the counts and recomputes from the pooled numbers — never an average of the
+  // per-group rates, which would weight a group of one the same as a group of twenty (see `pool` above).
+  const overall = { n: 0, stages: emptyStages() };
+  for (const g of out) {
+    overall.n += g.n;
+    for (const stage of RATE_STAGE_KEYS) {
+      overall.stages[stage].green += g.stages[stage].green;
+      overall.stages[stage].measured += g.stages[stage].measured;
+    }
+  }
+  return { groups: out, overall };
+}
+
+/** The rate table: one row per harness · model · source, a total pooled over them, and the caveats that
+ *  say what the numbers cannot say. */
+export function formatRateReport(report) {
+  const cell = (s) => (s.measured ? `${s.green}/${s.measured} (${pct(s.green / s.measured)})` : '–');
+  const head = ['Harness · model', 'Source', 'Colonies', 'PR opened', 'Tests green', 'Merged'];
+  const line = (cells) => `| ${cells.join(' | ')} |`;
+  const row = (label, source, g) => [label, source, g.n, ...RATE_STAGE_KEYS.map((k) => cell(g.stages[k]))];
+  const colonies = report.groups.filter((g) => g.source === 'colonies').reduce((n, g) => n + g.n, 0);
+  const bench = report.groups.filter((g) => g.source === 'bench').reduce((n, g) => n + g.n, 0);
+  const stages = [...report.groups.map((g) => g.stages), report.overall.stages];
+  const caveats = [];
+  if (stages.some((s) => RATE_STAGE_KEYS.some((k) => s[k].measured === 0))) {
+    caveats.push('A stage nothing was measured for reads –, not 0: a stage that never ran is not a stage that failed.');
+  }
+  if (report.groups.some((g) => g.source === 'bench')) {
+    caveats.push('For bench rows "tests green" is the bench\'s own hidden check, not the scratch repository\'s CI: the bench repository has no CI, so the bench can only measure a model that passed the check the colony could not read.');
+    caveats.push('The bench never merges — `clean` closes its pull requests — so the Merged column of a bench row reads 0 unless the merge loop got to it first. Only colonies merge.');
+  }
+  caveats.push('One colony is one sample; treat small differences as noise.');
+  return [
+    '# Resolved rate by harness · model',
+    '',
+    `${colonies} colonies and ${bench} bench tasks, counted separately: a pull request opened, that pull request's checks green, and the pull request merged.`,
+    '',
+    line(head),
+    line(head.map(() => '---')),
+    ...report.groups.map((g) => line(row(`${g.harness ?? '–'} · ${g.model ?? '–'}`, g.source, g))),
+    ...(report.groups.length ? [line(row('–', 'overall', report.overall))] : []),
+    '',
+    caveats.join(' '),
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------------------------- command
 
 export function parseArgs(argv) {
@@ -993,6 +1116,24 @@ async function main() {
     console.log(args.json ? JSON.stringify(report, null, 2) : formatRoutingReport(report));
     return;
   }
+  if (args.command === 'rate') {
+    // Two sources, read separately and never mixed: the colony session store, and any bench run files
+    // named on the command line. With no files it reads the sessions alone.
+    let sessions = [];
+    try {
+      const parsed = JSON.parse(readFileSync(join(dataDirOf(args), 'sessions.json'), 'utf8'));
+      if (Array.isArray(parsed)) sessions = parsed;
+    } catch {
+      // No sessions.json: only the bench files, if any, have anything to say.
+    }
+    const records = [
+      ...sessions.map((s) => ({ source: 'colonies', ...s })),
+      ...args.files.flatMap((f) => (JSON.parse(readFileSync(f, 'utf8')).results ?? []).map((r) => ({ source: 'bench', ...r }))),
+    ];
+    const report = rateReport(records);
+    console.log(args.json ? JSON.stringify(report, null, 2) : formatRateReport(report));
+    return;
+  }
   if (args.command === 'brief') {
     const rows = readJsonLines(join(dataDirOf(args), 'brief_picks.jsonl'));
     const report = briefReport(rows, args.files.map((f) => JSON.parse(readFileSync(f, 'utf8'))));
@@ -1013,7 +1154,7 @@ async function main() {
     }
     return;
   }
-  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, brief, routing or clean');
+  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, brief, routing, rate or clean');
   if (!args.repo) throw new Error('run needs --repo owner/name');
 
   const issues = benchIssues(args.repo);
