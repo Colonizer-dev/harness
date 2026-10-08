@@ -305,6 +305,12 @@ enum Command {
         #[command(subcommand)]
         command: TokenCommand,
     },
+    /// Manage the public feed's read-only keys (issue #895). Local: it reads and writes the config
+    /// dir, no mothership and no token
+    FeedKey {
+        #[command(subcommand)]
+        command: FeedKeyCommand,
+    },
     /// Export this machine's stats, logs and colony history, or import another machine's (issue #687)
     Fleet {
         #[command(subcommand)]
@@ -673,6 +679,31 @@ enum TokenCommand {
         budget_usd_per_day: Option<f64>,
     },
     /// Revoke a token. Presentations of it stop authenticating at once.
+    Revoke { id: String },
+}
+
+/// The `feed-key` subcommands. They run locally off the settings — the keys live in the config dir
+/// and are read per request, so a key made here is live without a restart.
+#[derive(Subcommand, Debug)]
+enum FeedKeyCommand {
+    /// List every feed key's metadata. The plaintext is never here; it was shown once, at creation.
+    List,
+    /// Mint a feed key. The plaintext is printed once and cannot be shown again.
+    Create {
+        /// A name that says who uses it ("colony-map.example"). A flag rather than `token create`'s
+        /// positional: this name is a label a site is looked up by later, and it reads better beside
+        /// `--ip` and `--rate` than as a bare word whose position has to be remembered
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        /// Only allow these addresses, as an address or a CIDR block (repeat the flag); none listed
+        /// means any address
+        #[arg(long, value_name = "IP_OR_CIDR")]
+        ip: Vec<String>,
+        /// How many requests a minute the key may make
+        #[arg(long, value_name = "N")]
+        rate: Option<u32>,
+    },
+    /// Revoke a feed key. Presentations of it stop authenticating at once.
     Revoke { id: String },
 }
 
@@ -1904,6 +1935,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
         Command::Loop { command } => loop_command(cli, command).await,
         Command::Redteam { command } => redteam_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
+        Command::FeedKey { command } => {
+            let cfg = match Settings::from_env() {
+                Ok(cfg) => cfg,
+                Err(e) => return await_local(Err(e)),
+            };
+            await_local(feed_key_command(&cfg.config_dir, command, cli.json))
+        }
         Command::Fleet {
             command:
                 FleetCommand::Sync {
@@ -2236,6 +2274,76 @@ async fn token_command(cli: &Cli, command: TokenCommand) -> i32 {
         }
     })
     .await
+}
+
+/// `colonizer feed-key`: mint, list and revoke the public feed's read-only keys (issue #895).
+///
+/// Local on purpose. The keys live in `<config_dir>/feed-keys.json` and the feed reads that file
+/// per request, so a key made or revoked here takes effect at once — with no mothership running
+/// and no token held, which is the whole point of a credential an external site can carry.
+fn feed_key_command(config_dir: &std::path::Path, command: FeedKeyCommand, json: bool) -> Result<()> {
+    match command {
+        FeedKeyCommand::List => {
+            let keys = crate::public_feed::keys::list(config_dir);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&keys).map_err(|e| anyhow::anyhow!("could not serialise the feed keys: {e}"))?
+                );
+                return Ok(());
+            }
+            // A person sees a word, a script sees an empty stdout and a 0.
+            if keys.is_empty() {
+                eprintln!("no feed keys");
+                return Ok(());
+            }
+            for key in keys {
+                let created = key.created_at.to_rfc3339().get(..10).unwrap_or("?").to_string();
+                println!(
+                    "{:<14} {:<24} {:<10} {:<28} rate/min {:<5} created {created}",
+                    key.id,
+                    util::truncate(&key.name, 24),
+                    if key.revoked_at.is_some() { "revoked" } else { "live" },
+                    if key.ip_allowlist.is_empty() {
+                        "any address".to_string()
+                    } else {
+                        key.ip_allowlist.join(",")
+                    },
+                    key.rate_limit_per_minute,
+                );
+            }
+            Ok(())
+        }
+        FeedKeyCommand::Create { name, ip, rate } => {
+            let (plaintext, meta) = crate::public_feed::keys::create(
+                config_dir,
+                crate::public_feed::keys::NewKey {
+                    name,
+                    ip_allowlist: ip,
+                    rate_limit_per_minute: rate,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                let created = serde_json::json!({ "key": plaintext, "meta": meta });
+                println!("{}", pretty(&created)?);
+            } else {
+                // The plaintext on stdout (pipe-able), the warning where a person reads.
+                println!("{plaintext}");
+                eprintln!("this is the only time the key is shown; store it now — it cannot be read back");
+            }
+            Ok(())
+        }
+        FeedKeyCommand::Revoke { id } => {
+            if crate::public_feed::keys::revoke(config_dir, &id).is_none() {
+                return Err(anyhow::anyhow!("no feed key {id}"));
+            }
+            if !json {
+                println!("feed key {id} revoked");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// The org/repo limits a `token list` line shows: `*/*` when there are none.
