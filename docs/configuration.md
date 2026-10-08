@@ -116,4 +116,12 @@ which you write and Colonizer only reads — a missing file means the defaults:
 # for a user account that is the ID-prefixed noreply form. An unreadable or malformed file
 # falls back to the defaults, so co-author stays on.
 co_author = true
+
+# Whether a published commit and pull request name the Colonizer version, the settler (the
+# agent module that ran) and the model, as `Colonizer-Version` / `Colonizer-Settler` /
+# `Colonizer-Model` trailers on the commit and a small table in the pull request body. On by
+# default, so a maintainer can see and filter the automated work with an ordinary `git log
+# --grep`; `false` turns both off for a repository that does not want them. The model line is
+# left out when no model is recorded for the colony, rather than written empty.
+label_provenance = true
 ```
