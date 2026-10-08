@@ -366,7 +366,7 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | :--- | :--- |
 | `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}` and its `/question`, `/diff`, `/commits`, `/transcript` and `/files` (listing, archive, content) reads, `POST /api/sessions/{id}/seen`, `GET /api/loops`, `/api/loops/{id}/runs` and `/api/loops/{id}/history`, the built-in loops' `GET /api/merge-train`, `/api/merge-train/loop`, `/api/supply-chain-loop` and `/api/ts-any-loop`, the events WebSocket, the `/api/maps/…` reads, the `/uhp/v1/…` reads, and `GET /api/tokens/self` |
 | `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm`, and the UHP cancels `POST /uhp/v1/sessions/{id}/cancel` and `/uhp/v1/responses/{id}/cancel`; and manage its own webhook subscriptions, `GET/POST /api/webhooks` and `DELETE /api/webhooks/{id}`, which receive only events about colonies within its limits ([webhooks](protocol/webhooks.md#subscriptions)) |
-| `launch` | Start colonies: `POST /api/sessions` and `POST /uhp/v1/responses`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
+| `launch` | The writes that leave the machine. Start a colony (`POST /api/sessions`, `POST /uhp/v1/responses`) or keep one recurring (create, edit, delete and run its own loops: `POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`); publish one — the branch push and the pull request (`POST /api/sessions/{id}/publish`); and file an issue on a repository its limits cover (`POST /api/repos/{owner}/{repo}/issues`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
 for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
@@ -374,8 +374,8 @@ for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
 preview proxy under `/api/previews/{id}/…`, and the history push's `POST /api/fleet/peer/rows` and
 `PUT /api/fleet/peer/payloads/{sha256}`.
 
-Everything else is the owner's at any scope — token management itself, settings, secrets, and
-publishing. The enforcement is the same for every client of the API, the CLI included.
+Everything else is the owner's at any scope — token management itself, settings, and secrets.
+The enforcement is the same for every client of the API, the CLI included.
 
 A launch token may keep its recurring work in loops: a loop it creates records the token, and each
 run is admitted against the token's org/repo limits, concurrency cap and daily budget and marked as
@@ -389,7 +389,8 @@ map loop (whose runs launch outside any token's caps) is the owner's alone.
   matches its repository's owner *and* a `--repo` entry matches its repository, each empty list
   meaning no limit of that kind. A colony or map outside the limits answers **404**, exactly like
   an unknown id — the list is filtered to them, and the token can probe nothing. A launch naming
-  a repository outside the limits is **403** before anything starts.
+  a repository outside the limits is **403** before anything starts, and so is filing an issue on
+  one: that path names the repository itself, so there is nothing left to hide.
 - **The caps** refuse a launch with the reason (exit 6): `max_concurrent` counts the token's
   colonies that are not yet finished — queued ones hold a place — and `budget_usd_per_day` sums
   what its colonies created today (UTC) have spent so far.
