@@ -830,7 +830,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "on_quota": {"type": "boolean", "title": "When a provider runs out of quota", "description": "One line per provider whose plan ran out while colonies wait on it — its name, how many colonies wait and when it resets — not one per colony. Opens the Inbox card that switches, waits or stops them", "default": true},
                 "on_lifecycle": {"type": "boolean", "title": "Send every colony lifecycle event to the webhook", "description": "One webhook event per status change — queued, started, running, idle, answered, publishing, merged, closed, no changes, parked, resumed, stopped, cleaned — besides the ones above. Webhook only, never the desktop or a phone, and never rate-limited, so a receiver can keep an exact record", "default": false},
                 "desktop": {"type": "boolean", "title": "Desktop notifications", "description": "Notify the desktop the mothership runs on. Does nothing over SSH or on a headless machine, and says so once in the log", "default": false},
-                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and it is unsigned unless a signing secret is set in Settings", "default": ""}
+                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and every note is signed with the signing secret in Settings, which this URL cannot be saved without", "default": ""}
             }}),
         )],
         "burn_down" => vec![p(
@@ -986,6 +986,27 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
         }
         crate::observability::settings::validate(&provider.id, &stored, &effective, req.enabled, req.confirm_content)
             .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    }
+    // The owner's webhook URL needs a signing secret (issue #900): every delivery carries a
+    // signature, so a URL saved without one is an address whose notes anybody who can read the
+    // request could forge. An unchanged URL is let through, which is what keeps an install that
+    // upgraded with an unsigned webhook editable — it can still save its other notify settings, and
+    // can still turn the webhook off by clearing the URL. Not skippable by `save_anyway`, for the
+    // reason the model check below gives: an unsigned URL is not settings to fix up later, it is a
+    // channel that never delivers.
+    if kind == "notify" && crate::notify::secret(&app).is_none() {
+        let mut effective = stored.clone();
+        for (key, value) in settings.iter() {
+            effective.insert(key.clone(), value.clone());
+        }
+        let url = effective.get("webhook_url").and_then(Value::as_str).unwrap_or_default();
+        let was = stored.get("webhook_url").and_then(Value::as_str).unwrap_or_default();
+        if !url.is_empty() && url != was {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "the webhook URL needs a signing secret (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET): a webhook delivery is never sent unsigned",
+            ));
+        }
     }
     check_plugin_dirs(&app.cfg, &provider.schema, &settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;

@@ -458,10 +458,11 @@ schema are in [Webhooks](webhooks.md).
 `id` is the event's stable id (issue #896): the same event always carries the same one, so a
 receiver can dedupe on it, and it also travels in the `X-Colonizer-Event-Id` header. How it is
 derived, and how to verify a request, is in [Webhooks](webhooks.md).
-Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
-(`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
-`X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
-and without one it is sent unsigned. Transport errors and non-2xx answers are logged and retried
+Every request carries `X-Colonizer-Timestamp` (unix seconds) and
+`X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"`,
+with the signing secret (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`). A
+webhook URL cannot be saved without one and is never delivered to without it (issue #900;
+[Upgrading](webhooks.md#upgrading)). Transport errors and non-2xx answers are logged and retried
 with exponential backoff and jitter, at most 6 attempts in all, then kept in a persistent dead
 letter the owner can list, replay or discard (issue #898; [Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)).
 
