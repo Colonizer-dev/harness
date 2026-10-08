@@ -176,9 +176,10 @@ An install that had a webhook URL and no signing secret before issue
   loop says it once per run, not once per event, so a busy install is not flooded — an announcement
   made outside that loop (a merge-train line, say) starts a fresh run and may repeat it, the same
   way a bad URL does. Everything else in the notify module keeps working.
-- Set the secret and it resumes. `PUT /api/notify/secret` with `{"secret": "…"}` saves one on the
-  mothership, and `COLONIZER_NOTIFY_SECRET` in the environment is read too (the saved file wins if
-  both are set). Nothing needs a restart: the secret is read where each attempt is made.
+- Set the secret and it resumes. `PUT /api/notify/secret` with the secret in a `secret` field saves
+  one on the mothership, and `COLONIZER_NOTIFY_SECRET` in the environment is read too (the saved
+  file wins if both are set). Nothing needs a restart: the secret is read where each attempt is
+  made.
 - A URL that is already stored stays editable until a secret is set — the operator can still save
   the module's other settings, and can still turn the webhook off by clearing the URL. Changing it,
   or adding one, is refused until the secret is set, and an organisation's `notify.webhook_url`

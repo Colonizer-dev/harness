@@ -988,7 +988,7 @@ async fn the_webhook_carries_the_event_id_in_a_header_and_the_body() {
     std::fs::create_dir_all(&root).unwrap();
     let app = crate::tests::test_app(&root);
     std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
-    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    write_secret(&secret_file(&app), "test-signing-secret").unwrap();
     let client = reqwest::Client::new();
     let settings = NotifySettings {
         webhook_url: url,
@@ -1010,10 +1010,10 @@ async fn the_webhook_carries_the_event_id_in_a_header_and_the_body() {
         let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
         assert_eq!(
             headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
-            format!("sha256={}", signature("whsec-test", timestamp, body)),
+            format!("sha256={}", signature("test-signing-secret", timestamp, body)),
             "the signature covers the body, id included"
         );
-        assert!(!body.contains("whsec-test"), "the secret never travels in the payload");
+        assert!(!body.contains("test-signing-secret"), "the secret never travels in the payload");
         ids.insert(header.to_string());
     }
     assert_eq!(ids.len(), 1, "a resent event keeps its id: {ids:?}");
@@ -1193,7 +1193,7 @@ async fn run_colony(settings: &NotifySettings, steps: &[(SessionStatus, bool)]) 
     std::fs::create_dir_all(&root).unwrap();
     let app = crate::tests::test_app(&root);
     std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
-    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    write_secret(&secret_file(&app), "test-signing-secret").unwrap();
     let client = reqwest::Client::new();
     let settings = NotifySettings {
         webhook_url: url,
@@ -1299,7 +1299,7 @@ fn outbox_app(name: &str) -> (Shared, std::path::PathBuf, reqwest::Client) {
     std::fs::create_dir_all(&root).unwrap();
     let app = crate::tests::test_app(&root);
     std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
-    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    write_secret(&secret_file(&app), "test-signing-secret").unwrap();
     (app, root, reqwest::Client::new())
 }
 
@@ -1348,7 +1348,7 @@ async fn a_500_then_a_200_delivers_once() {
     let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
     assert_eq!(
         headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
-        format!("sha256={}", signature("whsec-test", timestamp, &sent))
+        format!("sha256={}", signature("test-signing-secret", timestamp, &sent))
     );
     assert_eq!(
         sent,
@@ -1845,7 +1845,7 @@ async fn the_same_webhook_url_delivers_once_a_secret_is_saved() {
     let saved = put_secret(
         State(app.clone()),
         Json(NotifySecret {
-            secret: Some("whsec-test".into()),
+            secret: Some("test-signing-secret".into()),
         }),
     )
     .await
@@ -1862,7 +1862,7 @@ async fn the_same_webhook_url_delivers_once_a_secret_is_saved() {
     let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
     assert_eq!(
         headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
-        format!("sha256={}", signature("whsec-test", timestamp, sent)),
+        format!("sha256={}", signature("test-signing-secret", timestamp, sent)),
         "signed with the secret saved between the two attempts"
     );
     assert_eq!(sent, &serde_json::to_string(&body).unwrap(), "the same body");
@@ -1885,7 +1885,7 @@ async fn a_subscription_needs_a_signing_secret() {
         let message = format!("{:?}", refused.expect_err("no secret is refused"));
         assert!(message.contains("never sent unsigned"), "{message}");
     }
-    let made = subscriptions::create(State(app.clone()), None, Json(new(json!("whsec-test"))))
+    let made = subscriptions::create(State(app.clone()), None, Json(new(json!("test-signing-secret"))))
         .await
         .unwrap()
         .0;
@@ -1966,7 +1966,7 @@ async fn a_webhook_url_is_only_saved_with_a_signing_secret() {
     assert!(save_notify(&app, "", false).await.is_ok(), "no URL is nothing to sign");
 
     // With a secret, the same URL saves.
-    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    write_secret(&secret_file(&app), "test-signing-secret").unwrap();
     assert!(save_notify(&app, "https://hooks.example.com/hook", false).await.is_ok());
 
     // The secret goes away again — an install that upgraded, exactly.
