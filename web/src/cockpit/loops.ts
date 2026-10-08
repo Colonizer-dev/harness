@@ -152,10 +152,12 @@ export function parseLoopCommand(text: string, now = new Date()): { cadence: Loo
   return { cadence: { every: "every_days", days, hour: now.getUTCHours(), minute: now.getUTCMinutes() }, prompt, error: null };
 }
 
-/** A short name for a loop from its prompt. */
+/** A short name for a loop from its prompt. Counted and cut in code points, not UTF-16 units: a cut
+ *  through an emoji's surrogate pair leaves a lone surrogate, which the server's JSON parser rejects. */
 export function nameFromPrompt(prompt: string): string {
   const line = prompt.trim().split("\n")[0].replace(/\s+/g, " ");
-  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || "Loop";
+  const chars = [...line];
+  return chars.length > 60 ? `${chars.slice(0, 57).join("").trimEnd()}…` : line || "Loop";
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;

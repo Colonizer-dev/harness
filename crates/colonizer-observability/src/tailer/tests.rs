@@ -380,6 +380,40 @@ async fn the_backlog_guard_yields_one_gap_per_run_and_then_only_fresh_lines() {
     assert_eq!(tailed.records.len(), 2003);
 }
 
+/// Settings too large to multiply out saturate: a huge backlog window keeps every line, a huge
+/// read rate still reads.
+#[test]
+fn huge_backlog_and_rate_settings_saturate_instead_of_overflowing() {
+    let root = root("huge");
+    let path = root.0.join("sessions/c0ffee12/harness.jsonl");
+    append(
+        &path,
+        &serde_json::json!({"type": "harness_log", "level": "info", "message": "old", "ts": "2020-01-01T00:00:00Z"}),
+    );
+    append(
+        &path,
+        &serde_json::json!({"type": "harness_log", "level": "info", "message": "fresh", "ts": now_ts()}),
+    );
+    let colonies = BTreeMap::from([("c0ffee12".to_string(), colony("running"))]);
+    for settings in [
+        Settings {
+            max_backlog_days: 213_504,
+            ..logs_only()
+        },
+        Settings {
+            max_read_mib_per_sec: 1 << 44,
+            ..logs_only()
+        },
+    ] {
+        let mut tailer = Tailer::default();
+        let mut state = State::default();
+        let tailed = tick(&mut tailer, &root, &settings, &colonies, &mut state);
+        assert!(tailed.gaps.is_empty(), "{:?}", tailed.gaps);
+        let read: Vec<_> = tailed.records.iter().map(|r| r.line["message"].clone()).collect();
+        assert_eq!(read, ["old", "fresh"]);
+    }
+}
+
 #[test]
 fn a_rotation_past_the_cursor_yields_a_gap_record() {
     let root = root("rotated");

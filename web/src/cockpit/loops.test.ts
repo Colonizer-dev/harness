@@ -74,6 +74,10 @@ describe("loops", () => {
   it("names a loop from its prompt and says how far off a run is", () => {
     expect(nameFromPrompt("Triage new issues\nand more")).toBe("Triage new issues");
     expect(nameFromPrompt("x".repeat(80)).endsWith("…")).toBe(true);
+    // The cut falls on the emoji's surrogate pair; a lone half would fail the server's JSON parse.
+    const emoji = nameFromPrompt("Every morning, check the nightly build and post summary 🚀 to the team channel");
+    expect(emoji).toBe("Every morning, check the nightly build and post summary 🚀…");
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(emoji)).toBe(false);
     const now = Date.UTC(2026, 8, 24, 12, 0);
     expect(relative(new Date(now + 3 * 3600_000).toISOString(), now)).toBe("in 3h");
     expect(relative(new Date(now - 20 * 60_000).toISOString(), now)).toBe("20m ago");

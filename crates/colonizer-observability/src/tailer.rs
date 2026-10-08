@@ -327,11 +327,13 @@ impl Tailer {
         let settings = inputs.settings;
         let colonies = self.colonies(inputs, &mut out);
         let files = sources::discover(inputs.data_dir, settings, &colonies);
-        let rate = settings.max_read_mib_per_sec.max(1) * 1024 * 1024;
+        let rate = settings.max_read_mib_per_sec.max(1).saturating_mul(1024 * 1024);
         let mut budget = self.bucket.available(rate);
         let cutoff = match settings.max_backlog_days {
             0 => 0,
-            days => inputs.now_unix_nanos.saturating_sub(days * 86_400 * 1_000_000_000),
+            days => inputs
+                .now_unix_nanos
+                .saturating_sub(days.saturating_mul(86_400 * 1_000_000_000)),
         };
 
         // A colony stays a drain candidate only while every one of its files is at its end and old.

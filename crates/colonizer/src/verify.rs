@@ -419,7 +419,7 @@ pub(crate) fn dir_files(base: &BaseTree, dir: &str) -> BaseFiles {
             .is_some_and(|lock| lock.lines().any(|l| l.starts_with("__metadata:")));
     let bun = lockfiles.iter().any(|l| l.starts_with("bun.lock"))
         || package_manager(package_json.as_deref()).is_some_and(|(name, _)| name == "bun");
-    let prefix = format!("{dir}/");
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
     BaseFiles {
         bun_test_files: bun
             && usable_script(package_json.as_deref()).is_none()
@@ -2680,6 +2680,20 @@ pub(crate) mod tests {
             ),
             vec![("".into(), "make test".into())]
         );
+    }
+
+    /// bun's own runner is found for a package at the root as well as below it.
+    #[test]
+    fn bun_test_files_are_found_at_the_root_and_in_a_package() {
+        let bun = |dir: &str| {
+            let at = |name: &str| join(dir, name);
+            let (package, lock, test) = (at("package.json"), at("bun.lock"), at("src/a.test.ts"));
+            let base = tree(&[&package, &lock, &test], &[(&package, r#"{"name": "x"}"#)]);
+            picked(&[&at("src/a.ts")], &base)
+        };
+        let check = "bun install --frozen-lockfile && bun test".to_string();
+        assert_eq!(bun(""), vec![("".into(), check.clone())]);
+        assert_eq!(bun("web"), vec![("web".into(), check)]);
     }
 
     /// ANSI is stripped before matching (CSI and OSC, truncated sequences included); cargo's

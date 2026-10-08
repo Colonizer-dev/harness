@@ -1200,16 +1200,18 @@ pub fn history_with_images(messages: &[ChatMessage], images: &ImageBlocks) -> Ve
 /// each complete event's `data` payload.
 #[derive(Default)]
 pub struct SseDecoder {
-    buf: String,
+    buf: Vec<u8>,
     data: Vec<String>,
 }
 
 impl SseDecoder {
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
+        // Lines are split on bytes, so a chunk boundary inside a UTF-8 character waits for the rest.
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
             let line = line.trim_end_matches(['\n', '\r']);
             if line.is_empty() {
                 if !self.data.is_empty() {
@@ -2273,6 +2275,16 @@ mod tests {
             Some("Overloaded")
         );
         assert_eq!(stream_step("not json"), StreamStep::default());
+    }
+
+    #[test]
+    fn the_sse_decoder_keeps_a_character_split_across_chunks() {
+        let mut d = SseDecoder::default();
+        let stream = "data: {\"text\":\"héllo 日本\"}\n\n".as_bytes();
+        let mid = stream.iter().position(|&b| b == 0xc3).unwrap() + 1;
+        let mut events = d.feed(&stream[..mid]);
+        events.extend(d.feed(&stream[mid..]));
+        assert_eq!(events, vec![r#"{"text":"héllo 日本"}"#.to_string()]);
     }
 
     #[test]
