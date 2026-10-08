@@ -798,3 +798,40 @@ test('git -C <the repository> check-ignore --no-index is name-only; other -C dir
   ];
   for (const command of refused) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
 });
+
+// #1241: a git object spec `<rev>:<path>` reads the file as committed; the prefix must not hide it.
+test('git <rev>:<path> object specs naming a secret path are refused; other paths pass', () => {
+  const policy = policyIn('/repo');
+  const refused = [
+    'git show HEAD:.env',
+    'git show HEAD~1:.env',
+    'git cat-file -p :.env',
+    'git cat-file -p HEAD:.env',
+    'git show origin/main:.npmrc',
+    'git show 0123abcd:.netrc',
+    'git show 0123456789abcdef0123456789abcdef01234567:config/.git-credentials',
+    'git show HEAD:./.pypirc',
+    'git -C /repo show HEAD:.env',
+    'git --no-pager show main:.env.local',
+    'git show stash@{0}:.envrc',
+    'git show HEAD:.env | head -1',
+    'git archive HEAD .env',
+    'git archive --format=tar HEAD:.env',
+    'git diff HEAD~1 -- .env',
+    'git diff HEAD:.env HEAD~1:.env',
+    'git grep -n TOKEN -- .env',
+    'git grep TOKEN HEAD:.npmrc',
+    'git log -p -- .netrc',
+    'git log -p HEAD -- config/.env',
+  ];
+  for (const command of refused) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+  const allowed = [
+    'git show HEAD:README.md',
+    'git show origin/main:src/env.ts',
+    'git cat-file -p HEAD:docs/.env-setup.md',
+    'git show HEAD:.env.example',
+    'git log -p -- README.md',
+    'git diff HEAD~1 -- src/',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
+});
