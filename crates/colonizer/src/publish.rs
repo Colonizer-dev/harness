@@ -182,18 +182,30 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
             }
             let message = format!("{e:#}");
             log.error(format!("publishing failed: {message}")).await;
-            let mut attention = None;
-            app.update_session(&id, |x| {
-                x.status = SessionStatus::Failed;
-                x.error = Some(truncate(&message, 2000));
-                attention = x.clear_attention();
-            })
-            .await;
-            app.note_cleared_attention(&id, attention).await;
-            // Failed without ever opening a pull request: it frees the issue for a retry, on
-            // GitHub as well as locally.
-            if let Some(fresh) = app.session(&id).await {
-                crate::claims::spawn_release_if_needed(app.clone(), &fresh);
+            // Issue #1134: the work is done and its branch is sitting in the local repository, and
+            // the only thing missing is the right to write it anywhere else. `Failed` is terminal
+            // — resume answers 409 and so does publish — so a refused push would take the whole
+            // colony's work with it, hours of microVM time included. `Parked` is not terminal: it
+            // keeps the branch and the worktree, and Retry publishes it the moment the account has
+            // write access. So this path falls through to the shared tail instead of returning,
+            // and deliberately does *not* release the claim: a parked colony keeps the issue, and
+            // releasing it would let a duplicate launch start while this one's work is unlanded.
+            if crate::push_access::refuses_push(&message) {
+                park_without_push_access(&app, &id, &message).await;
+            } else {
+                let mut attention = None;
+                app.update_session(&id, |x| {
+                    x.status = SessionStatus::Failed;
+                    x.error = Some(truncate(&message, 2000));
+                    attention = x.clear_attention();
+                })
+                .await;
+                app.note_cleared_attention(&id, attention).await;
+                // Failed without ever opening a pull request: it frees the issue for a retry, on
+                // GitHub as well as locally.
+                if let Some(fresh) = app.session(&id).await {
+                    crate::claims::spawn_release_if_needed(app.clone(), &fresh);
+                }
             }
         }
     }
@@ -204,6 +216,46 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
         // transcripts are final, so index them for the org's recall. Fire-and-forget.
         crate::deja::spawn_after_stop(app.clone(), &ended);
     }
+}
+
+/// The park reason recorded when the push was refused for want of write access (issue #1134).
+/// Deliberately not [`queue::PUBLISH_BLOCKED_REASON`], which is an error string for the unrelated
+/// hold give-up. `Parked` is resumable and publishable (`lifecycle::can_resume`, [`can_publish`]),
+/// so the colony's branch and worktree survive and Retry works.
+pub(crate) const NO_PUSH_ACCESS_REASON: &str = "no_push_access";
+
+/// Parks a colony whose publish was refused for want of write access (issue #1134), with the reason
+/// and the fix in its error.
+///
+/// `lifecycle::park_colony` is not used here: it only parks a colony whose status `is_live()`, and
+/// the publish claim has already moved this one to `Publishing`. So the record is written directly
+/// — `vm_kept: false` is right, because the microVM was already confirmed removed before the push
+/// ran, and the attention stamp is the one `park_colony` writes, so the queue and `notify` read
+/// this park like any other.
+pub(crate) async fn park_without_push_access(app: &App, id: &str, message: &str) {
+    let recovery = truncate(
+        &format!(
+            "{message} — your work is saved; give this mothership's GitHub account write access \
+             to the repo, then retry the publish"
+        ),
+        2000,
+    );
+    let now = Utc::now();
+    app.update_session(id, |x| {
+        x.status = SessionStatus::Parked;
+        x.error = Some(recovery.clone());
+        // The publish is over either way; the stage is left behind by nothing.
+        x.publish_stage = None;
+        x.parked = Some(crate::sessions::Park {
+            at: now,
+            reason: NO_PUSH_ACCESS_REASON.into(),
+            resets_at: None,
+            vm_kept: false,
+            question_risk: None,
+        });
+        x.attention = Some(json!({"reason": NO_PUSH_ACCESS_REASON, "since": now, "nudges": 0}));
+    })
+    .await;
 }
 
 /// How many times one colony is resumed for each kind of publish hold (issue #1206).
