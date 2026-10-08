@@ -51,6 +51,7 @@ mod deps;
 mod diagnosis;
 mod disk_cleanup;
 mod docs_loop;
+mod doctor;
 mod drain;
 mod duplicates;
 mod egress;

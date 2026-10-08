@@ -109,6 +109,9 @@ enum Command {
     },
     /// Install this version's release over a `cargo install` build, which has no app beside it
     Setup,
+    /// Say whether this host can run colonies — kernel features, `/dev/kvm`, the mesh and microVM
+    /// binaries — and name the fix for whatever is missing
+    Doctor,
     /// Print the cockpit sign-in link and open it in a browser
     Open,
     /// Start the mothership at login (macOS LaunchAgent, Linux systemd user unit)
@@ -1366,6 +1369,7 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("update", &["json"]),
     ("setup", &["host", "token_file", "json"]),
+    ("doctor", &["host", "token_file", "json"]),
     ("open", &["host", "token_file", "json"]),
     ("login-item", &["host", "token_file", "json"]),
     ("telemetry", &["host", "token_file", "json"]),
@@ -1508,6 +1512,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
         }
         Command::Update { force, check } => await_local(update_command(cli, force, check).await),
         Command::Setup => await_local(crate::setup::command().await),
+        Command::Doctor => await_local(crate::doctor::command().await),
         Command::Open => await_local(open()),
         Command::LoginItem { action } => {
             let cfg = match Settings::from_env() {
@@ -3352,6 +3357,7 @@ mod tests {
             &["update"][..],
             &["update", "--force"][..],
             &["update", "--check"][..],
+            &["doctor"][..],
             &["open"][..],
             &["login-item", "enable"][..],
             &["login-item", "disable"][..],
@@ -3510,6 +3516,7 @@ mod tests {
             &["man", "--host", "h:1"][..],
             &["update", "--json"][..],
             &["setup", "--token-file", "/tmp/token"][..],
+            &["doctor", "--token-file", "/tmp/token"][..],
         ] {
             let err = parse(args).unwrap_err();
             assert_eq!(err.exit_code(), EXIT_USAGE, "{args:?} should be a usage error");
@@ -3557,6 +3564,7 @@ mod tests {
         for command in [
             "open",
             "setup",
+            "doctor",
             "login-item",
             "telemetry",
             "version",

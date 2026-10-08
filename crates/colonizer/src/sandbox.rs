@@ -2,6 +2,7 @@
 
 use axum::extract::State;
 
+use crate::doctor::Component;
 use crate::util::{exec, exec_within, mount_spec};
 use anyhow::{Context, Result, bail};
 use std::{collections::HashSet, path::PathBuf, time::Duration};
@@ -94,9 +95,11 @@ pub async fn boot(msb: &str, spec: &BootSpec) -> Result<()> {
         cmd.arg("-p").arg(format!("127.0.0.1:{host}:{guest}"));
     }
     cmd.arg(&spec.image).arg("--").args(&spec.command);
+    // A libkrun or KVM refusal arrives as the child's own stderr, which says less than the check
+    // that explains it does; `doctor::failed_anyhow` appends both.
     exec(&mut cmd)
         .await
-        .with_context(|| format!("microVM {} failed to boot", spec.name))?;
+        .map_err(|e| crate::doctor::failed_anyhow(Component::MicroVm, &format!("microVM {} failed to boot", spec.name), &e))?;
     Ok(())
 }
 
