@@ -8,6 +8,8 @@
 //! Exit codes are part of the interface, so scripts can tell a typo from a refusal: [`EXIT_ERROR`]
 //! and friends are defined once here, shown in `--help`, and returned from [`run`].
 
+mod glossary;
+
 use crate::{Settings, auth, util};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, FixedOffset};
@@ -44,14 +46,20 @@ pub const EXIT_TIMEOUT: i32 = 8;
 /// The port a `--host` that names no port of its own gets: the mothership's default bind.
 const DEFAULT_PORT: u16 = 7878;
 
+// clap's own `help` subcommand is turned off below (`disable_help_subcommand`): `colonizer help`
+// and `colonizer help <command>` still print what they always printed, but `help` is a command of
+// ours now, so it can carry a `glossary` topic (issue #904). The `glossary` module holds it.
+///
 /// `colonizer`, as clap sees it. The global flags work before or after the subcommand, so both
 /// `colonizer --json list` and `colonizer list --json` read the same.
 #[derive(Parser, Debug)]
 #[command(
     name = "colonizer",
-    about = "turn a task into a pull request: coding agents in private microVMs, watched from a cockpit",
+    about = "turn a task into a pull request: a coding agent works in an isolated sandbox, \
+             watched from a cockpit",
     version = crate::version::build().line(),
     after_help = AFTER_HELP,
+    disable_help_subcommand = true,
 )]
 pub struct Cli {
     /// Which mothership the client commands talk to: a host name or host:port. The default is the
@@ -72,8 +80,11 @@ pub struct Cli {
     command: Option<Command>,
 }
 
-const AFTER_HELP: &str = "With no subcommand at all, colonizer starts the mothership: it serves the web UI and the API
-on COLONIZER_BIND (default 127.0.0.1:7878) and runs the colonies.
+const AFTER_HELP: &str = "With no subcommand at all, colonizer starts the control plane (the mothership): it serves the web
+UI and the API on COLONIZER_BIND (default 127.0.0.1:7878) and runs the colonies.
+
+New to the words? `colonizer help glossary` says what a colony, a settler and the mothership
+actually are, in ordinary language.
 
 Exit codes:
   0  ok
@@ -98,6 +109,13 @@ enum Command {
     Version,
     /// Print what the venture is built with, each product's status said in words (issue #944)
     About,
+    /// Print this message, or a command's own help; `help glossary` explains this CLI's words in
+    /// ordinary language (issue #904)
+    Help {
+        /// Which command to explain; omit it for this message
+        #[command(subcommand)]
+        command: Option<glossary::HelpCommand>,
+    },
     /// Install the newest release against a running mothership and restart into it
     Update {
         /// Install over a development build, or one newer than the latest release
@@ -114,7 +132,8 @@ enum Command {
     Doctor,
     /// Print the cockpit sign-in link and open it in a browser
     Open,
-    /// Start the mothership at login (macOS LaunchAgent, Linux systemd user unit)
+    /// Start the control plane (the mothership) at login (macOS LaunchAgent, Linux systemd user
+    /// unit)
     LoginItem {
         /// enable, disable or status; disable never stops a running one
         #[arg(value_enum)]
@@ -170,7 +189,8 @@ enum Command {
     },
     /// Print this command's man page to stdout
     Man,
-    /// Start a colony: an agent in a microVM, working the repo, or one issue in it
+    /// Start a colony: an isolated sandbox running one coding agent, working the repo or one
+    /// issue in it
     Launch {
         /// The repository to work in, as owner/repo
         #[arg(value_name = "OWNER/REPO")]
@@ -235,7 +255,8 @@ enum Command {
         #[arg(long, conflicts_with = "status")]
         parked: bool,
     },
-    /// Show one colony: where it stands, what it costs, and what it is doing right now
+    /// Show one colony (an isolated sandbox): where it stands, what it costs, and what it is
+    /// doing right now
     Status { id: String },
     /// Print a colony's recent events, or follow them live
     Logs {
@@ -303,7 +324,7 @@ enum Command {
         #[command(subcommand)]
         command: RedteamCommand,
     },
-    /// Manage the mothership's scoped API tokens (the owner token only)
+    /// Manage the control plane's (the mothership's) scoped API tokens (the owner token only)
     Token {
         #[command(subcommand)]
         command: TokenCommand,
@@ -1378,6 +1399,7 @@ const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("sessions", &["host", "token_file"]),
     ("version", &["host", "token_file", "json"]),
     ("about", &["host", "token_file", "json"]),
+    ("help", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
     ("man", &["host", "token_file", "json"]),
 ];
@@ -1510,6 +1532,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             crate::built_with::print();
             EXIT_OK
         }
+        Command::Help { command } => glossary::help_command(command),
         Command::Update { force, check } => await_local(update_command(cli, force, check).await),
         Command::Setup => await_local(crate::setup::command().await),
         Command::Doctor => await_local(crate::doctor::command().await),
@@ -3354,6 +3377,9 @@ mod tests {
     fn the_documented_commands_parse() {
         for args in [
             &["version"][..],
+            &["help"][..],
+            &["help", "glossary"][..],
+            &["help", "status"][..],
             &["update"][..],
             &["update", "--force"][..],
             &["update", "--check"][..],

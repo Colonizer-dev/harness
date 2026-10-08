@@ -1,0 +1,103 @@
+### colonizer --help
+turn a task into a pull request: a coding agent works in an isolated sandbox, watched from a cockpit
+
+Usage: colonizer [OPTIONS] [COMMAND]
+
+Commands:
+  version      Print what this build is, and whether it is a release (also `--version`)
+  about        Print what the venture is built with, each product's status said in words (issue #944)
+  help         Print this message, or a command's own help; `help glossary` explains this CLI's words in ordinary language (issue #904)
+  update       Install the newest release against a running mothership and restart into it
+  setup        Install this version's release over a `cargo install` build, which has no app beside it
+  open         Print the cockpit sign-in link and open it in a browser
+  login-item   Start the control plane (the mothership) at login (macOS LaunchAgent, Linux systemd user unit)
+  telemetry    Show or change anonymous usage reporting (no network, no daemon needed)
+  hotspots     Show the files merged pull requests touched most often in a window — where parallel colonies collide, and a hint at what to split (issue #831)
+  sessions     Manage this machine's session store: where colonies' records and logs live (docs/session-store.md)
+  completions  Print a shell completion script for this command (source it from your shell's rc)
+  man          Print this command's man page to stdout
+  launch       Start a colony: an isolated sandbox running one coding agent, working the repo or one issue in it
+  handoff      Hand a local agent session to a colony: a session you ran here continues on the mothership
+  list         List the colonies this token may see, newest first
+  status       Show one colony (an isolated sandbox): where it stands, what it costs, and what it is doing right now
+  logs         Print a colony's recent events, or follow them live
+  diff         Print everything a colony has changed against its base branch, as a unified diff
+  ask          Print the question a colony is waiting on, with its options numbered
+  answer       Answer a colony's pending question: an option's number, its label, or free text
+  stop         Stop a colony: the microVM goes away, the worktree is kept for a later `resume`
+  resume       Start a stopped colony again, picking up its worktree where it was left
+  pr           Print a colony's pull request URL and state, or --wait for its checks to settle
+  map          Print a repository's architecture map as a text outline, or search it with --find
+  mcp          Serve this harness to MCP clients over stdio (tools for listing, watching and driving colonies); the tool set follows the token's scope
+  loop         Manage loops: saved prompts that launch a colony on a schedule — the cockpit's Loops page from a terminal. `colonizer loop create --help` shows the cadence grammar
+  redteam      Start and list red-team runs: hunters that find and report bugs, or security defects with `--preset security`
+  token        Manage the control plane's (the mothership's) scoped API tokens (the owner token only)
+  fleet        Export this machine's stats, logs and colony history, or import another machine's (issue #687)
+
+Options:
+      --host <HOST[:PORT]>  Which mothership the client commands talk to: a host name or host:port. The default is the local one (COLONIZER_BIND, else 127.0.0.1:7878); across a tailnet or tunnel, name it
+      --token-file <PATH>   File holding the API token (the value itself, one line). The resolution order is COLONIZER_TOKEN, then this file, then the local <config_dir>/api-token
+      --json                Print machine-readable JSON instead of the human rendering, where a command has one
+  -h, --help                Print help
+  -V, --version             Print version
+
+With no subcommand at all, colonizer starts the control plane (the mothership): it serves the web
+UI and the API on COLONIZER_BIND (default 127.0.0.1:7878) and runs the colonies.
+
+New to the words? `colonizer help glossary` says what a colony, a settler and the mothership
+actually are, in ordinary language.
+
+Exit codes:
+  0  ok
+  1  error: the mothership is unreachable, refused, or something else went wrong
+  2  usage: the arguments name no command this build knows
+  3  unauthorized or forbidden: the token is missing, unknown (401) or not allowed (403)
+  4  not found: no such colony, loop or token (404)
+  5  conflict (409), or `ask`/`answer` on a colony that is not asking anything
+  6  a launch cap was refused (429)
+  7  `pr --wait` followed the checks and they failed
+  8  `pr --wait --timeout` ran out of time before the checks settled
+
+Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
+COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
+(`open`, `login-item`, `telemetry`, `sessions migrate`) read them. The client commands take --host and --token-file,
+and so does `update` — a thin client of a running mothership; the other local commands refuse
+them (and --json), which only the client commands use.
+
+### colonizer help glossary
+Plain-language glossary
+
+This CLI describes itself in metaphors. Here is each one next to the ordinary words for it.
+
+  isolated sandbox (colony)
+      A throwaway microVM — a tiny virtual machine with its own kernel — in which one
+      coding agent works on a repository. Nothing it does reaches the machine you sit
+      at: it has its own filesystem, its own credentials and its own network rules, and
+      stopping it throws the whole thing away. `launch` starts one; `list`, `status`,
+      `logs` and `diff` read what it did; `stop` ends it and `resume` picks its worktree
+      back up where it was left.
+
+  worker agent (settler)
+      A helper the agent inside a colony calls for one slice of its work: read these
+      files, run the tests, write this one fix. Settlers are short-lived — a colony
+      spawns them, they report back to the colony that spawned them, and they die with
+      it. A settler never opens a pull request and never outlives its sandbox; the
+      colony is the one that talks to you and does the publishing.
+
+  control plane (mothership)
+      The `colonizer` process that starts sandboxes, watches them and routes your
+      commands to the right one. One runs per machine, and `colonizer` with no
+      subcommand at all starts it. Everything else — the cockpit in a browser, every
+      client command, the API other tools call — talks to it over `--host`, so the
+      same commands work against a control plane on another machine across a tailnet.
+
+  record of one sandbox (session)
+      What the control plane keeps about a colony: its id, state, worktree, logs and
+      transcript. That id is what `status`, `logs`, `diff`, `ask`, `answer`, `stop` and
+      `resume` all take, so `list` is where you find it.
+
+  scheduled prompt (loop)
+      A saved prompt plus a cadence that launches a colony on it —
+      `colonizer loop create acme/app --name Triage --prompt '...' daily@09:00`.
+      Loops are for work that should happen while you are not watching: triage, sweeps,
+      anything that would otherwise be a cron job and a forgotten terminal.
