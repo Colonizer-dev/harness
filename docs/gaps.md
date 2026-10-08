@@ -95,7 +95,7 @@ Stated here rather than buried.
   macOS build of it. Several motherships can join a [fleet](fleet.md) and share one view, and
   [remote access](remote-tunnel.md) reaches a cockpit from anywhere, but neither moves a colony: a
   launch on another member is not built yet, nor is enrolling members into one mesh
-  ([#298](https://github.com/Colonizer-dev/harness/issues/298)).
+  ([#1252](https://github.com/Colonizer-dev/harness/issues/1252)).
 - **Seven agent modules, one forge.** Claude Code, Pi, OpenCode, Codex, Grok Build, ACP and Hermes
   ship as agent modules (`modules/agents`); GitHub is the only source and publisher. Claude Code is
   staged from the host (or fetched at install time on a Mac), Pi is bundled with its module, and

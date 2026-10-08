@@ -18,6 +18,38 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.14] - 2026-10-08
+
+### Added
+
+- **The observability exporter can be configured entirely from `OTEL_*` environment variables, and a header it cannot parse is refused rather than half-sent.** The standard variables are read and each one overrides its module field, with `GET /api/observability/status` naming where every field came from (`module`, `env:<VAR>` or `default`). `COLONIZER_OBSERVABILITY=on` turns export on for a setup with no module saved, and set to anything else (`off`, `false`, `0`, `no`, empty) turns it off even when a module is saved and enabled — an operator who wrote it meant it. `OTEL_SDK_DISABLED` still wins over both. A header list from `OTEL_EXPORTER_OTLP_HEADERS` or the **Observability headers** secret is now really parsed: `k=v,…` pairs, values percent-decoded so Grafana Cloud's `Authorization` header, whose value carries a percent-encoded space before the base64, works, `=` allowed inside a value, an empty value legal, and one malformed pair refuses the whole list rather than sending a half-read credential. A rejected pair is reported by its position in the list, and by its name only when the pair has a legal one, so a mistyped `Authorization: Basic …` or a bare token can never reach the status page; the same rules are applied as the add-on applies them when it reads the list, so a header list the status calls valid never fails at spawn. Every export now carries the whole resource (`service.name`, `service.version`, `service.instance.id`, `host.name`, and `colonizer.fleet.id`/`colonizer.fleet.role` where they are known); `OTEL_RESOURCE_ATTRIBUTES` can add keys to it but never supply `service.name`, `service.instance.id`, `host.name` or anything under `colonizer.` — a fleet member carries no fleet id and a lone mothership no role, whatever the environment says. The effective config serialises with header names and never a value, so the status API and any log line are safe by construction. The default service name is now `colonizer-mothership`, which says which install is talking. ([#841])
+- **understand-anything: an optional knowledge-graph skillset, with a cost guard in colonies.**
+
+  Settings → Skillsets now lists [understand-anything](https://github.com/Egonex-AI/Understand-Anything)
+  (MIT, by Egonex) beside graft. It builds a knowledge graph of a colony's repository and answers from
+  it: what a change would affect, a domain and business-flow view, and onboarding tours. It is
+  off by default and downloading it does not switch it on — the operator flips the switch, like any
+  other skillset. `crates/colonizer/understand-anything.lock` pins one upstream release by commit and
+  sha256, the mothership checks the checksum fail-closed before it unpacks anything, and
+  `scripts/update-runtime-pins.mjs` checks the latest release in the daily pin workflow and proposes a
+  bump as a pull request.
+
+  In a colony the plugin is mounted read-only, writes only `.ua/` (git-ignored by the colony, so never
+  part of the pull request) and has no network beyond the model router. The full `/understand` pass is
+  a multi-agent sweep of the whole repository that upstream itself warns about, and
+  `/understand-dashboard` and `/understand-figma` need a network and a writable plugin root, so the
+  runner refuses those three skills deterministically and tells the colony to use the file-scoped
+  commands (`/understand-explain <file>`, `/understand-diff`, `/understand-chat`) instead. A shared
+  graph is a planned follow-up. ([#1014])
+
+### Fixed
+
+- **Colonies can run the repository's own check scripts, syntax-check a script, and ask git about the placeholders with `-C`, without a security hold.** The exec policy's `script-egress` rule refused `python3 tools/sync-nav.py --check` and other check scripts a repository ships and tells contributors to run, so colonies retried and were held for `repeated_denial`. The boot now writes the base commit's scripts, with their git object ids, to `/colonizer/tracked-scripts` (read on the host from the merge-base, where the colony cannot change it), and the default rule leaves a script to the VM's network policy while its bytes are still the committed ones. A script the colony adds or edits is read as before, and an org, install or repository layer still sees every script. `bash -n`, `sh -n`, `--noexec`, `node --check`, `node -c` and `ruby -c` parse the script without running it and are no longer read as a run (`bash -n -c …` still is). The name-only allowance from #1169 now accepts `git -C <the repository> check-ignore --no-index …`; a `-C` naming any other directory is still refused. ([#1239], [#1227], [#1079])
+
+### Security
+
+- **The exec policy now refuses reading a committed secret file through a git object spec.** `secret-paths` matched path-looking words, so the `<rev>:` prefix in `git show HEAD:.env`, `git cat-file -p HEAD:.env`, `git show origin/main:.npmrc` or `git show <sha>:.netrc` hid the path, and the command printed the committed file. A git command's `<rev>:<path>` arguments now have their path part matched too, for any subcommand (`show`, `cat-file`, `archive`, `diff`, `grep`, `log` and the rest). `git show HEAD:README.md` and committed templates such as `HEAD:.env.example` still pass. ([#1241])
+
 ## [v0.2.13] - 2026-10-07
 
 ### Changed
@@ -2806,6 +2838,7 @@ Macs. ([#74])
 [#834]: https://github.com/Colonizer-dev/harness/issues/834
 [#839]: https://github.com/Colonizer-dev/harness/issues/839
 [#840]: https://github.com/Colonizer-dev/harness/issues/840
+[#841]: https://github.com/Colonizer-dev/harness/issues/841
 [#843]: https://github.com/Colonizer-dev/harness/issues/843
 [#844]: https://github.com/Colonizer-dev/harness/issues/844
 [#845]: https://github.com/Colonizer-dev/harness/issues/845
@@ -2853,6 +2886,7 @@ Macs. ([#74])
 [#983]: https://github.com/Colonizer-dev/harness/issues/983
 [#984]: https://github.com/Colonizer-dev/harness/issues/984
 [#1001]: https://github.com/Colonizer-dev/harness/issues/1001
+[#1014]: https://github.com/Colonizer-dev/harness/issues/1014
 [#1018]: https://github.com/Colonizer-dev/harness/issues/1018
 [#1036]: https://github.com/Colonizer-dev/harness/issues/1036
 [#1051]: https://github.com/Colonizer-dev/harness/issues/1051
@@ -2904,8 +2938,12 @@ Macs. ([#74])
 [#1217]: https://github.com/Colonizer-dev/harness/issues/1217
 [#1218]: https://github.com/Colonizer-dev/harness/issues/1218
 [#1219]: https://github.com/Colonizer-dev/harness/issues/1219
+[#1227]: https://github.com/Colonizer-dev/harness/issues/1227
 [#1228]: https://github.com/Colonizer-dev/harness/issues/1228
 [#1231]: https://github.com/Colonizer-dev/harness/issues/1231
+[#1239]: https://github.com/Colonizer-dev/harness/issues/1239
+[#1241]: https://github.com/Colonizer-dev/harness/issues/1241
+[v0.2.14]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.14
 [v0.2.13]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.13
 [v0.2.12]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.12
 [v0.2.11]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.11

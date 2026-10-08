@@ -105,7 +105,7 @@ The table above names each one; the shapes:
   a member, or when this mothership is itself a member and owns no fleet.
 - `POST /api/fleet/peer/leave` ends the membership from the member's side (**204**): the token is
   revoked, the owner's mesh policy is updated, and the member keeps its local data. The mesh itself
-  enrolls no member yet — that waits for outposts ([#298](https://github.com/Colonizer-dev/harness/issues/298)); see [fleet.md](../fleet.md).
+  enrolls no member yet — that waits for outposts ([#1252](https://github.com/Colonizer-dev/harness/issues/1252)); see [fleet.md](../fleet.md).
 
 Both screens get the same six digits because each side computes them independently: the first 4
 bytes of SHA-256(`"colonizer-fleet-pair\0"` ‖ normalized invite code ‖ `"\0"` ‖ joiner nonce) taken

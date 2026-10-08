@@ -14,6 +14,13 @@ pub const QUOTA_FALLBACK: &str = "provider_quota_exhausted";
 /// so the record lapses after 15 minutes and the queue re-probes (resume → re-hit → re-park)
 /// instead of parking forever.
 pub const QUOTA_DEFAULT_TTL_SECS: i64 = 15 * 60;
+/// How long a reset that has ALREADY passed keeps the record alive (issue #1234). The words were
+/// true a moment ago — clock skew, a slow retry — so the plan gets a few minutes to refill before
+/// the record lapses and the queue resumes. This used to roll the reset forward to the same date
+/// next year, which parked the queue for a year on an outage that ended twelve minutes ago; the
+/// re-probe after the grace is one real attempt, not a hot loop, and an attempt that fails writes a
+/// fresh record either way.
+pub const QUOTA_RESET_GRACE_SECS: i64 = 5 * 60;
 
 /// What the classifier found: when the plan refills, as the provider worded it and as a timestamp,
 /// and whether the cap is the Claude account's own (a session/usage limit names no provider id, so
@@ -103,8 +110,8 @@ fn reached_limit(text: &str) -> bool {
 
 /// A reset instant out of provider prose, as raw words and unix time: ISO8601, then `Mon DD
 /// [HH:MM[am]]`, then `MM-DD HH:MM[:SS]`, then a dateless clock time, all UTC. A month and day land
-/// on this year, or next when only just passed; more than ~24h stale, or unrepresentable (Feb 29),
-/// reads as reset-less. `None` when the message names no reset.
+/// on this year, or a short grace from now when only just passed; more than ~24h stale, or
+/// unrepresentable (Feb 29), reads as reset-less. `None` when the message names no reset.
 fn extract_reset(message: &str, now: DateTime<Utc>) -> (Option<String>, Option<i64>) {
     if let Some(hit) = pipe_epoch_reset(message) {
         return hit;
@@ -408,19 +415,18 @@ fn place_time_tz(hour: u32, min: u32, tz: Tz, now: DateTime<Utc>) -> i64 {
         .unwrap_or_else(|| place_time(hour, min, now))
 }
 
-/// The zone-aware [`place`]: this year when still ahead, next year when the date only just passed,
-/// reset-less when more than ~24h stale or unrepresentable in the zone.
+/// The zone-aware [`place`]: this year when still ahead, [`QUOTA_RESET_GRACE_SECS`] from now when
+/// the date has only just passed, reset-less when more than ~24h stale or unrepresentable in the
+/// zone.
 fn place_in_tz(month: u32, day: u32, hour: u32, min: u32, tz: Tz, now: DateTime<Utc>) -> Option<i64> {
-    let resolve = |year: i32| {
-        chrono::NaiveDate::from_ymd_opt(year, month, day)
-            .and_then(|d| d.and_hms_opt(hour, min, 0))
-            .and_then(|naive| tz.from_local_datetime(&naive).earliest())
-            .map(|dt| dt.with_timezone(&Utc))
-    };
-    match resolve(now.year()) {
+    let date = chrono::NaiveDate::from_ymd_opt(now.year(), month, day)
+        .and_then(|d| d.and_hms_opt(hour, min, 0))
+        .and_then(|naive| tz.from_local_datetime(&naive).earliest())
+        .map(|dt| dt.with_timezone(&Utc));
+    match date {
         Some(date) if date > now => Some(date.timestamp()),
         Some(date) if now.signed_duration_since(date) <= chrono::Duration::hours(24) => {
-            resolve(now.year() + 1).map(|d| d.timestamp())
+            Some((now + chrono::Duration::seconds(QUOTA_RESET_GRACE_SECS)).timestamp())
         }
         _ => None,
     }
@@ -532,17 +538,17 @@ fn skip_utc(bytes: &[u8], j: &mut usize) {
     }
 }
 
-/// This year when still ahead; next year when the date only just passed (clock skew, a slow
-/// retry). A reset more than ~24h in the past is stale words, not next year's plan — reset-less
-/// (None), so the record expires on TTL instead of parking the queue for a year. Feb 29 on a
-/// non-leap year is unrepresentable: reset-less too.
+/// This year when still ahead; [`QUOTA_RESET_GRACE_SECS`] from now when the date has only just
+/// passed (clock skew, a slow retry), so the record lapses shortly afterwards and the queue resumes
+/// — the next attempt either finds the plan refilled or parks the colony again on fresh words
+/// (issue #1234). A reset more than ~24h in the past is stale words — reset-less (None), so the
+/// record expires on TTL. Feb 29 on a non-leap year is unrepresentable: reset-less too.
 fn place(month: u32, day: u32, hour: u32, min: u32, now: DateTime<Utc>) -> Option<i64> {
     match Utc.with_ymd_and_hms(now.year(), month, day, hour, min, 0).single() {
         Some(date) if date > now => Some(date.timestamp()),
-        Some(date) if now.signed_duration_since(date) <= chrono::Duration::hours(24) => Utc
-            .with_ymd_and_hms(now.year() + 1, month, day, hour, min, 0)
-            .single()
-            .map(|d| d.timestamp()),
+        Some(date) if now.signed_duration_since(date) <= chrono::Duration::hours(24) => {
+            Some((now + chrono::Duration::seconds(QUOTA_RESET_GRACE_SECS)).timestamp())
+        }
         _ => None,
     }
 }
@@ -832,16 +838,62 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_reset_is_reset_less_not_next_year() {
+    fn a_stale_reset_is_reset_less_and_a_passed_one_graces_not_a_year() {
         // Sep 10 is 11 days past: stale words, not a year of exhaustion.
         let hit = classify_quota_at(429, "", "quota exhausted, resets Sep 10.", now()).expect("hit");
         assert_eq!(hit.reset_at.as_deref(), Some("Sep 10"));
         assert!(hit.reset_unix.is_none(), "stale resets expire on TTL");
-        // An hour past is clock skew, not staleness: still rolls forward.
+        // An hour past is clock skew, not staleness — but it is minutes, not a year (#1234): the
+        // record keeps the words alive for a grace and then lapses.
         let hit = classify_quota_at(429, "", "quota exhausted, resets Sep 20, 23:00.", now()).expect("hit");
+        let reset = hit.reset_unix.expect("an hour past is not stale");
+        assert_eq!(
+            reset,
+            (now() + chrono::Duration::seconds(QUOTA_RESET_GRACE_SECS)).timestamp(),
+            "reset_at plus a small grace, never next year"
+        );
+        assert!(
+            !quota_active(Some(reset), now(), now() + chrono::Duration::seconds(QUOTA_RESET_GRACE_SECS)),
+            "the record lapses once the grace is up"
+        );
+    }
+
+    #[test]
+    fn a_zoned_reset_that_has_passed_graces_too() {
+        // Asia/Shanghai is UTC+8 all year: Oct 8, 8:54am there is 00:54 UTC, twelve minutes before
+        // this now. The zone-aware arm must grace like the UTC one, not reach for next October.
+        let at = Utc.with_ymd_and_hms(2026, 10, 8, 1, 6, 0).unwrap();
+        let hit = classify_quota_at(429, "", "quota exhausted, resets Oct 8, 8:54am (Asia/Shanghai)", at).expect("hit");
+        assert_eq!(hit.reset_at.as_deref(), Some("Oct 8, 8:54am (Asia/Shanghai)"));
         assert_eq!(
             hit.reset_unix,
-            Some(Utc.with_ymd_and_hms(2027, 9, 20, 23, 0, 0).unwrap().timestamp())
+            Some((at + chrono::Duration::seconds(QUOTA_RESET_GRACE_SECS)).timestamp()),
+            "reset_at plus a small grace, never next year"
+        );
+    }
+
+    #[test]
+    fn the_pause_lifts_after_a_reset_that_has_passed() {
+        // Issue #1234: "resets 10-08 08:54:26" read twelve minutes after it passed parked the queue
+        // until 2027. With the grace the record lapses on its own and the queue admits again — no
+        // operator, no upstream success, nothing but the clock.
+        let at = Utc.with_ymd_and_hms(2026, 10, 8, 9, 6, 0).unwrap();
+        let message = "quota plan exhausted, resets 10-08 08:54:26";
+        let hit = classify_quota_at(429, "", message, at).expect("hit");
+        let reset = hit.reset_unix.expect("a reset inside the day is not stale");
+        let states = |exhausted: bool| vec![state("minimax", exhausted, Some(reset), true)];
+        // While the grace runs the plan still reads out and the queue holds.
+        assert!(quota_active(Some(reset), at, at), "the grace is still running");
+        assert!(
+            quota_pause(&states(quota_active(Some(reset), at, at)), 3).is_some(),
+            "the queue holds while the record is active"
+        );
+        // And it lapses shortly afterwards.
+        let later = at + chrono::Duration::seconds(QUOTA_RESET_GRACE_SECS);
+        assert!(!quota_active(Some(reset), at, later), "the record lapses on the clock alone");
+        assert!(
+            quota_pause(&states(quota_active(Some(reset), at, later)), 3).is_none(),
+            "the queue admits again instead of waiting a year"
         );
     }
 

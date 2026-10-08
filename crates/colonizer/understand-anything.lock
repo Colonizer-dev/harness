@@ -1,0 +1,17 @@
+# The Understand-Anything skillset (github.com/Egonex-AI/Understand-Anything, MIT): a plugin that
+# analyses a repository and keeps a knowledge graph of it. Not shipped with the app, like graft —
+# the mothership downloads it when someone asks for the skillset in Settings (src/understand_anything.rs)
+# and unpacks it to <data>/plugins/understand-anything, where it is an ordinary local skillset.
+#
+# Compiled into the mothership. Same six columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
+# One row because the skillset is plain source — no bundle, no platform: the colonies are Linux on the
+# host's architecture either way. Pinned by COMMIT rather than by the v2.9.0 tag, because a tag can be
+# moved and this file is not: codeload serves the tag's current commit, and the sha256 below is of the
+# commit's tarball.
+#
+# The plugin is one directory inside a marketplace repository, so the install takes
+# `understand-anything-plugin/` out of the unpacked top-level directory and copies the repository's
+# root LICENSE (the only copy of it) next to it. Refreshed by
+# `node scripts/update-runtime-pins.mjs --write`, which proposes the change by pull request; a human
+# merges it. Never hand-edited.
+understand-anything  v2.9.0  any  source  c05c150f21d13e98cdbdf4e8e520b2101975751b031c0a2e8b013f41953f5e40  https://codeload.github.com/Egonex-AI/Understand-Anything/tar.gz/f08763d11d0202a8a8f52b5dedda6d1b2e2ebac8

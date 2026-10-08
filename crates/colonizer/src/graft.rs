@@ -79,9 +79,9 @@ pub enum State {
     Downloading,
     Unpacking,
     Failed,
-    /// This build pins no bundle for this machine's architecture (no release pins it, or an unsupported arch).
+    /// This build pins nothing for this machine's architecture (no release pins it, or an unsupported arch).
     Unavailable,
-    /// `<data>/plugins/graft` is the operator's own directory, not a downloaded bundle: it is used as is.
+    /// `<data>/plugins/<name>` is the operator's own directory, not something a download put there.
     Local,
 }
 

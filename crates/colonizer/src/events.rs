@@ -465,6 +465,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         if seq <= rt.agent_seq.load(Ordering::SeqCst) {
             return; // replayed by agentd after a reconnect: already on record
         }
+        if rt.rotated.load(Ordering::SeqCst) {
+            return; // a retired run's straggler: its log was moved aside while this waited for the lock
+        }
         // The file's seqs are one counter, agentd lines and host chain lines together, so a browser
         // reconnecting with `?since=` replays one monotonic file. A host chain event has already
         // stamped a rank at or past this agentd event's own seq (validation.rs `emit_chain` numbers

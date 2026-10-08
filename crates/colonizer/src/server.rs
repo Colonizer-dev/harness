@@ -211,6 +211,14 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
+        // The public activity feed (public_feed.rs, issue #895): its two routes authenticate with
+        // their own read-only feed keys, not with an install or scoped token, so they are admitted
+        // here and the handler checks the key, the client's address and the key's rate limit. With
+        // the feed off they answer 404, which is also what an unknown route answers.
+        if req.method() == Method::GET && crate::public_feed::is_feed_path(&path) {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
         // A fleet member the owner removed presents a token revoked on purpose: it reads 403
         // "removed from the fleet", so the member can tell removal from a bad credential.
         if let Some(token) = auth::bearer_token(req.headers())
@@ -400,6 +408,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::gateway::routes())
         .merge(crate::github::routes())
         .merge(crate::graft::routes())
+        .merge(crate::understand_anything::routes())
         .merge(crate::headroom::routes())
         .merge(crate::hunters::routes())
         .merge(crate::img_proxy::routes())
@@ -520,9 +529,18 @@ pub(crate) async fn serve() -> Result<()> {
         }
         Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
     };
+    // `logs` is deliberately not here: it is created by `oplog::install` below, which treats a
+    // directory it cannot make as "no file, stderr still works" rather than a reason to refuse to
+    // serve. Listing it here would put it back on the `?` and make a data dir with a `logs` file in
+    // it — rather than a directory — unstartable, which it was not before this issue.
     for dir in ["repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
+    // The process log (#856): from here on every `tracing` line goes to stderr and, on its own
+    // thread, to `<data>/logs/mothership.jsonl`, whose directory `install` creates. Nothing above
+    // this point does — the two `eprintln!` lines are a bind refusal and a hand-off note that print
+    // before a log could exist, and they have to reach a terminal that has nothing else on it.
+    crate::observability::oplog::install(&cfg.data_dir);
     // The one store this run reads and writes through (docs/session-store.md): the backend
     // `session-store.json` names (the local disk under the data dir when there is none), opened once
     // here and threaded into startup and the `App`, so every later save and append answers by the
@@ -594,10 +612,7 @@ pub(crate) async fn serve() -> Result<()> {
     let login_url = auth::login_url(&app.cfg.bind, &app.api_token);
     println!("cockpit: {login_url}");
     if !auth::bind_is_loopback(&app.cfg.bind) {
-        eprintln!(
-            "warning: colonizer is bound to {}, so the API answers to the network; requests need the API token, but plain HTTP exposes the token to anyone on the path — use a TLS reverse proxy or an SSH tunnel",
-            app.cfg.bind
-        );
+        tracing::warn!( bind = %app.cfg.bind, "warning: colonizer is bound to {}, so the API answers to the network; requests need the API token, but plain HTTP exposes the token to anyone on the path — use a TLS reverse proxy or an SSH tunnel", app.cfg.bind );
     }
     auth::open_browser(&login_url);
     // The first-run notice: once, while nobody has answered yet, show the exact usage batch on stderr.
@@ -608,20 +623,23 @@ pub(crate) async fn serve() -> Result<()> {
             let gateway = gateway::router(app.clone());
             tokio::spawn(async move {
                 if let Err(e) = axum::serve(listener, gateway).await {
-                    eprintln!("provider gateway stopped: {e}");
+                    tracing::error!( error = %e, "provider gateway stopped: {e}" );
                 }
             });
         }
-        Err(e) => eprintln!(
-            "provider gateway: cannot bind {}: {e}; colonies can't use model providers",
-            app.cfg.gateway_bind
-        ),
+        Err(e) => {
+            tracing::error!( error = %e, gateway_bind = %app.cfg.gateway_bind, "provider gateway: cannot bind {}: {e}; colonies can't use model providers", app.cfg.gateway_bind )
+        }
     }
 
     start_tasks(&app, &router).await;
 
     tokio::select! {
-        result = async { axum::serve(listener, router).await } => result?,
+        // `ConnectInfo` so a handler can see the peer's address: the public feed's per-key IP
+        // allowlist (public_feed.rs, issue #895) is enforced from it. It is read from the socket
+        // itself and never from a forwarded header — a header is the client's own claim about
+        // itself, which would defeat the allowlist entirely.
+        result = async { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await } => result?,
         // microVMs are detached and keep running; sessions reconnect on the next start.
         signal = shutdown_signal() => {
             // Issue #880: a SIGTERM (systemd stop, a deploy's `kill`) must not cut a boot or a
@@ -633,7 +651,7 @@ pub(crate) async fn serve() -> Result<()> {
                 if crate::drain::drain_and_wait(&app, timeout).await {
                     println!("drained; nothing was left booting or publishing");
                 } else {
-                    eprintln!("drain timed out; exiting with colonies still in flight — they are requeued on the next start");
+                    tracing::warn!("drain timed out; exiting with colonies still in flight — they are requeued on the next start");
                 }
             }
             println!("shutting down; running sessions keep their microVMs");
@@ -644,6 +662,13 @@ pub(crate) async fn serve() -> Result<()> {
             }
             // The usage counters flush every few seconds; one last flush loses nothing.
             app.gateway.flush_usage();
+            // #856: a dropped line is one nobody can read, so a run that dropped any says so here
+            // rather than ending as a quiet shutdown that quietly lost the answer to something.
+            if let Some(dropped) = crate::observability::oplog::dropped_lines()
+                && dropped > 0
+            {
+                tracing::warn!("{dropped} log lines were dropped: the log writer could not keep up", dropped = dropped);
+            }
         }
     }
     Ok(())

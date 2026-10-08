@@ -45,7 +45,24 @@ fn process_env(name: &str) -> Option<String> {
 pub(crate) async fn resolve(app: &App) -> Resolved {
     let module = app.modules.read().await.observability.clone();
     let secret = util::read_secret(&app.cfg.config_dir.join("observability-headers"));
-    env::resolve(module.as_ref(), &process_env, secret)
+    let id = env::Identity {
+        host_id: crate::runtime::host_id(app),
+        host_name: crate::runtime::probe_hostname().await.unwrap_or_default(),
+        fleet_role: fleet_role(app).await,
+    };
+    env::resolve(module.as_ref(), &process_env, secret, &id)
+}
+
+/// `owner` when this mothership has members, `member` when it has joined one, empty when it is
+/// alone — the same three states `fleet_policy.rs` reads, and the only two it can see.
+async fn fleet_role(app: &App) -> String {
+    if app.fleet_members.membership().await.is_some() {
+        "member".into()
+    } else if app.fleet_members.has_members().await {
+        "owner".into()
+    } else {
+        String::new()
+    }
 }
 
 /// `<data>/observability/exporter.json`.
@@ -439,7 +456,10 @@ async fn status(State(app): State<Shared>) -> ApiResult<Value> {
             out["protocol"] = json!(e.str("protocol"));
             out["service_name"] = json!(e.str("service_name"));
             out["provenance"] = json!(e.provenance);
-            out["headers"] = json!({"source": e.headers_source, "names": env::header_names(&e.headers)});
+            out["headers"] = json!({
+                "source": e.headers_source,
+                "names": e.parsed_headers.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+            });
         }
         Resolved::Off(why) | Resolved::Invalid(why) => {
             out["configured"] = json!(false);

@@ -27,12 +27,18 @@ export function usePlugins(): { listing: PluginListing | null; error: string | n
 const DOWNLOADABLE_ABOUT: Record<string, string> = {
   graft:
     "A code map of the colony's repository (graft by Nanonets): ranked answers with exact file:line, every caller of a symbol, a file's API. Each colony builds its own map on first use, offline.",
+  "understand-anything":
+    "A knowledge graph of the colony's repository (understand-anything, MIT, by Egonex): what a change would affect, a domain and business-flow view, guided onboarding tours. The first full analysis is a multi-agent pass, so colonies use the file-scoped commands only.",
 };
 
 const megabytes = (bytes: number) => `${(bytes / 1_048_576).toFixed(bytes >= 10 * 1_048_576 ? 0 : 1)} MB`;
 
+/** How big a skillset's download is, in MB, for the row before it is asked for. */
+const DOWNLOADABLE_MB: Record<string, number> = { graft: 80, "understand-anything": 3 };
+
 /** One line about where a download is; null when the row's button says it all. */
 export function downloadLine(d: DownloadableSkillset): string | null {
+  const size = DOWNLOADABLE_MB[d.name];
   switch (d.state) {
     case "downloading":
       return d.total ? `Downloading… ${megabytes(d.bytes)} of ${megabytes(d.total)}` : `Downloading… ${megabytes(d.bytes)}`;
@@ -43,11 +49,11 @@ export function downloadLine(d: DownloadableSkillset): string | null {
     case "unavailable":
       return "Not published for this machine yet — a later Colonizer release will offer it.";
     case "local":
-      return "Your own plugins/graft directory is used instead; remove it to download the pinned bundle.";
+      return `Your own plugins/${d.name} directory is used instead; remove it to download the pinned bundle.`;
     case "idle":
       return d.installed_release && d.release
         ? `Version ${d.installed_release} is on disk; ${d.release} is a new download.`
-        : `Downloaded when you ask, about 80 MB${d.release ? ` (${d.release})` : ""}.`;
+        : `Downloaded when you ask${size ? `, about ${size} MB` : ""}${d.release ? ` (${d.release})` : ""}.`;
     default:
       return null;
   }
@@ -95,42 +101,60 @@ export function DownloadableRow({
   );
 }
 
-/** Starts the graft download and follows it until it settles, then reloads the skillset list. */
-function useGraftDownload(initial: DownloadableSkillset | undefined, reload: () => void) {
+/**
+ * Starts the download of each downloadable skillset and follows every one of them until it settles,
+ * then reloads the skillset list. One map by name, so a listing with several downloads on it gets
+ * one row each rather than only the first.
+ */
+export function useSkillsetDownloads(initial: DownloadableSkillset[] | undefined, reload: () => void) {
   const api = useApi();
-  const [status, setStatus] = useState<DownloadableSkillset | undefined>(initial);
-  const [starting, setStarting] = useState(false);
-  useEffect(() => setStatus(initial), [initial]);
-  const running = status?.state === "downloading" || status?.state === "unpacking";
+  const [starting, setStarting] = useState<string[]>([]);
+  // The listing is the source of truth between polls; a download's own answers win until the listing
+  // comes back with the skillset on disk, at which point this map is dropped with the effect below.
+  const [answers, setAnswers] = useState<Record<string, DownloadableSkillset>>({});
+  useEffect(() => setAnswers({}), [initial]);
+  const running = Object.values(answers).filter((d) => d.state === "downloading" || d.state === "unpacking").map((d) => d.name);
+  const polling = running.join(",");
   useEffect(() => {
-    if (!running) return;
+    if (!polling) return;
     let cancelled = false;
     const timer = window.setInterval(() => {
-      api
-        .graftSkillset()
-        .then((next) => {
-          if (cancelled) return;
-          setStatus(next);
-          if (next.state === "installed") reload();
-        })
-        .catch(() => {
-          /* the next tick tries again */
-        });
+      for (const name of running) {
+        api
+          .skillset(name)
+          .then((next) => {
+            if (cancelled) return;
+            setAnswers((s) => ({ ...s, [name]: next }));
+            if (next.state === "installed") reload();
+          })
+          .catch(() => {
+            /* the next tick tries again */
+          });
+      }
     }, 1000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [api, running, reload]);
-  const start = () => {
-    setStarting(true);
+  }, [api, polling, reload]);
+  const start = (name: string) => {
+    setStarting((s) => [...s, name]);
     api
-      .graftDownload()
-      .then(setStatus)
-      .catch((e) => setStatus((s) => (s ? { ...s, state: "failed", error: errorMessage(e) } : s)))
-      .finally(() => setStarting(false));
+      .skillsetDownload(name)
+      .then((next) => setAnswers((s) => ({ ...s, [name]: next })))
+      .catch((e) =>
+        setAnswers((s) => {
+          const current = s[name] ?? initial?.find((d) => d.name === name);
+          return current ? { ...s, [name]: { ...current, state: "failed", error: errorMessage(e) } } : s;
+        }),
+      )
+      .finally(() => setStarting((s) => s.filter((n) => n !== name)));
   };
-  return { status, starting, start };
+  return {
+    rows: (initial ?? []).map((d) => answers[d.name] ?? d),
+    isStarting: (name: string) => starting.includes(name),
+    start,
+  };
 }
 
 /** The comma-separated `plugins` setting as names, in order, without blanks or repeats (plugins.rs). */
@@ -181,10 +205,7 @@ export function SkillsetField({
   onChange: (value: string) => void;
 }) {
   const { listing, error, reload } = usePlugins();
-  const graft = useGraftDownload(
-    listing?.downloadable?.find((d) => d.name === "graft"),
-    reload,
-  );
+  const downloads = useSkillsetDownloads(listing?.downloadable, reload);
   const names = pluginNames(value);
   const known = new Set(listing?.plugins.map((p) => p.name) ?? []);
   const missing = listing ? names.filter((name) => !known.has(name)) : [];
@@ -267,9 +288,11 @@ export function SkillsetField({
               <p className="px-3 py-2.5 text-small-lg text-muted">No skillsets are installed.</p>
             )}
             {/* Offered for download until it is on disk; then it is a row above like any other. */}
-            {graft.status && graft.status.state !== "installed" && !(graft.status.state === "local" && known.has("graft")) && (
-              <DownloadableRow item={graft.status} onDownload={graft.start} starting={graft.starting} />
-            )}
+            {downloads.rows
+              .filter((d) => d.state !== "installed" && !(d.state === "local" && known.has(d.name)))
+              .map((d) => (
+                <DownloadableRow key={d.name} item={d} onDownload={() => downloads.start(d.name)} starting={downloads.isStarting(d.name)} />
+              ))}
           </div>
           <p className="text-small text-faint">
             Add your own by putting a Claude Code plugin directory in{" "}

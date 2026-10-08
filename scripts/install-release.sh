@@ -89,6 +89,9 @@ main() {
     base="https://github.com/$repo/releases/download/$version"
   fi
   app=${COLONIZER_APP:-$HOME/.local/share/colonizer/app}
+  # A trailing slash makes readlink and [ -L ] look through the $app symlink at the slot it points
+  # to, so the swap below would pick the live slot and remove it. Strip every one (but keep "/").
+  while [ "${app%/}" != "$app" ] && [ -n "${app%/}" ]; do app=${app%/}; done
   archive="colonizer-$platform.tar.gz"
 
   tmp=$(mktemp -d)

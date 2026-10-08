@@ -20,10 +20,10 @@ export interface ProvidersApi {
   quotaAction(provider: string, body: QuotaActionRequest): Promise<QuotaActionReply>;
   models(): Promise<ModelOption[]>;
   plugins(): Promise<PluginListing>;
-  /** GET /api/plugins/graft */
-  graftSkillset(): Promise<DownloadableSkillset>;
-  /** POST /api/plugins/graft/download: start (or join) the download; poll graftSkillset for progress. */
-  graftDownload(): Promise<DownloadableSkillset>;
+  /** GET /api/plugins/{name}: one downloadable skillset's download status. */
+  skillset(name: string): Promise<DownloadableSkillset>;
+  /** POST /api/plugins/{name}/download: start (or join) the download; poll skillset for progress. */
+  skillsetDownload(name: string): Promise<DownloadableSkillset>;
 }
 
 export const providersHttp: ProvidersApi = {
@@ -37,6 +37,6 @@ export const providersHttp: ProvidersApi = {
   quotaAction: (provider, body) => post(`/api/providers/${enc(provider)}/quota-action`, body),
   models: () => request("/api/models"),
   plugins: () => request("/api/plugins"),
-  graftSkillset: () => request("/api/plugins/graft"),
-  graftDownload: () => post("/api/plugins/graft/download"),
+  skillset: (name) => request(`/api/plugins/${enc(name)}`),
+  skillsetDownload: (name) => post(`/api/plugins/${enc(name)}/download`),
 };

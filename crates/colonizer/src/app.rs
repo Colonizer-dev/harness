@@ -164,6 +164,8 @@ pub struct App {
     pub github_viewer: Mutex<Option<crate::github::ViewerStatus>>,
     /// The graft skillset download (graft.rs), for Settings.
     pub graft: Mutex<crate::graft::Status>,
+    /// The understand-anything skillset download (understand_anything.rs), for Settings.
+    pub understand_anything: Mutex<crate::graft::Status>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<crate::headroom::Status>,
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
@@ -298,6 +300,7 @@ impl App {
             gateway: crate::gateway::Gateway::new(&cfg.data_dir)?,
             github_viewer: Mutex::new(None),
             graft: Mutex::new(Default::default()),
+            understand_anything: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             host_cache: Mutex::new(None),
             capacity: crate::capacity::Capacity::new(),
@@ -428,7 +431,7 @@ impl App {
     /// Records a confirmed storage failure: printed loudly here, kept as the sticky alert the UI
     /// shows, and counted so a run of failures reads as more than one.
     pub async fn storage_failed(&self, what: &str, err: &anyhow::Error) {
-        eprintln!("storage: {what}: {err:#}");
+        tracing::error!( error = %format!("{err:#}"), "storage: {what}: {err:#}" );
         let mut alert = self.storage_alert.write().await;
         let failures = alert.as_ref().map_or(0, |a| a.failures) + 1;
         *alert = Some(StorageAlert {
@@ -511,7 +514,7 @@ impl App {
                 }
                 drop(damage);
                 if fresh {
-                    eprintln!("config: {message}");
+                    tracing::error!("config: {message}");
                 }
                 T::default()
             }
@@ -764,7 +767,7 @@ pub(crate) async fn load_sessions(store: &dyn SessionStore, index_path: &FsPath)
         saved.display(),
         damaged
     );
-    eprintln!("sessions: {message}");
+    tracing::error!("sessions: {message}");
     Ok((
         sessions,
         Some(StorageAlert {
@@ -797,7 +800,7 @@ fn unusable(path: &FsPath, saved: &FsPath, reason: String) -> (Vec<Session>, Opt
         path.display(),
         saved.display()
     );
-    eprintln!("sessions: {message}");
+    tracing::error!("sessions: {message}");
     (
         Vec::new(),
         Some(StorageAlert {

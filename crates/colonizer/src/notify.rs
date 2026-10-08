@@ -816,22 +816,24 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// POSTs one signed body, its event id in [`EVENT_ID_HEADER`] as well as in the body. One attempt:
-/// a failed one is the outbox's to retry ([`outbox`], issue #898), with the same body.
-async fn post(client: &reqwest::Client, url: &str, secret: Option<&str>, event_id: &str, body: &str) -> Result<()> {
+/// a failed one is the outbox's to retry ([`outbox`], issue #898), with the same body. Always
+/// signed, so `secret` is a `&str` and never an `Option` (issue #900): an unsigned delivery is
+/// unrepresentable here, and a caller with nothing to sign with has to refuse the delivery instead
+/// — see [`post_webhook`] and `outbox::attempt`, which do exactly that.
+async fn post(client: &reqwest::Client, url: &str, secret: &str, event_id: &str, body: &str) -> Result<()> {
     let timestamp = Utc::now().timestamp().to_string();
-    let mut request = client
+    let response = client
         .post(url)
         .header("content-type", "application/json")
         .header("X-Colonizer-Timestamp", &timestamp)
         .header(EVENT_ID_HEADER, event_id)
-        .body(body.to_string());
-    if let Some(secret) = secret {
-        request = request.header(
+        .header(
             "X-Colonizer-Signature",
             format!("sha256={}", signature(secret, &timestamp, body)),
-        );
-    }
-    let response = request.send().await?;
+        )
+        .body(body.to_string())
+        .send()
+        .await?;
     let status = response.status();
     if !status.is_success() {
         bail!("the webhook answered {status}");
@@ -849,8 +851,9 @@ fn secret_file(app: &App) -> PathBuf {
 
 /// The saved webhook signing secret, else `COLONIZER_NOTIFY_SECRET`. Lives beside the other keys
 /// and, like them, is never written to modules.json, never returned by the API and never sent into
-/// a colony.
-fn secret(app: &App) -> Option<(String, &'static str)> {
+/// a colony. `pub(crate)` because a webhook URL cannot be saved without one (issue #900), which is
+/// checked at write time by the modules and orgs saves as well as on every delivery.
+pub(crate) fn secret(app: &App) -> Option<(String, &'static str)> {
     read_secret(&secret_file(app))
         .map(|key| (key, "file"))
         .or_else(|| env_nonempty("COLONIZER_NOTIFY_SECRET").map(|key| (key, "env")))
@@ -907,7 +910,7 @@ pub async fn run(app: Shared) {
         .build()
         .ok();
     if client.is_none() {
-        eprintln!("notify: could not build an HTTP client; the webhook channel is off");
+        tracing::warn!("notify: could not build an HTTP client; the webhook channel is off");
     }
     let mut seen: HashMap<String, Seen> = HashMap::new();
     // Per provider: whether its failure rate has already been announced as degraded. A restart starts
@@ -1425,7 +1428,7 @@ async fn deliver_routed(
                 }
             }
             Err(reason) if reasons.desktop != Some(reason) => {
-                eprintln!("notify: desktop notifications stay off: {reason}");
+                tracing::warn!( reason = %reason, "notify: desktop notifications stay off: {reason}" );
                 reasons.desktop = Some(reason);
             }
             Err(_) => {}
@@ -1449,8 +1452,12 @@ async fn deliver_routed(
     sent
 }
 
+/// The [`Reasons::webhook`] key for a URL that is fine but has nothing to sign it with. Not the
+/// URL, so the line below names the one thing that is actually wrong.
+const NO_SIGNING_SECRET: &str = "no-signing-secret";
+
 /// The webhook channel: one signed POST of the payload, when a URL is set. `false` means nothing
-/// went out — no URL, a bad one, or a receiver that answered with an error.
+/// went out — no URL, a bad one, nothing to sign it with, or a receiver that answered with an error.
 async fn post_webhook(
     app: &App,
     client: &reqwest::Client,
@@ -1464,11 +1471,21 @@ async fn post_webhook(
     }
     if !webhook_valid(&settings.webhook_url) {
         if reasons.webhook.as_deref() != Some(settings.webhook_url.as_str()) {
-            eprintln!(
-                "notify: the webhook stays off: {} is not an http:// or https:// address",
-                settings.webhook_url
-            );
+            tracing::warn!( webhook_url = %settings.webhook_url, "notify: the webhook stays off: {} is not an http:// or https:// address", settings.webhook_url );
             reasons.webhook = Some(settings.webhook_url.clone());
+        }
+        return false;
+    }
+    // A webhook with nothing to sign it is not sent at all (issue #900): a receiver that trusts an
+    // unsigned note trusts anyone who can reach its address, and there is nothing to tell one
+    // request from another. Refused here, not only at the save, so an install that upgraded with an
+    // unsigned URL says so once and stops rather than posting what it cannot sign.
+    if secret(app).is_none() {
+        if reasons.webhook.as_deref() != Some(NO_SIGNING_SECRET) {
+            eprintln!(
+                "notify: the webhook stays off: no signing secret is set (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET)"
+            );
+            reasons.webhook = Some(NO_SIGNING_SECRET.to_string());
         }
         return false;
     }
@@ -1502,11 +1519,12 @@ async fn post_webhook(
 
 /// Where a failed channel's line goes: into the colony's log when the event is about a colony, so it
 /// lands where the person it was meant for is looking — as the watchdog and autonomy log — or onto
-/// stderr when it is about a provider, which has no colony to log into.
+/// stderr when it is about a provider, which has no colony to log into. The session log calls it
+/// `warn`; this arm matches it.
 async fn report_failure(app: &App, session: Option<&Session>, what: String) {
     match session {
         Some(session) => app.session_log_as(Origin::Notify, &session.id, "warn", what).await,
-        None => eprintln!("{what}"),
+        None => tracing::warn!("{what}"),
     }
 }
 

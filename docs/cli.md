@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `setup`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `setup`, `doctor`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -25,7 +25,7 @@ Every client command takes the same two global flags, before or after the subcom
 
 The local commands run against this machine and take none of the client flags. `update` is the
 exception: it is a thin client of a running mothership, so it follows `--host` and `--token-file`
-like any client command — but it has no `--json`. The rest (`setup`, `open`, `login-item`, `telemetry`,
+like any client command — but it has no `--json`. The rest (`setup`, `doctor`, `open`, `login-item`, `telemetry`,
 `version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
 (exit 2), and their `--help` does not list them; `hotspots` and `sessions migrate` refuse the two host
 flags and keep `--json`.
@@ -54,15 +54,20 @@ COLONIZER_TOKEN=col_… colonizer --host mothership.tailnet list
 
 ## The commands
 
+New to the words? `colonizer help glossary` says what a colony, a settler and the mothership
+actually are, in ordinary language. `colonizer help <command>` prints any command's own help.
+
 On this machine:
 
 ```sh
 colonizer version             # what this build is, and whether it is a release (also --version)
 colonizer about               # what Colonizer is built with, from the vendored Factory Zero stack entry
+colonizer help glossary       # what this CLI's words mean, in ordinary language
 colonizer update              # install the newest release against a running mothership, restart into it
 colonizer update --force      # also over a development build, or a build newer than the latest release
 colonizer update --check      # say whether a newer release exists and stop; no mothership needed
 colonizer setup               # install this version's release over a cargo install (no app assets beside it)
+colonizer doctor              # say whether this host can run colonies, and name the fix for whatever is missing
 colonizer open                # reprint the cockpit sign-in link and open it in a browser
 colonizer login-item enable   # start the mothership at login (status, disable too; disable never stops one)
 colonizer telemetry show      # anonymous usage reporting (on, off; no network, no daemon needed)
@@ -366,7 +371,7 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | :--- | :--- |
 | `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}` and its `/question`, `/diff`, `/commits`, `/transcript` and `/files` (listing, archive, content) reads, `POST /api/sessions/{id}/seen`, `GET /api/loops`, `/api/loops/{id}/runs` and `/api/loops/{id}/history`, the built-in loops' `GET /api/merge-train`, `/api/merge-train/loop`, `/api/supply-chain-loop` and `/api/ts-any-loop`, the events WebSocket, the `/api/maps/…` reads, the `/uhp/v1/…` reads, and `GET /api/tokens/self` |
 | `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm`, and the UHP cancels `POST /uhp/v1/sessions/{id}/cancel` and `/uhp/v1/responses/{id}/cancel`; and manage its own webhook subscriptions, `GET/POST /api/webhooks` and `DELETE /api/webhooks/{id}`, which receive only events about colonies within its limits ([webhooks](protocol/webhooks.md#subscriptions)) |
-| `launch` | Start colonies: `POST /api/sessions` and `POST /uhp/v1/responses`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
+| `launch` | The writes that leave the machine. Start a colony (`POST /api/sessions`, `POST /uhp/v1/responses`) or keep one recurring (create, edit, delete and run its own loops: `POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`); publish one — the branch push and the pull request (`POST /api/sessions/{id}/publish`); and file an issue on a repository its limits cover (`POST /api/repos/{owner}/{repo}/issues`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
 for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
@@ -374,8 +379,8 @@ for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
 preview proxy under `/api/previews/{id}/…`, and the history push's `POST /api/fleet/peer/rows` and
 `PUT /api/fleet/peer/payloads/{sha256}`.
 
-Everything else is the owner's at any scope — token management itself, settings, secrets, and
-publishing. The enforcement is the same for every client of the API, the CLI included.
+Everything else is the owner's at any scope — token management itself, settings, and secrets.
+The enforcement is the same for every client of the API, the CLI included.
 
 A launch token may keep its recurring work in loops: a loop it creates records the token, and each
 run is admitted against the token's org/repo limits, concurrency cap and daily budget and marked as
@@ -389,7 +394,8 @@ map loop (whose runs launch outside any token's caps) is the owner's alone.
   matches its repository's owner *and* a `--repo` entry matches its repository, each empty list
   meaning no limit of that kind. A colony or map outside the limits answers **404**, exactly like
   an unknown id — the list is filtered to them, and the token can probe nothing. A launch naming
-  a repository outside the limits is **403** before anything starts.
+  a repository outside the limits is **403** before anything starts, and so is filing an issue on
+  one: that path names the repository itself, so there is nothing left to hide.
 - **The caps** refuse a launch with the reason (exit 6): `max_concurrent` counts the token's
   colonies that are not yet finished — queued ones hold a place — and `budget_usd_per_day` sums
   what its colonies created today (UTC) have spent so far.

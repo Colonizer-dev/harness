@@ -249,7 +249,7 @@ fn kvm_for(os: &str, readable: bool, writable: bool, user: &str) -> Option<Kvm> 
 /// is the ground truth for "readable and writable by this process", which is exactly what `[ -r ]`
 /// and `[ -w ]` ask of the installer's own process. Opening `/dev/kvm` changes nothing; a VM is
 /// only created by an ioctl afterwards.
-async fn probe_kvm() -> Option<Kvm> {
+pub(crate) async fn probe_kvm() -> Option<Kvm> {
     if std::env::consts::OS != "linux" {
         return None;
     }

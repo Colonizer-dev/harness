@@ -332,7 +332,8 @@ fn locked(ecosystem: &'static str, name: &str, version: &str) -> Locked {
 
 /// `name@version` split at the last `@` that is not a scope's leading one.
 fn split_at_version(spec: &str) -> Option<(&str, &str)> {
-    let at = spec[1..].rfind('@')? + 1;
+    let first = spec.chars().next()?.len_utf8();
+    let at = spec[first..].rfind('@')? + first;
     let (name, version) = (&spec[..at], &spec[at + 1..]);
     (!name.is_empty() && !version.is_empty()).then_some((name, version))
 }
@@ -693,6 +694,7 @@ pub fn parse_pubspec_lock(text: &str) -> Vec<Locked> {
 
 /// The parser for a lockfile name, if this reads it.
 pub fn parse_lockfile(file: &str, text: &str) -> Option<Vec<Locked>> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     Some(match file {
         "package-lock.json" | "npm-shrinkwrap.json" => parse_package_lock(text),
         "bun.lock" => parse_bun_lock(text),
@@ -2975,6 +2977,8 @@ flask>=3
         assert!(version_lt("0.24.0", "v0.25.0"));
         assert_eq!(split_at_version("@scope/pkg@1.0.0"), Some(("@scope/pkg", "1.0.0")));
         assert_eq!(split_at_version("@scope/pkg"), None);
+        assert_eq!(split_at_version(""), None);
+        assert_eq!(split_at_version("é@1.0.0"), Some(("é", "1.0.0")));
         let strict = strict_json("{\"a\": [1, 2,], // x\n \"s\": \"a,//b\",}");
         let v: Value = serde_json::from_str(&strict).expect("strict JSON parses");
         assert_eq!(v["a"], json!([1, 2]));
@@ -2982,5 +2986,21 @@ flask>=3
         let doc = json!({"id":"GHSA-1","summary":"prototype pollution","database_specific":{"severity":"HIGH"},"affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]});
         let s = advisory_summary(&doc);
         assert_eq!((s["severity"].as_str(), s["fixed"].as_str()), (Some("high"), Some("4.17.21")));
+    }
+
+    /// A BOM, an empty bun spec or a non-ASCII first character is read, never a panic.
+    #[test]
+    fn odd_lockfile_text_does_not_panic() {
+        let yarn = "\u{feff}# yarn lockfile v1\n\nlodash@^4.17.0:\n  version \"4.17.21\"\n";
+        let names = |l: Vec<Locked>| l.into_iter().map(|l| (l.name, l.version)).collect::<Vec<_>>();
+        assert_eq!(
+            names(parse_lockfile("yarn.lock", yarn).unwrap()),
+            vec![("lodash".to_string(), "4.17.21".to_string())]
+        );
+        assert_eq!(parse_lockfile("bun.lock", r#"{"packages":{"x":[""]}}"#), Some(vec![]));
+        assert_eq!(
+            names(parse_lockfile("pnpm-lock.yaml", "packages:\n  é@1.0.0:\n").unwrap()),
+            vec![("é".to_string(), "1.0.0".to_string())]
+        );
     }
 }

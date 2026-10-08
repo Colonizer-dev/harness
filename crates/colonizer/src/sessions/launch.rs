@@ -582,21 +582,21 @@ pub async fn create(
         return Err(refusal.into_error());
     }
     // Placement (issue #688): a pure policy whose verdict is recorded on the colony. Nothing here
-    // executes remotely (issue #298), so an unpinned choice of a peer is recorded and the colony runs
+    // executes remotely (issue #1252), so an unpinned choice of a peer is recorded and the colony runs
     // here, a pin to a peer is refused rather than silently moved, and an unknown pin is a bad request.
     let host_pin = req.host.as_deref().map(str::trim).filter(|host| !host.is_empty());
     let placement_reason = match crate::placement::place(host_pin, &local, &peers) {
         Ok(chosen) if chosen.local => chosen.reason,
         // A peer has room, but nothing launches on another member yet: say so, run here.
         Ok(chosen) if host_pin.is_none() => {
-            format!("{}; running on another member is not built yet (#298)", chosen.reason)
+            format!("{}; running on another member is not built yet (#1252)", chosen.reason)
         }
         // Pinned to a peer that can take the colony: refused; remote execution is not built.
         Ok(chosen) => {
             return Err(client_error(
                 StatusCode::CONFLICT,
                 &format!(
-                    "pinned to {}: running a colony on another member is not built yet (#298)",
+                    "pinned to {}: running a colony on another member is not built yet (#1252)",
                     chosen.host_name
                 ),
             ));

@@ -1,7 +1,7 @@
 [package]
 # Published as colonizer-harness: `colonizer` on crates.io is another project. The command is still `colonizer`.
 name = "colonizer-harness"
-version = "0.2.13"
+version = "0.2.14"
 edition = "2024"
 description = "The Colonizer harness: coding agents in private microVMs, linked by a private mesh, returning pull requests"
 license = "MIT"
@@ -37,7 +37,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10"
 # Secret redaction (crate::redact): its own crate so the observability add-on shares the detectors.
 # The version is required to publish this crate; the two are released together.
-colonizer-redact = { version = "0.2.13", path = "../colonizer-redact" }
+colonizer-redact = { version = "0.2.15", path = "../colonizer-redact" }
 # Cratefield's module-telemetry (Cratefield/harness#413): the payload grammar the usage batch is
 # validated with (`payload::Batch::parse`) and the consent helpers. Published on crates.io, so
 # colonizer can publish too (#741); the wire contract is docs/usage-data.md. The collector half runs on
@@ -70,6 +70,15 @@ toml = "1.1.6"
 # (remote.rs); the auth tests drive it the same way.
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
+# The mothership process log (issue #856): `tracing` is the instrumentation the harness emits
+# spans and events with; `tracing-subscriber` is the only sink it installs. `fmt` is the `fmt::Layer`
+# both of oplog's two layers are built on, `env-filter` is `COLONIZER_LOG`'s control and `registry`
+# is the per-subscriber lookup the layers are stacked on. `ansi` is deliberately off: the log is read
+# from a file or a pipe, where colour codes are noise. `json` is enabled because the issue's scope
+# list asks for it, not because `fmt::json` formats anything here: `oplog::JsonEvent` implements
+# `FormatEvent` by hand, and the `json` feature of `tracing-subscriber` is unused.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
 # Native agent session transcripts (issue #736, transcript.rs): read a colony's own Claude Code,
 # Codex, OpenCode, Grok or Hermes session off disk and normalize it to one shape. Minimal feature
 # set — the file-backed readers plus the two SQLite ones; no live HTTP sources or WASM. Also

@@ -450,6 +450,10 @@ fn default_co_author() -> Option<CoAuthor> {
     Some(CoAuthor::settlers())
 }
 
+fn default_label_provenance() -> bool {
+    true
+}
+
 fn de_co_author<'de, D>(deserializer: D) -> Result<Option<CoAuthor>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -467,6 +471,9 @@ where
 #[serde(default)]
 pub struct FileConfig {
     pub publish: PublishConfig,
+    /// The public activity feed (#895): a sanitized, read-only view of this install's colonies for
+    /// an external site. Off unless `enabled`, and publishing only the repositories listed.
+    pub public_feed: crate::public_feed::FeedConfig,
     /// The operator vault (#777): folders of Markdown staged read-only into each colony.
     pub vault: crate::vault::VaultConfig,
 }
@@ -479,12 +486,19 @@ pub struct PublishConfig {
     /// trailer — and the findings credit — off.
     #[serde(default = "default_co_author", deserialize_with = "de_co_author")]
     pub co_author: Option<CoAuthor>,
+    /// Whether a published commit and pull request name the Colonizer version, the settler (the agent
+    /// module) and the model, as `Colonizer-Version` / `Colonizer-Settler` / `Colonizer-Model`
+    /// trailers (#908). On by default so a maintainer can see and filter the automated work;
+    /// `false` turns the trailers off for a repository that does not want them.
+    #[serde(default = "default_label_provenance")]
+    pub label_provenance: bool,
 }
 
 impl Default for PublishConfig {
     fn default() -> Self {
         Self {
             co_author: default_co_author(),
+            label_provenance: default_label_provenance(),
         }
     }
 }
@@ -550,6 +564,17 @@ mod tests {
             assert!(err.contains("COLONIZER_GATEWAY_BIND"), "{raw:?}: {err}");
             assert!(err.contains(raw), "the bad value {raw:?} should be named: {err}");
         }
+    }
+
+    #[test]
+    fn the_provenance_trailers_are_on_unless_a_file_turns_them_off() {
+        // On by default (#908): a repository that names no key still gets a filterable stamp on
+        // every colony commit and pull request.
+        assert!(FileConfig::default().publish.label_provenance);
+        assert!(parse("").publish.label_provenance);
+        assert!(parse("[publish]\nco_author = true\n").publish.label_provenance);
+        assert!(!parse("[publish]\nlabel_provenance = false\n").publish.label_provenance);
+        assert!(parse("[publish]\nlabel_provenance = true\n").publish.label_provenance);
     }
 
     #[test]
