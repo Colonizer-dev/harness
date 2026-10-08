@@ -32,6 +32,9 @@ use crate::{events::*, publish::*, queue::*, sessions::*};
 pub(crate) const RESUME_CONFLICT: &str =
     "this colony can't be resumed: it has to be stopped or parked and still have its worktree";
 
+/// What [`resume_if`] says when the sweep's condition no longer holds at the claim.
+const NO_LONGER_DUE: &str = "this colony is no longer waiting for this automatic resume";
+
 /// Stops the agent link, asks agentd to shut the runner down, removes the VM and its mesh node,
 /// and takes the path policy's empty placeholders back out of the kept worktree: they were only
 /// bind targets for the VM just removed, and a resume's boot makes them again. Best-effort, as
@@ -937,6 +940,54 @@ pub(crate) async fn rotate_events(store: &dyn SessionStore, id: &str) -> std::io
     ))
 }
 
+/// Retires a claimed colony's agent link and moves its event log aside, for a resume or the queue's
+/// restore. The old link is told to stop, then the log is rotated under the runtime's `file_lock`: a
+/// colony reads as stopped before `teardown_vm`'s shutdown POST has finished, so its link task can
+/// still be appending agentd's last events, and an append straddling the rename would resurrect an
+/// `events.jsonl` holding the old life's seq. An agent event already queued on that lock behind the
+/// rename (tokio's mutex is FIFO) is dropped by `handle_agent_event`, because the runtime is marked
+/// `rotated` before the lock is let go. Host-written lines (`session_log`, a chain event) are not
+/// gated and may still land in the new log. Only then is the runtime swapped for one rebuilt from
+/// the rotated logs, and the one it replaces retired, which closes its event sockets so the clients
+/// reconnect into the new epoch. Swapped, not removed before the rename: with no runtime in the map, a
+/// reconnecting socket or a `session_log` rebuilds one, and a rebuild that read the log before the
+/// rename would hand the boot the old life's `agent_seq`, so the new run's first events would be
+/// dropped as replays. Until the rename the old runtime is there to be found, and after it the fresh
+/// one wins `App::runtime`'s `or_insert` over a rebuild that raced it. Every lock is taken alone: the
+/// map's around a get and an insert, `file_lock` around the rename (nothing under it may take
+/// `file_lock` again, as `session_log` does). A failed rotation takes the stopped runtime out of the
+/// map, as the claim always did before rotating: its link is ending, and `warm_resume` reads a runtime
+/// in the map as a live link. Nothing was moved aside, so whatever rebuilds it reads a consistent log.
+pub(crate) async fn retire_and_rotate_events(app: &Shared, id: &str) -> std::io::Result<()> {
+    let runtime = app.runtimes.lock().await.get(id).cloned();
+    if let Some(rt) = &runtime {
+        rt.stop.send_replace(true);
+    }
+    let rotated = {
+        let _file_lock = match runtime.as_ref() {
+            Some(rt) => Some(rt.file_lock.lock().await),
+            None => None,
+        };
+        let rotated = rotate_events(app.store(), id).await;
+        if let (Ok(()), Some(rt)) = (&rotated, &runtime) {
+            rt.rotated.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        rotated
+    };
+    if let Err(e) = rotated {
+        if let Some(old) = app.runtimes.lock().await.remove(id) {
+            old.stop.send_replace(true);
+            old.retired.send_replace(true);
+        }
+        return Err(e);
+    }
+    if let Some(old) = app.replace_runtime(id).await {
+        old.stop.send_replace(true);
+        old.retired.send_replace(true);
+    }
+    Ok(())
+}
+
 /// The current run epoch of a colony's event log: 1 for a fresh colony, one past the highest
 /// archived `events-N.jsonl` after that. Each successful resume rotates `events.jsonl` aside into
 /// the next archive slot (see `rotate_events`), so the archive count is the resume count, and the
@@ -987,6 +1038,24 @@ pub async fn resume(
     Path(id): Path<String>,
     via: Option<axum::Extension<crate::auth::Via>>,
 ) -> ApiResult<Session> {
+    resume_with(app, id, via, &|_| true).await
+}
+
+/// [`resume`] for an automatic sweep (the hold-timeout and provider-retry backoffs, the account, quota
+/// and PR-cap recoveries): `due` is the sweep's own condition, re-checked in each claim beside
+/// `can_resume`, under the colony's lifecycle lock. A sweep reads it from an earlier snapshot, and a
+/// stop landing in between leaves the colony `stopped` — which `can_resume` admits — so without this
+/// the sweep would boot a colony the operator just stopped. One no longer due is refused with a 409.
+pub(crate) async fn resume_if(app: &Shared, id: &str, due: impl Fn(&Session) -> bool + Sync) -> ApiResult<Session> {
+    resume_with(app.clone(), id.to_string(), None, &due).await
+}
+
+async fn resume_with(
+    app: Shared,
+    id: String,
+    via: Option<axum::Extension<crate::auth::Via>>,
+    due: &(dyn Fn(&Session) -> bool + Sync),
+) -> ApiResult<Session> {
     let s = app
         .session(&id)
         .await
@@ -1013,7 +1082,7 @@ pub async fn resume(
     // prompted to continue in the machine it never left, no boot, no rotation. `None` here — no kept
     // microVM, no live agent link, the microVM gone from `msb ls`, the discard setting back on, or
     // no slot free — falls through to the cold path, which tears any kept microVM down before it boots.
-    if let Some(warm) = warm_resume(&app, &id, &s).await {
+    if let Some(warm) = warm_resume(&app, &id, &s, due).await {
         return warm;
     }
     let mut previous_status = s.status;
@@ -1114,6 +1183,9 @@ pub async fn resume(
             if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) && !suspended_waiting(x) {
                 return Err(RESUME_CONFLICT.to_string()); // another resume won the race between the handler and the lock
             }
+            if !due(x) {
+                return Err(NO_LONGER_DUE.to_string()); // a stop or another resume got there between the sweep's check and this claim
+            }
             // Issue #880: while the mothership drains for an update or restart a resume queues
             // rather than boots, so the restart cannot cut the boot short.
             let admitted = room && !app.drain.draining();
@@ -1159,31 +1231,11 @@ pub async fn resume(
     };
     app.persist_and_broadcast(&s).await;
     // The colony is ours: only now is the old agent link dropped and the event log rotated.
-    let runtime = app.runtimes.lock().await.remove(&id);
-    if let Some(rt) = &runtime {
-        rt.stop.send_replace(true);
-        // Retire pre-existing event sockets: they hold this Runtime and read from its broadcast
-        // channels, so they can never see the new run's events. `stop` cannot do this —
-        // `teardown_vm` sets it on a plain stop too, where sockets stay open on purpose — so this
-        // dedicated signal, sent only on the resume-retire path, closes them, and the clients
-        // reconnect into the new epoch.
-        rt.retired.send_replace(true);
-    }
     // Rotation must not fail silently (see `rotate_events`): with the stale log still in place the
-    // resumed colony's events are dropped as already seen. A colony reads as Stopped before
-    // `teardown_vm`'s shutdown POST has finished, so its link task can still be draining agentd's
-    // last events and appending under the runtime's `file_lock`; hold that lock across the rename so
-    // an in-flight append cannot straddle it and resurrect an `events.jsonl` holding the old life's
-    // seq. Nothing under the guard may itself take `file_lock` (`session_log` does), so the failure
-    // reporting stays outside it.
-    let rotated = {
-        let _file_lock = match runtime.as_ref() {
-            Some(rt) => Some(rt.file_lock.lock().await),
-            None => None,
-        };
-        rotate_events(app.store(), &id).await
-    };
-    if let Err(e) = rotated {
+    // resumed colony's events are dropped as already seen. Retiring the old event sockets is
+    // `retire_and_rotate_events`'s, not `stop`'s — `teardown_vm` sets `stop` on a plain stop too,
+    // where sockets stay open on purpose.
+    if let Err(e) = retire_and_rotate_events(&app, &id).await {
         // The claim already moved this colony off its old status — and may have taken a parallel
         // slot with it — so put it back, or the colony is left mid-resume and `can_resume` refuses
         // the retry this error asks for. The suspension comes back with it (as the queue's restore
@@ -1297,7 +1349,7 @@ pub async fn keep(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
 /// kept microVM, no in-memory link (a restart drops it), the microVM gone from `msb ls`, the
 /// operator turned `discard_vm` back on while the colony sat parked, or no slot free right now —
 /// the cold path queues instead, after handing the kept microVM in.
-async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Session>> {
+async fn warm_resume(app: &Shared, id: &str, s: &Session, due: &(dyn Fn(&Session) -> bool + Sync)) -> Option<ApiResult<Session>> {
     let park = s.parked.as_ref()?;
     if !park.vm_kept {
         return None;
@@ -1333,7 +1385,7 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
             // The mesh and the local port survive on purpose: the microVM they point at never left.
             // Issue #880: while the mothership drains, the warm resume is refused so the cold path
             // queues the colony instead of prompting a runner a restart is about to cut off.
-            if x.status != SessionStatus::Parked || !room || app.drain.draining() {
+            if x.status != SessionStatus::Parked || !due(x) || !room || app.drain.draining() {
                 return None;
             }
             note = x.resume_note.take();
@@ -3466,6 +3518,7 @@ exit 0
         .unwrap();
         // Rotation only runs over a log that is there; the injected fault fails its rename.
         std::fs::write(app.session_dir("abc").join("events.jsonl"), b"{}\n").unwrap();
+        let rt_before = app.runtime("abc").await;
         let _guard = crate::util::faults::inject("events.jsonl", crate::util::faults::Op::Rename, || {
             std::io::Error::from(std::io::ErrorKind::StorageFull)
         });
@@ -3489,7 +3542,78 @@ exit 0
             Some("q1"),
             "the held answer is back on the restore pass's books"
         );
+        // The old link was told to stop, so its runtime is out of the map: `warm_resume` would read
+        // it as a live link.
+        let rt_now = app.runtimes.lock().await.get("abc").cloned();
+        assert!(
+            !rt_now.is_some_and(|rt| Arc::ptr_eq(&rt, &rt_before)),
+            "the stopped runtime is not left in the map"
+        );
         drop(_guard);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An events socket reconnecting while a resume waits to rotate the log (or anything else asking
+    /// for the runtime then) must not leave a runtime rebuilt from the retired run's log for the boot:
+    /// its cursor would be that run's, and the new run's agentd, numbering from 1 again, would have its
+    /// first events dropped as replays. Nor may an old-run event queued on the file lock behind the
+    /// rotation land in the new run's log, with the same effect.
+    #[tokio::test]
+    async fn a_runtime_asked_for_while_a_resume_rotates_does_not_carry_the_old_run_s_cursor() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        app.update_session("abc", |s| s.git_admin_dir = Some("/tmp/wt".into()))
+            .await
+            .unwrap();
+        std::fs::write(
+            app.session_dir("abc").join("events.jsonl"),
+            "{\"seq\":7,\"type\":\"log\",\"origin\":\"agent\",\"a_seq\":7}\n",
+        )
+        .unwrap();
+        let rt_old = app.runtime("abc").await;
+        // The old link task mid-append, so the resume stops at the rotation.
+        let append = rt_old.file_lock.lock().await;
+        let resumed = tokio::spawn(resume(State(app.clone()), Path("abc".to_string()), None));
+        // The resume has told the old link to stop and now waits for the file lock.
+        let mut stopped = rt_old.stop.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped.wait_for(|v| *v))
+            .await
+            .unwrap()
+            .unwrap();
+        // A browser reconnecting in that window, and the old link's next event, queued behind the
+        // resume on the lock.
+        let reconnected = app.runtime("abc").await;
+        let straggler = tokio::spawn({
+            let (app, rt_old) = (app.clone(), rt_old.clone());
+            async move {
+                crate::events::handle_agent_event(&app, "abc", &rt_old, r#"{"seq":8,"type":"log","message":"old run"}"#).await
+            }
+        });
+        drop(append);
+        if let Err(e) = resumed.await.unwrap() {
+            panic!("the resume failed once the lock freed up: {:#}", e.1);
+        }
+        straggler.await.unwrap();
+        assert!(
+            app.session_dir("abc").join("events-1.jsonl").exists(),
+            "the old log was rotated"
+        );
+        let rt_now = app.runtime("abc").await;
+        assert_eq!(
+            rt_now.agent_seq.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the runtime the boot links with starts the new run's cursor afresh"
+        );
+        assert!(
+            *reconnected.retired.borrow(),
+            "the socket that reconnected in the window is retired, so it reconnects into the new run"
+        );
+        crate::events::handle_agent_event(&app, "abc", &rt_now, r#"{"seq":1,"type":"log","message":"new run"}"#).await;
+        let log = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap_or_default();
+        assert!(log.contains("new run"), "the new run's first event is kept: {log:?}");
+        assert!(
+            !log.contains("old run"),
+            "the old run's straggler stays out of the new log: {log:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
