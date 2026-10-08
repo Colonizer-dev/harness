@@ -11,6 +11,7 @@
 // (`.colonizer/exec-policy.json`, read once at start); a malformed layer is dropped with a
 // warning, so the policy fails closed on the default.
 
+import { createHash } from 'node:crypto';
 import { openSync, readSync, closeSync, statSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, normalize, posix } from 'node:path';
@@ -20,6 +21,10 @@ export const EXEC_POLICY_REPO_FILE = join('.colonizer', 'exec-policy.json');
 /** Where the boot mounts the writable-bind list (boot.rs writes `vm_dir/host-mounts`, exposed at
  * guest `/colonizer`, alongside `path-policy`). */
 export const HOST_MOUNTS_FILE = '/colonizer/host-mounts';
+/** Where the boot writes the repository's own scripts as the base commit has them, `<object id>
+ * <path>` per line (crates/colonizer/src/tracked_scripts.rs, issue #1239). */
+export const TRACKED_SCRIPTS_FILE = '/colonizer/tracked-scripts';
+const TRACKED_SCRIPTS_MAX_BYTES = 4 * 1024 * 1024;
 const EXEC_POLICY_MAX_BYTES = 64 * 1024; // a policy file is rules, not data; more is a mistake
 const HOST_MOUNTS_MAX_BYTES = 64 * 1024; // the list is paths, not data; more is a mistake
 const SCRIPT_MAX_BYTES = 256 * 1024;
@@ -31,6 +36,14 @@ const LOG_COMMAND_CHARS = 200;
 // Interpreters (and `source` and `.`, which run a script in place) whose first non-flag argument
 // names the script the command runs.
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'python', 'python3', 'node', 'deno', 'bun', 'ruby', 'perl', 'source', '.']);
+// Flags that make an interpreter parse its script and stop, running nothing (#1227): `bash -n`,
+// `node --check`, `ruby -c`. Only when these are the interpreter's only flags; `bash -n -c …` or
+// `bash -n -x …` is not recognised and is read as a run, as before.
+const SYNTAX_ONLY = new Map([
+  ...['bash', 'sh', 'zsh', 'dash', 'ksh'].map((shell) => [shell, new Set(['-n', '--noexec'])]),
+  ['node', new Set(['--check', '-c'])],
+  ['ruby', new Set(['-c'])],
+]);
 const WRITE_WORDS = new Set(['cp', 'mv', 'rm', 'touch', 'mkdir', 'tee', 'truncate', 'install']);
 const WRITE_TARGET_FLAGS = /^(-|--|[a-zA-Z]=)/;
 // Write targets that are never "outside the repository": scratch space and the kernel's own sinks.
@@ -214,7 +227,48 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
   if (env.COLONIZER_EXEC_POLICY_ORG) add('org', env.COLONIZER_EXEC_POLICY_ORG);
   const repo = readFile(join(cwd, EXEC_POLICY_REPO_FILE), EXEC_POLICY_MAX_BYTES);
   if (repo) add('repo', repo);
-  return { layers, warnings, hostMounts: loadHostMounts(env, readFile) };
+  return {
+    layers,
+    warnings,
+    hostMounts: loadHostMounts(env, readFile),
+    trackedScripts: loadTrackedScripts(env, readFile),
+  };
+}
+
+/**
+ * The repository's own scripts at the base commit, path to git object id (#1239). The guest cannot
+ * see that commit by itself, and the agent can rewrite the worktree's index and refs, so the host
+ * writes this list at boot into the read-only `/colonizer` mount. Empty when absent.
+ * @param {string} text
+ * @returns {Map<string, string>}
+ */
+export function parseTrackedScripts(text) {
+  const tracked = new Map();
+  for (const line of String(text ?? '').split('\n')) {
+    const match = line.match(/^([0-9a-f]{40}|[0-9a-f]{64}) (.+)$/);
+    if (match) tracked.set(posix.normalize(match[2]), match[1]);
+  }
+  return tracked;
+}
+
+function loadTrackedScripts(env, readFile) {
+  const file = env.COLONIZER_TRACKED_SCRIPTS || TRACKED_SCRIPTS_FILE;
+  return parseTrackedScripts(readFile(file, TRACKED_SCRIPTS_MAX_BYTES));
+}
+
+/** The git object id of a blob with these bytes, SHA-1 or SHA-256 to match `id`'s length. */
+export function gitBlobId(bytes, algorithm = 'sha1') {
+  const body = Buffer.from(bytes);
+  return createHash(algorithm).update(`blob ${body.length}\0`).update(body).digest('hex');
+}
+
+/** True when the script at `path` is one the base commit carries, with the same bytes. */
+function isTrackedScript(path, text, cwd, tracked) {
+  if (!tracked?.size || text.length >= SCRIPT_MAX_BYTES) return false; // a capped read cannot be hashed
+  const rel = posix.relative(posix.normalize(cwd), posix.normalize(path));
+  if (!rel || rel.startsWith('..') || rel.startsWith('/')) return false;
+  const id = tracked.get(rel);
+  return Boolean(id) && gitBlobId(text, id.length === 64 ? 'sha256' : 'sha1') === id;
 }
 
 /**
@@ -229,11 +283,11 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
  */
 export function evaluateExecPolicy(policy, command, opts = {}) {
   if (!policy || typeof command !== 'string' || !command) return null;
-  const ctx = buildContext(command, opts, policy.hostMounts ?? null);
+  const ctx = buildContext(command, opts, policy.hostMounts ?? null, policy.trackedScripts ?? null);
   let best = null;
   for (const layer of policy.layers) {
     for (const rule of layer.rules) {
-      if (!ruleMatches(rule, ctx)) continue;
+      if (!ruleMatches(rule, ctx, layer.name)) continue;
       // A `writes_outside` rule reports WHY: the specific path classification the context found (a
       // read-only mount, the checkout's .git, a host-backed mount), falling back to the rule's own
       // reason for the plain strict case (a VM-local write, which no single path names).
@@ -322,17 +376,22 @@ export function createExecAllowCache() {
 // --- matching ------------------------------------------------------------------
 
 /** One rule: every predicate present must hold. */
-function ruleMatches(rule, ctx) {
+function ruleMatches(rule, ctx, layer) {
   for (const p of rule.predicates) {
     switch (p.kind) {
       case 'command':
         if (!p.res.some((re) => re.test(ctx.command))) return false;
         break;
-      case 'script':
+      case 'script': {
         // No readable script, no match: the rule is about what the command runs, and a command
         // that runs nothing readable cannot show it (the default layer's other rules still hold).
-        if (!ctx.scripts.some((s) => p.res.some((re) => re.test(s.text)))) return false;
+        // The repository's own scripts, byte for byte as the base commit has them, are not the
+        // colony's to answer for (#1239): the default layer leaves them to the VM's network
+        // policy. A layer an operator or the repository adds still sees them.
+        const scripts = layer === 'default' ? ctx.scripts.filter((s) => !s.tracked) : ctx.scripts;
+        if (!scripts.some((s) => p.res.some((re) => re.test(s.text)))) return false;
         break;
+      }
       case 'touches':
         if (!ctx.tokens.some((t) => p.res.some((re) => re.test(t)) && !p.keepOut.some((re) => re.test(t)))) return false;
         break;
@@ -433,8 +492,15 @@ function scriptArg(segment) {
   const ws = /^\s*\.\s+\S/.test(segment) ? ['.', ...commandWords(segment)] : commandWords(segment);
   const head = ws[0] ?? '';
   if (INTERPRETERS.has(basename(head))) {
+    const flags = [];
     for (const w of ws.slice(1)) {
-      if (!w.startsWith('-')) return expandTilde(w); // the first non-flag argument is the script
+      if (!w.startsWith('-')) {
+        // A syntax check reads the script and runs none of it (#1227).
+        const syntax = SYNTAX_ONLY.get(basename(head));
+        if (syntax && flags.length && flags.every((f) => syntax.has(f))) return null;
+        return expandTilde(w); // the first non-flag argument is the script
+      }
+      flags.push(w);
     }
     return null;
   }
@@ -583,15 +649,24 @@ const UNSAFE_SHELL_PIPED = /[<>`$(){}\\]/;
 const HARMLESS_REDIRECT = /(^|\s)(?:2>&1|[12]?>\s*\/dev\/null|&>\s*\/dev\/null)(?=\s|;|\||&|$)/g;
 
 /** True when one segment (already split on `;`, `&&` and the like) only asks about path names. */
-function isNameOnlySegment(segment) {
+function isNameOnlySegment(segment, cwd) {
   const ws = segment.trim().split(/\s+/).map((w) => w.replace(/^["']|["']$/g, ''));
   if (!ws.length || ws.some((w) => /["']/.test(w))) return false;
   const paths = (rest) => rest.every((w) => !w.startsWith('-'));
   const flags = (rest) => rest.filter((w) => w.startsWith('-')).every((w) => SHORT_FLAGS.test(w) || LONG_FLAGS.test(w));
   if (ws[0] === 'git') {
-    // The subcommand must come first: `git -c core.pager=... status` could run a command.
-    if (!['check-ignore', 'status'].includes(ws[1])) return false;
-    return flags(ws.slice(2));
+    // `-C <dir>` is allowed only when it names the repository the command already runs in (#1079
+    // follow-up: `git -C /workspace check-ignore --no-index ...`); another directory could carry a
+    // config whose hooks run. Then the subcommand must come first: `git -c core.pager=... status`
+    // could run a command.
+    let i = 1;
+    while (ws[i] === '-C') {
+      const dir = ws[i + 1] ?? '';
+      if (!(dir === '.' || (cwd && dir.startsWith('/') && posix.normalize(dir).replace(/\/+$/, '') === posix.normalize(cwd).replace(/\/+$/, '')))) return false;
+      i += 2;
+    }
+    if (!['check-ignore', 'status'].includes(ws[i])) return false;
+    return flags(ws.slice(i + 1));
   }
   if (ws[0] === 'ls') return flags(ws.slice(1));
   // `echo` of literal words (the caller already refused every expansion) only prints its own text.
@@ -637,7 +712,7 @@ function isStdinFilter(segment) {
  * as name-only when its body is. Anything touching `.ssh` keeps counting; any other segment, such
  * as `cat .env`, keeps its tokens and is refused as before.
  */
-function nameOnlyFiltered(command, segments) {
+function nameOnlyFiltered(command, segments, cwd) {
   if (/\.ssh/.test(command)) return segments;
   // One line only: a newline inside the body would hide a second command (`hash -p /bin/cat ls`).
   const loop = !/[\r\n]/.test(command.trim()) && command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;|&<>`(){}\\]+?);?\s*done$/);
@@ -645,13 +720,13 @@ function nameOnlyFiltered(command, segments) {
     const [, name, , body] = loop;
     const ref = new RegExp(`"?\\$(?:${name}|\\{${name}\\})"?`, 'g');
     const plain = body.replace(ref, 'X');
-    return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain) ? [] : segments;
+    return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain, cwd) ? [] : segments;
   }
   if (!UNSAFE_SHELL.test(command)) {
     // All or nothing: one other segment (`alias ls=cat`, `export PATH=...`, `hash -p /bin/cat ls`)
     // can change what a later `ls` or `test` runs, so only a command made of name-only segments
     // and nothing else drops its tokens.
-    return segments.every((segment) => !segment.trim() || isNameOnlySegment(segment)) ? [] : segments;
+    return segments.every((segment) => !segment.trim() || isNameOnlySegment(segment, cwd)) ? [] : segments;
   }
   // The shape agents reach for to keep output short: `git check-ignore -v .env 2>&1 | head; wc -c
   // .env 2>&1 | head`. With `2>&1` and `>/dev/null` gone, and no other redirect, substitution or
@@ -660,7 +735,7 @@ function nameOnlyFiltered(command, segments) {
   const plain = command.replace(HARMLESS_REDIRECT, '$1');
   if (/[\r\n]/.test(plain.trim()) || UNSAFE_SHELL_PIPED.test(plain)) return segments;
   const parts = splitCommands(plain);
-  return parts.length && parts.every((segment) => isNameOnlySegment(segment) || isStdinFilter(segment)) ? [] : segments;
+  return parts.length && parts.every((segment) => isNameOnlySegment(segment, cwd) || isStdinFilter(segment)) ? [] : segments;
 }
 
 /**
@@ -672,7 +747,7 @@ function nameOnlyFiltered(command, segments) {
  * of those plus a write into the microVM's own root filesystem. Each carries the reason for the
  * write it matched; a VM-local write has no reason of its own, so a strict rule names it.
  */
-function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null) {
+function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null, tracked = null) {
   const segments = splitCommands(command);
   const scripts = [];
   const seen = new Set();
@@ -683,11 +758,11 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     if (seen.has(path)) continue;
     seen.add(path);
     const text = readFile(path);
-    if (text) scripts.push({ path, text });
+    if (text) scripts.push({ path, text, tracked: isTrackedScript(path, text, cwd, tracked) });
   }
   const tokens = new Set();
   const spelled = new Map(); // token -> the word as the command spelled it (`~/.ssh`, not /root/.ssh)
-  for (const word of [...nameOnlyFiltered(command, segments).map(withoutExcludes).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
+  for (const word of [...nameOnlyFiltered(command, segments, cwd).map(withoutExcludes).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
     const token = expandTilde(word);
     tokens.add(token);
     if (!spelled.has(token)) spelled.set(token, word);

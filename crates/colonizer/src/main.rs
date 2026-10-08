@@ -164,6 +164,7 @@ mod supply_chain_loop;
 mod switch_agent;
 mod telemetry;
 mod timing;
+mod tracked_scripts;
 mod transcript;
 mod ts_any_loop;
 mod uhp;
