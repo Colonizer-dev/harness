@@ -30,6 +30,28 @@ describe("DownloadableRow", () => {
     expect(html).toContain("downloadable");
   });
 
+  // A second downloadable skillset gets a row of its own: the name, the licence, what it adds, and
+  // the cost note that keeps an operator from expecting a whole-repo pass on the first colony.
+  it("describes the understand-anything skillset, and does not pretend the download switches it on", () => {
+    const html = row(graft({ name: "understand-anything", release: "v2.9.0" }));
+    expect(html).toContain('aria-label="Download the understand-anything skillset"');
+    expect(html).toContain(">Download<");
+    expect(html).toContain("knowledge graph");
+    expect(html).toContain("what a change would affect");
+    expect(html).toContain("onboarding tours");
+    expect(html).toContain("MIT, by Egonex");
+    expect(html).toContain("multi-agent pass");
+    expect(html).toContain("about 3 MB (v2.9.0)"); // its own size, not graft's 80 MB
+    // Downloading only puts the plugin on disk; the operator still flips the switch.
+    expect(html).not.toContain('aria-label="Load the understand-anything skillset"');
+  });
+
+  it("names the skillset's own directory when a local copy is used instead", () => {
+    expect(downloadLine(graft({ name: "understand-anything", state: "local" }))).toBe(
+      "Your own plugins/understand-anything directory is used instead; remove it to download the pinned bundle.",
+    );
+  });
+
   it("shows progress while downloading, with the button disabled", () => {
     const html = row(graft({ state: "downloading", bytes: 20 * 1_048_576, total: 80 * 1_048_576 }));
     expect(html).toContain("Downloading… 20 MB of 80 MB");

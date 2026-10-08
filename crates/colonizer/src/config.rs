@@ -467,6 +467,9 @@ where
 #[serde(default)]
 pub struct FileConfig {
     pub publish: PublishConfig,
+    /// The public activity feed (#895): a sanitized, read-only view of this install's colonies for
+    /// an external site. Off unless `enabled`, and publishing only the repositories listed.
+    pub public_feed: crate::public_feed::FeedConfig,
     /// The operator vault (#777): folders of Markdown staged read-only into each colony.
     pub vault: crate::vault::VaultConfig,
 }

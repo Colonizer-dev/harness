@@ -174,6 +174,93 @@ export function superpowersBootstrap(skill) {
   ].join('\n');
 }
 
+/**
+ * understand-anything (Egonex-AI, MIT), an optional downloadable skillset. It builds a knowledge
+ * graph of the repository and answers lookups, tours and diff-impact questions from it.
+ *
+ * The full pass (`/understand`) is a multi-agent sweep of the whole repository — upstream warns
+ * about the token cost — and it bootstraps itself with `pnpm install` plus a build into the plugin
+ * root, which cannot work here: the plugin dir is mounted read-only and a colony's only network is
+ * the model router. So the colony keeps what is file-scoped and offline and refuses the rest
+ * (docs/understand-anything.md).
+ */
+export const UNDERSTAND_ANYTHING_PLUGIN = 'understand-anything';
+
+/** The skills the colony refuses, by their bare name, and why each one is refused. */
+export const UNDERSTAND_ANYTHING_DENIED = new Map([
+  [
+    'understand',
+    'the full /understand analysis is a multi-agent pass over the whole repository and upstream warns about its token cost. Use the file-scoped commands instead — /understand-explain <file>, /understand-diff, /understand-chat — and read an existing graph in .ua/ when one is there.',
+  ],
+  [
+    'understand-dashboard',
+    '/understand-dashboard starts a vite server after a pnpm install, and this colony has no network beyond the model router and a read-only plugin directory. Read the graph in .ua/ directly.',
+  ],
+  [
+    'understand-figma',
+    '/understand-figma calls the Figma API, which a colony cannot reach: its only network is the model router.',
+  ],
+]);
+
+export const UNDERSTAND_ANYTHING_PROMPT_APPEND = [
+  '- You have the understand-anything skillset: it keeps a knowledge graph of this repository under `.ua/` and answers lookups, guided tours and diff-impact questions from it.',
+  '- Do not run the full `/understand` analysis — a PreToolUse hook refuses it. It is a multi-agent pass over the whole repository and upstream warns about the tokens it costs.',
+  '- If `.ua/` already holds a graph in this colony, read it. Otherwise stay with the file-scoped and incremental commands: `/understand-explain <file>`, `/understand-diff`, `/understand-chat`.',
+  '- `/understand-dashboard` and `/understand-figma` are refused too: one needs a vite server and a `pnpm install`, the other the Figma API, and neither can reach the network here.',
+  '- `.ua/` is git-ignored by the colony and never part of the pull request.',
+].join('\n');
+
+/**
+ * Whether understand-anything is one of the mounted plugin directories. `COLONIZER_PLUGIN_DIRS`
+ * carries in-VM paths (`/opt/colonizer/plugins/understand-anything`), and bare names are accepted
+ * so a test and a hand-set value both work.
+ */
+export function understandAnythingMounted(pluginDirs = []) {
+  return pluginDirs.some((dir) => {
+    const name = String(dir ?? '').trim().split('/').pop();
+    return name === UNDERSTAND_ANYTHING_PLUGIN;
+  });
+}
+
+/**
+ * The skill a Skill tool call names, split into its `plugin:` namespace and its bare name, or
+ * `[null, '']` when the call names none. `skill` is read first: that is the field the bundled CLI
+ * actually sends — the Skill tool's input schema is `{ skill, args }` (checked against the
+ * `Tt` schema and the `Skill` tool's `validateInput`/`checkPermissions` in claude 2.1.270, the
+ * build `@anthropic-ai/claude-agent-sdk` 0.3.270 ships). The other spellings are read too, because a
+ * call that slips past this way costs a turn and nothing here depends on which one matched.
+ */
+function splitSkillName(toolInput = {}) {
+  const input = toolInput && typeof toolInput === 'object' ? toolInput : {};
+  const raw = [input.skill, input.command, input.name, input.skill_name].find(
+    (value) => typeof value === 'string' && value.trim(),
+  );
+  if (!raw) return [null, ''];
+  // `args` is a separate field, but a leading slash or a trailing argument can still ride along.
+  const first = raw.trim().split(/\s+/)[0].replace(/^\//, '');
+  const colon = first.lastIndexOf(':');
+  return colon < 0 ? [null, first] : [first.slice(0, colon), first.slice(colon + 1)];
+}
+
+/** The bare skill name a Skill tool call names, namespace and leading slash stripped. */
+export function skillNameFromInput(toolInput = {}) {
+  return splitSkillName(toolInput)[1];
+}
+
+/**
+ * Why a Skill call is refused when understand-anything is mounted, or null when it is allowed.
+ * Only the three skills above are refused, and only by exact name: `/understand-diff` and the rest
+ * are the file-scoped commands the guard points the colony at instead. A name another plugin
+ * namespaces (`other-pack:understand`) is that plugin's skill, not this one's, so it stays allowed.
+ */
+export function understandAnythingDenial(toolName, toolInput = {}, pluginDirs = []) {
+  if (toolName !== 'Skill' || !understandAnythingMounted(pluginDirs)) return null;
+  const [namespace, skill] = splitSkillName(toolInput);
+  if (namespace !== null && namespace !== UNDERSTAND_ANYTHING_PLUGIN) return null;
+  const reason = UNDERSTAND_ANYTHING_DENIED.get(skill);
+  return reason ? `understand-anything: ${reason}` : null;
+}
+
 /** Where the mothership mounts what the token-saving settings need (crates/colonizer/src/sessions.rs). */
 export const RTK_BIN = '/opt/colonizer/bin/rtk';
 export const CAVEMAN_SKILL = '/opt/colonizer/caveman/SKILL.md';
@@ -581,6 +668,10 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
+  // Cost guard (issue #1014): only when the plugin is actually mounted, so a colony that never got
+  // the skillset sees neither the prompt block nor the gate.
+  const understandAnything = understandAnythingMounted(pluginDirs);
+  if (understandAnything) appended.push(UNDERSTAND_ANYTHING_PROMPT_APPEND);
   // Keyed on the skill file, not the directory name, so an operator's own copy of superpowers switches on too.
   for (const dir of pluginDirs) {
     const skill = readText(join(dir, SUPERPOWERS_SKILL));
@@ -705,6 +796,24 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
       hooks: [
         async (input) => {
           const reason = memoryDecision(input.tool_name, input) ?? vaultDecision(input.tool_name, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (understandAnything) {
+    // The colony's cost guard (issue #1014), on the same hook layer as the gates above: a hook
+    // rather than canUseTool, because it applies to subagents too — the whole-repository pass is
+    // expensive whoever starts it. The reason names the file-scoped commands to use instead.
+    preToolUse.push({
+      matcher: 'Skill',
+      hooks: [
+        async (input) => {
+          const reason = understandAnythingDenial(input.tool_name, input.tool_input, pluginDirs);
           if (!reason) return { continue: true };
           return {
             continue: true,
