@@ -136,7 +136,7 @@ pub fn policy_for(contract: &Contract) -> Policy {
 pub fn resource_for(policy: &Policy, contract: &Contract) -> ExportResource {
     let s = &contract.settings;
     let service = if s.service_name.is_empty() {
-        "colonizer"
+        contract::DEFAULT_SERVICE_NAME
     } else {
         s.service_name.as_str()
     };
