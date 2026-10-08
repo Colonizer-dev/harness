@@ -477,6 +477,21 @@ function words(text) {
     .filter((w) => w.length > 1 || w === '/');
 }
 
+/**
+ * The paths a git segment names inside `<rev>:<path>` object specs (#1241): `git show HEAD:.env`,
+ * `git cat-file -p origin/main:.npmrc` or `<sha>:config/.netrc` read the file as committed, and the
+ * `<rev>:` prefix would otherwise hide it from a `touches` glob. Any git subcommand counts; a word
+ * without a colon, or with only a leading one (`:.env`, which [`words`] already strips), adds
+ * nothing.
+ */
+function gitObjectPaths(segment) {
+  if (basename(commandWords(segment)[0] ?? '') !== 'git') return [];
+  return words(segment)
+    .filter((w) => w.indexOf(':') > 0)
+    .map((w) => w.slice(w.indexOf(':') + 1))
+    .filter((path) => path.length > 1);
+}
+
 /** A segment's words past its env assignments and a leading sudo/env/command/exec. */
 function commandWords(segment) {
   const ws = words(segment);
@@ -762,7 +777,7 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
   }
   const tokens = new Set();
   const spelled = new Map(); // token -> the word as the command spelled it (`~/.ssh`, not /root/.ssh)
-  for (const word of [...nameOnlyFiltered(command, segments, cwd).map(withoutExcludes).flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
+  for (const word of [...nameOnlyFiltered(command, segments, cwd).map(withoutExcludes).flatMap((s) => [...words(s), ...gitObjectPaths(s)]), ...scripts.flatMap((s) => words(s.text))]) {
     const token = expandTilde(word);
     tokens.add(token);
     if (!spelled.has(token)) spelled.set(token, word);
