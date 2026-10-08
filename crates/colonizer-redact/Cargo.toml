@@ -2,7 +2,7 @@
 name = "colonizer-redact"
 # Versioned with colonizer-harness, which depends on it and is published: release.yml checks the tag
 # against this version and publishes this crate first.
-version = "0.2.14"
+version = "0.2.15"
 edition = "2024"
 description = "Secret redaction for Colonizer logs, shared by the harness and its observability add-on"
 license = "MIT"
