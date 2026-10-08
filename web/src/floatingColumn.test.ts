@@ -9,15 +9,10 @@ const PHONE = "max-sm:left-3 max-sm:right-3 max-sm:bottom-[calc(4.25rem+env(safe
 
 describe("floatingColumnClass", () => {
   it("keeps the bottom-right corner when no inspector is showing", () => {
-    expect(floatingColumnClass(false, false)).toBe(`bottom-5 right-5 w-[380px] ${PHONE}`);
+    expect(floatingColumnClass(false)).toBe(`bottom-5 right-5 w-[380px] ${PHONE}`);
   });
 
   it("moves past the 360px inspector, keeping the 20px gap, while it shows", () => {
-    expect(floatingColumnClass(false, true)).toBe(`bottom-5 right-[380px] w-[380px] ${PHONE}`);
-  });
-
-  it("spans a narrow window, where the cockpit and its inspector are not rendered", () => {
-    expect(floatingColumnClass(true, false)).toBe("inset-x-3 bottom-3");
-    expect(floatingColumnClass(true, true)).toBe("inset-x-3 bottom-3");
+    expect(floatingColumnClass(true)).toBe(`bottom-5 right-[380px] w-[380px] ${PHONE}`);
   });
 });

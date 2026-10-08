@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import type { MemoryNote, MemoryProposal, MemoryScope, OrgInfo, Repo } from "../types";
-import { IconCheck, IconMemory, IconMenu, IconOrg, IconPencil, IconPlus, IconTrash } from "./icons";
+import { IconCheck, IconMemory, IconOrg, IconPencil, IconPlus, IconTrash } from "./icons";
 import { InlineCode, MarkdownBlock } from "./Markdown";
 import { VaultProposals } from "./VaultProposals";
 import { Badge, Button, Spinner, cx, inputClass, sameOrg, store, stored, timeAgo } from "./ui";
@@ -50,16 +50,12 @@ function groupProposals(proposals: MemoryProposal[]): ProposalGrouping[] {
 }
 
 export function MemoryView({
-  narrow,
   selectedOrg,
   orgs,
-  onOpenSidebar,
   onChanged,
 }: {
-  narrow: boolean;
   selectedOrg: string | null;
   orgs: OrgInfo[];
-  onOpenSidebar: () => void;
   onChanged: () => void;
 }) {
   const api = useApi();
@@ -95,16 +91,6 @@ export function MemoryView({
     <div className="flex h-full min-h-0 flex-col">
       <header className="shrink-0 border-b border-border bg-panel px-4 py-3">
         <div className="flex items-start gap-3">
-          {narrow && (
-            <button
-              type="button"
-              onClick={onOpenSidebar}
-              aria-label="Open sidebar"
-              className="-ml-1.5 grid size-9 shrink-0 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
-            >
-              <IconMenu size={18} />
-            </button>
-          )}
           <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
             <IconMemory size={18} />
           </div>
