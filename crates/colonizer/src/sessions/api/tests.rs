@@ -20,7 +20,179 @@ fn page(limit: &str, cursor: Option<&str>) -> ListQuery {
     ListQuery {
         limit: Some(limit.into()),
         cursor: cursor.map(String::from),
+        ..ListQuery::default()
     }
+}
+
+/// The `external_ref` / `origin` filters (issue #901), each optionally present, over the bare array
+/// — neither changes the reply shape, only what is in it.
+fn filter(external_ref: Option<&str>, origin: Option<&str>) -> ListQuery {
+    ListQuery {
+        external_ref: external_ref.map(String::from),
+        origin: origin.map(String::from),
+        ..ListQuery::default()
+    }
+}
+
+/// The ids a list answer carries, newest first.
+fn ids(parsed: &Value) -> Vec<&str> {
+    parsed.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect()
+}
+
+/// Four colonies for the filters to choose between, inserted oldest first: one carries both fields,
+/// one shares its reference and differs in origin, one carries a reference of its own and no
+/// origin, and the newest carries neither. A filter that keeps the wrong pair, or that ORs instead
+/// of ANDs, shows up here.
+async fn four_colonies() -> (Shared, PathBuf) {
+    let (app, root) = app_with_colony("oldest", SessionStatus::Running).await;
+    {
+        let mut sessions = app.sessions.write().await;
+        let found = |id: &str, external_ref: Option<&str>, origin: Option<&str>| {
+            let mut s = colony("acme", SessionStatus::Idle);
+            s.id = id.into();
+            s.external_ref = external_ref.map(String::from);
+            s.origin = origin.map(String::from);
+            s
+        };
+        let oldest = sessions.iter_mut().find(|s| s.id == "oldest").unwrap();
+        oldest.external_ref = Some("ticket-1".into());
+        oldest.origin = Some("burn_down".into());
+        sessions.push(found("same-ref", Some("ticket-1"), Some("burn_down")));
+        sessions.push(found("other-origin", Some("ticket-1"), Some("redteam")));
+        sessions.push(found("unnamed", None, None));
+    }
+    (app, root)
+}
+
+/// `?external_ref=` and `?origin=` each select exactly the colonies carrying the value, newest
+/// first, in the bare-array shape the route has always answered — a filter narrows the list, it
+/// does not page it.
+#[tokio::test]
+async fn external_ref_and_origin_each_select_their_own_colonies() {
+    let (app, root) = four_colonies().await;
+
+    let by_ref = list_response(&app, filter(Some("ticket-1"), None)).await;
+    assert_eq!(
+        ids(&by_ref),
+        ["other-origin", "same-ref", "oldest"],
+        "the reference names three colonies, newest first: {by_ref}"
+    );
+    assert!(by_ref.is_array(), "a filter alone is still the bare array: {by_ref}");
+
+    let by_origin = list_response(&app, filter(None, Some("redteam"))).await;
+    assert_eq!(ids(&by_origin), ["other-origin"], "the origin names one colony: {by_origin}");
+    assert!(
+        !ids(&list_response(&app, filter(None, Some("burn_down"))).await).contains(&"other-origin"),
+        "and does not name the colony it does not match"
+    );
+
+    // A value no colony carries is an empty list, not a refusal: the route cannot tell an unknown
+    // reference from a colony that was never created.
+    assert!(
+        list_response(&app, filter(Some("ticket-9"), None))
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        list_response(&app, filter(None, Some("map")))
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // A colony with no reference of its own is not in the answer for any value.
+    assert!(
+        !ids(&by_ref).contains(&"unnamed"),
+        "a colony with no reference matches nothing"
+    );
+
+    // Both together narrow to the colonies carrying both — the pair that shares only one field is
+    // not in it, so the filters compose rather than widen.
+    let both = list_response(&app, filter(Some("ticket-1"), Some("burn_down"))).await;
+    assert_eq!(ids(&both), ["same-ref", "oldest"], "both filters must match: {both}");
+    let crossed = list_response(&app, filter(Some("ticket-1"), Some("redteam"))).await;
+    assert_eq!(ids(&crossed), ["other-origin"], "and they pair per colony: {crossed}");
+
+    // A value is trimmed the way a body field is, so a padded query filters the same colony.
+    assert_eq!(
+        ids(&list_response(&app, filter(None, Some(" redteam "))).await),
+        ["other-origin"]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A filter sent blank is a **400** `invalid_input`, the same refusal a bad `cursor` gets — never a
+/// filter that quietly matches every colony.
+#[tokio::test]
+async fn a_blank_filter_is_invalid_input() {
+    let (app, root) = four_colonies().await;
+    for query in [
+        filter(Some("   "), None),
+        filter(None, Some("")),
+        filter(Some("t-1"), Some(" ")),
+    ] {
+        let response = list(State(app.clone()), Query(query), HeaderMap::new(), None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "a blank filter is refused");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["code"], "invalid_input", "{parsed}");
+    }
+    // The same query still pages when asked to: a filter and a page compose.
+    let paged = list_response(
+        &app,
+        ListQuery {
+            limit: Some("10".into()),
+            ..filter(None, Some("redteam"))
+        },
+    )
+    .await;
+    assert_eq!(
+        ids(&paged["sessions"]),
+        ["other-origin"],
+        "filtered inside the page too: {paged}"
+    );
+    assert_eq!(paged["next_cursor"], Value::Null);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The filters narrow what the scoped-token rule already let through: a matching colony outside the
+/// token's org/repo limits stays out of the answer, so a reference is not a way to read one.
+#[tokio::test]
+async fn a_scoped_token_never_finds_a_colony_through_a_filter() {
+    let (app, root) = four_colonies().await;
+    let mut elsewhere = colony("other", SessionStatus::Running);
+    elsewhere.id = "elsewhere".into();
+    elsewhere.repo = "other/repo".into();
+    elsewhere.org = "other".into();
+    elsewhere.external_ref = Some("ticket-1".into());
+    elsewhere.origin = Some("burn_down".into());
+    app.sessions.write().await.push(elsewhere);
+
+    let token = axum::Extension(crate::api_tokens::ScopedToken {
+        id: "tok_test".into(),
+        name: "watcher".into(),
+        scope: crate::api_tokens::Scope::Read,
+        orgs: Vec::new(),
+        repos: vec!["acme/repo".into()],
+        max_concurrent: None,
+        budget_usd_per_day: None,
+    });
+
+    let seen = list_response_with_token(&app, filter(Some("ticket-1"), None), Some(token.clone())).await;
+    assert_eq!(
+        ids(&seen),
+        ["other-origin", "same-ref", "oldest"],
+        "the hidden colony is not in the answer: {seen}"
+    );
+    // The owner sees all four, hidden colony included, so what the token missed is the filter's
+    // doing rather than the fixture's.
+    assert!(
+        ids(&list_response(&app, filter(Some("ticket-1"), None)).await).contains(&"elsewhere"),
+        "the owner sees every match"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Without `limit` or `cursor` the route answers the cockpit's bare array, newest first —

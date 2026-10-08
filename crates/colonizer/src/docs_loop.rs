@@ -28,6 +28,7 @@ use crate::{
     util::{exec_within, short_id, write_atomic},
 };
 use anyhow::{Context, Result};
+use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -2454,7 +2455,7 @@ async fn dispatch(app: &Shared, repo: &str, scan: &Scan, shown: &[Finding], more
     });
     let req: NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    let Json(session) = sessions::create(State(app.clone()), None, Json(req)).await?;
+    let Json(session) = sessions::create(State(app.clone()), None, HeaderMap::new(), Json(req)).await?;
     Ok(session)
 }
 

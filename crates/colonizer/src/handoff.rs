@@ -18,6 +18,7 @@
 //! mount, never inside it) and the recorded branch becomes the colony's base, so a fresh boot cuts
 //! the colony's own `colonizer/session-…` branch from it (`boot.rs`).
 
+use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{DefaultBodyLimit, Path, State},
@@ -199,7 +200,7 @@ pub async fn handoff_in(
         handoff: Some(seed),
         ..Default::default()
     };
-    crate::sessions::create(State(app), scoped, Json(new)).await
+    crate::sessions::create(State(app), scoped, HeaderMap::new(), Json(new)).await
 }
 
 /// `GET /api/sessions/{id}/handoff`: the colony's conversation as a txcript Simple document, redacted

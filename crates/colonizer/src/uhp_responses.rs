@@ -1023,10 +1023,15 @@ async fn launch(app: &Shared, ask: &Ask, scoped: Option<ScopedToken>, via: Optio
         instructions: ask.input.clone(),
         ..NewSession::default()
     };
-    let session = crate::sessions::create(State(app.clone()), scoped.map(axum::Extension), Json(request))
-        .await
-        .map_err(from_app_error)?
-        .0;
+    let session = crate::sessions::create(
+        State(app.clone()),
+        scoped.map(axum::Extension),
+        HeaderMap::new(),
+        Json(request),
+    )
+    .await
+    .map_err(from_app_error)?
+    .0;
     let mut entry = crate::activity::Entry::new("colony.launch", "you").colony(&session);
     entry.via = crate::activity::via_name(via);
     crate::activity::record(app, entry).await;

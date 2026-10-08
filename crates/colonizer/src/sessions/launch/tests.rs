@@ -1,5 +1,6 @@
 use super::*;
 use crate::sessions::tests::*;
+use axum::http::HeaderMap;
 use tokio::sync::RwLock;
 
 /// Nothing configured means nothing automatic; the publish module's defaults flow into a session
@@ -127,6 +128,7 @@ fn an_overlap_queued_colony_stays_queued_until_its_holder_finishes() {
 /// into overlap-aware queueing.
 fn overlap_request(repo: &str, serialize: Option<bool>) -> Json<NewSession> {
     Json(NewSession {
+        external_ref: None,
         repo: repo.into(),
         issue: None,
         title: String::new(),
@@ -183,7 +185,7 @@ async fn overlap_queueing_only_applies_when_the_request_opts_in_with_serialize()
 
     // No `serialize` at all: the default stays off, so the newcomer never even scans for an
     // overlap and starts unheld.
-    let created = create(State(app.clone()), None, overlap_request("acme/app", None))
+    let created = create(State(app.clone()), None, HeaderMap::new(), overlap_request("acme/app", None))
         .await
         .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
     assert_eq!(
@@ -192,15 +194,25 @@ async fn overlap_queueing_only_applies_when_the_request_opts_in_with_serialize()
     );
 
     // `serialize: false` reads the same as absent.
-    let created = create(State(app.clone()), None, overlap_request("acme/app", Some(false)))
-        .await
-        .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
+    let created = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        overlap_request("acme/app", Some(false)),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
     assert_eq!(created.queued_behind, None, "an explicit false is still off");
 
     // `serialize: true`: the same live, touched-file colony now holds the newcomer behind it.
-    let created = create(State(app.clone()), None, overlap_request("acme/app", Some(true)))
-        .await
-        .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
+    let created = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        overlap_request("acme/app", Some(true)),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create refused: {:#}", e.1));
     assert_eq!(
         created.queued_behind.as_deref(),
         Some("holder"),
@@ -328,7 +340,9 @@ async fn a_second_colony_for_one_supply_chain_target_is_refused_until_allow_dupl
         })
     };
 
-    let err = create(State(app.clone()), None, request(false)).await.unwrap_err();
+    let err = create(State(app.clone()), None, HeaderMap::new(), request(false))
+        .await
+        .unwrap_err();
     assert_eq!(err.0, StatusCode::CONFLICT, "a live holder refuses the launch");
     let message = err.1.to_string();
     assert!(message.contains("holder") && message.contains("lodash / ghsa-1"), "{message}");
@@ -339,6 +353,7 @@ async fn a_second_colony_for_one_supply_chain_target_is_refused_until_allow_dupl
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
             supply_chain: Some(crate::supersede::SupplyChainTarget::new("lodash", "  ")),
             ..request(false).0
@@ -353,7 +368,7 @@ async fn a_second_colony_for_one_supply_chain_target_is_refused_until_allow_dupl
     );
     assert_eq!(app.sessions.read().await.len(), 1);
 
-    let created = create(State(app.clone()), None, request(true))
+    let created = create(State(app.clone()), None, HeaderMap::new(), request(true))
         .await
         .unwrap_or_else(|e| panic!("allow_duplicate starts a second colony anyway: {:#}", e.1));
     assert_eq!(
@@ -605,7 +620,9 @@ async fn a_switched_off_org_refuses_new_colonies_and_names_the_way_back_on() {
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
+            external_ref: None,
             repo: "acme/app".into(),
             issue: None,
             title: String::new(),
@@ -690,7 +707,9 @@ async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_ab
     let created = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
+            external_ref: None,
             repo: "acme/app".into(),
             issue: None,
             title: String::new(),
@@ -736,6 +755,7 @@ async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_ab
 /// Unstacked unless the test says otherwise: the default queues behind the parent's merge.
 fn stack_request(repo: &str, after: Option<String>, stack: bool) -> Json<NewSession> {
     Json(NewSession {
+        external_ref: None,
         repo: repo.into(),
         issue: None,
         title: String::new(),
@@ -775,6 +795,7 @@ async fn a_colony_asked_to_stack_on_another_queues_until_that_one_pushes() {
     let created = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/app", Some("parent".into()), true),
     )
     .await
@@ -814,6 +835,7 @@ async fn by_default_a_colony_behind_an_open_pull_request_queues_for_the_merge() 
     let created = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/app", Some("parent".into()), false),
     )
     .await
@@ -837,6 +859,7 @@ async fn an_explicit_stack_starts_from_the_open_pull_request() {
     let created = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/app", Some("parent".into()), true),
     )
     .await
@@ -860,6 +883,7 @@ async fn by_default_a_colony_behind_a_merged_parent_starts_at_once() {
     let created = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/app", Some("parent".into()), false),
     )
     .await
@@ -881,6 +905,7 @@ async fn by_default_a_colony_behind_a_closed_parent_is_refused_naming_the_stack_
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/app", Some("parent".into()), false),
     )
     .await
@@ -905,9 +930,14 @@ async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
     dead.repo = "acme/app".into();
     app.sessions.write().await.push(dead);
 
-    let err = create(State(app.clone()), None, stack_request("acme/app", Some("dead".into()), true))
-        .await
-        .unwrap_err();
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/app", Some("dead".into()), true),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(err.0, StatusCode::CONFLICT, "a refusal, like the duplicate-issue one");
     let message = err.1.to_string();
     assert!(message.contains("dead"), "{message}");
@@ -925,6 +955,7 @@ async fn stacking_on_a_colony_that_does_not_exist_is_refused_as_a_404_naming_it(
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/app", Some("ghost".into()), true),
     )
     .await
@@ -944,9 +975,14 @@ async fn stacking_on_a_colony_that_does_not_exist_is_refused_as_a_404_naming_it(
 async fn an_after_of_nothing_but_whitespace_is_refused_not_read_as_absent() {
     let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
     let app = app_that_can_create(&root);
-    let err = create(State(app.clone()), None, stack_request("acme/app", Some("   ".into()), true))
-        .await
-        .unwrap_err();
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/app", Some("   ".into()), true),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(err.0, StatusCode::BAD_REQUEST, "the request names nothing stackable");
     assert!(err.1.to_string().contains("`after`"), "{}", err.1);
     assert!(
@@ -969,6 +1005,7 @@ async fn stacking_on_a_colony_of_another_repository_is_refused_naming_both() {
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         stack_request("acme/other", Some("parent".into()), true),
     )
     .await
@@ -995,6 +1032,7 @@ async fn an_unknown_model_tier_is_refused_naming_the_tier_and_the_known_ones() {
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
             model_tier: Some("gigantic".into()),
             ..stack_request("acme/app", None, false).0
@@ -1024,6 +1062,7 @@ async fn a_model_override_naming_no_configured_provider_is_refused_naming_both()
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
             model_override: Some("unconfigured/claude-opus-4".into()),
             ..stack_request("acme/app", None, false).0
@@ -1043,6 +1082,7 @@ async fn a_model_override_naming_no_configured_provider_is_refused_naming_both()
     let err = create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
             subagent_model_override: Some("unconfigured/claude-opus-4".into()),
             ..stack_request("acme/app", None, false).0
@@ -1064,9 +1104,14 @@ async fn a_launch_on_an_agent_module_that_is_not_installed_is_refused() {
     let app = app_that_can_create(&root);
     app.modules.write().await.agent.provider = "ghost-module".into();
 
-    let err = create(State(app.clone()), None, stack_request("acme/app", None, false))
-        .await
-        .unwrap_err();
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/app", None, false),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
     let message = err.1.to_string();
     assert!(message.contains("not installed"), "{message}");
@@ -1087,13 +1132,255 @@ async fn a_launch_without_claude_credentials_is_refused_naming_the_account() {
     let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
     let app = app_that_can_create_needing(&root, true);
 
-    let err = create(State(app.clone()), None, stack_request("acme/app", None, false))
-        .await
-        .unwrap_err();
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/app", None, false),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
     let message = err.1.to_string();
     assert!(message.contains("log in with Claude"), "{message}");
     assert!(message.contains("'default'"), "it names the account: {message}");
     assert!(app.sessions.read().await.is_empty(), "nothing was created");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- issue #901: `external_ref` and the `Idempotency-Key` header -------------------------------
+
+/// A create request for `repo` carrying the caller's own reference, with the headers to send with
+/// it — `Some(key)` puts an `Idempotency-Key` on the request.
+fn launch_request(repo: &str, external_ref: Option<&str>, key: Option<&str>) -> (HeaderMap, Json<NewSession>) {
+    let mut headers = HeaderMap::new();
+    if let Some(key) = key {
+        headers.insert("idempotency-key", axum::http::HeaderValue::from_str(key).unwrap());
+    }
+    let mut request = stack_request(repo, None, false).0;
+    request.external_ref = external_ref.map(String::from);
+    (headers, Json(request))
+}
+
+/// The same `Idempotency-Key` twice is one colony: the second request answers the first one's
+/// record, creates nothing, and leaves the store exactly as it found it.
+#[tokio::test]
+async fn a_repeated_idempotency_key_answers_the_colony_it_created() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+
+    let (headers, request) = launch_request("acme/app", Some("ticket-1"), Some("retry-key"));
+    let Json(first) = create(State(app.clone()), None, headers, request)
+        .await
+        .expect("the first launch");
+    assert_eq!(first.idempotency_key.as_deref(), Some("retry-key"), "the key is recorded");
+    assert_eq!(
+        first.external_ref.as_deref(),
+        Some("ticket-1"),
+        "so is the caller's reference"
+    );
+
+    let (headers, request) = launch_request("acme/app", Some("ticket-1"), Some("retry-key"));
+    let Json(second) = create(State(app.clone()), None, headers, request)
+        .await
+        .expect("a repeat of the key is answered, not refused");
+    assert_eq!(second.id, first.id, "the same colony, not a second one");
+    assert_eq!(
+        app.sessions.read().await.len(),
+        1,
+        "and no second colony was admitted behind the replay"
+    );
+    // And the replay is the colony itself, not a fresh record with the old id on it.
+    assert_eq!(
+        app.session(&first.id).await.map(|s| s.idempotency_key),
+        Some(Some("retry-key".into()))
+    );
+
+    // A different key is a different launch, even on the same repository and reference.
+    let (headers, request) = launch_request("acme/app", Some("ticket-1"), Some("other-key"));
+    let Json(another) = create(State(app.clone()), None, headers, request)
+        .await
+        .expect("a fresh key starts a colony");
+    assert_ne!(another.id, first.id);
+    assert_eq!(app.sessions.read().await.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The replay is asked before the launch caps, so a retry of a launch that already happened costs
+/// the caller none of its quota: a token at its concurrency cap is refused for a new colony and
+/// answered for the one its key already made.
+#[tokio::test]
+async fn a_replayed_key_spends_no_launch_quota() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+    let launcher = || {
+        axum::Extension(crate::api_tokens::ScopedToken {
+            id: "tok_test".into(),
+            name: "launcher".into(),
+            scope: crate::api_tokens::Scope::Launch,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            max_concurrent: Some(1),
+            budget_usd_per_day: None,
+        })
+    };
+
+    let (headers, request) = launch_request("acme/app", None, Some("capped-key"));
+    let Json(first) = create(State(app.clone()), Some(launcher()), headers, request)
+        .await
+        .expect("the first launch fits under the cap");
+    assert_eq!(first.launched_by_token.as_deref(), Some("tok_test"), "the token's own colony");
+
+    // The cap is now spent, so a new colony from this token is a 429 …
+    let err = create(
+        State(app.clone()),
+        Some(launcher()),
+        HeaderMap::new(),
+        stack_request("acme/app", None, false),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS, "the cap is spent: {}", err.1);
+
+    // … while the same request carrying the key that made it is answered with that colony.
+    let (headers, request) = launch_request("acme/app", None, Some("capped-key"));
+    let Json(replay) = create(State(app.clone()), Some(launcher()), headers, request)
+        .await
+        .expect("a retry is not a launch and is not charged one");
+    assert_eq!(replay.id, first.id);
+    assert_eq!(app.sessions.read().await.len(), 1, "still one colony");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// One key names one colony on one repository. The same key on another repository is a **409**
+/// naming both — never the first colony handed back as if it were this request's.
+#[tokio::test]
+async fn a_repeated_key_on_another_repository_is_a_conflict() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+
+    let (headers, request) = launch_request("acme/app", None, Some("shared-key"));
+    let Json(first) = create(State(app.clone()), None, headers, request)
+        .await
+        .expect("the first launch");
+
+    let (headers, request) = launch_request("acme/other", None, Some("shared-key"));
+    let err = create(State(app.clone()), None, headers, request).await.unwrap_err();
+    assert_eq!(err.0, StatusCode::CONFLICT, "the key is spoken for: {}", err.1);
+    let message = err.1.to_string();
+    assert!(
+        message.contains(&first.id) && message.contains("acme/app"),
+        "it names the holder: {message}"
+    );
+    assert!(message.contains("acme/other"), "and the repository asked for: {message}");
+    assert_eq!(app.sessions.read().await.len(), 1, "the refusal created nothing");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A key is only ever a shortcut to a colony the caller could already have read: a scoped token
+/// asking with a key that names a colony outside its org/repo limits gets an ordinary new colony
+/// of its own, never the other one.
+#[tokio::test]
+async fn a_key_never_hands_a_scoped_token_a_colony_it_cannot_see() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+
+    let (headers, request) = launch_request("other/repo", None, Some("their-key"));
+    let Json(elsewhere) = create(State(app.clone()), None, headers, request)
+        .await
+        .expect("the owner's launch");
+
+    let launcher = || {
+        axum::Extension(crate::api_tokens::ScopedToken {
+            id: "tok_test".into(),
+            name: "launcher".into(),
+            scope: crate::api_tokens::Scope::Launch,
+            orgs: Vec::new(),
+            repos: vec!["acme/app".into()],
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        })
+    };
+    let (headers, request) = launch_request("acme/app", None, Some("their-key"));
+    let Json(mine) = create(State(app.clone()), Some(launcher()), headers, request)
+        .await
+        .expect("the key names nothing visible to this token, so the launch goes on as usual");
+    assert_ne!(mine.id, elsewhere.id, "it is not a replay of the other colony");
+    assert_eq!(mine.repo, "acme/app");
+    assert_eq!(
+        mine.idempotency_key.as_deref(),
+        Some("their-key"),
+        "the key is recorded on this token's own colony"
+    );
+    assert_eq!(app.sessions.read().await.len(), 2);
+
+    // And the replay it may now make is its own, not the owner's.
+    let (headers, request) = launch_request("acme/app", None, Some("their-key"));
+    let Json(replay) = create(State(app.clone()), Some(launcher()), headers, request)
+        .await
+        .expect("the token's own colony is the one its key answers");
+    assert_eq!(replay.id, mine.id);
+    assert_eq!(app.sessions.read().await.len(), 2, "the replay created nothing");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A caller-chosen identifier that names nothing, or names too much, is a **400** naming the field —
+/// for the body field and for the header alike, and neither creates a colony.
+#[tokio::test]
+async fn a_blank_or_over_long_caller_reference_is_a_bad_request() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+
+    let (_, request) = launch_request("acme/app", Some("   "), None);
+    let err = create(State(app.clone()), None, HeaderMap::new(), request).await.unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST, "a reference of nothing is refused");
+    assert!(err.1.to_string().contains("`external_ref`"), "{}", err.1);
+
+    let long = "x".repeat(MAX_CALLER_REF + 1);
+    let (_, request) = launch_request("acme/app", Some(&long), None);
+    let err = create(State(app.clone()), None, HeaderMap::new(), request).await.unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST, "past the cap is refused");
+    assert!(err.1.to_string().contains("200"), "the cap is named: {}", err.1);
+
+    // A header that is present but unusable is the same refusal, never a request read as keyless:
+    // a client that sent a key it cannot get back would otherwise retry into a second colony.
+    for key in ["", "   "] {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", axum::http::HeaderValue::from_str(key).unwrap());
+        let err = create(State(app.clone()), None, headers, stack_request("acme/app", None, false))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST, "{key:?}");
+        assert!(err.1.to_string().contains("Idempotency-Key"), "{key:?}: {}", err.1);
+    }
+
+    assert!(app.sessions.read().await.is_empty(), "no colony was created by any of them");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A reference is trimmed rather than refused for its padding, and a launch naming none leaves both
+/// fields absent — which is exactly how a record written before them reads.
+#[tokio::test]
+async fn a_caller_reference_is_trimmed_and_kept() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+
+    let (headers, request) = launch_request("acme/app", Some("  ticket-1  "), Some("key-1"));
+    let Json(created) = create(State(app.clone()), None, headers, request)
+        .await
+        .expect("a padded reference is a reference");
+    assert_eq!(created.external_ref.as_deref(), Some("ticket-1"), "trimmed onto the record");
+    assert_eq!(created.idempotency_key.as_deref(), Some("key-1"));
+
+    let Json(plain) = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/other", None, false),
+    )
+    .await
+    .expect("an ordinary launch");
+    assert_eq!(plain.external_ref, None);
+    assert_eq!(plain.idempotency_key, None);
     let _ = std::fs::remove_dir_all(root);
 }
