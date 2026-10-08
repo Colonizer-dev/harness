@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { actTier, briefMetrics, briefReport, formatBriefReport, formatComparison, formatJevReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { actTier, briefMetrics, briefReport, formatBriefReport, formatComparison, formatJevReport, formatRateReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, rateReport, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 import { loadSpend, readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -473,4 +473,156 @@ test('an empty ledger reports nothing to judge rather than failing', () => {
   assert.equal(r.colonies, 0);
   assert.equal(r.agreement_rate, null);
   assert.match(formatRoutingReport(r), /act is not yet justified: only 0 confident disagreements/);
+});
+
+const RATE_COLONIES = [
+  { source: 'colonies', agent: 'claude-code', model_routing: { model: 'claude-opus-5' }, pr_url: 'https://…/1', ci_state: 'success', status: 'merged' },
+  { source: 'colonies', agent: 'claude-code', model_routing: { model: 'claude-opus-5' }, pr_url: 'https://…/2', ci_state: 'success', status: 'merged' },
+  { source: 'colonies', agent: 'claude-code', model_routing: { model: 'claude-opus-5' }, pr_url: 'https://…/3', ci_state: 'pending', status: 'pr_opened' },
+  { source: 'colonies', agent: 'claude-code', model_routing: { model: 'claude-opus-5' }, pr_url: null, status: 'no_changes' },
+  { source: 'colonies', agent: 'claude-code', model_routing: { model: 'claude-sonnet-4-5' }, pr_url: 'https://…/4', ci_state: 'success', status: 'merged' },
+  { source: 'colonies', agent: 'claude-code', model_routing: { model: 'claude-sonnet-4-5' }, pr_url: 'https://…/5', ci_state: 'success', status: 'merged' },
+  { source: 'bench', agent: 'claude-code', model: 'claude-opus-5', pr_url: 'https://…/6', visible: true, status: 'pr_opened' },
+];
+
+test('the rate table groups by harness · model and source, counting the three stages separately', () => {
+  const text = formatRateReport(rateReport(RATE_COLONIES));
+  assert.match(text, /# Resolved rate by harness · model/);
+  assert.match(text, /6 colonies and 1 bench tasks, counted separately/);
+  // Biggest sample first, then by name: the colonies of a model before the one bench task beside them.
+  // The fourth opus colony settled with no pull request at all, so PR opened is 3 of the 4 that got
+  // that far: a stage the record could speak for, and a row that did not pass it.
+  assert.match(text, /\| claude-code · claude-opus-5 \| colonies \| 4 \| 3\/4 \(75%\) \| 2\/3 \(67%\) \| 2\/4 \(50%\) \|/);
+  assert.match(text, /\| claude-code · claude-sonnet-4-5 \| colonies \| 2 \| 2\/2 \(100%\) \| 2\/2 \(100%\) \| 2\/2 \(100%\) \|/);
+  assert.match(text, /\| claude-code · claude-opus-5 \| bench \| 1 \| 1\/1 \(100%\) \| 1\/1 \(100%\) \| 0\/1 \(0%\) \|/);
+  assert.match(text, /The bench never merges/);
+  assert.match(text, /hidden check/);
+  assert.match(text, /One colony is one sample/);
+});
+
+test('a model is read from the override, then what routing recorded, then the row, never a tier', () => {
+  const r = rateReport([
+    { source: 'colonies', agent: 'a', model_override: 'override-model', model_routing: { model: 'routed-model' }, model_tier: 'high', model: 'row-model', status: 'merged' },
+    { source: 'colonies', agent: 'a', model_routing: { model: 'routed-model' }, model_tier: 'high', model: 'row-model', status: 'merged' },
+    { source: 'colonies', agent: 'a', model_tier: 'high', model: 'row-model', status: 'merged' },
+    { source: 'colonies', agent: 'a', model: 'row-model', status: 'merged' },
+    { source: 'colonies', agent: null, status: 'merged' },
+  ]);
+  // The two rows that resolve to the row's own model are the biggest group and come first, then the rest
+  // by name. A tier is a label, not a model — it never becomes the model name (the rule the `compare`
+  // rows above already keep), so `model_tier: 'high'` groups with neither `override-model` nor
+  // `routed-model` and never renders as `high`.
+  assert.deepEqual(r.groups.map((g) => g.model), ['row-model', null, 'override-model', 'routed-model']);
+  assert.match(formatRateReport(r), /\| – · – \| colonies \| 1 \| 0\/1 \(0%\) \| – \| 1\/1 \(100%\) \|/);
+});
+
+test('a tier alone never stands in for a model: the row reads –', () => {
+  const text = formatRateReport(rateReport([{ source: 'colonies', agent: 'claude-code', model_tier: 'high', status: 'merged' }]));
+  assert.match(text, /\| claude-code · – \| colonies \| 1 \| 0\/1 \(0%\) \| – \| 1\/1 \(100%\) \|/);
+  assert.doesNotMatch(text, /claude-code · high/);
+});
+
+test('a bench group rates the rows that opened no pull request: 1/3, not 1/1', () => {
+  const text = formatRateReport(rateReport([
+    { source: 'bench', agent: 'claude-code', model: 'm', pr_url: 'https://…/1', visible: true, status: 'pr_opened' },
+    { source: 'bench', agent: 'claude-code', model: 'm', pr_url: null, visible: false, status: 'failed' },
+    { source: 'bench', agent: 'claude-code', model: 'm', pr_url: null, visible: true, status: 'pr_opened' },
+  ]));
+  // Every bench row ran its task to a scored result, so all three could be measured for the
+  // pull-request stage; only one of them opened one. Measuring only the rows with a `pr_url` would make
+  // this column read 1/1 (100%) and hide the two tasks that never got as far as a pull request.
+  assert.match(text, /\| claude-code · m \| bench \| 3 \| 1\/3 \(33%\) \| 2\/3 \(67%\) \| 0\/3 \(0%\) \|/);
+});
+
+test('a colony still in flight reads – for every stage, not a failure it has not had a chance at', () => {
+  const inFlight = ['queued', 'blocked', 'starting', 'running', 'waiting_for_answer', 'publishing', 'idle'];
+  const r = rateReport(inFlight.map((status) => ({ source: 'colonies', agent: 'a', model: 'm', status })));
+  // None of the seven has reached the pull-request stage, tests green or merged: all three are unmeasured,
+  // so every cell reads – rather than a 0 the model has not earned.
+  assert.deepEqual(r.groups[0].stages, { pr_opened: { green: 0, measured: 0 }, tests_green: { green: 0, measured: 0 }, merged: { green: 0, measured: 0 } });
+  assert.match(formatRateReport(r), /\| a · m \| colonies \| 7 \| – \| – \| – \|/);
+});
+
+test('a settled colony that failed is a real zero, where an in-flight one is –', () => {
+  const text = formatRateReport(rateReport([
+    { source: 'colonies', agent: 'a', model: 'm', status: 'running', pr_url: null, ci_state: 'pending' },
+    { source: 'colonies', agent: 'a', model: 'm', status: 'queued', pr_url: null, ci_state: null },
+    { source: 'colonies', agent: 'a', model: 'm', status: 'failed', pr_url: null, ci_state: 'failure' },
+  ]));
+  // The two in flight drop out of every denominator; the one that finished and failed is counted, and the
+  // CI it did report is counted too — so this is 0/1, not 0/3 and not –.
+  assert.match(text, /\| a · m \| colonies \| 3 \| 0\/1 \(0%\) \| 0\/1 \(0%\) \| 0\/1 \(0%\) \|/);
+});
+
+test('a colony whose status is missing or unknown reads –, not 0', () => {
+  const r = rateReport([
+    { source: 'colonies', agent: 'a', model: 'm', status: null, pr_url: null, ci_state: 'success' },
+    { source: 'colonies', agent: 'a', model: 'm', status: 'not-a-status-we-know', pr_url: null, ci_state: 'success' },
+    { source: 'colonies', agent: 'a', model: 'm', pr_url: null, ci_state: 'success' },
+  ]);
+  assert.deepEqual(r.groups[0].stages.pr_opened, { green: 0, measured: 0 });
+  assert.deepEqual(r.groups[0].stages.merged, { green: 0, measured: 0 });
+  assert.match(formatRateReport(r), /\| a · m \| colonies \| 3 \| – \| – \| – \|/);
+});
+
+test('a stage nothing was measured for reads – , not a zero it never had a chance at', () => {
+  const text = formatRateReport(rateReport([
+    { source: 'bench', agent: 'a', model: 'm', pr_url: 'https://…/1', visible: null, status: 'pr_opened' },
+  ]));
+  assert.match(text, /\| a · m \| bench \| 1 \| 1\/1 \(100%\) \| – \| 0\/1 \(0%\) \|/);
+  assert.doesNotMatch(text, /\| 0% \|/);
+  assert.match(text, /reads –, not 0: a stage that never ran is not a stage that failed/);
+});
+
+test('merged_at and status each say merged on their own', () => {
+  const r = rateReport([
+    { source: 'colonies', agent: 'a', model: 'm', status: 'closed', merged_at: '2026-01-02T03:04:05Z' },
+    { source: 'colonies', agent: 'a', model: 'm', status: 'merged', merged_at: null },
+    { source: 'colonies', agent: 'a', model: 'm', status: 'pr_opened', merged_at: null },
+  ]);
+  assert.deepEqual(r.groups[0].stages.merged, { green: 2, measured: 3 });
+});
+
+test('for colonies tests green is its CI succeeding, and only that', () => {
+  const r = rateReport([
+    { source: 'colonies', agent: 'a', model: 'm', ci_state: 'success', status: 'merged' },
+    { source: 'colonies', agent: 'a', model: 'm', ci_state: 'pending', status: 'merged' },
+    { source: 'colonies', agent: 'a', model: 'm', status: 'merged' },
+  ]);
+  assert.deepEqual(r.groups[0].stages.tests_green, { green: 1, measured: 2 });
+});
+
+test('the overall row pools the counts instead of averaging the per-group rates', () => {
+  const one = { source: 'colonies', agent: 'a', model: 'm', pr_url: 'https://…/1', status: 'merged' };
+  const none = { source: 'colonies', agent: 'b', model: 'm', pr_url: null, status: 'failed' };
+  const text = formatRateReport(rateReport([one, none, none, none]));
+  // The one colony that merged is 100% and the three that did not are 0%: averaging the two rates would
+  // say 50%; the pooled counts say 1 of the 4 that got that far did — 25%.
+  assert.match(text, /\| a · m \| colonies \| 1 \|.*\| 1\/1 \(100%\) \|/);
+  assert.match(text, /\| b · m \| colonies \| 3 \|.*\| 0\/3 \(0%\) \|/);
+  assert.match(text, /\| – \| overall \| 4 \|.*\| 1\/4 \(25%\) \|$/m);
+});
+
+test('no records is an empty table, not a crash', () => {
+  const r = rateReport([]);
+  assert.deepEqual(r.groups, []);
+  assert.deepEqual(r.overall, { n: 0, stages: { pr_opened: { green: 0, measured: 0 }, tests_green: { green: 0, measured: 0 }, merged: { green: 0, measured: 0 } } });
+  const text = formatRateReport(r);
+  assert.doesNotMatch(text, /overall/);
+  assert.match(text, /0 colonies and 0 bench tasks/);
+});
+
+test('the rate report is the json the docs read: groups and a pooled overall', () => {
+  assert.deepEqual(rateReport([{ source: 'bench', agent: 'a', model: 'm', pr_url: 'https://…/1', visible: false, status: 'pr_opened' }]), {
+    groups: [{ harness: 'a', model: 'm', source: 'bench', n: 1, stages: { pr_opened: { green: 1, measured: 1 }, tests_green: { green: 0, measured: 1 }, merged: { green: 0, measured: 1 } } }],
+    overall: { n: 1, stages: { pr_opened: { green: 1, measured: 1 }, tests_green: { green: 0, measured: 1 }, merged: { green: 0, measured: 1 } } },
+  });
+});
+
+test('rate takes run files, a data dir and --json like every other report', () => {
+  const args = parseArgs(['rate', 'a.json', '--data', '/tmp/d', '--json']);
+  assert.equal(args.command, 'rate');
+  assert.deepEqual(args.files, ['a.json']);
+  assert.equal(args.data, '/tmp/d');
+  assert.equal(args.json, true);
 });
