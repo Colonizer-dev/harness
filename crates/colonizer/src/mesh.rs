@@ -4,6 +4,7 @@
 //! This network is completely separate from any tailnet the host is on: its own control server,
 //! its own state directory, its own socket, and `--no-logs-no-support`.
 
+use crate::doctor::{self, Component};
 use crate::util::{exec_within, write_private};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -176,15 +177,23 @@ impl Mesh {
             .stderr(log_file(&self.state_dir.join("headscale.log"))?)
             .kill_on_drop(true)
             .spawn()
-            .context("failed to start headscale")?;
+            .map_err(|e| doctor::failed(Component::MeshControl, "failed to start headscale", &e))?;
         write_pid(&self.runtime_dir.join("headscale.pid"), headscale.id());
+        // A readiness wait that runs out is the failure an operator sees as a bare ENOSYS on a
+        // kernel without KVM, so it is reported with the check that settles it.
         wait_for(Duration::from_secs(30), || async {
             exec_within(CLI_LIMIT, self.headscale().args(["users", "list", "-o", "json"]))
                 .await
                 .is_ok()
         })
         .await
-        .context("headscale did not become ready (see mesh/headscale.log)")?;
+        .map_err(|e| {
+            doctor::failed_anyhow(
+                Component::MeshControl,
+                "headscale did not become ready (see mesh/headscale.log)",
+                &e,
+            )
+        })?;
         let harness_user = self.ensure_user(COLONIZER_USER).await?;
         let vms_user = self.ensure_user(VMS_USER).await?;
         self.ensure_user(FLEET_USER).await?;
@@ -208,11 +217,17 @@ impl Mesh {
             .stderr(log_file(&self.state_dir.join("tailscaled.log"))?)
             .kill_on_drop(true)
             .spawn()
-            .context("failed to start the harness tailscaled")?;
+            .map_err(|e| doctor::failed(Component::MeshNode, "failed to start the harness tailscaled", &e))?;
         write_pid(&self.runtime_dir.join("tailscaled.pid"), tailscaled.id());
         wait_for(Duration::from_secs(20), || async { self.backend_state().await.is_ok() })
             .await
-            .context("harness tailscaled did not start (see mesh/tailscaled.log)")?;
+            .map_err(|e| {
+                doctor::failed_anyhow(
+                    Component::MeshNode,
+                    "harness tailscaled did not start (see mesh/tailscaled.log)",
+                    &e,
+                )
+            })?;
 
         if self.backend_state().await? != "Running" {
             let key = self.create_key(harness_user).await?;
@@ -229,7 +244,9 @@ impl Mesh {
             )
             .await;
             let _ = std::fs::remove_file(&key_file);
-            result.context("harness node could not join the mesh")?;
+            // `exec` folds the CLI's own stderr into this error, so an ENOSYS from the daemon
+            // reaches here as text; the diagnosis reads it either way.
+            result.map_err(|e| doctor::failed_anyhow(Component::MeshNode, "harness node could not join the mesh", &e))?;
         }
         *running = Some(Running {
             headscale,
