@@ -224,16 +224,13 @@ impl FleetStore {
             // A missing file is a first use, not a fault.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => FleetState::default(),
             Err(e) => {
-                eprintln!("fleet: could not read {} ({e}); starting with no fleet", path.display());
+                tracing::warn!( path = %path.display(), error = %e, "fleet: could not read {} ({e}); starting with no fleet", path.display() );
                 FleetState::default()
             }
             Ok(bytes) => match serde_json::from_slice::<FleetState>(&bytes) {
                 Ok(state) => state,
                 Err(e) => {
-                    eprintln!(
-                        "fleet: {} does not parse ({e}); starting with no fleet until the file is repaired or removed",
-                        path.display()
-                    );
+                    tracing::warn!( path = %path.display(), error = %e, "fleet: {} does not parse ({e}); starting with no fleet until the file is repaired or removed", path.display() );
                     FleetState::default()
                 }
             },
@@ -251,7 +248,7 @@ impl FleetStore {
             return; // a fixed-shape struct cannot fail to serialize
         };
         if let Err(e) = util::write_private(&self.path, &bytes) {
-            eprintln!("fleet: could not save {}: {e}", self.path.display());
+            tracing::error!( path = %self.path.display(), error = %e, "fleet: could not save {}: {e}", self.path.display() );
         }
     }
 
@@ -490,7 +487,7 @@ async fn update_mesh_acl(app: &Shared) {
     let members = app.fleet_members.has_members().await;
     match app.mesh().await {
         Ok(mesh) => mesh.set_fleet_acl(members).await,
-        Err(e) => eprintln!("fleet: the mesh policy was not updated: {e:#}"),
+        Err(e) => tracing::warn!( error = %format!("{e:#}"), "fleet: the mesh policy was not updated: {e:#}" ),
     }
 }
 
@@ -519,10 +516,10 @@ async fn remove_member_where(app: &Shared, tombstone: bool, matches: impl Fn(&Me
         match app.mesh().await {
             Ok(mesh) => {
                 if let Err(e) = mesh.delete_nodes_named(&format!("fleet-{}", member.id)).await {
-                    eprintln!("fleet: the member's mesh node was not removed: {e:#}");
+                    tracing::warn!( error = %format!("{e:#}"), "fleet: the member's mesh node was not removed: {e:#}" );
                 }
             }
-            Err(e) => eprintln!("fleet: the mesh was not reached: {e:#}"),
+            Err(e) => tracing::warn!( error = %format!("{e:#}"), "fleet: the mesh was not reached: {e:#}" ),
         }
     }
     update_mesh_acl(app).await;
@@ -962,7 +959,7 @@ pub async fn leave(State(app): State<Shared>) -> Result<StatusCode, crate::AppEr
     if let Ok(res) = post_owner(&owner_url, "/api/fleet/peer/leave", Some(&token), json!({})).await {
         let status = res.status();
         if !(status.is_success() || status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND) {
-            eprintln!("fleet: the owner answered {status} to our leave; leaving locally anyway");
+            tracing::warn!( status = %status, "fleet: the owner answered {status} to our leave; leaving locally anyway" );
         }
     }
     let mut state = app.fleet_members.state.write().await;

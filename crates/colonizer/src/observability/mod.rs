@@ -16,6 +16,7 @@
 
 pub mod env;
 pub mod metrics;
+pub(crate) mod oplog;
 pub mod settings;
 pub(crate) mod supervisor;
 
