@@ -78,6 +78,10 @@ pub struct Runtime {
     /// new epoch. Distinct from `stop`, which `teardown_vm` also sets on a plain stop where
     /// sockets stay open on purpose.
     pub(crate) retired: watch::Sender<bool>,
+    /// Set by `lifecycle::retire_and_rotate_events` under `file_lock`, once this run's log has been
+    /// moved aside: an agent event of this run still queued on the lock is dropped instead of landing
+    /// in the next run's `events.jsonl`. Distinct from `stop`, after which a plain stop still drains.
+    pub(crate) rotated: std::sync::atomic::AtomicBool,
     pub(crate) file_lock: Mutex<()>,
     /// Serialises findings, so the per-colony cap holds when two arrive together.
     pub(crate) findings_lock: Mutex<()>,
@@ -293,6 +297,7 @@ impl Runtime {
             restart_resume_until: std::sync::Mutex::new(None),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
+            rotated: std::sync::atomic::AtomicBool::new(false),
             file_lock: Mutex::new(()),
             findings_lock: Mutex::new(()),
             github_lock: Mutex::new(()),
