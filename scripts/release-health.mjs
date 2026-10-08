@@ -9,8 +9,13 @@
 // machine, so they are the workflow's matrix. The site check is /docs/changelog: the home page's
 // install line is deliberately version-less, so it is only asserted still to be there. Exit is 0
 // only when every check passes. GITHUB_TOKEN, if set, is used for the GitHub API.
+//
+// The site fetch is retried and reports separately: a page we never managed to read is a fetch
+// failure, never a content failure.
 
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const REPO = 'Colonizer-dev/harness';
 const SITE = 'https://colonizer.dev';
@@ -95,42 +100,97 @@ async function crateChecks(version) {
   }
 }
 
-async function siteChecks(tag) {
+// colonizer.dev is behind Cloudflare, which answers an occasional single request with a 403 that
+// the next one does not. Retrying a transient status costs a couple of seconds against a run that
+// already waits out ten minutes of asset downloads; a 404 is an answer, not a hiccup, so it is
+// never retried.
+const SITE_ATTEMPTS = 3;
+const SITE_BACKOFF_MS = 400;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const isTransient = (status) => status === 403 || status === 429 || status >= 500;
+
+export async function fetchSiteText(url, { attempts = SITE_ATTEMPTS, fetchImpl = fetch, delay = sleep } = {}) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let status;
+    try {
+      const res = await fetchImpl(url, { headers: UA, signal: AbortSignal.timeout(600000) });
+      if (res.ok) return await res.text();
+      status = res.status;
+      last = new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      last = e;
+    }
+    if (status !== undefined && !isTransient(status)) throw last;
+    if (attempt < attempts) await delay(SITE_BACKOFF_MS * attempt);
+  }
+  throw last;
+}
+
+export async function siteChecks(tag, { fetchSite = fetchSiteText } = {}) {
   const pages = [
-    [`${SITE}/`, `${SITE}/install.sh`,
+    ['website', `${SITE}/`, `${SITE}/install.sh`,
       '**website** — colonizer.dev shows the install line',
       `**website** — colonizer.dev has no ${SITE}/install.sh install line`],
-    [`${SITE}/docs/changelog`, tag,
+    ['changelog', `${SITE}/docs/changelog`, tag,
       `**changelog** — colonizer.dev/docs/changelog names ${tag}`,
       `**changelog** — colonizer.dev/docs/changelog does not name ${tag}`],
   ];
-  for (const [url, needle, ok, fail] of pages) {
+  const results = [];
+  for (const [name, url, needle, ok, fail] of pages) {
+    let body;
     try {
-      recordIf((await text(url)).includes(needle), ok, fail);
+      body = await fetchSite(url);
     } catch (e) {
-      record(false, `${fail} (${e.message})`);
+      // The page was never read, so its content says nothing either way: claiming it "has no
+      // install line" here is what made a passing check red for nine releases.
+      results.push({ ok: false, text: `**${name}** — could not read ${url} (${e.message})` });
+      continue;
+    }
+    const found = body.includes(needle);
+    results.push({ ok: found, text: found ? ok : fail });
+  }
+  return results;
+}
+
+async function main() {
+  let tag = option('--tag');
+  if (!tag) {
+    try {
+      tag = (await get(`https://api.github.com/repos/${REPO}/releases/latest`, API).then((r) => r.json())).tag_name;
+    } catch (e) {
+      console.error(`could not resolve the latest release: ${e.message}`);
+      return 1;
     }
   }
+  const version = tag.replace(/^v/, '');
+
+  console.log(`## Release health: ${tag}\n`);
+  await releaseChecks(tag);
+  await crateChecks(version);
+  checks.push(...await siteChecks(tag));
+  if (forceFailure) record(false, '**forced failure** — the workflow was run with force_failure');
+  for (const c of checks) console.log(`- ${c.ok ? '✅' : '❌'} ${c.text}`);
+
+  const failed = checks.filter((c) => !c.ok).length;
+  if (failed) console.error(`${failed} of ${checks.length} release-health checks failed for ${tag}`);
+  return failed ? 1 : 0;
 }
 
-let tag = option('--tag');
-if (!tag) {
-  try {
-    tag = (await get(`https://api.github.com/repos/${REPO}/releases/latest`, API).then((r) => r.json())).tag_name;
-  } catch (e) {
-    console.error(`could not resolve the latest release: ${e.message}`);
-    process.exit(1);
-  }
+// Only when run, not when its checks are imported by a test. The exit code is set rather than
+// `process.exit`-ed, so a redirected stdout is not cut off.
+//
+// The comparison is on realpaths: `import.meta.url` is Node's resolved module path, symlinks and
+// all, while a lexical normalisation of argv[1] would miss a symlinked invocation. That miss is
+// not a harmless no-op — main() would never run, and a health check that exits 0 having checked
+// nothing is the worst thing it could do. A path that does not exist (node -e, a stale argv[1])
+// falls through to "not invoked" rather than throwing.
+let invoked = false;
+try {
+  invoked = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+} catch {
+  invoked = false;
 }
-const version = tag.replace(/^v/, '');
-
-console.log(`## Release health: ${tag}\n`);
-await releaseChecks(tag);
-await crateChecks(version);
-await siteChecks(tag);
-if (forceFailure) record(false, '**forced failure** — the workflow was run with force_failure');
-for (const c of checks) console.log(`- ${c.ok ? '✅' : '❌'} ${c.text}`);
-
-const failed = checks.filter((c) => !c.ok).length;
-if (failed) console.error(`${failed} of ${checks.length} release-health checks failed for ${tag}`);
-process.exit(failed ? 1 : 0);
+if (invoked) {
+  process.exitCode = await main();
+}
