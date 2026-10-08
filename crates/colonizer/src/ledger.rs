@@ -342,7 +342,7 @@ impl LedgerStore {
         let (state, quarantined) = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (LedgerState::default(), 0),
             Err(e) => {
-                eprintln!("ledger: could not read {}: {e}; starting empty", path.display());
+                tracing::warn!( path = %path.display(), error = %e, "ledger: could not read {}: {e}; starting empty", path.display() );
                 (LedgerState::default(), 0)
             }
             Ok(bytes) => match serde_json::from_slice::<LedgerState>(&bytes) {
@@ -352,10 +352,7 @@ impl LedgerStore {
                         Ok(saved) => format!("the bytes were saved as {}", saved.display()),
                         Err(move_error) => format!("starting empty, and {move_error:#}"),
                     };
-                    eprintln!(
-                        "ledger: {} is not a ledger the harness understands ({e}); {note}",
-                        path.display()
-                    );
+                    tracing::warn!( path = %path.display(), error = %e, "ledger: {} is not a ledger the harness understands ({e}); {note}", path.display() );
                     (LedgerState::default(), 1)
                 }
             },
@@ -378,13 +375,13 @@ impl LedgerStore {
         let data = match data {
             Ok(data) => data,
             Err(e) => {
-                eprintln!("ledger: could not serialise {}: {e}", self.path.display());
+                tracing::error!( path = %self.path.display(), error = %e, "ledger: could not serialise {}: {e}", self.path.display() );
                 return;
             }
         };
         let _guard = self.write.lock().await;
         if let Err(e) = write_atomic(&self.path, &data).await {
-            eprintln!("ledger: could not save {}: {e:#}", self.path.display());
+            tracing::error!( path = %self.path.display(), error = %format!("{e:#}"), "ledger: could not save {}: {e:#}", self.path.display() );
         }
     }
 
