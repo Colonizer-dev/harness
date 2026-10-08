@@ -116,6 +116,7 @@ mod prescan;
 mod presets;
 mod previews;
 mod protocol;
+mod provenance;
 mod provider_history;
 mod provider_quota;
 mod providers;
