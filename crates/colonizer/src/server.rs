@@ -211,6 +211,14 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
+        // The public activity feed (public_feed.rs, issue #895): its two routes authenticate with
+        // their own read-only feed keys, not with an install or scoped token, so they are admitted
+        // here and the handler checks the key, the client's address and the key's rate limit. With
+        // the feed off they answer 404, which is also what an unknown route answers.
+        if req.method() == Method::GET && crate::public_feed::is_feed_path(&path) {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
         // A fleet member the owner removed presents a token revoked on purpose: it reads 403
         // "removed from the fleet", so the member can tell removal from a bad credential.
         if let Some(token) = auth::bearer_token(req.headers())
@@ -621,7 +629,11 @@ pub(crate) async fn serve() -> Result<()> {
     start_tasks(&app, &router).await;
 
     tokio::select! {
-        result = async { axum::serve(listener, router).await } => result?,
+        // `ConnectInfo` so a handler can see the peer's address: the public feed's per-key IP
+        // allowlist (public_feed.rs, issue #895) is enforced from it. It is read from the socket
+        // itself and never from a forwarded header — a header is the client's own claim about
+        // itself, which would defeat the allowlist entirely.
+        result = async { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await } => result?,
         // microVMs are detached and keep running; sessions reconnect on the next start.
         signal = shutdown_signal() => {
             // Issue #880: a SIGTERM (systemd stop, a deploy's `kill`) must not cut a boot or a

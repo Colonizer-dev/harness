@@ -119,6 +119,7 @@ mod protocol;
 mod provider_history;
 mod provider_quota;
 mod providers;
+mod public_feed;
 mod publish;
 mod push;
 mod push_guard;
