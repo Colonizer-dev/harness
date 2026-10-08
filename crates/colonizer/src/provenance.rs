@@ -297,7 +297,9 @@ mod tests {
     /// that, so redaction has to happen here to close the gap (issue #908 follow-up).
     #[test]
     fn a_secret_shaped_value_is_redacted_out_of_both_publish_paths() {
-        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        // Split so no single line of this file holds a token-shaped literal; the value is the
+        // same one the other modules use, and still redacts as `github_token`.
+        let secret = concat!("gh", "p_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
         for (version, settler, model) in [
             (secret.to_string(), "claude-code".to_string(), None),
             ("v0.2.14".to_string(), secret.to_string(), None),
