@@ -18,6 +18,10 @@ pub const START_NOW: &str = "now";
 pub const START_BACKLOG: &str = "backlog";
 /// The contract file's name, under `<data>/observability/`.
 pub const FILE: &str = "exporter.json";
+/// The service name a contract with no `service_name` exports as. The mothership's
+/// `observability::env::DEFAULT_SERVICE_NAME` is the same string; it is repeated here because the
+/// add-on crate cannot see the mothership's constants.
+pub const DEFAULT_SERVICE_NAME: &str = "colonizer-mothership";
 
 /// `exporter.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -82,7 +86,7 @@ impl Default for Settings {
             protocol: "http/protobuf".into(),
             compression: "gzip".into(),
             timeout_secs: 10,
-            service_name: "colonizer".into(),
+            service_name: DEFAULT_SERVICE_NAME.into(),
             resource_attributes: BTreeMap::new(),
             stream_operational: true,
             stream_activity: true,
@@ -294,7 +298,10 @@ mod tests {
         assert!(load(&file).unwrap_err().starts_with("refused"));
         std::fs::write(&file, br#"{"contract": 1, "host_id": "h"}"#).unwrap();
         let c = load(&file).unwrap();
-        assert_eq!(c.settings.service_name, "colonizer", "absent fields take their defaults");
+        assert_eq!(
+            c.settings.service_name, "colonizer-mothership",
+            "absent fields take their defaults"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
