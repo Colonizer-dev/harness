@@ -2,7 +2,7 @@
 
 The mothership writes down what its own process has to say, as redacted JSON lines in
 `<data>/logs/mothership.jsonl` (issue
-[#856](https://github.com/Colonizer-dev/harness/issues/856)). This is the [observability](observability.md)
+[#856](https://github.com/Colonizer-dev/harness/issues/856)). This is the [observability](../observability.md)
 add-on's tail source for the harness itself, and it is what a support answer about a *mothership* —
 as opposed to a colony — reads.
 
