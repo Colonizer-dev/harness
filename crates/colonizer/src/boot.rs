@@ -2168,6 +2168,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Written before the VM starts, like the path policy above (a failed write fails the launch; a
     // missing list would leave the policy's conservative fallback — every absolute path asks).
     std::fs::write(vm_dir.join(sandbox::HOST_MOUNTS_FILE), sandbox::host_mounts_text(&mounts))?;
+    // The repository's own scripts at the base commit (issue #1239): the exec policy runs them
+    // without `script-egress` while their bytes are still the committed ones. Best effort; an
+    // empty list exempts nothing.
+    crate::tracked_scripts::write(app, &admin, &base, &vm_dir).await;
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),

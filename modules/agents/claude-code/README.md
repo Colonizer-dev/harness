@@ -187,7 +187,11 @@ below). The reason on the card says which: a host-backed path, a read-only mount
 Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env*` and the files the
 path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
 not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
-stays the egress policy's business; ask `writes-outside-repo`), **install** (the agent module's
+stays the egress policy's business. A syntax check (`bash -n`, `node --check`, `ruby -c`) runs
+nothing and is not read, and the repository's own scripts, byte for byte as the base commit has
+them (the boot writes their object ids to `/colonizer/tracked-scripts`, #1239), are left to the
+egress policy too; a script the colony adds or edits is read as before, and other layers still see
+every script; ask `writes-outside-repo`), **install** (the agent module's
 `exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (the org's workspace settings → Exec
 policy, stored as `exec_policy` in `orgs.json` and passed as `COLONIZER_EXEC_POLICY_ORG`) and
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
