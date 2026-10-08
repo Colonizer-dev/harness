@@ -453,7 +453,7 @@ export interface NewSessionRequest {
   serialize?: boolean;
   /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
-  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#298). */
+  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#1252). */
   host?: string;
 }
 

@@ -6,8 +6,7 @@ outposts — other machines joining the mesh and hosting colonies — are PLANNE
 present. The design gate for them, and for a hosted Colonizer, was
 [#298](https://github.com/Colonizer-dev/harness/issues/298), closed with the hosted contract
 ([hosted.md](hosted.md#the-outpost-seam)); the outpost protocol and enrollment it names are a
-follow-up with no tracking issue yet
-([#929](https://github.com/Colonizer-dev/harness/issues/929)).
+follow-up tracked in [#1252](https://github.com/Colonizer-dev/harness/issues/1252).
 
 Terms follow [vision.md](vision.md): the **Mothership** is the Colonizer app on your
 machine, a **Colony** is one session (a microVM plus worktree plus agent), and the
