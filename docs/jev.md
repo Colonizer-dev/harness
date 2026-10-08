@@ -37,6 +37,7 @@ the harness makes zero network calls and every rule behaves exactly as before.
 | --- | --- | --- |
 | `routing.tier` | `jev_shadow_mode`, `jev_routing_act`, `jev_routing_act_confidence` | 1800 ms |
 | `recovery.path` | `jev_shadow_mode`, `jev_recovery_act`, `jev_recovery_act_confidence`, `jev_recovery_cap` | 1800 ms |
+| `verify.focus` | `verify_focus` (`off`/`shadow`/`act`, on the publish module) | 1800 ms |
 
 ### `recovery.path`
 
@@ -58,6 +59,26 @@ publishes or deletes — those are not options.
   past the cap is `ask_human`. Recoveries that ask a person or stop never count against it. The
   count is per colony, in memory — a mothership restart starts it over.
 
+### `verify.focus`
+
+Which focused check the verifier runs first, before the full suite (#584). The options are the
+candidate checks the diff offers — one per check it would run, labelled `dir: command` — plus `full`
+for "full suite only". The context is metadata only: how many files the diff touches, the changed
+files' extensions and counts, and per candidate how many of the changed files it owns.
+
+- **Shadow only.** The pick is recorded and graded, never applied: the verifier's own rule (the check
+  owning the most changed files, first on a tie) keeps deciding the order, and a confirmed verdict
+  still needs every check green. Jev's answer can never shorten the suite or change a verdict.
+- **Detached.** The ask is spawned after the checks ran, so a verification pays nothing for it; the
+  row lands in the ledger while the turn moves on.
+- **Grading.** One `decisions.jsonl` row per verification that had two or more candidates, `did`
+  always `rule`, and `outcome` filled in the same row:
+  `{"would_catch": bool, "actual_first_failure_ms": n, "focused_first_failure_ms": n, "total_ms": n}`
+  — whether Jev's pick would have caught the failure the suite actually found, and the
+  time-to-first-failure Jev's order would have meant versus the order that ran. A miss leaves the
+  outcome null; the rule's own per-verification measurement is in `jev_focus.jsonl`
+  (`crates/colonizer/src/verify_focus.rs`).
+
 ## The ledger
 
 Every ask at a point that is not off appends one row to `decisions.jsonl` in the data dir:
@@ -73,7 +94,8 @@ Every ask at a point that is not off appends one row to `decisions.jsonl` in the
   decision (shadow and act alike) a second row is appended with the same point, session and `ts`,
   `kind: "outcome"`, and `outcome` = `{"progressed": bool, "window_min": 10}` — whether the colony's
   activity shows progress after the decision. A grade measures only, so it writes no activity line. A
-  restart before the window elapses loses that grade. Other points leave it null today.
+  restart before the window elapses loses that grade. `verify.focus` fills it in the decision row
+  itself, as soon as the checks have run (above). The other points leave it null today.
 
 Each ask also writes one activity line (`GET /api/activity`): `decision.shadow` for a shadow ask,
 `decision.act` for a used act pick, and `decision.fallback` for an act ask on the rule or any miss.

@@ -751,7 +751,7 @@ async fn clean_up(dirs: &[&Path]) {
 /// Runs the verification for one completion claim and answers the record. Every failure is part
 /// of the verdict: git that cannot be read, a missing command or broken infra make the claim
 /// unverifiable with the reason; only real disagreements contradict it.
-async fn verify_claim(app: &App, s: &Session, runner: &VmRunner, delays: &[Duration]) -> Verification {
+async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Duration]) -> Verification {
     let started = Instant::now();
     let mut record = Verification::blank();
     macro_rules! unverifiable {
@@ -1043,6 +1043,12 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner, delays: &[Durat
     let record = record.finished(started);
     if focus != crate::verify_focus::Mode::Off && !runs.is_empty() {
         crate::verify_focus::record(app, &s.id, focus, &candidates, chosen, &runs, record.verdict, record.ms).await;
+        // Shadow ask (#584): Jev is asked which check it would have run first, beside the rule — in
+        // act mode too, and still never applied: its pick is recorded and graded only. Detached, so
+        // the verification pays nothing for it.
+        if candidates.len() >= 2 {
+            crate::verify_focus::ask(app.clone(), s.clone(), &candidates, &changed, &runs, record.ms);
+        }
     }
     record
 }
@@ -2907,6 +2913,14 @@ pub(crate) mod tests {
             .collect()
     }
 
+    fn decision_rows(app: &crate::Shared) -> Vec<Value> {
+        std::fs::read_to_string(app.decisions_file())
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
     fn runs(calls: &Calls) -> Vec<(String, bool)> {
         calls.lock().unwrap().clone()
     }
@@ -2977,6 +2991,68 @@ pub(crate) mod tests {
         );
         assert_eq!(row["verdict"], "contradicted");
         assert_eq!(row["checks_run"], 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Shadow asks the mock Jev which check it would run first and records the pick with its
+    /// would-catch outcome in `decisions.jsonl` — while the rule still decides the order and the
+    /// verdict: what ran and what the verification concluded is exactly what off runs.
+    #[tokio::test]
+    async fn shadow_records_jevs_pick_and_its_would_catch_outcome_without_changing_anything() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        two_crate_fixture(&app, "shadow").await;
+        let body = json!({
+            "model": crate::jev::JEV_MODEL,
+            "answers": {"verify_focus": {"choice": "b: cargo test", "confidence": 0.7}},
+        });
+        let scripted = Arc::new(Mutex::new(std::collections::VecDeque::from(vec![body])));
+        let (base, _) = crate::jev::mock::serve(crate::jev::mock::Reply::Scripted(scripted)).await;
+        // The ask reads its endpoint and key off this app alone, so no other test's ask sees the mock.
+        *app.test_ask.lock().unwrap() = Some((base, "test-key".into()));
+
+        let (runner, calls) = crate_runner(Some("b"));
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(
+            runs(&calls),
+            [("a".into(), true), ("b".into(), true), ("b".into(), false)],
+            "the diff's order, never Jev's pick"
+        );
+
+        // The ask is detached, so the row lands after verify returned: wait for it, bounded well
+        // past the point's budget.
+        let mut row = None;
+        for _ in 0..250 {
+            if let Some(found) = decision_rows(&app).into_iter().find(|r| r["point"] == "verify.focus") {
+                row = Some(found);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let row = row.expect("the detached ask records its decision row");
+        assert_eq!(row["kind"], "decision");
+        assert_eq!(row["mode"], "shadow");
+        assert_eq!(row["options"], json!(["a: cargo test", "b: cargo test", "full"]));
+        assert_eq!(row["pick"], "b: cargo test");
+        assert_eq!(row["confidence"], 0.7);
+        assert_eq!(row["did"], "rule", "shadow never applies the pick");
+        assert_eq!(row["outcome"]["would_catch"], true, "b's own failure is the one it picked");
+        let (focused, actual) = (
+            row["outcome"]["focused_first_failure_ms"].as_u64().unwrap(),
+            row["outcome"]["actual_first_failure_ms"].as_u64().unwrap(),
+        );
+        assert!(focused <= actual, "failing first is never slower: {row}");
+        assert!(row["outcome"]["total_ms"].as_u64().unwrap() > 0);
+        // The rule's own measurement still stands in the focus ledger, unchanged by the ask.
+        assert_eq!(focus_rows(&app)[0]["chosen"], "b: cargo test");
+
+        // Off fires no ask at all.
+        two_crate_fixture(&app, "off").await;
+        let before = decision_rows(&app).len();
+        let (runner, _) = crate_runner(None);
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert_eq!(decision_rows(&app).len(), before, "off asks nothing");
         let _ = std::fs::remove_dir_all(root);
     }
 
