@@ -5,6 +5,7 @@ use crate::{
     config::{CoAuthor, setting_str},
     exec_bits::GitRun,
     orgs,
+    provenance::Provenance,
     publish::record_publish_stage,
     sessions::{PublishStage, Session, SessionLogger, SessionStatus},
     util::{
@@ -984,6 +985,10 @@ pub(crate) fn neutralize_close(text: &str, close: &str) -> String {
     out
 }
 
+/// The brief's line about the path policy's placeholders (issue #1169).
+pub(crate) const PLACEHOLDER_NOTE: &str =
+    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: don't inspect, gitignore or edit them.";
+
 pub fn build_prompt(
     s: &Session,
     issue: Option<&Value>,
@@ -1022,6 +1027,10 @@ pub fn build_prompt(
         "The repository is checked out at /workspace on the branch {branch}. You are running inside a disposable \
          microVM sandbox with internet access: install whatever you need and run builds and tests freely.\n"
     );
+    // The path policy's empty placeholders (docs/path-policy.md) are hidden from `git status`, but an
+    // agent can still stumble on them with `ls -a`; unprompted it gitignores or inspects them, and
+    // the exec policy refuses that as an attempt to reach a secret (issue #1169).
+    let _ = writeln!(p, "{PLACEHOLDER_NOTE}\n");
     if resumed {
         let _ = writeln!(
             p,
@@ -1083,13 +1092,29 @@ pub fn build_prompt(
         }
         let body = text(&issue["body"]);
         let _ = writeln!(p, "\n{}\n", if body.is_empty() { "(no description)" } else { &body });
-        for comment in issue["comments"].as_array().into_iter().flatten() {
+        // A colony auto mode started (issue #1219) reads only comments boot marked trusted: the issue
+        // came from a trusted author, but a comment under it may be anyone's.
+        let auto = crate::auto_colonize::is_auto(s);
+        let comments: Vec<&Value> = if auto {
+            crate::auto_colonize::brief_comments(issue).collect()
+        } else {
+            issue["comments"].as_array().into_iter().flatten().collect()
+        };
+        for comment in comments {
             let _ = writeln!(
                 p,
                 "--- Comment by @{} ({}) ---\n{}\n",
                 text(&comment["author"]["login"]),
                 text(&comment["createdAt"]),
                 text(&comment["body"])
+            );
+        }
+        if auto && let Some(omitted) = issue["omitted_comments"].as_u64().filter(|n| *n > 0) {
+            let _ = writeln!(
+                p,
+                "({omitted} comment{} from authors outside the org {} left out of this brief.)\n",
+                if omitted == 1 { "" } else { "s" },
+                if omitted == 1 { "was" } else { "were" }
             );
         }
         let _ = writeln!(p, "</issue>\n");
@@ -1678,6 +1703,29 @@ fn commit_trailer(issue: Option<u64>, session_id: &str, co_author: Option<&CoAut
     }
 }
 
+/// The commit trailer paragraph with the provenance trailers (#908) on it, or `base` unchanged when
+/// `colonizer.toml` turns them off.
+///
+/// They join the *last* paragraph rather than starting one of their own, which is the only place git
+/// looks: a block of its own would push the co-author line out of the trailer block, and with it the
+/// credit `co_author` exists to give. When the co-author trailer is off, the base is a bare reference
+/// line, so a paragraph break is needed first — otherwise the reference is a non-trailer line sitting
+/// ahead of the trailers in the same paragraph.
+fn commit_message_trailer(base: &str, provenance: Option<&Provenance>) -> String {
+    let Some(p) = provenance else {
+        return base.to_string();
+    };
+    let trailers = p.commit_trailers();
+    if base.is_empty() {
+        return trailers;
+    }
+    if base.contains('\n') {
+        format!("{base}\n{trailers}")
+    } else {
+        format!("{base}\n\n{trailers}")
+    }
+}
+
 /// A colony only ever publishes its own `colonizer/` branch, never the base branch.
 pub fn check_publish_branch(branch: &str, base: &str) -> Result<()> {
     let own = branch.strip_prefix("colonizer/").is_some_and(|rest| !rest.is_empty());
@@ -1726,6 +1774,13 @@ trait PublishOps {
     async fn remote_head(&self) -> Result<Option<String>>;
     /// Pushes the branch to origin.
     async fn push(&self) -> Result<()>;
+    /// Fetches the branch as origin has it and folds the colony's new commits onto it (a rebase, a
+    /// merge when that fails), after a push was rejected as non-fast-forward (issue #1206). A conflict
+    /// is a [`crate::push_guard::PublishHold::Conflict`].
+    async fn sync_remote(&self) -> Result<()>;
+    /// Whether the pre-push scan for secret-shaped literals still applies to this colony: it runs
+    /// once, so a colony already resumed for one publishes as it stands (issue #1206).
+    fn secret_scan_due(&self) -> bool;
     /// The URL of a pull request that is already open for this branch, if there is one.
     async fn existing_pr(&self) -> Result<Option<String>>;
     /// Opens the pull request and returns its URL.
@@ -1820,7 +1875,19 @@ async fn run_publish_with<O: PublishOps>(
         None => body,
     };
 
-    let local = ops.local_head().await?;
+    // Issue #1206: a secret-shaped literal on an added line is caught here, before anything leaves the
+    // machine, and held for the colony to remove instead of failing it at GitHub's push protection.
+    // Best effort: a diff that cannot be read is the screening gate's to refuse, not this scan's.
+    if ops.secret_scan_due()
+        && let Ok(diff) = ops.diff_against_base().await
+    {
+        let spots = crate::push_guard::scan_diff(&diff);
+        if !spots.is_empty() {
+            return Err(crate::push_guard::PublishHold::Secrets(spots).into());
+        }
+    }
+
+    let mut local = ops.local_head().await?;
     // Issue #98: the push and the PR check against the approved candidate rather than a recomputed
     // one. The tree the approval bound was recomputed at the commit above; a restack may since have
     // rewritten the branch legitimately, and what pins the push to reality is `verify_tree_binding`
@@ -1832,7 +1899,26 @@ async fn run_publish_with<O: PublishOps>(
         ops.note("the branch is already on origin; skipping the push".to_string())
             .await;
     } else {
-        ops.push().await?;
+        // Issue #1206: something else moved the branch on GitHub (a merge of main, a rebase, update
+        // branch), so the plain push is rejected. Fold the colony's commits onto it and push again,
+        // twice at most, rather than failing a colony whose work is fine.
+        let syncs = crate::push_guard::push_syncing(
+            || ops.push(),
+            || async {
+                ops.note(
+                    "the push was rejected as non-fast-forward; fetching the branch and folding the new commits onto it"
+                        .to_string(),
+                )
+                .await;
+                ops.sync_remote().await
+            },
+            crate::push_guard::MAX_SYNCS,
+        )
+        .await?;
+        if syncs > 0 {
+            // The branch was rewritten on top of the remote's: what was pushed is the new head.
+            local = ops.local_head().await?;
+        }
     }
     ops.checkpoint(PublishStage::Pushed).await;
     // The pull request is bound to the exact tree that was pushed: a branch that moved since is refused.
@@ -2001,6 +2087,19 @@ impl GitPublishOps<'_> {
             .co_author
             .clone()
     }
+
+    /// Whether this colony's commit and pull request name the Colonizer version, the settler and the
+    /// model (#908), or `None` when `colonizer.toml` turns that off.
+    ///
+    /// Read from the file on every publish rather than cached at startup, like `co_author` above: a
+    /// repository that decides it does not want the trailers should not have to restart the
+    /// mothership for the setting to take effect.
+    fn provenance(&self) -> Option<Provenance> {
+        let on = crate::config::FileConfig::load(&self.app.cfg.config_dir)
+            .publish
+            .label_provenance;
+        on.then(|| Provenance::from_session(self.s))
+    }
 }
 
 impl PublishOps for GitPublishOps<'_> {
@@ -2009,7 +2108,10 @@ impl PublishOps for GitPublishOps<'_> {
     }
 
     fn trailer(&self) -> String {
-        commit_trailer(self.s.issue, &self.s.id, self.co_author().as_ref())
+        commit_message_trailer(
+            &commit_trailer(self.s.issue, &self.s.id, self.co_author().as_ref()),
+            self.provenance().as_ref(),
+        )
     }
 
     async fn stage_all(&self) -> Result<bool> {
@@ -2202,7 +2304,7 @@ impl PublishOps for GitPublishOps<'_> {
         // path ever force-pushes, and only the colony's own branch (`check_publish_branch` guards the
         // shape at the publish entry).
         let expected = self.lease.lock().expect("publish lease poisoned").clone();
-        if let Some(expected) = expected {
+        let pushed = if let Some(expected) = expected {
             let lease = format!("--force-with-lease=refs/heads/{0}:{expected}", self.s.branch);
             exec(
                 self.app
@@ -2210,7 +2312,7 @@ impl PublishOps for GitPublishOps<'_> {
                     .args(["push", "--quiet", "origin", &lease])
                     .arg(&refspec),
             )
-            .await?;
+            .await
         } else {
             exec(
                 self.app
@@ -2218,7 +2320,16 @@ impl PublishOps for GitPublishOps<'_> {
                     .args(["push", "--quiet", "origin"])
                     .arg(&refspec),
             )
-            .await?;
+            .await
+        };
+        if let Err(e) = pushed {
+            // Issue #1206: GitHub's push protection names the files and lines it refused. While the
+            // colony has its one fix round left that is a hold, not a failure.
+            let text = format!("{e:#}");
+            if self.secret_scan_due() && crate::push_guard::is_secret_rejection(&text) {
+                return Err(crate::push_guard::PublishHold::Secrets(crate::push_guard::parse_gh013(&text)).into());
+            }
+            return Err(e);
         }
         // Only now — with the rebased history actually on the remote — does the recorded base
         // follow it; see the doc comment on `restack` for why persisting it any sooner is unsafe.
@@ -2240,6 +2351,38 @@ impl PublishOps for GitPublishOps<'_> {
             Err(e) => self.log.warn(format!("could not record commit links: {e:#}")).await,
         }
         Ok(())
+    }
+
+    async fn sync_remote(&self) -> Result<()> {
+        let branch = self.s.branch.as_str();
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        // The repository lock, as the restack takes it: the fetch and the fold see one origin.
+        let lock = self.app.repo_lock(&self.s.repo).await;
+        let _guard = lock.lock().await;
+        exec(
+            self.app
+                .git_authed(&self.bare)
+                .args(["fetch", "--quiet", "origin"])
+                .arg(format!("+refs/heads/{branch}:{remote_ref}")),
+        )
+        .await
+        .with_context(|| format!("could not fetch {branch} from origin to fold in what changed there"))?;
+        let mut git = crate::exec_bits::WorktreeGit::new(self.app, &self.admin, &self.wt);
+        let how = crate::push_guard::integrate(&mut git, &remote_ref).await?;
+        self.log
+            .info(format!(
+                "folded the colony's new commits onto origin/{branch} ({})",
+                match how {
+                    crate::push_guard::Integrated::Rebased => "rebased",
+                    crate::push_guard::Integrated::Merged => "merged",
+                }
+            ))
+            .await;
+        Ok(())
+    }
+
+    fn secret_scan_due(&self) -> bool {
+        self.s.secret_fix_rounds == 0
     }
 
     async fn existing_pr(&self) -> Result<Option<String>> {
@@ -2284,7 +2427,14 @@ impl PublishOps for GitPublishOps<'_> {
             Some(notes) => format!("{}\n\n{notes}", body.trim_end()),
             None => body.to_string(),
         };
-        let body = compose_pr_body(&body, self.s.issue, behind, &base, self.co_author().as_ref());
+        let body = compose_pr_body(
+            &body,
+            self.s.issue,
+            behind,
+            &base,
+            self.co_author().as_ref(),
+            self.provenance().as_ref(),
+        );
         // The audit trail names the exact body that goes out (`publish_candidate_hash`, issue #98).
         let bound = crate::publish::publish_candidate_hash(body.as_bytes());
         self.log.info(format!("opening the pull request; body sha256 {bound}")).await;
@@ -2499,7 +2649,7 @@ pub async fn publish(
         session_dir: app.session_dir(&s.id),
     };
     // #761: a manual press publishes the redacted description, but still says out loud that the
-    // colony put a secret in it (autopilot never gets here with one: it holds for this press).
+    // colony put a secret in it (autopilot publishes it the same way, #1175).
     if let Some(note) = pr_description_secret_note(&app.session_dir(&s.id).join("out"), s) {
         log.warn(note.clone()).await;
         // A credential in the colony's own output means a secret value reached the guest, which the
@@ -2787,7 +2937,14 @@ fn strip_agent_attribution(body: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
-fn compose_pr_body(body: &str, issue: Option<u64>, behind: Option<u64>, base: &str, co_author: Option<&CoAuthor>) -> String {
+fn compose_pr_body(
+    body: &str,
+    issue: Option<u64>,
+    behind: Option<u64>,
+    base: &str,
+    co_author: Option<&CoAuthor>,
+    provenance: Option<&Provenance>,
+) -> String {
     let mut out = strip_agent_attribution(body);
     if let Some(number) = issue {
         let lower = out.to_lowercase();
@@ -2810,6 +2967,15 @@ fn compose_pr_body(body: &str, issue: Option<u64>, behind: Option<u64>, base: &s
             "> Note: this branch was {n} commit(s) behind {base} \
             when this pull request was opened."
         ));
+    }
+    // The provenance table (#908) sits under the footer rule with the rest of the machinery's own
+    // signature, so a reviewer reads the colony's description first and the stamp second, and it is
+    // still peeled by nothing: `strip_agent_attribution` above ran on the description alone.
+    if let Some(p) = provenance {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(p.body_block().trim_end());
     }
     out.push_str("\n\n---\n🤖 Generated by [Colonizer](https://colonizer.dev) in a microVM\n");
     // Last, so `strip_agent_attribution` above cannot peel it and GitHub reads it as a trailer when
@@ -2854,13 +3020,36 @@ pub async fn delete_token(State(app): State<Shared>) -> ApiResult<Value> {
 }
 
 pub async fn list_repos(State(app): State<Shared>) -> ApiResult<Vec<Value>> {
-    // `gh api --paginate` takes seconds; the cockpit asks on every load, so serve the last list at
-    // once and refresh it behind the answer once it is a minute old.
-    let value = crate::cached_answer(&app, "repos", Duration::from_secs(60), |app| async move {
+    let hidden = app.hidden_orgs();
+    let mut repos = repos_cached(&app).await?;
+    // Hidden orgs (issue #1213) are out of every picker; their colonies and settings are untouched.
+    repos.retain(|r| !repo_is_hidden(r, &hidden));
+    Ok(Json(repos))
+}
+
+/// Whether a repository row (`full_name` = `owner/name`) belongs to a hidden org.
+pub(crate) fn repo_is_hidden(repo: &Value, hidden: &std::collections::BTreeSet<String>) -> bool {
+    repo["full_name"]
+        .as_str()
+        .and_then(|name| name.split('/').next())
+        .is_some_and(|owner| hidden.contains(&owner.to_ascii_lowercase()))
+}
+
+/// The signed-in login when the viewer is already cached; never asks GitHub.
+pub(crate) async fn cached_login(app: &App) -> Option<String> {
+    let cache = app.github_viewer.lock().await;
+    cache.as_ref()?.user.as_ref().ok()?["login"].as_str().map(String::from)
+}
+
+/// The repository list, served at once from the last answer and refreshed behind it once it is a
+/// minute old: `gh api --paginate` takes seconds, and the cockpit asks on every load. Also the
+/// source of the frontier badge's repository counts (backlog.rs).
+pub(crate) async fn repos_cached(app: &Shared) -> anyhow::Result<Vec<Value>> {
+    let value = crate::cached_answer(app, "repos", Duration::from_secs(60), |app| async move {
         fetch_repos(&app).await.map(Value::Array)
     })
     .await?;
-    Ok(Json(serde_json::from_value(value)?))
+    Ok(serde_json::from_value(value)?)
 }
 
 async fn fetch_repos(app: &Shared) -> anyhow::Result<Vec<Value>> {
@@ -3012,7 +3201,7 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         "--limit",
         "200",
         "--json",
-        "number,title,body,labels,author,updatedAt,url",
+        "number,title,body,labels,author,createdAt,updatedAt,url",
     ]))
     .await?;
     let issues: Value = serde_json::from_str(&out)?;
@@ -3028,7 +3217,10 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
         eprintln!("epic: could not read sub-issue totals for {repo} ({e:#}); marking epics by label and title only");
         Default::default()
     });
-    Ok(Json(crate::epic::annotate(filter.apply(issues), &totals)))
+    // Each issue also carries `intake` (issue #1219): whether auto mode takes it or a person must
+    // look first, and why.
+    let issues = crate::epic::annotate(filter.apply(issues), &totals);
+    Ok(Json(crate::auto_colonize::annotate(&app, &repo, issues).await))
 }
 
 /// The Source module's include labels as the operator typed them (case kept, duplicates dropped
@@ -3430,6 +3622,22 @@ mod tests {
         let prompt = build_prompt(&me, None, "main", false, &[], None, None);
         assert!(prompt.contains("`changelog.d/`"), "{prompt}");
         assert!(prompt.contains("leave the changelog file itself alone"), "{prompt}");
+    }
+
+    /// Issue #1169: the brief says the empty dotfiles are harness placeholders, to leave alone.
+    #[test]
+    fn the_prompt_names_the_empty_dotfiles_as_placeholders_to_leave_alone() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        for resumed in [false, true] {
+            let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
+            assert!(
+                prompt.contains(
+                    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: \
+                     don't inspect, gitignore or edit them."
+                ),
+                "{prompt}"
+            );
+        }
     }
 
     /// Issue #508: instructions that arrived through a scoped API token are marked as external
@@ -3865,7 +4073,7 @@ mod tests {
     #[test]
     fn pr_body_is_signed_by_colonizer_not_the_agent() {
         let body = "Change\n\n---\nCo-Authored-By: Claude <noreply@anthropic.com>\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n";
-        let out = compose_pr_body(body, Some(5), None, "main", None);
+        let out = compose_pr_body(body, Some(5), None, "main", None, None);
         assert!(!out.to_lowercase().contains("claude"), "{out}");
         assert!(out.starts_with("Change\n\nCloses #5"), "{out}");
         assert!(out.contains("Generated by [Colonizer]"), "{out}");
@@ -3874,7 +4082,7 @@ mod tests {
 
     #[test]
     fn pr_body_ends_with_the_configured_co_author_trailer() {
-        let out = compose_pr_body("Change", Some(5), None, "main", Some(&CoAuthor::settlers()));
+        let out = compose_pr_body("Change", Some(5), None, "main", Some(&CoAuthor::settlers()), None);
         let trailer = "Co-Authored-By: Colonizer Settlers <331648616+colonizer-settlers@users.noreply.github.com>";
         let footer = "---\n🤖 Generated by [Colonizer](https://colonizer.dev) in a microVM";
         assert!(out.ends_with(trailer), "{out}");
@@ -3893,14 +4101,93 @@ mod tests {
             None,
             "main",
             Some(&CoAuthor::settlers()),
+            None,
         );
         assert_eq!(sneaky.matches("Co-Authored-By").count(), 1, "{sneaky}");
         assert!(sneaky.ends_with(trailer), "{sneaky}");
     }
 
+    /// The provenance stamp (#908), standing in for what `GitPublishOps::provenance` hands both
+    /// paths: the same `Provenance` the flag read allows through, and `None` for the flag off.
+    fn stamped() -> Provenance {
+        Provenance::new("v0.2.14".into(), "claude-code".into(), Some("claude-opus-5".into()))
+    }
+
+    #[test]
+    fn the_commit_names_the_version_the_settler_and_the_model_unless_the_flag_is_off() {
+        let base = commit_trailer(Some(5), "ab12cd34", Some(&CoAuthor::settlers()));
+        let on = commit_message_trailer(&base, Some(&stamped()));
+        assert!(
+            on.ends_with("Colonizer-Version: v0.2.14\nColonizer-Settler: claude-code\nColonizer-Model: claude-opus-5"),
+            "{on}"
+        );
+        // Git reads trailers from the last paragraph, so the provenance joins the co-author's rather
+        // than starting a paragraph of its own — a block apart would cost the co-author the credit.
+        let co_author = "Co-Authored-By: Colonizer Settlers <331648616+colonizer-settlers@users.noreply.github.com>";
+        assert!(on.contains(&format!("{co_author}\nColonizer-Version: v0.2.14")), "{on}");
+
+        // Flag off (`publish.label_provenance = false`): exactly what the trailer was before.
+        let off = commit_message_trailer(&base, None);
+        assert_eq!(off, base);
+        assert!(!off.contains("Colonizer-"), "{off}");
+    }
+
+    #[test]
+    fn a_provenance_trailer_keeps_the_co_author_block_whole() {
+        // With the co-author trailer off, `base` is a bare reference line and would otherwise sit in
+        // the same paragraph as the provenance trailers, where git stops reading at the first
+        // non-trailer line.
+        let base = commit_trailer(Some(5), "ab12cd34", None);
+        let out = commit_message_trailer(&base, Some(&stamped()));
+        assert_eq!(
+            out,
+            "Refs #5\n\nColonizer-Version: v0.2.14\nColonizer-Settler: claude-code\nColonizer-Model: claude-opus-5"
+        );
+        assert_eq!(commit_message_trailer(&base, None), "Refs #5");
+        // And a base with no trailer at all is just the provenance block.
+        assert_eq!(
+            commit_message_trailer("", Some(&stamped())),
+            "Colonizer-Version: v0.2.14\nColonizer-Settler: claude-code\nColonizer-Model: claude-opus-5"
+        );
+    }
+
+    #[test]
+    fn the_pull_request_body_carries_the_stamp_unless_the_flag_is_off() {
+        let out = compose_pr_body("Change", Some(5), None, "main", Some(&CoAuthor::settlers()), Some(&stamped()));
+        for row in [
+            "## Provenance",
+            "Colonizer-Version | v0.2.14",
+            "Colonizer-Settler | claude-code",
+            "Colonizer-Model | claude-opus-5",
+        ] {
+            assert!(out.contains(row), "missing {row}: {out}");
+        }
+        // Above the footer rule, so the colony's description is the first thing a reviewer reads and
+        // the stamp is part of the same signature block as the generated-by line; and the co-author
+        // trailer is still last, for the squash merge that uses this body as the commit message.
+        assert!(out.find("## Provenance").unwrap() < out.find("---\n🤖").unwrap(), "{out}");
+        // The co-author trailer is still the last thing in the body, where git needs it for a squash
+        // merge that uses this body as the commit message.
+        assert!(
+            out.ends_with(
+                "Co-Authored-By: Colonizer Settlers \
+                 <331648616+colonizer-settlers@users.noreply.github.com>"
+            ),
+            "{out}"
+        );
+
+        let off = compose_pr_body("Change", Some(5), None, "main", Some(&CoAuthor::settlers()), None);
+        assert!(!off.contains("Colonizer-Version"), "{off}");
+        assert!(!off.contains("## Provenance"), "{off}");
+        assert!(
+            off.contains("Generated by [Colonizer]"),
+            "the rest of the body is unchanged: {off}"
+        );
+    }
+
     #[test]
     fn pr_body_notes_how_far_behind_the_branch_was_when_it_matters() {
-        let noted = compose_pr_body("Change", Some(5), Some(3), "main", None);
+        let noted = compose_pr_body("Change", Some(5), Some(3), "main", None, None);
         assert!(noted.contains("> Note: this branch was 3 commit(s) behind main"), "{noted}");
         assert!(noted.contains("when this pull request was opened."), "{noted}");
         assert!(noted.contains("Closes #5"), "the Closes line still comes first: {noted}");
@@ -3913,7 +4200,7 @@ mod tests {
             "and before the footer: {noted}"
         );
         for (behind, base) in [(None, "main"), (Some(0), "main")] {
-            let out = compose_pr_body("Change", Some(5), behind, base, None);
+            let out = compose_pr_body("Change", Some(5), behind, base, None, None);
             assert!(!out.contains("> Note:"), "no note when {behind:?}: {out}");
         }
     }
@@ -4190,6 +4477,10 @@ mod tests {
         parent_merged: bool,
         /// The rebase hits a conflict: the publish must fail before any push.
         restack_conflict: bool,
+        /// Folding the remote branch in conflicts (issue #1206).
+        sync_conflict: bool,
+        /// The colony was already resumed once for a secret-shaped literal, so the scan stands aside.
+        scan_spent: bool,
         /// A restack's new base, held until the push that carries it actually lands — mirrors
         /// `GitPublishOps::pending_base`, so `base` above only ever follows a successful push.
         pending_base: Option<String>,
@@ -4247,6 +4538,18 @@ mod tests {
         /// The restack rebase hits a conflict.
         fn with_conflict(self) -> Self {
             self.state.borrow_mut().restack_conflict = true;
+            self
+        }
+
+        /// Folding in a moved remote branch hits a conflict.
+        fn with_sync_conflict(self) -> Self {
+            self.state.borrow_mut().sync_conflict = true;
+            self
+        }
+
+        /// The colony already had its one secret fix round.
+        fn with_scan_spent(self) -> Self {
+            self.state.borrow_mut().scan_spent = true;
             self
         }
 
@@ -4422,6 +4725,23 @@ mod tests {
                 self.note(format!("parent PR merged; rebased 1 commit(s) onto {base}")).await;
             }
             Ok(())
+        }
+
+        async fn sync_remote(&self) -> Result<()> {
+            self.state.borrow_mut().calls.push("sync_remote");
+            if self.state.borrow().sync_conflict {
+                return Err(crate::push_guard::PublishHold::Conflict {
+                    files: vec!["CHANGELOG.md".into()],
+                }
+                .into());
+            }
+            // The colony's commits now sit on top of the remote's: the remote head is one the local head descends from.
+            self.state.borrow_mut().remote = Some(PARENT.into());
+            Ok(())
+        }
+
+        fn secret_scan_due(&self) -> bool {
+            !self.state.borrow().scan_spent
         }
 
         async fn existing_pr(&self) -> Result<Option<String>> {
@@ -4648,10 +4968,11 @@ mod tests {
     }
 
     /// Real git rejects a push that does not fast-forward the remote branch — and so does the
-    /// modelled one, so a future `--force` on the real push cannot slip past this suite.
+    /// modelled one, so a future `--force` on the real push cannot slip past this suite. Since #1206
+    /// the publish first folds the remote branch in; here that conflicts, so the push stays rejected.
     #[tokio::test]
     async fn a_diverged_remote_rejects_the_push_instead_of_being_force_pushed() {
-        let repo = FakeRepo::new(true, false, Some(DIVERGED), None);
+        let repo = FakeRepo::new(true, false, Some(DIVERGED), None).with_sync_conflict();
         assert!(
             run_publish(&repo).await.is_err(),
             "a diverged remote must fail the publish loudly"
@@ -4717,6 +5038,64 @@ mod tests {
             "the lease must let the restacked push through"
         );
         assert!(repo.lease_used(), "the push must have moved the pre-rebase remote head aside");
+    }
+
+    /// Issue #1206: a branch someone else moved on GitHub is folded onto and pushed again, and the
+    /// publish goes on to open the pull request instead of failing.
+    #[tokio::test]
+    async fn a_non_fast_forward_push_syncs_and_pushes_again() {
+        let repo = FakeRepo::new(false, true, Some(DIVERGED), None);
+        let out = run_publish(&repo).await.unwrap();
+        assert!(
+            matches!(out, Published::PullRequest(_)),
+            "the publish carries on to the pull request"
+        );
+        assert_eq!(repo.count("sync_remote"), 1);
+        assert_eq!(repo.count("push"), 2, "rejected once, landed after the sync");
+        assert!(repo.noted("non-fast-forward"));
+    }
+
+    /// Issue #1206: a conflict while folding in the remote branch is a hold the publish hands back,
+    /// not a plain failure, and nothing is pushed twice.
+    #[tokio::test]
+    async fn a_conflict_while_syncing_is_a_hold() {
+        let repo = FakeRepo::new(false, true, Some(DIVERGED), None).with_sync_conflict();
+        let err = run_publish(&repo).await.err().expect("the publish is held");
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::push_guard::PublishHold>(),
+                Some(crate::push_guard::PublishHold::Conflict { files }) if files == &["CHANGELOG.md".to_string()]
+            ),
+            "{err:#}"
+        );
+        assert_eq!(repo.count("push"), 1);
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    /// Issue #1206: a Stripe-shaped literal on an added line holds the publish before any push, naming
+    /// the file, the line and the kind and never the value.
+    #[tokio::test]
+    async fn a_secret_shaped_literal_holds_the_publish_before_any_push() {
+        let key = concat!("sk_", "live_4eC39HqLyjWDarjtT1zdp7dc");
+        let diff = format!(
+            "diff --git a/tests/schema.rs b/tests/schema.rs\n--- a/tests/schema.rs\n+++ b/tests/schema.rs\n@@ -10,2 +10,3 @@ fn t() {{\n let a = 1;\n+let key = \"{key}\";\n let b = 2;\n"
+        );
+        let repo = FakeRepo::new(false, true, None, None).with_diff(&diff);
+        let err = run_publish(&repo).await.err().expect("the publish is held");
+        let Some(crate::push_guard::PublishHold::Secrets(spots)) = err.downcast_ref::<crate::push_guard::PublishHold>() else {
+            panic!("expected a secrets hold: {err:#}");
+        };
+        assert_eq!(spots.len(), 1);
+        assert_eq!(
+            (spots[0].path.as_str(), spots[0].line, spots[0].kind.as_str()),
+            ("tests/schema.rs", 11, "stripe_key")
+        );
+        assert!(!format!("{err:#}").contains(key), "the value is never in the message");
+        assert_eq!(repo.count("push"), 0, "nothing leaves the machine");
+
+        // Once the colony had its fix round the scan stands aside and the publish goes on.
+        let spent = FakeRepo::new(false, true, None, None).with_diff(&diff).with_scan_spent();
+        assert!(matches!(run_publish(&spent).await.unwrap(), Published::PullRequest(_)));
     }
 
     /// A conflicted rebase fails the publish before anything pushes, so the branch is never left

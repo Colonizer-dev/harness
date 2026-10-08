@@ -14,7 +14,7 @@ import { IconBranch, IconDownload, IconSearch, IconSliders, IconX } from "../com
 import { Button, cx, orgOf, stored, store } from "../components/ui";
 import { formatCost, formatTokens } from "../spend";
 import { useModels } from "../useModels";
-import type { ChatAttachment, ChatAttachmentNote, ChatMessage, ChatMeta, ChatModels, ChatPatch, ChatPrefs, ChatStreamEvent, Repo, Session } from "../types";
+import type { ChatAttachment, ChatAttachmentNote, ChatMessage, ChatMeta, ChatModels, ChatPatch, ChatPrefs, ChatStreamEvent, ChatToolNote, Repo, Session } from "../types";
 import { AttachMenu, pending, type AttachStep, type Pending } from "./chat/AttachMenu";
 import { ChatComposer, MOD, type SendKey } from "./chat/ChatComposer";
 import { ChatSidebar } from "./chat/ChatSidebar";
@@ -22,6 +22,7 @@ import { HandoffDialog, ImageLightbox, IssueDialog, LoopDialog } from "./chat/Di
 import { MessageRow, StreamingRow, type MessageAction, type OpenImage } from "./chat/Message";
 import { Popover } from "./chat/Popover";
 import { PersonaPicker } from "./chat/PersonaPicker";
+import { useApprovals } from "./chat/ToolCalls";
 import {
   candidatesByParent,
   estimateTokens,
@@ -140,6 +141,8 @@ interface Live {
   model: string;
   text: string;
   done: boolean;
+  /** Tool calls so far (#1217): reads that ran, writes waiting on an approval. */
+  tools: ChatToolNote[];
 }
 
 const FALLBACK_TITLE = "New conversation";
@@ -152,6 +155,7 @@ export function ChatView({
   autopilotDefault,
   initialPrompt,
   onPromptTaken,
+  openRequest,
   onCreated,
   workspaces = [],
   onOpenFile,
@@ -163,6 +167,8 @@ export function ChatView({
   /** A question sent from the composer's Ask mode: a new conversation starts with it. */
   initialPrompt?: { text: string; n: number } | null;
   onPromptTaken?: () => void;
+  /** A conversation Spotlight expanded into this page: opened once (a fresh `n` each time). */
+  openRequest?: { id: string | null; n: number } | null;
   onCreated: (session: Session) => void;
   /** The workspaces and their logos, for the sidebar filter and pickers. */
   workspaces?: readonly { org: string; avatar: string | null }[];
@@ -197,6 +203,18 @@ export function ChatView({
   const [handoff, setHandoff] = useState<{ instructions: string; repo: string } | null>(null);
   const [loop, setLoop] = useState<{ name: string; prompt: string; repo: string } | null>(null);
   const [issue, setIssue] = useState<{ title: string; body: string; repo: string } | null>(null);
+
+  // The writes the model proposed in this conversation, held until they are decided (#1217).
+  const approvals = useApprovals(current?.id ?? null, (a) =>
+    setMessages((list) =>
+      list.map((m) =>
+        m.id === a.message && m.tools?.some((t) => t.approval === a.id)
+          ? { ...m, tools: m.tools.map((t) => (t.approval === a.id ? { ...t, status: a.status === "rejected" ? "rejected" : a.status === "failed" ? "failed" : "approved", result: a.result ?? t.result } : t)) }
+          : m,
+      ),
+    ),
+  );
+  const addApproval = approvals.add;
 
   const abort = useRef<AbortController | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -320,6 +338,9 @@ export function ChatView({
       const finish = () => setLive((l) => l && l.map((x, i) => (i === lane ? { ...x, done: true } : x)));
       if (event.type === "delta") {
         setLive((l) => l && l.map((x, i) => (i === lane ? { ...x, text: x.text + event.text } : x)));
+      } else if (event.type === "tool") {
+        if (event.approval) addApproval(event.approval);
+        setLive((l) => l && l.map((x, i) => (i === lane ? { ...x, tools: [...x.tools, event.note] } : x)));
       } else if (event.type === "done") {
         setMessages((m) => [...m, event.message]);
         finish();
@@ -334,7 +355,7 @@ export function ChatView({
         toast(event.message, "error");
       }
     },
-    [toast],
+    [toast, addApproval],
   );
 
   const settle = useCallback(
@@ -373,7 +394,7 @@ export function ChatView({
       stick.current = true;
       setBusy(true);
       const attached = opts.attached ?? [];
-      setLive([{ model: opts.model ?? meta.model, text: "", done: false }]);
+      setLive([{ model: opts.model ?? meta.model, text: "", done: false, tools: [] }]);
       if (content) setMessages((m) => [...m, optimistic(content, attached)]);
       else
         setMessages((m) => {
@@ -408,8 +429,8 @@ export function ChatView({
       stick.current = true;
       setBusy(true);
       setLive([
-        { model: meta.model, text: "", done: false },
-        { model: second, text: "", done: false },
+        { model: meta.model, text: "", done: false, tools: [] },
+        { model: second, text: "", done: false, tools: [] },
       ]);
       setMessages((m) => [...m, optimistic(content, attached)]);
       try {
@@ -438,6 +459,15 @@ export function ChatView({
       await send(meta, initialPrompt.text);
     })();
   }, [initialPrompt, models, onPromptTaken, api, org, refresh, reset, send]);
+
+  // A conversation Spotlight expanded into this page opens once.
+  const opened = useRef(0);
+  useEffect(() => {
+    if (!openRequest || openRequest.n === opened.current) return;
+    opened.current = openRequest.n;
+    if (openRequest.id === null) reset();
+    else void open(openRequest.id).then(() => refresh());
+  }, [openRequest, open, refresh, reset]);
 
   const model = current?.model || settings.model || models?.default || "";
   const comparing = compareModel !== null;
@@ -750,6 +780,7 @@ export function ChatView({
       imageUrl={api.chatImageUrl}
       onOpenImage={setLightbox}
       ant={replyAnt}
+      approvals={approvals}
     />
   );
 
@@ -966,7 +997,7 @@ export function ChatView({
                     {live.map((l, i) =>
                       l.done ? null : (
                         <div key={i} className={cx(live.length > 1 && "min-w-0 rounded-xl border border-border bg-panel/50")}>
-                          <StreamingRow model={l.model} text={l.text} models={models} ant={replyAnt} />
+                          <StreamingRow model={l.model} text={l.text} models={models} ant={replyAnt} tools={l.tools} approvals={approvals} />
                         </div>
                       ),
                     )}

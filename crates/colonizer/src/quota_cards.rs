@@ -717,6 +717,15 @@ async fn apply_overrides(app: &Shared, provider: &str, model: &str, plan: &[Over
     changes
 }
 
+/// Moves one colony's roles off `provider` onto `model` and restarts it there (issue #1191: the
+/// watchdog playbook's switch-to-fallback). The same override and restart a card's `switch` does.
+pub(crate) async fn switch_colony(app: &Shared, provider: &str, model: &str, s: &Session) -> Result<(), String> {
+    let modules = app.modules.read().await.clone();
+    let plan = plan_overrides(app, &modules, provider, std::slice::from_ref(s));
+    apply_overrides(app, provider, model, &plan).await;
+    restart(app, &s.id).await
+}
+
 /// Restarts every colony on the new model scope ([`restart`]).
 pub(crate) async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
     let mut out = Vec::new();
@@ -748,6 +757,11 @@ pub(crate) fn role_error(app: &Shared, role: &str, model: &str) -> Option<String
     {
         return Some(format!(
             "{model} can't be `{role}`: provider \"{id}\" maps its models and \"{canonical}\" is not among them"
+        ));
+    }
+    if role == "account_fallback_model" && !app.providers().iter().any(|p| crate::providers::names_model_on(model, &p.id)) {
+        return Some(format!(
+            "{model} can't be `account_fallback_model`: it is the model Claude's roles run on while the account is out, so it must be a <provider>/<model> on a configured provider"
         ));
     }
     if role == "summary_model" && !model.contains('/') && !crate::summaries::claude_summaries_possible(app) {

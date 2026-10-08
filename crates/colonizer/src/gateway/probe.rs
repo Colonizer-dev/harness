@@ -109,18 +109,24 @@ async fn models_probe(app: &App, provider: &Provider) -> Value {
 /// The quota half of [`probe`]: `GET`s the configured URL with the same credential and timeout, and
 /// reads the pointer out of the answer. `None` when the provider has no probe, which leaves the
 /// `quota` field out of the health JSON entirely.
+pub(crate) async fn probe_quota(app: &App, provider: &Provider) -> Option<Value> {
+    quota_probe(app, provider).await
+}
+
 async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
     let quota = provider.quota.as_ref()?;
     let mut request = app.gateway.client.get(&quota.url).timeout(HEALTH_TIMEOUT);
     if let Some((name, value)) = credential_header(app, provider) {
         request = request.header(name, value);
     }
+    let mut reset_unix: Option<i64> = None;
     let (error, remaining, limit) = match request.send().await {
         Ok(response) => {
             let status = response.status();
             let body: Value = response.json().await.unwrap_or(Value::Null);
             if status.is_success() {
                 let limit = quota.limit_pointer.as_deref().and_then(|p| quota_remaining(&body, p));
+                reset_unix = quota.reset_pointer.as_deref().and_then(|p| quota_reset(&body, p));
                 (None, quota_remaining(&body, &quota.pointer), limit)
             } else {
                 (Some(format!("quota endpoint answered HTTP {}", status.as_u16())), None, None)
@@ -139,10 +145,23 @@ async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
     };
     // A success with nothing readable at the pointer is the usual typo, so it gets its own words.
     let error = error.or_else(|| remaining.is_none().then(|| format!("no number at {}", quota.pointer)));
+    // Every successful read is a point on the providers page's credits chart (#1204).
+    if let Some(left) = remaining.as_ref().and_then(Value::as_f64) {
+        app.gateway.history.record_balance(
+            &provider.id,
+            left,
+            limit.as_ref().and_then(Value::as_f64),
+            reset_unix,
+            chrono::Utc::now(),
+        );
+    }
     let mut answer = json!({"remaining": remaining, "error": error});
     // The plan's total only when a limit pointer is configured, so older readers see the same shape.
     if quota.limit_pointer.is_some() {
         answer["limit"] = limit.unwrap_or(Value::Null);
+    }
+    if quota.reset_pointer.is_some() {
+        answer["reset_unix"] = json!(reset_unix);
     }
     Some(answer)
 }
@@ -160,6 +179,22 @@ pub(super) fn quota_remaining(body: &Value, pointer: &str) -> Option<Value> {
     } else {
         json!(count)
     })
+}
+
+/// The moment a quota reset pointer names, as unix seconds: a number (milliseconds when it is too big
+/// to be seconds), a numeric string, or an RFC 3339 string. `None` when the pointer misses.
+pub(crate) fn quota_reset(body: &Value, pointer: &str) -> Option<i64> {
+    let value = body.pointer(pointer)?;
+    if let Some(text) = value.as_str()
+        && let Ok(at) = chrono::DateTime::parse_from_rfc3339(text.trim())
+    {
+        return Some(at.timestamp());
+    }
+    let n = value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())?;
+    if !n.is_finite() || n <= 0.0 {
+        return None;
+    }
+    Some(if n > 1e11 { (n / 1000.0) as i64 } else { n as i64 })
 }
 
 pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {

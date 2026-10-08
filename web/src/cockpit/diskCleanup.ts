@@ -67,13 +67,12 @@ export function diskCleanupBody(l: Loop, change: { enabled?: boolean; minutes?: 
   };
 }
 
-/** The loop's one-line description: cadence, trigger, and what it cleans. */
+/** The loop's cadence and early trigger, as the card's schedule line says it. */
 export function describeDiskCleanup(l: Loop): string {
   const s = settingsOf(l);
   const minutes = l.cadence.every === "interval" ? l.cadence.minutes : DISK_CLEANUP_DEFAULT_MINUTES;
-  const on = DISK_CLEANUP_CATEGORIES.filter((c) => s[c.key]).map((c) => c.label.toLowerCase());
   const trigger = s.trigger_free_pct > 0 ? ` · early under ${s.trigger_free_pct}% free` : "";
-  return `Built in · every ${intervalWords(minutes)}${trigger} · ${on.length ? on.join(", ") : "nothing selected"}`;
+  return `every ${intervalWords(minutes)}${trigger}`;
 }
 
 /** "would free 3.2G", "freed 3.2G", or that there was nothing to clean. */

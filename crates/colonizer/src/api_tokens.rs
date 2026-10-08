@@ -34,7 +34,8 @@ use std::path::PathBuf;
 /// How much a token may do, ordered so `token.scope >= needed` reads as "may". `fleet` is the
 /// trust scope one machine in a fleet holds (issue #686): it reaches only the fleet's own routes,
 /// and nothing below `read` passes any other need. `read` watches, `operate` drives colonies that
-/// exist (answer, stop, resume, prewarm), `launch` starts colonies.
+/// exist (answer, stop, resume, prewarm), `launch` starts colonies and sends work out (publish a
+/// branch or pull request, file an issue).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
@@ -446,6 +447,9 @@ pub(crate) enum Need<'a> {
     /// A map route for one repository: read scope, then the repository against the token's
     /// limits — outside them the map reads as unknown (404), like an out-of-limits colony.
     Map { owner: &'a str, name: &'a str },
+    /// A route named for one repository by the URL rather than for a colony of it — filing an
+    /// issue on it (issue #902): the scope first, then the repository against the token's limits.
+    Repo { owner: &'a str, name: &'a str, at_least: Scope },
     /// A launch route — starting a colony, or a loop mutation, each of which starts or reshapes
     /// colonies: the body (or the loop) is the handler's to check.
     Launch,
@@ -516,6 +520,13 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Operate,
         },
+        // Publishing commits, pushes and opens the pull request (issue #902): a write that
+        // leaves the machine, so the top rung, which nothing below launch reaches. It starts no
+        // colony and drives none either — a colony the token cannot see stays a 404.
+        ["api", "sessions", id, "publish"] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Launch,
+        },
         // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
         // unseen-failure flag — so watching it is enough, however it arrives.
         ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
@@ -573,6 +584,17 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
+        // Filing an issue on a repository (issue #902): the route names the repository itself, so
+        // the need is the repository's — launch, since filing is a write that leaves the machine —
+        // and then the token's org/repo limits against it. POST only and exactly this shape: the
+        // sibling `GET` on the same path (reading the repository's issues) stays the owner's, and
+        // the deeper `/api/repos/{o}/{r}/issues/{number}/intake` has its own segments and does
+        // not match here.
+        ["api", "repos", owner, name, "issues"] if post && !owner.is_empty() && !name.is_empty() => Need::Repo {
+            owner,
+            name,
+            at_least: Scope::Launch,
+        },
         // The built-in TypeScript any loop's settings, last report and trend: a watch. Changing its
         // settings or pressing a run stays the owner's (it starts colonies on the allowlist).
         ["api", "ts-any-loop"] if get => Need::Bare(Scope::Read),
@@ -619,7 +641,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
 }
 
 /// The scoped-token rule `classify` applies to a request, spelled for the route-table snapshot
-/// (server.rs's tests): `read`, `session>=operate`, `map`, `launch` or `owner`.
+/// (server.rs's tests): `read`, `session>=operate`, `map`, `repo>=launch`, `launch` or `owner`.
 #[cfg(test)]
 pub(crate) fn describe_need(method: &Method, path: &str) -> String {
     match classify(method, path) {
@@ -627,6 +649,7 @@ pub(crate) fn describe_need(method: &Method, path: &str) -> String {
         Need::Session { at_least, .. } => format!("session>={}", at_least.as_str()),
         Need::Response { at_least, .. } => format!("response>={}", at_least.as_str()),
         Need::Map { .. } => "map".to_string(),
+        Need::Repo { at_least, .. } => format!("repo>={}", at_least.as_str()),
         Need::Launch => "launch".to_string(),
         Need::Fleet => "fleet".to_string(),
         Need::Owner => "owner".to_string(),
@@ -707,6 +730,18 @@ pub(crate) async fn authorize(app: &App, token: &ScopedToken, method: &Method, p
                 Err(Deny::NoMap)
             }
         }
+        // A repository named by the URL, not by a colony id (issue #902). Unlike the session and
+        // map routes above, a token outside its repo limits is refused here with a 403, not
+        // hidden behind a 404 — and that is deliberate, do not "fix" it: the caller wrote the
+        // repository into the path itself, so there is no existence left to conceal, and telling
+        // the token holder plainly that the repository is outside its limits is the answer they
+        // can act on. The scope is checked first, for the same reason `authorize` orders every
+        // other need.
+        Need::Repo { at_least, .. } if token.scope < at_least => Err(Deny::forbidden(token, method, path)),
+        Need::Repo { owner, name, .. } if !token.covers(owner, &format!("{owner}/{name}")) => {
+            Err(Deny::forbidden(token, method, path))
+        }
+        Need::Repo { .. } => Ok(()),
         Need::Launch if token.scope >= Scope::Launch => Ok(()),
         Need::Launch => Err(Deny::forbidden(token, method, path)),
         // The fleet scope reaches only the fleet's own routes; being the lowest scope, it passes
@@ -979,6 +1014,75 @@ mod tests {
             ));
             assert!(authorize(&app, &launch, &post, path).await.is_ok(), "launch {path}");
         }
+        // Publishing a colony (issue #902) pushes a branch and opens a pull request — a write that
+        // leaves the machine, so it takes launch and not the operate that drives a colony in hand:
+        // read and operate are refused, and it holds the colony to the token's org/repo limits like
+        // every other `/api/sessions/{id}/…` route.
+        for path in ["/api/sessions/abc/publish"] {
+            assert!(
+                matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
+                "read {path}"
+            );
+            assert!(
+                matches!(authorize(&app, &operate, &post, path).await, Err(Deny::Forbidden(_))),
+                "operate {path}"
+            );
+            assert!(authorize(&app, &launch, &post, path).await.is_ok(), "launch {path}");
+            // Outside the limits the colony is unknown, not forbidden — the same as every other
+            // colony-scoped route.
+            assert!(
+                matches!(
+                    authorize(&app, &scoped(Scope::Launch, &["other"], &[]), &post, path).await,
+                    Err(Deny::NoSession)
+                ),
+                "a publish on a colony outside the org limits is unknown"
+            );
+        }
+        // Filing an issue on a repository (issue #902) is named by the URL, so the need is the
+        // repository's: launch, then the token's org/repo limits — outside them a 403 naming the
+        // limit, not a 404 (the caller named the repository itself; see `authorize`). POST only:
+        // reading the repository's issues stays the owner's.
+        let issue = "/api/repos/acme/web/issues";
+        assert!(authorize(&app, &launch, &post, issue).await.is_ok(), "launch {issue}");
+        for token in [
+            scoped(Scope::Launch, &[], &["acme/api"]),
+            scoped(Scope::Launch, &["other"], &[]),
+            scoped(Scope::Launch, &["acme"], &["acme/api"]),
+        ] {
+            assert!(
+                matches!(authorize(&app, &token, &post, issue).await, Err(Deny::Forbidden(_))),
+                "{token:?} must not file outside its repo limits"
+            );
+        }
+        for scope in [Scope::Read, Scope::Operate] {
+            assert!(
+                matches!(
+                    authorize(&app, &scoped(scope, &[], &[]), &post, issue).await,
+                    Err(Deny::Forbidden(_))
+                ),
+                "{scope:?} must not file issues"
+            );
+        }
+        assert!(
+            matches!(classify(&get, issue), Need::Owner),
+            "reading a repository's issues stays owner-only"
+        );
+        assert!(
+            matches!(authorize(&app, &launch, &get, issue).await, Err(Deny::Forbidden(_))),
+            "reading a repository's issues stays owner-only"
+        );
+        // The repository routes filing did not open: only `POST` on exactly this shape, so the
+        // deeper intake (its own segments) and the sibling writes stay the owner's.
+        for (method, path) in [
+            (&post, "/api/repos/acme/web/issues/42/intake"),
+            (&post, "/api/repos/acme/web/edits"),
+            (&post, "/api/repos/acme/web/ask"),
+        ] {
+            assert!(
+                matches!(authorize(&app, &launch, method, path).await, Err(Deny::Forbidden(_))),
+                "{method} {path} must be owner-only"
+            );
+        }
         // Loops (issue #627): listing a loop's runs is a read at every scope; every loop mutation
         // can start or reshape a colony, so it takes launch — read and operate are refused.
         for path in ["/api/loops", "/api/loops/loop_1/runs"] {
@@ -1008,7 +1112,6 @@ mod tests {
             (&post, "/api/tokens"),
             (&Method::DELETE, "/api/tokens/tok_1"),
             (&get, "/api/secrets"),
-            (&post, "/api/sessions/abc/publish"),
             (&get, "/api/sessions/abc/terminal"),
             (&post, "/api/sessions/abc/answer/extra"),
             (&get, "/api/sessions/abc/events/../terminal"),
@@ -1099,6 +1202,18 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The chat approvals decide whether a held write runs as the owner: no scoped token reaches them.
+    #[test]
+    fn chat_approvals_are_owner_only() {
+        for (method, path) in [
+            (Method::POST, "/api/chat/approvals"),
+            (Method::POST, "/api/chat/approvals/abc123"),
+            (Method::GET, "/api/chat/approvals"),
+        ] {
+            assert!(matches!(classify(&method, path), Need::Owner), "{method} {path}");
+        }
     }
 
     #[test]

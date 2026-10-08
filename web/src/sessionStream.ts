@@ -11,6 +11,9 @@ import type {
   AgentEventBody,
   BoundaryRecord,
   AgentRef,
+  EventsPage,
+  HistoryCursor,
+  HistorySummary,
   AgentState,
   Answers,
   ClientCommand,
@@ -108,6 +111,28 @@ export interface LogEntry {
 
 export type ConnectionState = "connecting" | "open" | "reconnecting" | "closed";
 
+/**
+ * How much of the colony's log this stream holds (issue #1210). A colony opens on its newest page and the
+ * older ones load on scroll-up; what the UI derives from the whole history comes from `summary`.
+ */
+export interface HistoryState {
+  /** Older events are on record behind the oldest one loaded. */
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+  /** Names the page behind the loaded ones; null until the mothership sends a `history` frame. */
+  cursor: HistoryCursor | null;
+  summary: HistorySummary | null;
+  /** How many older pages have been prepended, so the view can anchor its scroll position on each. */
+  loaded: number;
+  /** Turns that ended after the summary was taken, which it never counted. */
+  liveTurns: number;
+}
+
+export function initialHistory(): HistoryState {
+  return { hasMore: false, loading: false, error: null, cursor: null, summary: null, loaded: 0, liveTurns: 0 };
+}
+
 export interface StreamState {
   session: Session | null;
   messages: ChatMessage[];
@@ -133,6 +158,7 @@ export interface StreamState {
   switchingModel: string | null;
   /** The last switch that ended in a warning instead of a `model_changed`; cleared by the next switch or report. */
   refusedModel: string | null;
+  history: HistoryState;
 }
 
 export function initialStreamState(): StreamState {
@@ -152,6 +178,7 @@ export function initialStreamState(): StreamState {
     model: null,
     switchingModel: null,
     refusedModel: null,
+    history: initialHistory(),
   };
 }
 
@@ -249,6 +276,25 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
     }
     const entry: LogEntry = { source: "harness", level: frame.level, message: frame.message, ts: frame.ts };
     return { ...state, logs: [...state.logs, entry].slice(-MAX_LOGS) };
+  }
+  if (frame.type === "history") {
+    const baseline = usageTotals(frame.baseline_usage ?? undefined);
+    const summary = frame.summary;
+    return {
+      ...state,
+      history: {
+        ...state.history,
+        hasMore: frame.has_more,
+        cursor: { epoch: frame.epoch, seq: frame.oldest_seq, offset: frame.offset },
+        summary,
+      },
+      // The first `turn_end` on the page is diffed against the last one before it, which the page does not hold.
+      modelUsage: state.modelUsage ?? (Object.keys(baseline).length > 0 ? baseline : null),
+      // What the unsent part of the log last said; the events on the page that follow overwrite these.
+      model: state.model ?? summary?.model ?? null,
+      agentState: state.agentState ?? summary?.agent_state?.state ?? null,
+      agentDetail: state.agentDetail ?? summary?.agent_state?.detail ?? null,
+    };
   }
   if (frame.type === "memory_proposed") {
     const proposal = frame.proposal;
@@ -390,7 +436,9 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
           : m,
       );
       // A `turn_end` without `model_usage` says nothing new about usage; keep the last known baseline.
-      return { ...s, messages, turns: [...s.turns, turn], modelUsage: Object.keys(usage).length > 0 ? usage : s.modelUsage };
+      const live = s.history.summary && typeof ev.seq === "number" && ev.seq > s.history.summary.last_seq ? 1 : 0;
+      const history = live ? { ...s.history, liveTurns: s.history.liveTurns + 1 } : s.history;
+      return { ...s, messages, turns: [...s.turns, turn], history, modelUsage: Object.keys(usage).length > 0 ? usage : s.modelUsage };
     }
 
     case "log": {
@@ -423,6 +471,66 @@ export function reduceFrame(state: StreamState, frame: ServerFrame): StreamState
     default:
       return s; // unknown event types are ignored
   }
+}
+
+/** Events in the page the colony opens on, and in each older one loaded on scroll-up (issue #1210). */
+export const PAGE_SIZE = 200;
+
+/** What identifies a block among its message's others, so a message split across two pages joins without repeats. */
+function blockKey(block: Block): string {
+  return block.kind === "tool" || block.kind === "question" ? `${block.kind}:${block.id}` : `${block.kind}:${block.index}`;
+}
+
+/**
+ * Adds one older page in front of what the stream holds. The page is reduced on a fresh state — seeded
+ * with the usage baseline the mothership found before it — and its messages, turns and notices go ahead
+ * of the loaded ones; the loaded state's watermark, logs, model and agent state are the live run's and stay.
+ * A page that reaches back into an earlier run restarts its seqs, so the reducer's watermark resets there.
+ */
+export function prependPage(state: StreamState, page: EventsPage): StreamState {
+  let older: StreamState = { ...initialStreamState(), modelUsage: null };
+  const baseline = usageTotals(page.baseline_usage ?? undefined);
+  older.modelUsage = Object.keys(baseline).length > 0 ? baseline : null;
+  for (const ev of page.events) {
+    if (typeof ev.seq === "number" && ev.seq <= older.lastSeq) older = { ...older, lastSeq: 0, modelUsage: null };
+    older = reduceFrame(older, ev);
+  }
+  // A question from an earlier part of the log is not waiting on anyone, whatever the log did not record.
+  const closed = older.messages.map((m) =>
+    m.blocks.some((b) => b.kind === "question" && !b.answer)
+      ? {
+          ...m,
+          blocks: m.blocks.map((b) => (b.kind === "question" && !b.answer ? { ...b, answer: { answers: {}, response: null } } : b)),
+        }
+      : m,
+  );
+  let ahead = closed;
+  let messages = state.messages;
+  const last = ahead[ahead.length - 1];
+  const first = messages[0];
+  if (last && first && last.id === first.id && last.role === "assistant" && first.role === "assistant") {
+    // One assistant message cut by the page boundary: the older half's blocks lead.
+    const held = new Set(first.blocks.map(blockKey));
+    messages = [{ ...first, blocks: [...last.blocks.filter((b) => !held.has(blockKey(b))), ...first.blocks] }, ...messages.slice(1)];
+    ahead = ahead.slice(0, -1);
+  }
+  // A message id the loaded part already has (the `initial` brief of an earlier run, say) is not shown twice.
+  const seen = new Set(messages.map((m) => m.id));
+  return {
+    ...state,
+    messages: [...ahead.filter((m) => !seen.has(m.id)), ...messages],
+    turns: [...older.turns, ...state.turns],
+    memoryNotices: [...older.memoryNotices, ...state.memoryNotices],
+    boundaries: [...older.boundaries, ...state.boundaries],
+    history: {
+      ...state.history,
+      loading: false,
+      error: null,
+      hasMore: page.has_more,
+      cursor: { epoch: page.epoch, seq: page.oldest_seq, offset: page.offset },
+      loaded: state.history.loaded + 1,
+    },
+  };
 }
 
 export class SessionStream {
@@ -496,6 +604,33 @@ export class SessionStream {
     return true;
   }
 
+  /**
+   * Loads the page of events before the oldest one held and puts it in front (issue #1210). Resolves true when
+   * a page arrived, false when there is nothing older, a load is already running, or it failed (the state says why).
+   */
+  async loadOlder(): Promise<boolean> {
+    const { hasMore, loading, cursor } = this.state.history;
+    if (!hasMore || loading || !cursor || this.stopped) return false;
+    this.update((s) => ({ ...s, history: { ...s.history, loading: true, error: null } }));
+    try {
+      const page = await this.api.eventsPage(this.sessionId, { before: cursor.seq, epoch: cursor.epoch, offset: cursor.offset, limit: PAGE_SIZE });
+      if (this.stopped) return false;
+      this.update((s) => prependPage(s, page));
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.update((s) => ({ ...s, history: { ...s.history, loading: false, error: message } }));
+      return false;
+    }
+  }
+
+  /** Loads every older page, for "Jump to start"; stops at `maxPages` or the first failure. */
+  async loadAllOlder(maxPages = 100): Promise<void> {
+    for (let i = 0; i < maxPages && this.state.history.hasMore; i++) {
+      if (!(await this.loadOlder())) return;
+    }
+  }
+
   private update(fn: (s: StreamState) => StreamState): void {
     const next = fn(this.state);
     if (next === this.state) return;
@@ -529,7 +664,7 @@ export class SessionStream {
 
   private connect(): void {
     this.update((s) => ({ ...s, connection: this.retries > 0 ? "reconnecting" : "connecting" }));
-    const ws = this.api.openEvents(this.sessionId, this.state.lastSeq, this.runEpoch ?? 0);
+    const ws = this.api.openEvents(this.sessionId, this.state.lastSeq, this.runEpoch ?? 0, PAGE_SIZE);
     this.ws = ws;
     this.holding = true;
     this.holdSince = Date.now();
@@ -730,6 +865,8 @@ export interface ThreadView {
    */
   renderOf: Record<string, string>;
   hasOpenQuestion: boolean;
+  /** The numbered settler name of every subagent the colony has had, keyed by agent id. */
+  settlerNames: Record<string, string>;
 }
 
 // `seen` holds the tool-call ids already emitted in this thread. A tool-call id must be unique across
@@ -812,6 +949,11 @@ export function buildThread(state: StreamState): ThreadView {
     }
     return name;
   };
+  // The settlers of the part of the log this stream never loaded still count in the numbering, so the second
+  // Scout is "Scout Settler 2" however much of the history is on screen (issue #1210).
+  for (const settler of state.history.summary?.settlers ?? []) {
+    nameOf({ id: settler.id, name: settler.name, description: settler.description ?? undefined });
+  }
   type Group = { id: string; blocks: Block[]; ts: string | null; agent?: AgentRef };
   // The orchestrator's open bubble.
   let group: Group | null = null;
@@ -858,7 +1000,23 @@ export function buildThread(state: StreamState): ThreadView {
     crew = [];
   };
 
-  for (const message of state.messages) {
+  // The brief opens the thread even while the messages after it are still unloaded.
+  const brief = state.history.hasMore ? state.history.summary?.brief : null;
+  const loaded =
+    brief && !state.messages.some((m) => m.id === brief.id)
+      ? [
+          {
+            id: brief.id,
+            role: "user" as const,
+            origin: brief.origin,
+            blocks: [{ kind: "text" as const, index: 0, text: brief.text, streaming: false }],
+            ts: brief.ts ?? null,
+            pending: false,
+          },
+          ...state.messages,
+        ]
+      : state.messages;
+  for (const message of loaded) {
     if (message.role === "user") {
       flush();
       groupOf.set(message.id, message.id);
@@ -935,5 +1093,48 @@ export function buildThread(state: StreamState): ThreadView {
     i = Math.max(end, i + 1);
   }
 
-  return { messages, subagents, origins, turns, notices, boundaries, renderOf: Object.fromEntries(groupOf), hasOpenQuestion };
+  return { messages, subagents, origins, turns, notices, boundaries, renderOf: Object.fromEntries(groupOf), hasOpenQuestion, settlerNames: Object.fromEntries(names) };
+}
+
+/**
+ * Every settler the colony has had, oldest first: the cards on the loaded part of the thread, and — while older
+ * events are still unloaded — the settlers the mothership's summary names that the loaded part never mentions.
+ * Those older ones carry their step and error counts and are finished (a settler's card is only live at the end).
+ */
+export function settlersOf(state: StreamState): SubagentView[] {
+  const thread = buildThread(state);
+  const cards = Object.values(thread.subagents);
+  const summary = state.history.summary;
+  if (!state.history.hasMore || !summary) return cards;
+  const loaded = new Set(cards.map((view) => view.agent.id));
+  const earlier = summary.settlers
+    .filter((settler) => !loaded.has(settler.id))
+    .map((settler): SubagentView => {
+      const agent: AgentRef = { id: settler.id, name: settler.name, description: settler.description };
+      const type = agent.name === agent.description ? null : agent.name;
+      return {
+        agent,
+        name: thread.settlerNames[settler.id] ?? settlerName(type),
+        role: settlerRole(type),
+        state: "done",
+        current: null,
+        last: settler.last_tool ? { name: settler.last_tool, input: {} } : null,
+        steps: settler.steps,
+        tools: [],
+        errors: settler.errors,
+        report: "",
+        crew: null,
+      };
+    });
+  return [...earlier, ...cards];
+}
+
+/** How many turns came before the loaded part of the thread, and the colony's cost so far, from the summary. */
+export function earlierTotals(state: StreamState): { turns: number; costUsd: number | null } {
+  const summary = state.history.summary;
+  if (!summary) return { turns: 0, costUsd: null };
+  const latest = state.turns[state.turns.length - 1]?.costUsd ?? null;
+  // Turns that ended after the summary was taken are live ones it never counted.
+  const counted = state.turns.length - state.history.liveTurns;
+  return { turns: Math.max(0, summary.turns - counted), costUsd: latest ?? summary.cost_usd };
 }

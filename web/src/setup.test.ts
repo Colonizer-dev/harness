@@ -648,10 +648,69 @@ describe("stackPresetOf", () => {
 });
 
 describe("setupTone", () => {
-  it("is red while the checklist can auto-open, green at five of five, amber in between", () => {
-    expect(setupTone({ autoOpen: true, progress: { done: 2, total: 5, label: "2 of 5 done" } })).toBe("err");
-    expect(setupTone({ autoOpen: false, progress: { done: 5, total: 5, label: "5 of 5 done" } })).toBe("ok");
-    expect(setupTone({ autoOpen: false, progress: { done: 4, total: 5, label: "4 of 5 done" } })).toBe("warn");
+  it("is red while the checklist can auto-open, amber while a required row is unmet, green otherwise", () => {
+    expect(setupTone({ autoOpen: true, attention: true })).toBe("err");
+    expect(setupTone({ autoOpen: false, attention: false })).toBe("ok");
+    expect(setupTone({ autoOpen: false, attention: true })).toBe("warn");
+  });
+});
+
+describe("issue #1200 — the Stack row after a restart", () => {
+  it("is done after a simulated restart with a cached image and a saved preset", () => {
+    // The mothership re-checks its image cache at startup, so the status a fresh process reports is `cached`.
+    const restarted = input({ stackPreset: "auto", pull: pull("cached") });
+    expect(row(restarted, "stack").state).toBe("done");
+    expect(setupView(restarted).firstActionable?.id).toBe("launch");
+  });
+
+  it("is working, not todo, while the pull state is unknown", () => {
+    const unknown = row(input({ pull: null }), "stack");
+    expect(unknown.state).toBe("working");
+    expect(unknown.detail).toContain("Checking");
+    expect(setupView(input({ pull: null })).firstActionable?.id).toBe("launch");
+  });
+
+  it("stays todo only when the cache was checked and the image is absent", () => {
+    expect(row(input({ pull: pull("idle") }), "stack").state).toBe("todo");
+  });
+});
+
+describe("issue #1200 — advisory rows and the Settings dot", () => {
+  const healthy = (over: Partial<SetupInput>) => setupView(input(over));
+
+  it("keeps the dot green with every advisory row open and the required rows done", () => {
+    const view = healthy({ pull: pull("idle"), telemetry: telemetry(null), sessionCount: 0 });
+    expect(row(input({ pull: pull("idle"), telemetry: telemetry(null) }), "stack").state).toBe("todo");
+    expect(row(input({ telemetry: telemetry(null) }), "map").state).toBe("todo");
+    expect(row(input(), "launch").state).toBe("todo");
+    expect(view.attention).toBe(false);
+    expect(setupTone(view)).toBe("ok");
+  });
+
+  it("also stays green while the pull state is still unknown or the pull failed", () => {
+    expect(setupTone(healthy({ pull: null }))).toBe("ok");
+    expect(setupTone(healthy({ pull: pull("failed", "boom") }))).toBe("ok");
+  });
+
+  it("goes amber or red when a required row is unmet", () => {
+    const noClaude = healthy({ status: status({ claude: { configured: false, source: null, kind: null } as unknown as HarnessStatus["claude"] }) });
+    expect(noClaude.attention).toBe(true);
+    expect(["warn", "err"]).toContain(setupTone(noClaude));
+    const noGithub = healthy({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }) });
+    expect(setupTone(noGithub)).toBe("err");
+  });
+
+  it("reads a dismissed advisory row as done and counts it", () => {
+    const dismissed = input({ pull: pull("idle"), telemetry: telemetry(null), dismissed: ["stack", "map"] });
+    expect(row(dismissed, "stack").state).toBe("done");
+    expect(row(dismissed, "map").state).toBe("done");
+    expect(setupProgress(setupRows(dismissed)).done).toBe(4);
+  });
+
+  it("never lets a required or unknown id be dismissed away", () => {
+    const sneaky = input({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }), dismissed: ["github", "machine", "claude"] });
+    expect(row(sneaky, "github").state).toBe("blocked");
+    expect(launchEnabled(setupRows(sneaky))).toBe(false);
   });
 });
 

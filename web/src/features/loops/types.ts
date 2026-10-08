@@ -7,7 +7,7 @@
  * the run is live but not raiding until the nest empties — `running`/`draining` are
  * raiding, and `done`/`stopped` are terminal.
  */
-export type RedTeamState = "armed" | "waiting" | "running" | "draining" | "done" | "stopped";
+export type RedTeamState = "armed" | "waiting" | "running" | "draining" | "done" | "stopped" | "cancelled";
 
 export interface RedTeamHunter {
   session_id: string;
@@ -104,6 +104,9 @@ export interface RedTeamRun {
   preset?: RedTeamPreset;
   /** A security run's pre-scan; null for general runs and until a security run launches. */
   prescan?: PreScan | null;
+  /** Who cancelled the run and when (#1145); null unless it was cancelled. */
+  cancelled_by?: string | null;
+  cancelled_at?: string | null;
 }
 
 /** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */
@@ -613,4 +616,49 @@ export interface MergeLoopView {
   last_report: MergeLoopReport | null;
   /** Newest first. */
   history: MergeLoopReport[];
+}
+
+/** How a loop's run went (issue #1199). `running` is a colony loop's run whose colony is still at work;
+ * `skipped` is a run that found nothing to do. */
+export type LoopOutcome = "ok" | "partial" | "failed" | "skipped" | "running";
+
+/** One run in GET /api/loops/{id}/history. `cost_usd` is the model spend of the colonies it dispatched. */
+export interface LoopHistoryRun {
+  at: string;
+  finished_at?: string;
+  trigger: string;
+  outcome: LoopOutcome;
+  summary: string;
+  /** What the run did, by kind: merged, red, dispatched, critical, bytes… */
+  counts: Record<string, number>;
+  /** The colonies the run dispatched or resumed. */
+  colonies: string[];
+  cost_usd: number;
+}
+
+/** One day of a loop's history, in the caller's own midnight-to-midnight. */
+export interface LoopHistoryBucket {
+  /** `YYYY-MM-DD`. */
+  day: string;
+  runs: number;
+  ok: number;
+  partial: number;
+  failed: number;
+  skipped: number;
+  running: number;
+  colonies: number;
+  cost_usd: number;
+}
+
+/** GET /api/loops/{id}/history?days=: a zero-filled bucket per day, the runs newest first (at most 200), and the latest run whatever the range. */
+export interface LoopHistory {
+  id: string;
+  days: number;
+  from: string;
+  to: string;
+  retention_days: number;
+  totals: Omit<LoopHistoryBucket, "day">;
+  buckets: LoopHistoryBucket[];
+  last: LoopHistoryRun | null;
+  runs: LoopHistoryRun[];
 }

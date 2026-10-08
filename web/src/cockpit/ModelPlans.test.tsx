@@ -2,11 +2,10 @@
 // knows — an exhausted plan reads red with its countdown, a probed balance with a limit draws used
 // against limit, a balance alone says the total isn't reported, and a plan reporting nothing says
 // so and shows its request count instead. Rendered to static markup: no DOM.
-import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { PlanUsage } from "../types";
-import { PlanList, agoWords, planView, sortPlans } from "./ModelPlans";
+import { agoWords, planView, sortPlans } from "./ModelPlans";
 
 const RESET = Date.UTC(2026, 9, 5, 19, 51, 58) / 1000;
 const NOW = (RESET - (2 * 3600 + 10 * 60)) * 1000;
@@ -89,29 +88,21 @@ describe("planView", () => {
   });
 });
 
-describe("PlanList", () => {
-  it("renders a meter per plan, red for the exhausted one, and a count of plans out", () => {
-    const html = renderToStaticMarkup(
-      <PlanList
-        nowMs={NOW}
-        plans={[
-          plan({ id: "anthropic", name: "Claude", kind: "claude", used_by: ["orchestrator"] }),
-          plan({ exhausted: true, reset_unix: RESET }),
-        ]}
-      />,
+describe("the account fallback on the Claude plan row (issue #1130)", () => {
+  it("says where Claude's roles run while the plan is out", () => {
+    const out = planView(
+      plan({
+        id: "anthropic",
+        name: "Claude",
+        kind: "claude",
+        exhausted: true,
+        reset_unix: NOW / 1000 + 3600,
+        fallback: { model: "minimax/MiniMax-M3.1", provider_name: "MiniMax" },
+      }),
+      NOW,
     );
-    expect(html).toContain('aria-label="plan usage"');
-    expect(html).toContain("1 out");
-    expect(html.match(/role="meter"/g)?.length).toBe(2);
-    expect(html).toContain('data-plan="byteplus" data-tone="err"');
-    expect(html).toContain('aria-valuenow="100"');
-    expect(html).toContain('aria-valuetext="limit not reported"');
-    expect(html.indexOf("byteplus")).toBeLessThan(html.indexOf("anthropic"));
-  });
-
-  it("says when it is loading, failed or empty", () => {
-    expect(renderToStaticMarkup(<PlanList plans={null} />)).toContain("Reading plan usage…");
-    expect(renderToStaticMarkup(<PlanList plans={[]} />)).toContain("No plan in use reports anything yet.");
-    expect(renderToStaticMarkup(<PlanList plans={null} error="403" />)).toContain("Plan usage unavailable: 403");
+    expect(out.details).toContain("Claude out, running on MiniMax (minimax/MiniMax-M3.1) until the reset");
+    const none = planView(plan({ id: "anthropic", name: "Claude", kind: "claude", exhausted: true, reset_unix: NOW / 1000 + 3600 }), NOW);
+    expect(none.details.join(" ")).not.toContain("running on");
   });
 });

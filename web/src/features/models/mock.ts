@@ -36,6 +36,7 @@ export const MOCK_AGENT_MODULES: AgentModuleRoles[] = [
       role("summary_model", "Summary model"),
       role("model_low", "Model for small tasks"),
       role("model_high", "Model for large tasks"),
+      role("account_fallback_model", "If Claude runs out, use"),
     ],
     blocked: null,
   },
@@ -173,7 +174,7 @@ function switchModels(ms: MockState, req: ModelSwitchRequest): ModelSwitchReply 
       if (option.out_of_quota) throw new ApiError(`${r}: ${value} is out of quota; pick a model on another provider`, 400);
     }
   }
-  if (roles.length === 0 && req.module === undefined) throw new ApiError("nothing to switch: name a module or at least one role", 400);
+  if (roles.length === 0 && req.module === undefined && !req.clear_leftovers) throw new ApiError("nothing to switch: name a module or at least one role", 400);
 
   const changes: ModelSwitchReply["changes"] = [];
   const before = new Map(roles.map(([r]) => [r, resolve(ms, orgSettings, current, r)[0]]));
@@ -186,7 +187,23 @@ function switchModels(ms: MockState, req: ModelSwitchRequest): ModelSwitchReply 
           .filter((s) => !org || (s.session.org || s.session.repo.split("/")[0]) === org)
           .map((s) => s.session.id)
       : [];
-  if (req.dry_run) return { dry_run: true, scope: req.scope, org, module, changes, affected, colonies: [], failed: [] };
+  // The Claude names an org override still holds after a switch onto another provider (issue #1130).
+  const movesOffClaude = roles.some(([r, v]) => r !== "account_fallback_model" && (v ?? "").includes("/"));
+  const leftover_claude = {
+    colonies: [],
+    orgs: movesOffClaude || req.clear_leftovers
+      ? Object.entries(ms.orgSettings)
+          .filter(([name]) => !org || name === org)
+          .flatMap(([name, settings]) =>
+            ORG_ROLES.flatMap((r) => {
+              const model = orgOverride(settings, r);
+              return model && !model.includes("/") ? [{ org: name, role: r, model }] : [];
+            }),
+          )
+      : [],
+    cleared: false,
+  };
+  if (req.dry_run) return { dry_run: true, scope: req.scope, org, module, changes, affected, colonies: [], failed: [], leftover_claude };
 
   if (org) {
     const next: OrgSettings = clone(orgSettings ?? {});
@@ -210,7 +227,18 @@ function switchModels(ms: MockState, req: ModelSwitchRequest): ModelSwitchReply 
     changes.push({ scope: org ? "org" : "install", target: org ?? module, key: r, was: before.get(r) ?? null, now });
   }
   ms.logActivity({ kind: "settings.save", actor: "you", via: "cockpit", org, target: "models", section: "module:agent" });
-  return { dry_run: false, scope: req.scope, org, module, changes, affected, colonies: affected, failed: [] };
+  let cleared = false;
+  if (req.clear_leftovers) {
+    for (const left of leftover_claude.orgs) {
+      const a = ms.orgSettings[left.org]?.agent;
+      if (!a) continue;
+      if (left.role === "model") a.model = null;
+      if (left.role === "subagent_model") a.subagent_model = null;
+      if (left.role === "background_model") a.background_model = null;
+      cleared = true;
+    }
+  }
+  return { dry_run: false, scope: req.scope, org, module, changes, affected, colonies: affected, failed: [], leftover_claude: { ...leftover_claude, cleared } };
 }
 
 /** The plain words for a role, as the mothership's plan rows list them. */

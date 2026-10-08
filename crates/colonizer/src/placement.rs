@@ -1,5 +1,5 @@
 //! Where a colony would run (issue #688): a pure policy over this member and the fleet's last-known
-//! peers. Cross-member execution does not exist yet (issue #298), so nothing here runs a colony
+//! peers. Cross-member execution does not exist yet (issue #1252), so nothing here runs a colony
 //! anywhere but locally: it decides and says why, and `sessions::launch` records that reason on the
 //! colony it starts. No state, no I/O — the caller builds the candidates.
 
@@ -39,7 +39,7 @@ impl Candidate {
 }
 
 /// Where a colony would go: the member [`place`] chose, and the sentence that says why. `local` is
-/// always true today, since cross-member launches are not built (issue #298).
+/// always true today, since cross-member launches are not built (issue #1252).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placement {
     pub host_name: String,

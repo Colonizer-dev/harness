@@ -6,6 +6,7 @@ import type { ModelProvider, ProviderAuth, ProviderPricing, ProviderPreset } fro
 import { useModels } from "../../useModels";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass } from "../ui";
 import { IconCheck, IconChevron, IconX } from "../icons";
+import { ProviderMark } from "../providerMark";
 import { Row, Code } from "./ui";
 import {
   AUTH_LABEL,
@@ -29,6 +30,7 @@ import {
   type LimitKey,
   type ModelMapRow,
   type PricingDraft,
+  providerNeedsKey,
 } from "./providerCatalog";
 
 // ---------------------------------------------------------------------------
@@ -39,7 +41,7 @@ const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /** The saved-key state badge, shown on a provider row and on the form header. */
 export function KeyBadge({ provider }: { provider: ModelProvider }) {
-  if (provider.auth === "none") return <Badge>No key needed</Badge>;
+  if (!providerNeedsKey(provider)) return <Badge>No key needed</Badge>;
   return provider.has_key ? <Badge tone="ok">Key saved</Badge> : <Badge tone="warn">No key</Badge>;
 }
 
@@ -129,6 +131,7 @@ export function ProviderForm({
   // key string removes the key, so no keep/clear dance is needed for two plain text fields.
   const [quotaUrl, setQuotaUrl] = useState(initial?.quota?.url ?? "");
   const [quotaPointer, setQuotaPointer] = useState(initial?.quota?.pointer ?? "");
+  const [quotaReset, setQuotaReset] = useState(initial?.quota?.reset_pointer ?? "");
   // The connection policy (#295, #472): all three prefill from GET /api/providers and go on the save
   // as given; the model map's blank rows are dropped by `providerSaveBody`.
   const [trusted, setTrusted] = useState(initial?.trusted ?? false);
@@ -143,6 +146,11 @@ export function ProviderForm({
   );
   // A new Local provider opens Advanced so the prefilled limits are visible.
   const [advancedOpen, setAdvancedOpen] = useState(!initial && preset === "local");
+  // A new provider whose address the catalogue knows asks only for the key (the models are prefilled);
+  // the rest waits behind "Connection details". A bare Custom or Local server, or an address with holes
+  // to fill, needs the whole form up front.
+  const short: boolean = !initial && preset !== "custom" && preset !== "local" && template.length === 0 && Boolean(start.base_url);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const anthropicModels = useModels().filter((m) => m.provider === "anthropic");
   const sameWire = sameWireFallbacks(initial?.id ?? "", wire, peers);
   const ids = {
@@ -155,6 +163,7 @@ export function ProviderForm({
     fallback: useId(),
     quotaUrl: useId(),
     quotaPointer: useId(),
+    quotaReset: useId(),
     trusted: useId(),
     modelMap: useId(),
     disabledTools: useId(),
@@ -267,7 +276,7 @@ export function ProviderForm({
                 cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
               }
             : undefined,
-          quota: { url: quotaUrl, pointer: quotaPointer },
+          quota: { url: quotaUrl, pointer: quotaPointer, reset_pointer: quotaReset },
           timeout_secs: limits.timeout_secs.value,
           max_concurrent: limits.max_concurrent.value,
           queue_timeout_secs: limits.queue_timeout_secs.value,
@@ -311,7 +320,8 @@ export function ProviderForm({
   return (
     <form onSubmit={save} className="space-y-3 rounded-xl border border-accent/40 bg-panel p-3.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-body font-semibold">{isNew ? `New ${presetLabel(preset)} provider` : `Edit ${initial.name}`}</span>
+        {isNew && <ProviderMark preset={preset} name={presetLabel(preset)} baseUrl={start.base_url} />}
+        <span className="text-body font-semibold">{isNew ? `Add ${presetLabel(preset)}` : `Edit ${initial.name}`}</span>
         {!isNew && <KeyBadge provider={initial} />}
         {wire === "openai" && (
           <Badge tone="info" title="Speaks the OpenAI protocol; the Mothership gateway translates">
@@ -321,6 +331,410 @@ export function ProviderForm({
       </div>
       {isNew && PRESET_HINT[preset] && <p className="text-small-lg text-muted">{PRESET_HINT[preset]}</p>}
       <div className="grid gap-3 sm:grid-cols-2">
+        {short ? (
+          <>
+        <FormField id={ids.key} label={auth === "bearer" ? "Token" : "API key"} error={keyError}>
+          {auth === "none" ? (
+            <p id={ids.key} className="flex h-9 items-center text-body-sm text-faint">
+              Not needed
+            </p>
+          ) : keyMode === "keep" ? (
+            <div id={ids.key} className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex h-9 items-center gap-1.5 text-body-sm text-ok">
+                <IconCheck size={14} /> Saved
+              </span>
+              <Button size="sm" onClick={() => setKeyMode("replace")}>
+                Replace
+              </Button>
+              <Button size="sm" variant="danger" onClick={() => setKeyMode("remove")}>
+                Remove
+              </Button>
+            </div>
+          ) : keyMode === "remove" ? (
+            <div id={ids.key} className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex h-9 items-center text-body-sm text-warn">Removed on save</span>
+              <Button size="sm" variant="ghost" onClick={() => setKeyMode("keep")}>
+                Undo
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <input
+                id={ids.key}
+                type="password"
+                autoComplete="off"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                placeholder={initial?.has_key ? "New key" : "sk-…"}
+                aria-invalid={Boolean(keyError)}
+                className={cx(inputClass, "font-mono text-body-sm")}
+              />
+              {initial?.has_key && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setKey("");
+                    setKeyMode("keep");
+                  }}
+                >
+                  Keep saved
+                </Button>
+              )}
+            </div>
+          )}
+        </FormField>
+        <FormField
+          id={ids.models}
+          label="Models"
+          className="sm:col-span-2"
+          info={<p>Model IDs as the endpoint expects them. Enter or a comma adds one; leave empty to type IDs where you pick a model.</p>}
+        >
+          <ChipsInput id={ids.models} values={models} onChange={setModels} placeholder={models.length ? "Add another" : "deepseek-flash, qwen3-coder, …"} />
+        </FormField>
+            <details open={detailsOpen} onToggle={(e) => setDetailsOpen(e.currentTarget.open)} className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+              <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+                <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+                <span className="font-medium">Connection details</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-small text-faint">{url || "address, limits, pricing"}</span>
+              </summary>
+              <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+        <FormField
+          id={ids.id}
+          label="ID"
+          error={idError && id ? idError : null}
+          hint={isNew ? `Models are picked as ${id || "id"}/model` : "Can't be changed"}
+          info={isNew ? <p>Lowercase letters, digits and dashes. Fixed once saved.</p> : undefined}
+        >
+          <input
+            id={ids.id}
+            value={id}
+            onChange={(e) => setId(e.target.value.toLowerCase())}
+            disabled={!isNew}
+            placeholder="my-provider"
+            spellCheck={false}
+            aria-invalid={Boolean(idError && id)}
+            className={cx(inputClass, "font-mono text-body-sm disabled:opacity-60")}
+          />
+        </FormField>
+        <FormField id={ids.name} label="Name">
+          <input id={ids.name} value={name} onChange={(e) => setName(e.target.value)} placeholder="My provider" className={inputClass} />
+        </FormField>
+        {template.map((variable) => (
+          <FormField
+            key={variable.name}
+            id={`${ids.url}-${variable.name}`}
+            label={variable.label}
+            info={<p>Part of this provider's address, so the URL below is only complete once it is filled in.</p>}
+          >
+            <input
+              id={`${ids.url}-${variable.name}`}
+              value={vars[variable.name] ?? ""}
+              onChange={(e) => setVars((v) => ({ ...v, [variable.name]: e.target.value }))}
+              placeholder={variable.placeholder}
+              spellCheck={false}
+              className={cx(inputClass, "font-mono text-body-sm")}
+            />
+          </FormField>
+        ))}
+        <FormField
+          id={ids.url}
+          label="Base URL"
+          className="sm:col-span-2"
+          error={originKeyError ?? (urlError && baseUrl && !unfilled.length ? urlError : null)}
+          hint={
+            unfilled.length
+              ? urlError ?? undefined
+              : loopback
+                ? "The Mothership connects to this address, so localhost is the Mothership itself."
+                : undefined
+          }
+        >
+          <input
+            id={ids.url}
+            value={template.length ? url : baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            readOnly={template.length > 0}
+            placeholder={wire === "openai" ? "https://api.openai.com" : "https://api.example.com/anthropic"}
+            spellCheck={false}
+            aria-invalid={Boolean(originKeyError || (urlError && baseUrl && !unfilled.length))}
+            className={cx(inputClass, "font-mono text-body-sm", template.length > 0 && "text-muted")}
+          />
+        </FormField>
+        <FormField id={ids.auth} label="Authentication">
+          <select id={ids.auth} value={auth} onChange={(e) => setAuth(e.target.value as ProviderAuth)} className={inputClass}>
+            {(Object.keys(AUTH_LABEL) as ProviderAuth[]).map((mode) => (
+              <option key={mode} value={mode}>
+                {AUTH_LABEL[mode]}
+              </option>
+            ))}
+          </select>
+        </FormField>
+        <details
+          open={advancedOpen}
+          onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
+          className="group min-w-0 rounded-lg border border-border sm:col-span-2"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Advanced</span>
+            <span className={cx("min-w-0 flex-1 truncate text-small", limitsInvalid ? "text-err" : "text-faint")}>
+              {limitsInvalid
+                ? "Some values are out of range"
+                : advancedSummary.length
+                  ? advancedSummary.join(" · ")
+                  : "Timeouts, concurrency, context window, fallback"}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+            <LimitField
+              label="Request timeout (s)"
+              value={limitDraft.timeout_secs}
+              onChange={(v) => setLimit("timeout_secs", v)}
+              placeholder={String(DEFAULT_TIMEOUT)}
+              error={limits.timeout_secs.error}
+              help={`How long the Mothership waits for a response. Blank uses ${DEFAULT_TIMEOUT}.`}
+            />
+            <LimitField
+              label="Queue timeout (s)"
+              value={limitDraft.queue_timeout_secs}
+              onChange={(v) => setLimit("queue_timeout_secs", v)}
+              placeholder="Same as request timeout"
+              error={limits.queue_timeout_secs.error}
+              help="How long a request may wait for a free slot."
+            />
+            <LimitField
+              label="Max concurrent requests"
+              value={limitDraft.max_concurrent}
+              onChange={(v) => setLimit("max_concurrent", v)}
+              placeholder="Unlimited"
+              error={limits.max_concurrent.error}
+              help="Requests beyond this wait in a queue on the Mothership; a local server usually handles 1-2. Left empty it is unlimited: the request rate is every running colony times its subagents."
+            />
+            <LimitField
+              label="Context window (tokens)"
+              value={limitDraft.context_tokens}
+              onChange={(v) => setLimit("context_tokens", v)}
+              placeholder="Claude default"
+              error={limits.context_tokens.error}
+              help="The model's context size, so agents compact before they hit it."
+            />
+            <FormField
+              id={ids.fallback}
+              label="Fallback model"
+              info={
+                <p>
+                  A Claude model is used when the provider is unreachable, times out, the queue is full or its plan runs out. A
+                  model on another provider of the same wire is used when its plan runs out: the Mothership retries there.
+                </p>
+              }
+            >
+              <select id={ids.fallback} value={fallback} onChange={(e) => setFallback(e.target.value)} className={inputClass}>
+                <option value="">None</option>
+                {fallback && !anthropicModels.some((m) => m.id === fallback) && !sameWire.includes(fallback) && (
+                  <option value={fallback}>{fallback}</option>
+                )}
+                {anthropicModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label === model.id ? model.id : `${model.id} · ${model.label}`}
+                  </option>
+                ))}
+                {sameWire.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </FormField>
+          </div>
+        </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Connection policy</span>
+            <span className="min-w-0 flex-1 truncate text-small text-faint">{policySummary}</span>
+          </summary>
+          <div className="space-y-3 border-t border-border px-3 pb-3 pt-3">
+            <Row
+              id={ids.trusted}
+              label="Trusted"
+              inline
+              info={
+                <p>
+                  Marks the connection as vetted to carry restricted-sensitivity work — secrets, .env files, infra config.
+                  Left off, the security-aware routing gate keeps those paths away from this provider.
+                </p>
+              }
+            >
+              <Switch id={ids.trusted} labelledBy={`${ids.trusted}-label`} label="Trusted" checked={trusted} onChange={setTrusted} />
+            </Row>
+            <div className="min-w-0 space-y-1.5">
+              <div className="flex items-center gap-1">
+                <span className="text-small-lg font-medium text-muted">Model map</span>
+                <InfoButton label="Model map">
+                  <p>
+                    Canonical model name → the name sent on the wire. A <Code>provider/model</Code> picked anywhere goes
+                    out as the wire name on the right; a canonical with no row is sent as it is. A blank wire name sends
+                    the canonical name.
+                  </p>
+                </InfoButton>
+              </div>
+              {modelMapRows.length === 0 && <p className="text-small text-faint">No mappings — every model name goes out as it is.</p>}
+              {modelMapRows.map((row, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <input
+                    value={row.canonical}
+                    onChange={(e) => setModelMapRow(index, { canonical: e.target.value })}
+                    placeholder="canonical name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label={`Canonical model name, row ${index + 1}`}
+                    className={cx(inputClass, "font-mono text-body-sm")}
+                  />
+                  <span aria-hidden="true" className="shrink-0 text-faint">
+                    →
+                  </span>
+                  <input
+                    value={row.wire}
+                    onChange={(e) => setModelMapRow(index, { wire: e.target.value })}
+                    placeholder="wire name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label={`Wire model name, row ${index + 1}`}
+                    className={cx(inputClass, "font-mono text-body-sm")}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeModelMapRow(index)}
+                    aria-label={`Remove model mapping ${index + 1}`}
+                    className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-faint hover:bg-panel-2 hover:text-text"
+                  >
+                    <IconX size={13} />
+                  </button>
+                </div>
+              ))}
+              <Button size="sm" variant="ghost" onClick={addModelMapRow}>
+                Add mapping
+              </Button>
+              {mapError && <span className="block text-small text-err">{mapError}</span>}
+            </div>
+            <FormField
+              id={ids.disabledTools}
+              label="Disabled tools"
+              info={<p>Claude Code tool names stripped from every request through this connection, so an agent cannot call them here.</p>}
+              hint="Enter or a comma adds one."
+            >
+              <ChipsInput
+                id={ids.disabledTools}
+                values={disabledTools}
+                onChange={setDisabledTools}
+                placeholder={disabledTools.length ? "Add another" : "WebSearch, Bash, …"}
+              />
+            </FormField>
+          </div>
+        </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Pricing</span>
+            <span className={cx("min-w-0 flex-1 truncate text-small", pricingInvalid ? "text-err" : "text-faint")}>
+              {pricingInvalid
+                ? "Some values are out of range"
+                : pricingSummary.length
+                  ? `${pricingSummary.join(" · ")} per million tokens`
+                  : "Optional — unset counts as $0 spent"}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+            <PriceField
+              label="Input ($ per million tokens)"
+              value={pricingDraft.input_per_mtok}
+              onChange={(v) => setPricing("input_per_mtok", v)}
+              error={pricing.input_per_mtok.error}
+              help="What a million fresh input tokens cost."
+            />
+            <PriceField
+              label="Output ($ per million tokens)"
+              value={pricingDraft.output_per_mtok}
+              onChange={(v) => setPricing("output_per_mtok", v)}
+              error={pricing.output_per_mtok.error}
+              help="What a million output tokens cost."
+            />
+            <PriceField
+              label="Cache read ($ per million tokens)"
+              value={pricingDraft.cache_read_per_mtok}
+              onChange={(v) => setPricing("cache_read_per_mtok", v)}
+              error={pricing.cache_read_per_mtok.error}
+              help="What a million tokens read back from the provider's prompt cache cost."
+            />
+            <PriceField
+              label="Cache write ($ per million tokens)"
+              value={pricingDraft.cache_write_per_mtok}
+              onChange={(v) => setPricing("cache_write_per_mtok", v)}
+              error={pricing.cache_write_per_mtok.error}
+              help="What a million tokens written to the provider's prompt cache cost."
+            />
+            <p className="text-small leading-snug text-faint sm:col-span-2">
+              Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
+              provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
+              spend — the budget then only sees Claude's cost.
+            </p>
+          </div>
+        </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Plan balance</span>
+            <span className="min-w-0 flex-1 truncate text-small text-faint">
+              {quotaUrl.trim() ? `Probe ${quotaUrl.trim()}` : "Optional — read what is left in a prepaid plan"}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+            <FormField id={ids.quotaUrl} label="Quota URL" hint="Same host as the base URL">
+              <input
+                id={ids.quotaUrl}
+                value={quotaUrl}
+                onChange={(e) => setQuotaUrl(e.target.value)}
+                placeholder="https://api.example.com/plan"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-body-sm")}
+              />
+            </FormField>
+            <FormField id={ids.quotaPointer} label="Quota JSON pointer" hint="RFC 6901, like /data/remaining_tokens">
+              <input
+                id={ids.quotaPointer}
+                value={quotaPointer}
+                onChange={(e) => setQuotaPointer(e.target.value)}
+                placeholder="/data/remaining_tokens"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-body-sm")}
+              />
+            </FormField>
+            <FormField id={ids.quotaReset} label="Reset JSON pointer" hint="Optional: when the plan refills">
+              <input
+                id={ids.quotaReset}
+                value={quotaReset}
+                onChange={(e) => setQuotaReset(e.target.value)}
+                placeholder="/data/reset_at"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-body-sm")}
+              />
+            </FormField>
+            <p className="text-small leading-snug text-faint sm:col-span-2">
+              The provider's own credential is sent to that URL, so it must be on the same origin as the base URL —
+              scheme, host and port; the Mothership refuses anything else. The pointer picks the remaining-token number
+              out of the answer, shown on the health line, and must start with /. The reset pointer names a time, as unix seconds or an RFC 3339 string, and puts "resets in …" on the provider's row.
+            </p>
+          </div>
+        </details>
+              </div>
+            </details>
+          </>
+        ) : (
+          <>
         <FormField
           id={ids.id}
           label="ID"
@@ -700,6 +1114,8 @@ export function ProviderForm({
             </p>
           </div>
         </details>
+          </>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
         {!isNew && (

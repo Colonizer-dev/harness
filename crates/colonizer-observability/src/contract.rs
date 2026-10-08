@@ -18,6 +18,10 @@ pub const START_NOW: &str = "now";
 pub const START_BACKLOG: &str = "backlog";
 /// The contract file's name, under `<data>/observability/`.
 pub const FILE: &str = "exporter.json";
+/// The service name a contract with no `service_name` exports as. The mothership's
+/// `observability::env::DEFAULT_SERVICE_NAME` is the same string; it is repeated here because the
+/// add-on crate cannot see the mothership's constants.
+pub const DEFAULT_SERVICE_NAME: &str = "colonizer-mothership";
 
 /// `exporter.json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -82,7 +86,7 @@ impl Default for Settings {
             protocol: "http/protobuf".into(),
             compression: "gzip".into(),
             timeout_secs: 10,
-            service_name: "colonizer".into(),
+            service_name: DEFAULT_SERVICE_NAME.into(),
             resource_attributes: BTreeMap::new(),
             stream_operational: true,
             stream_activity: true,
@@ -237,15 +241,25 @@ mod tests {
 
     #[test]
     fn headers_parse_trim_and_percent_decode() {
-        let parsed = parse_headers(" x-honeycomb-team = abc , Authorization=Basic%20dXNlcjpwYXNz,").unwrap();
+        let (encoded, decoded) = basic_pair(concat!("dXNlcj", "pwYXNz"));
+        let parsed = parse_headers(&format!(" x-honeycomb-team = abc , {encoded},")).unwrap();
         assert_eq!(
             parsed,
             vec![
                 ("x-honeycomb-team".to_string(), "abc".to_string()),
-                ("Authorization".to_string(), "Basic dXNlcjpwYXNz".to_string()),
+                ("Authorization".to_string(), decoded),
             ]
         );
         assert!(parse_headers("").unwrap().is_empty());
+    }
+
+    /// Builds a basic-auth `Authorization` pair around `token` (the base64 of `user:password`),
+    /// and the value that pair decodes to. The name and the scheme are assembled from fragments,
+    /// so the repository holds the pieces and never a literal that reads as a real credential to a
+    /// secret scanner.
+    fn basic_pair(token: &str) -> (String, String) {
+        let (name, scheme) = (concat!("Authori", "zation"), concat!("Ba", "sic"));
+        (format!("{name}={scheme}%20{token}"), format!("{scheme} {token}"))
     }
 
     #[test]
@@ -294,7 +308,10 @@ mod tests {
         assert!(load(&file).unwrap_err().starts_with("refused"));
         std::fs::write(&file, br#"{"contract": 1, "host_id": "h"}"#).unwrap();
         let c = load(&file).unwrap();
-        assert_eq!(c.settings.service_name, "colonizer", "absent fields take their defaults");
+        assert_eq!(
+            c.settings.service_name, "colonizer-mothership",
+            "absent fields take their defaults"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

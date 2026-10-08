@@ -508,21 +508,21 @@ pub async fn create(
         return Err(refusal.into_error());
     }
     // Placement (issue #688): a pure policy whose verdict is recorded on the colony. Nothing here
-    // executes remotely (issue #298), so an unpinned choice of a peer is recorded and the colony runs
+    // executes remotely (issue #1252), so an unpinned choice of a peer is recorded and the colony runs
     // here, a pin to a peer is refused rather than silently moved, and an unknown pin is a bad request.
     let host_pin = req.host.as_deref().map(str::trim).filter(|host| !host.is_empty());
     let placement_reason = match crate::placement::place(host_pin, &local, &peers) {
         Ok(chosen) if chosen.local => chosen.reason,
         // A peer has room, but nothing launches on another member yet: say so, run here.
         Ok(chosen) if host_pin.is_none() => {
-            format!("{}; running on another member is not built yet (#298)", chosen.reason)
+            format!("{}; running on another member is not built yet (#1252)", chosen.reason)
         }
         // Pinned to a peer that can take the colony: refused; remote execution is not built.
         Ok(chosen) => {
             return Err(client_error(
                 StatusCode::CONFLICT,
                 &format!(
-                    "pinned to {}: running a colony on another member is not built yet (#298)",
+                    "pinned to {}: running a colony on another member is not built yet (#1252)",
                     chosen.host_name
                 ),
             ));
@@ -535,7 +535,7 @@ pub async fn create(
     };
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
-    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    let max_parallel = crate::capacity::max_parallel(&app, &modules).await;
     // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
     let org_settings = app.org_settings(owner);
     let org_limit = orgs::org_max_parallel(&org_settings);
@@ -578,6 +578,7 @@ pub async fn create(
         stack: req.stack,
         stack_fork: None,
         origin: req.origin.clone(),
+        auto_note: None,
         launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
         placement: Some(placement_reason),
         worktree: app
@@ -613,8 +614,11 @@ pub async fn create(
         // A fresh colony has no failure behind it, unseen or otherwise.
         unseen_failure: false,
         queued_behind,
+        blocked_reason: None,
+        pr_rewrite_nudged: false,
         // Set by admission when the launch waits for the issue's holder (issue #321).
         claim_wait: false,
+        priority: None,
         verify: Some(
             req.verify
                 .as_deref()
@@ -646,11 +650,18 @@ pub async fn create(
         run_end_cause: None,
         parked: None,
         hold_resumes: 0,
+        hold_cause: None,
+        hold_cause_repeats: 0,
+        verify_fix_rounds: 0,
+        auto_fixes: Vec::new(),
         provider_retries: 0,
         agent_session: None,
         pending_answer: None,
         switch_note: None,
         resume_note: None,
+        secret_fix_rounds: 0,
+        push_conflict_rounds: 0,
+        publish_resume_pending: false,
         prewarm: None,
         supply_chain,
         supply_chain_targets,

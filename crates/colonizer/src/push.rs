@@ -274,18 +274,24 @@ pub fn needs_you(session: &Session) -> bool {
     {
         return false;
     }
+    // A colony parked for sitting idle (issue #1140) only waits to be resumed: nobody has to act.
+    if attention["reason"].as_str() == Some(crate::idle_park::IDLE_PARK_REASON) {
+        return false;
+    }
     true
 }
 
-/// The app badge: how many colonies need a person ([`needs_you`]).
+/// The app badge: how many rows Needs you has ([`needs_you`] per colony, less the noise
+/// `needs_feed` removes: superseded and cascade failures, one entry per issue, old questions folded).
 pub fn attention_count(sessions: &[Session]) -> usize {
-    sessions.iter().filter(|s| needs_you(s)).count()
+    crate::needs_feed::rows(sessions, chrono::Utc::now())
 }
 
 /// [`attention_count`] with one colony left out — the one a resolution just closed (see
 /// [`resolved`], which sends the count as the badge).
 fn attention_count_without(sessions: &[Session], id: &str) -> usize {
-    sessions.iter().filter(|s| s.id != id && needs_you(s)).count()
+    let rest: Vec<Session> = sessions.iter().filter(|s| s.id != id).cloned().collect();
+    attention_count(&rest)
 }
 
 // ---------------------------------------------------------------------------
@@ -822,7 +828,7 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
     let list = match load(&app.cfg.config_dir) {
         Ok(list) => list,
         Err(e) => {
-            eprintln!("push: the subscription list could not be read ({e:#}); nothing sent");
+            tracing::error!( error = %format!("{e:#}"), "push: the subscription list could not be read ({e:#}); nothing sent" );
             return false;
         }
     };
@@ -832,7 +838,7 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
     let key = match signing_key(app) {
         Ok(key) => key,
         Err(e) => {
-            eprintln!("push: the VAPID key is unavailable ({e:#}); nothing sent");
+            tracing::error!( error = %format!("{e:#}"), "push: the VAPID key is unavailable ({e:#}); nothing sent" );
             return false;
         }
     };
@@ -887,7 +893,7 @@ pub async fn deliver_quota(app: &App, client: &reqwest::Client, provider: &str, 
     let list = match load(&app.cfg.config_dir) {
         Ok(list) => list,
         Err(e) => {
-            eprintln!("push: the subscription list could not be read ({e:#}); nothing sent");
+            tracing::error!( error = %format!("{e:#}"), "push: the subscription list could not be read ({e:#}); nothing sent" );
             return false;
         }
     };
@@ -897,7 +903,7 @@ pub async fn deliver_quota(app: &App, client: &reqwest::Client, provider: &str, 
     let key = match signing_key(app) {
         Ok(key) => key,
         Err(e) => {
-            eprintln!("push: the VAPID key is unavailable ({e:#}); nothing sent");
+            tracing::error!( error = %format!("{e:#}"), "push: the VAPID key is unavailable ({e:#}); nothing sent" );
             return false;
         }
     };
@@ -969,10 +975,12 @@ fn prune(app: &App, gone: &[String]) {
         Ok(mut remaining) => {
             remaining.retain(|s| !gone.contains(&s.id));
             if let Err(e) = save(&app.cfg.config_dir, &remaining) {
-                eprintln!("push: could not save the subscription list ({e:#})");
+                tracing::error!( error = %format!("{e:#}"), "push: could not save the subscription list ({e:#})" );
             }
         }
-        Err(e) => eprintln!("push: could not re-read the subscription list to prune it ({e:#}); the gone ones stay"),
+        Err(e) => {
+            tracing::warn!( error = %format!("{e:#}"), "push: could not re-read the subscription list to prune it ({e:#}); the gone ones stay" )
+        }
     }
     for id in gone {
         forget_presence(id);
@@ -1034,7 +1042,7 @@ pub async fn resolved(app: &App, session: &str) {
     let list = match load(&app.cfg.config_dir) {
         Ok(list) => list,
         Err(e) => {
-            eprintln!("push: the subscription list could not be read ({e:#}); nothing sent");
+            tracing::error!( error = %format!("{e:#}"), "push: the subscription list could not be read ({e:#}); nothing sent" );
             return;
         }
     };
@@ -1044,7 +1052,7 @@ pub async fn resolved(app: &App, session: &str) {
     let key = match signing_key(app) {
         Ok(key) => key,
         Err(e) => {
-            eprintln!("push: the VAPID key is unavailable ({e:#}); nothing sent");
+            tracing::error!( error = %format!("{e:#}"), "push: the VAPID key is unavailable ({e:#}); nothing sent" );
             return;
         }
     };
@@ -1060,7 +1068,7 @@ pub async fn resolved(app: &App, session: &str) {
         return;
     };
     let Some(client) = push_client() else {
-        eprintln!("push: could not build an HTTP client; the resolution was not sent");
+        tracing::error!("push: could not build an HTTP client; the resolution was not sent");
         return;
     };
     for subscription in resolved_recipients(&list, &colony) {
@@ -1113,11 +1121,13 @@ fn push_client() -> Option<reqwest::Client> {
 }
 
 /// Where a failed send's line goes: the colony's log when the event is about a colony, stderr when
-/// it is not — the same rule notify's own channel failures follow.
+/// it is not — the same rule notify's own channel failures follow. The session log takes the level
+/// as a string; this arm maps the same two levels onto `tracing`.
 async fn report(app: &App, session: Option<&str>, what: String, level: &str) {
     match session {
         Some(id) => app.session_log_as(Origin::Notify, id, level, what).await,
-        None => eprintln!("{what}"),
+        None if level == "info" => tracing::info!("{what}"),
+        None => tracing::warn!("{what}"),
     }
 }
 

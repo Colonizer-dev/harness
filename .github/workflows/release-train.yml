@@ -1,0 +1,204 @@
+# The release train (issue #1193): opens, merges and tags harness releases without a person, while main
+# is green. docs/release.md is the long version; scripts/release-prep.mjs does the mechanical work and
+# is what a person runs by hand when the train is stopped.
+#
+# - tag: after a `release: vX.Y.Z` pull request is merged, puts the lightweight tag on its merge commit
+#   (what scripts/changelog.mjs check --release and the crate versions allow, nothing else) and starts
+#   the Release workflow on it. It runs first, on every trigger, so a merged release is never waiting
+#   behind a new proposal, and it is the part that survives a push event that never arrived.
+# - propose: when main has pending changelog.d/ fragments and its last few CI runs are green, opens
+#   `release: vX.Y.Z` (patch bumps only) with auto-merge on. Never while a release pull request is open,
+#   and never when the head commit of main says `release-train: skip`.
+#
+# GITHUB_TOKEN does not start workflows: not a push made with it, and not a pull request it opens. So
+# the tag is pushed with it on purpose (a tag push by a person's token would start Release by itself,
+# and then the explicit dispatch below would start it twice) and Release is dispatched by name, with the
+# tag as its ref, which is exactly what a `push: tags` run sees (github.ref is refs/tags/vX.Y.Z). The
+# release pull request's own CI is the other case: with the optional RELEASE_TRAIN_TOKEN secret (a
+# fine-grained token or GitHub App installation token with contents, pull-requests and actions write)
+# the branch push starts CI as usual; without it, CI is dispatched on the release branch, whose check
+# runs attach to the same head commit and satisfy the required checks.
+name: Release train
+
+on:
+  schedule:
+    - cron: "17 21 * * *"
+  # Merging a release is what changes CHANGELOG.md on main, so this tags it within a minute; the
+  # schedule is the backstop if the event is missed.
+  push:
+    branches: [main]
+    paths: [CHANGELOG.md]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only say what would happen: no pull request, no tag"
+        type: boolean
+        default: false
+      green_runs:
+        description: "How many of the latest CI runs on main must be green"
+        default: "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-train
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # contents: write pushes the tag; actions: write dispatches Release on it.
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Tag the merged releases
+        run: |
+          git fetch --tags --force origin
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
+          range="origin/main"
+          [ -z "$last" ] || range="$last..origin/main"
+          # Oldest first; a release commit is the squash of a `release: vX.Y.Z` pull request.
+          git log --first-parent --reverse --format='%H%x09%s' "$range" |
+            sed -nE 's/^([0-9a-f]+)\trelease: (v[0-9]+\.[0-9]+\.[0-9]+)( \(#[0-9]+\))?$/\1 \2/p' > "$RUNNER_TEMP/releases"
+          if [ ! -s "$RUNNER_TEMP/releases" ]; then
+            echo "No merged release is waiting for its tag."
+            exit 0
+          fi
+          status=0
+          while read -r sha version; do
+            if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+              echo "$version is already tagged."
+              continue
+            fi
+            # The gate runs on the commit about to be tagged, with the script from main.
+            rm -rf "$RUNNER_TEMP/at"
+            git worktree add --detach "$RUNNER_TEMP/at" "$sha" >/dev/null
+            if ! node scripts/release-prep.mjs verify "$version" --root "$RUNNER_TEMP/at"; then
+              echo "::error::$version at $sha is not ready to tag; see the errors above. Fix it on main, then run this workflow again."
+              git worktree remove --force "$RUNNER_TEMP/at"
+              status=1
+              break
+            fi
+            git worktree remove --force "$RUNNER_TEMP/at"
+            if [ "$DRY_RUN" = true ]; then
+              echo "Dry run: would tag $version at $sha and dispatch Release."
+              continue
+            fi
+            git tag "$version" "$sha"
+            git push origin "refs/tags/$version"
+            gh workflow run release.yml --ref "$version"
+            echo "Tagged $version at $sha and started Release on it."
+          done < "$RUNNER_TEMP/releases"
+          exit "$status"
+
+  propose:
+    needs: tag
+    # Not on a push to main: that run is only there to tag. Runs after the tag job even if it failed on
+    # a release that is not ready, since the open-pull-request check below is what stops a second one.
+    if: ${{ !cancelled() && github.event_name != 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      # A token that can start workflows when the secret exists, GITHUB_TOKEN otherwise.
+      GH_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN || github.token }}
+      HAS_TRAIN_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN != '' }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      GREEN_RUNS: ${{ inputs.green_runs || '3' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TRAIN_TOKEN || github.token }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Decide
+        id: decide
+        run: |
+          case "$GREEN_RUNS" in ''|*[!0-9]*|0) echo "::error::green_runs must be a positive whole number"; exit 1 ;; esac
+          stop() { echo "::notice::Release train: $1"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          plan=$(node scripts/release-prep.mjs plan --message "$(git log -1 --format=%B origin/main)")
+          echo "$plan"
+          plan_pending=$(printf '%s\n' "$plan" | sed -n 's/^pending=//p')
+          plan_next=$(printf '%s\n' "$plan" | sed -n 's/^next=//p')
+          plan_skip=$(printf '%s\n' "$plan" | sed -n 's/^skip=//p')
+          [ "$plan_skip" != true ] || stop "the head commit of main says release-train: skip."
+          [ "$plan_pending" -gt 0 ] || stop "no changelog.d/ fragment is pending."
+
+          open=$(gh pr list --state open --search 'release: in:title' --json number,title \
+            --jq '[.[] | select(.title | test("^release: v[0-9]+[.][0-9]+[.][0-9]+"))] | map("#\(.number)") | join(" ")')
+          [ -z "$open" ] || stop "a release pull request is already open ($open)."
+
+          # The newest CI runs on main that were not superseded (CI cancels an older run when a newer
+          # commit lands), each green, and the newest one is for the commit a release would be cut from.
+          head=$(git rev-parse origin/main)
+          runs=$(gh run list --workflow ci.yml --branch main --event push --limit 30 --json status,conclusion,headSha \
+            --jq "[.[] | select(.conclusion != \"cancelled\")] | .[:$GREEN_RUNS]")
+          [ "$(printf '%s' "$runs" | jq length)" -eq "$GREEN_RUNS" ] || stop "fewer than $GREEN_RUNS finished CI runs on main."
+          [ "$(printf '%s' "$runs" | jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')" -eq "$GREEN_RUNS" ] \
+            || stop "the latest $GREEN_RUNS CI runs on main are not all green."
+          [ "$(printf '%s' "$runs" | jq -r '.[0].headSha')" = "$head" ] || stop "CI has not finished on the head of main ($head)."
+
+          if [ "$DRY_RUN" = true ]; then
+            stop "dry run: would open release: $plan_next from $plan_pending fragment(s)."
+          fi
+          { echo "go=true"; echo "version=$plan_next"; } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the release
+        if: steps.decide.outputs.go == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "release/$VERSION"
+          node scripts/release-prep.mjs prep "$VERSION"
+          git add -A
+          git commit -m "release: $VERSION" -m "Opened by the release train (docs/release.md)."
+          git push --force origin "release/$VERSION"
+
+      - name: Open the pull request, start its CI and turn on auto-merge
+        if: steps.decide.outputs.go == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          {
+            echo "Cut by the release train from the \`changelog.d/\` fragments on main (\`node scripts/release-prep.mjs prep $VERSION\`):"
+            echo
+            echo "- \`CHANGELOG.md\` has the \`$VERSION\` section and the fragments are gone;"
+            echo "- the release crates are at ${VERSION#v} (a crate that was already ahead is untouched) and \`Cargo.lock\` follows;"
+            echo "- \`docs/release-notes/$VERSION.md\` is a stub listing the fragments, for a person to polish if it matters."
+            echo
+            echo "While this pull request is open the merge steward holds pull requests that add a fragment. Merging it tags \`$VERSION\` on the merge commit and starts the Release workflow. Put \`hold\` on it, or close it, to stop the release."
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --base main --head "release/$VERSION" --title "release: $VERSION" --body-file "$RUNNER_TEMP/body.md"
+          # A branch pushed with GITHUB_TOKEN starts no CI; its dispatched run reports on the same commit.
+          if [ "$HAS_TRAIN_TOKEN" != true ]; then
+            gh workflow run ci.yml --ref "release/$VERSION"
+          fi
+          gh pr merge "release/$VERSION" --auto --squash \
+            || echo "::warning::Could not turn on auto-merge (is it allowed in Settings → General?). Merge release/$VERSION by hand when its checks are green."

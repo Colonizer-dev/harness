@@ -1270,11 +1270,7 @@ impl Settings {
             if e.is_empty() {
                 continue;
             }
-            let ok = if e.contains('/') {
-                valid_repo(&e)
-            } else {
-                valid_repo(&format!("{e}/x"))
-            };
+            let ok = crate::repo_scope::valid_entry(&e);
             if !ok {
                 return Err(format!("{e:?} is not an org or an owner/repo"));
             }
@@ -1307,10 +1303,8 @@ impl Settings {
 
     /// Whether the allowlist covers a repository, by its org or by name.
     pub fn covers(&self, repo: &str) -> bool {
-        let owner = repo.split('/').next().unwrap_or_default();
-        self.allow
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(repo) || a.eq_ignore_ascii_case(owner))
+        // `*` covers every repository here; a run resolves it first so hidden orgs fall out.
+        self.allow.iter().any(|a| crate::repo_scope::entry_matches(a, repo))
     }
 
     fn active(&self) -> bool {
@@ -1791,7 +1785,9 @@ pub struct RunRequest {
 /// start them, store the report and write the activity log.
 pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger: &str, now: DateTime<Utc>) -> Report {
     let state = app.supply_chain.snapshot().await;
-    let settings = state.settings.clone();
+    let mut settings = state.settings.clone();
+    // `*` is every visible org, resolved at use time so a hidden org is left out (issue #1213).
+    settings.allow = app.resolve_scope(&settings.allow).await;
     let started_at = Utc::now();
     let mut notes = Vec::new();
     let repos = match &req.repo {
@@ -1962,6 +1958,7 @@ pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger
         entry.org = report.repos[0].repo.split('/').next().map(str::to_string);
     }
     crate::activity::record(app, entry).await;
+    crate::loop_history::record(app, crate::loop_history::from_supply_chain(&report)).await;
     for item in &report.attention {
         eprintln!(
             "supply-chain loop: attention: {} {} {} in {} has no fixed version",
@@ -2047,7 +2044,13 @@ pub async fn run_now(State(app): State<Shared>, body: Option<Json<RunRequest>>) 
         if !valid_repo(repo) {
             return Err(client_error(StatusCode::BAD_REQUEST, "invalid repository name"));
         }
-        if !req.dry_run && !app.supply_chain.state.read().await.settings.covers(repo) {
+        if !req.dry_run
+            && !{
+                let mut settings = app.supply_chain.state.read().await.settings.clone();
+                settings.allow = app.resolve_scope(&settings.allow).await;
+                settings.covers(repo)
+            }
+        {
             return Err(client_error(
                 StatusCode::BAD_REQUEST,
                 &format!("{repo} is not on the supply-chain loop's allowlist; add it, or ask for a dry run"),

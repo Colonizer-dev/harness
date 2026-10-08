@@ -1,7 +1,8 @@
 // The mock's per-call state slice for the loops feature (issue #827). The one shared state object
 // (MockState in src/mockState.ts) carries these fields so a reassignment is seen by every feature.
-import type { DiskCleanupReport, Loop, MergeLoopView, NewLoop, NewRedTeamSchedule, RedTeamCadence, RedTeamRun, RedTeamSchedule, SupplyChainLoop, SupplyChainReport, TsAnyLoop, TsAnyReport } from "../../types";
+import type { DiskCleanupReport, Loop, LoopHistoryRun, MergeLoopItem, MergeLoopView, NewLoop, NewRedTeamSchedule, RedTeamCadence, RedTeamRun, RedTeamSchedule, SupplyChainLoop, SupplyChainReport, TsAnyLoop, TsAnyReport } from "../../types";
 import { ago, now } from "../../mockShared";
+import { mockRuns, type MockLoopShape } from "./mockHistory";
 import { defaultMergeLoopSettings } from "../../cockpit/mergeLoop";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
@@ -19,6 +20,8 @@ export type LoopsMockState = {
     scheduleOf: (body: NewRedTeamSchedule, id: string, created: string) => RedTeamSchedule;
     redRuns: RedTeamRun[];
     redActive: (repo: string) => boolean;
+    /** Every mock loop's runs for 90 days, oldest first, by history id (issue #1199). */
+    loopRunHistory: Record<string, LoopHistoryRun[]>;
 };
 
 export function installLoopsMockState(ms: MockState): void {
@@ -54,12 +57,12 @@ export function installLoopsMockState(ms: MockState): void {
   };
   ms.supplyLoop = {
     name: "Dependencies & supply chain",
-    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 6, minute: 17 }, max_per_repo: 1, max_per_run: 3, cooldown_hours: 12, min_severity: "moderate", outdated: false, builtin: true, autopilot: true },
-    next_run_at: null,
+    settings: { enabled: true, allow: ["acme", "kontinuum-ai"], cadence: { every: "interval", minutes: 360 }, max_per_repo: 1, max_per_run: 3, cooldown_hours: 12, min_severity: "moderate", outdated: false, builtin: true, autopilot: true },
+    next_run_at: new Date(Date.now() + 2 * 3_600_000).toISOString(),
     running: false,
     scanners: { "cargo-audit": false, "cargo-deny": false, "npm audit": true, "osv-scanner": false },
     blocked: false,
-    last_report: ms.supplySample,
+    last_report: { ...ms.supplySample, dry_run: false, trigger: "schedule", started_at: ago(48), finished_at: ago(47) },
     history: [],
     attention: [],
   };
@@ -80,20 +83,21 @@ export function installLoopsMockState(ms: MockState): void {
       autopilot: false,
       max_runs: null,
       end_at: null,
-      enabled: false,
-      next_run_at: null,
-      runs: 0,
-      last_run: null,
+      enabled: true,
+      next_run_at: new Date(Date.now() + 35 * 60_000).toISOString(),
+      runs: 412,
+      last_run: { session: "", at: ago(25) },
       last_note: null,
       ended_reason: null,
-      created_at: now(),
+      created_at: ago(60 * 24 * 40),
       disk_cleanup: {
         settings: { trigger_free_pct: 15, build_output: true, stopped_after_days: 7, worktrees: true, microvms: true, archives: false, archive_keep_days: 30, archive_max_gb: null, host_paths: false, extra_paths: [], host_min_age_days: 3 },
         history: [],
         attention: null,
-        previewed_at: null,
+        previewed_at: ago(60 * 24 * 40),
       },
     },
+    ...customLoops(),
   ];
   ms.cleanupReport = (dryRun: boolean): DiskCleanupReport => ({
     at: now(),
@@ -118,7 +122,9 @@ export function installLoopsMockState(ms: MockState): void {
       { category: "host_paths", enabled: false, items: [], count: 0, bytes: 0 },
     ],
   });
-  ms.mergeLoop = { settings: defaultMergeLoopSettings(), next_run_at: null, running: false, writes_blocked: true, repos: {}, last_report: null, history: [] };
+  ms.loopList[0].disk_cleanup!.history = [{ ...ms.cleanupReport(false), at: ago(25), trigger: "schedule" }];
+  ms.mergeLoop = mergeLoopSeed();
+  ms.loopRunHistory = seedHistories();
   ms.loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
     id,
     name: body.name,
@@ -185,12 +191,12 @@ export function installLoopsMockState(ms: MockState): void {
   };
   ms.tsAnyLoop = {
     name: "TypeScript: remove any",
-    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 7, minute: 43 }, batch_cap: 20, max_per_run: 3, cooldown_hours: 20, implicit: false, offline_install: true, autopilot: true },
-    next_run_at: null,
+    settings: { enabled: true, allow: ["acme/webshop"], cadence: { every: "daily", hour: 7, minute: 43 }, batch_cap: 20, max_per_run: 3, cooldown_hours: 20, implicit: false, offline_install: true, autopilot: true },
+    next_run_at: new Date(Date.now() + 5 * 3_600_000).toISOString(),
     running: false,
     node: true,
     blocked: false,
-    last_report: ms.tsAnySample,
+    last_report: { ...ms.tsAnySample, dry_run: false, trigger: "schedule", started_at: ago(60 * 3), finished_at: ago(60 * 3 - 1) },
     history: [64, 61, 57].reverse().map((total, i) => ({ id: `tsa_h${i}`, at: ago(60 * 24 * i + 60 * 7), trigger: "schedule", total, totals: { "acme/webshop": total }, dispatched: 1, skipped: 0, flagged: 0, summary: `1 TypeScript repository: ${total} explicit any` })),
     attention: [],
     trend: {},
@@ -286,6 +292,181 @@ export function installLoopsMockState(ms: MockState): void {
     },
   ];
   ms.redActive = (repo: string) =>
-    ms.redRuns.some((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped");
+    ms.redRuns.some((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped" && r.state !== "cancelled");
 
+}
+
+// --- the seeded, busy install the Loops page draws with `?mock=1` (issue #1199) --------------------
+
+/** What a custom loop of the mock looks like: a daily triage, a weekly dependency bump and a paused flaky-test hunt. */
+function customLoops(): Loop[] {
+  const base = { org: "acme", tz_offset_minutes: 0, model: null, subagent_model: null, autopilot: true, max_runs: null, end_at: null, ended_reason: null, kind: "colony" as const, needs_github: true };
+  return [
+    {
+      ...base,
+      id: "loop_triage",
+      name: "Triage new issues",
+      repo: "acme/webshop",
+      prompt: "Triage the issues in /colonizer/github/issues.json: label them, ask for missing reproduction details, close exact duplicates and fix the small, clear ones in one pull request.",
+      cadence: { every: "daily", hour: 9, minute: 0 },
+      enabled: true,
+      next_run_at: new Date(Date.now() + 14 * 3_600_000).toISOString(),
+      runs: 34,
+      last_run: { session: "old98765", at: ago(60 * 10) },
+      last_note: null,
+      created_at: ago(60 * 24 * 36),
+    },
+    {
+      ...base,
+      id: "loop_deps",
+      name: "Keep dependencies current",
+      repo: "acme/design-system",
+      prompt: "Update outdated dependencies that have no breaking changes, run every check and open one pull request with a short changelog of what moved.",
+      cadence: { every: "weekly", weekday: 0, hour: 8, minute: 0 },
+      enabled: true,
+      next_run_at: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+      runs: 9,
+      last_run: { session: "close0987", at: ago(60 * 24 * 4) },
+      last_note: null,
+      needs_github: false,
+      created_at: ago(60 * 24 * 70),
+    },
+    {
+      ...base,
+      id: "loop_flaky",
+      name: "Fix flaky tests from last night's CI",
+      repo: "acme/webshop",
+      prompt: "Read /colonizer/github/ci-failures.json, find tests that failed there and then passed on a later run without a code change, and fix the flakiness at its cause.",
+      cadence: { every: "daily", hour: 7, minute: 0 },
+      enabled: false,
+      next_run_at: null,
+      runs: 21,
+      last_run: { session: "stall5678", at: ago(60 * 24 * 12) },
+      last_note: "paused",
+      created_at: ago(60 * 24 * 50),
+    },
+  ];
+}
+
+const pr = (repo: string, n: number, title: string, action: MergeLoopItem["action"], reason: string): MergeLoopItem => ({ session: `mock-pr-${n}`, pr_url: `https://github.com/${repo}/pull/${n}`, title, action, reason });
+
+const BILLING =
+  "GitHub Actions did not start this pull request's checks: the job was not started because recent account payments have failed or your spending limit needs to be increased. Check the 'Billing & plans' section in your settings.";
+
+/** The merge-train loop's last run: three merged, two red, twenty waiting, eleven of them on one billing error. */
+function mergeLoopSeed(): MergeLoopView {
+  const repos = [
+    "kontinuum-ai/kontinuum",
+    "acme/webshop",
+    "acme/design-system",
+    ...Array.from({ length: 18 }, (_, i) => `${i % 3 === 0 ? "kontinuum-ai" : "acme"}/${["api", "docs", "mobile", "billing", "search", "cli"][i % 6]}-${String(i + 1).padStart(2, "0")}`),
+  ];
+  const kontinuum = Array.from({ length: 11 }, (_, i) => pr("kontinuum-ai/kontinuum", 301 + i, ["Tune the sequencer swing", "Add a Mixolydian preset", "Fix MIDI clock drift", "Smooth the filter sweep", "Quantise live input", "Faster wavetable load", "Export stems as FLAC", "Undo for pattern edits", "Dark theme contrast", "Fix the arpeggiator reset", "Bump the DSP crate"][i], "waiting", BILLING));
+  const queue = Array.from({ length: 6 }, (_, i) => pr("acme/api-01", 120 + i, ["Paginate the orders endpoint", "Rate limit login", "Retry webhook delivery", "Cache the price list", "Add the audit log", "Trim the response payload"][i], "waiting", "waiting behind #119, the head of the train"));
+  const running = Array.from({ length: 3 }, (_, i) => pr("acme/design-system", 77 + i, ["Button focus ring", "Tooltip arrow", "Table density"][i], "waiting", "its checks are still running (3 of 5 done)"));
+  const items: MergeLoopItem[] = [
+    pr("acme/webshop", 61, "Price rounding in cart totals", "merged", "green and clean: merged by squash"),
+    pr("acme/webshop", 63, "Guest checkout fix", "merged", "green and clean: merged by squash"),
+    pr("acme/design-system", 74, "Spacing tokens for dense tables", "merged", "green and clean: merged by squash"),
+    pr("acme/api-01", 118, "Move sessions to Redis", "red", "the required check `build` failed: 2 tests failed in src/session/store.test.ts"),
+    pr("acme/search-05", 41, "Reindex on schema change", "red", "the required check `lint` failed: 14 errors in src/indexer"),
+    ...kontinuum,
+    ...queue,
+    ...running,
+  ];
+  const by = (repo: string) => items.filter((i) => i.pr_url.includes(`github.com/${repo}/`));
+  const reportRepos = [...new Set(items.map((i) => i.pr_url.split("/").slice(3, 5).join("/")))].map((repo) => ({ repo, main: "green", paused: null, heal: [], items: by(repo) }));
+  const report = { started_at: ago(12), finished_at: ago(11), dry_run: false, forced_dry_run: false, stopped: null, api_calls: 188, summary: "merged 3 · updated (CI running) 0 · red 2 · redo dispatched 0 · skipped 0 · waiting 20", lines: [], repos: reportRepos };
+  const settings = { ...defaultMergeLoopSettings(), enabled: true, allow: repos, flaky_checks: ["e2e*"], self_heal: true };
+  return { settings, next_run_at: new Date(Date.now() + 28 * 60_000).toISOString(), running: false, writes_blocked: false, repos: {}, last_report: report, history: [report] };
+}
+
+const SHAPES: MockLoopShape[] = [
+  {
+    id: "merge-train", every: 60, weights: [35, 12, 8, 45], dispatch: 0.12, cost: [0.3, 1.4], seed: 0x6d657267,
+    summary: {
+      ok: ["merged 2 · updated 1 · waiting 6", "merged 1 · waiting 9"],
+      partial: ["merged 3 · red 2 · waiting 20", "merged 1 · red 1 · waiting 4"],
+      failed: ["red 3 · nothing merged", "GitHub Actions is blocked: nothing merged"],
+      skipped: ["waiting 8 · nothing ready to merge"],
+      running: [],
+    },
+  },
+  {
+    id: "supply-chain", every: 360, weights: [70, 12, 6, 12], dispatch: 0.3, cost: [0.6, 1.8], seed: 0x73757070,
+    summary: {
+      ok: ["3 repositories: no findings", "2 repositories: 1 moderate; dispatched 1"],
+      partial: ["3 repositories: 1 critical, 1 high; dispatched 1, skipped 1, 1 needs attention"],
+      failed: ["3 repositories: could not read the lockfiles"],
+      skipped: ["nothing is opted in"],
+      running: [],
+    },
+  },
+  {
+    id: "ts-any", every: 1440, weights: [60, 10, 10, 20], dispatch: 0.8, cost: [1.1, 2.7], seed: 0x74736e79,
+    summary: {
+      ok: ["1 TypeScript repository: 57 explicit any (-4); dispatched 1", "1 TypeScript repository: 61 explicit any; dispatched 1"],
+      partial: ["1 TypeScript repository: 64 explicit any; dispatched 1, 1 batch flagged"],
+      failed: ["1 TypeScript repository: could not count"],
+      skipped: ["1 TypeScript repository: cooldown holds the next batch"],
+      running: [],
+    },
+  },
+  {
+    id: "docs", every: 1440, weights: [55, 10, 5, 30], dispatch: 0.6, cost: [0.5, 1.4], seed: 0x646f6373,
+    summary: {
+      ok: ["2 repositories, 2 findings: 1 dispatched, 1 clean", "2 repositories, 0 findings: 2 clean"],
+      partial: ["3 repositories, 5 findings: 1 dispatched, 1 skipped, 1 failed"],
+      failed: ["2 repositories: could not read them"],
+      skipped: ["2 repositories, 3 findings: the cooldown holds both"],
+      running: [],
+    },
+  },
+  {
+    id: "disk-cleanup", every: 60, weights: [18, 3, 1, 78], dispatch: 0, cost: [0, 0], seed: 0x6469736b,
+    summary: {
+      ok: ["freed 3.2G (build output 3.1G, worktrees 100M)", "freed 640M (build output 640M)"],
+      partial: ["freed 1.1G; the disk is still under 15% free"],
+      failed: ["could not remove 3 paths"],
+      skipped: ["nothing to clean"],
+      running: [],
+    },
+  },
+  {
+    id: "loop_triage", every: 1440, weights: [72, 12, 8, 8], dispatch: 1, cost: [0.8, 3.4], seed: 0x74726961,
+    summary: { ok: ["PR opened"], partial: ["stopped early"], failed: ["colony failed"], skipped: ["no changes"], running: [] },
+  },
+  {
+    id: "loop_deps", every: 10_080, weights: [78, 10, 4, 8], dispatch: 1, cost: [1.2, 3.8], seed: 0x64657073,
+    summary: { ok: ["PR opened"], partial: ["stopped early"], failed: ["colony failed"], skipped: ["no changes"], running: [] },
+  },
+  {
+    id: "loop_flaky", every: 1440, weights: [60, 15, 10, 15], dispatch: 1, cost: [0.7, 2.6], seed: 0x666c616b,
+    summary: { ok: ["PR opened"], partial: ["stopped early"], failed: ["colony failed"], skipped: ["no changes"], running: [] },
+  },
+];
+
+/** The run a card calls "last" says what the loop's own last report says, so the page agrees with itself. */
+const LAST: Record<string, { minutes: number; outcome: LoopHistoryRun["outcome"]; summary: string; cost: number }> = {
+  "merge-train": { minutes: 12, outcome: "partial", summary: "merged 3 · red 2 · waiting 20", cost: 0 },
+  "supply-chain": { minutes: 48, outcome: "partial", summary: "1 critical, 1 high, 1 moderate · dispatched 1, 1 needs attention", cost: 1.24 },
+  "ts-any": { minutes: 180, outcome: "ok", summary: "57 explicit any (4 fewer) · dispatched 1", cost: 1.86 },
+  docs: { minutes: 180, outcome: "ok", summary: "3 repositories · 1 colony dispatched · 1 skipped", cost: 0.94 },
+  "disk-cleanup": { minutes: 25, outcome: "ok", summary: "freed 3.2 GB (build output)", cost: 0 },
+};
+
+function seedHistories(): Record<string, LoopHistoryRun[]> {
+  const out: Record<string, LoopHistoryRun[]> = {};
+  for (const shape of SHAPES) {
+    let runs = mockRuns(shape);
+    const pin = LAST[shape.id];
+    if (pin) {
+      const at = Date.now() - pin.minutes * 60_000;
+      runs = runs.filter((r) => new Date(r.at).getTime() < at - 30 * 60_000);
+      runs.push({ at: new Date(at).toISOString(), trigger: "schedule", outcome: pin.outcome, summary: pin.summary, counts: {}, colonies: pin.cost ? [`mock-${shape.id}-last`] : [], cost_usd: pin.cost });
+    }
+    // The paused loop stopped twelve days ago.
+    out[shape.id] = shape.id === "loop_flaky" ? runs.filter((r) => Date.now() - new Date(r.at).getTime() > 12 * 86_400_000) : runs;
+  }
+  return out;
 }

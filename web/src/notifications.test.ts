@@ -21,6 +21,7 @@ import {
   eventText,
   faviconHref,
   needsYou,
+  needsYouFeed,
   needsYouLabel,
   orgFilterForTarget,
   parseNotificationPrefs,
@@ -181,12 +182,18 @@ describe("the shared needs-you fixture", () => {
 describe("attentionCount", () => {
   it("counts only the colonies that need a person", () => {
     expect(
-      attentionCount([session({ id: "a", status: "waiting_for_answer" }), session({ id: "b" }), session({ id: "c", status: "running", attention: stalled() })]),
+      attentionCount([
+        session({ id: "a", issue: 1, status: "waiting_for_answer" }),
+        session({ id: "b", issue: 2 }),
+        session({ id: "c", issue: 3, status: "running", attention: stalled() }),
+      ]),
     ).toBe(2);
   });
 
   it("includes a failure nobody has looked at yet, and drops it once seen", () => {
-    expect(attentionCount([session({ id: "a", status: "failed" }), session({ id: "b", status: "failed", unseen_failure: true })])).toBe(1);
+    expect(
+      attentionCount([session({ id: "a", issue: 1, status: "failed" }), session({ id: "b", issue: 2, status: "failed", unseen_failure: true })]),
+    ).toBe(1);
   });
 });
 
@@ -454,3 +461,57 @@ describe("notification preferences", () => {
 });
 
 type NotificationPrefsLike = ReturnType<typeof defaultNotificationPrefs>;
+
+// ---------------------------------------------------------------------------
+// The Needs-you list (issue #1140)
+// ---------------------------------------------------------------------------
+
+const HOUR = 3_600_000;
+const at = (hoursAgo: number, now: number) => new Date(now - hoursAgo * HOUR).toISOString();
+
+describe("needsYou for the states issue #1140 adds", () => {
+  it("does not ask a person for a colony parked for sitting idle, or one blocked on its parent", () => {
+    const idle = { reason: "idle_timeout", since: "2026-10-07T10:00:00Z", nudges: 0 } as Session["attention"];
+    expect(needsYou(session({ status: "parked", attention: idle }))).toBe(false);
+    expect(needsYou(session({ status: "blocked" }))).toBe(false);
+  });
+});
+
+describe("needsYouFeed", () => {
+  const now = Date.parse("2026-10-07T12:00:00Z");
+  const failed = (id: string, issue: number, hoursAgo: number, error = "boom") =>
+    session({ id, issue, status: "failed", unseen_failure: true, error, created_at: at(hoursAgo, now), updated_at: at(hoursAgo, now) });
+
+  it("hides a failed colony a newer queued, running or merged colony for the same issue has overtaken", () => {
+    for (const status of ["queued", "running", "merged", "blocked"] as const) {
+      const feed = needsYouFeed([failed("old", 7, 80), session({ id: "new", issue: 7, status, created_at: at(1, now) })], now);
+      expect(feed.rows, status).toEqual([]);
+    }
+    // A newer colony for another issue changes nothing.
+    expect(needsYouFeed([failed("old", 7, 80), session({ id: "new", issue: 8, status: "running", created_at: at(1, now) })], now).rows.map((s) => s.id)).toEqual(["old"]);
+  });
+
+  it("lists one entry per issue: the newest colony", () => {
+    const feed = needsYouFeed([failed("older", 7, 30), failed("newest", 7, 2), failed("other", 9, 5)], now);
+    expect(feed.rows.map((s) => s.id).sort()).toEqual(["newest", "other"]);
+  });
+
+  it("keeps cascade failures out", () => {
+    const feed = needsYouFeed(
+      [
+        failed("a", 1, 3, "colony `c8a6d23c` was stopped or parked, so it cannot be stacked on"),
+        failed("b", 2, 3, "colony `a` failed, so it has no branch to build on"),
+        failed("real", 3, 3, "the agent crashed"),
+      ],
+      now,
+    );
+    expect(feed.rows.map((s) => s.id)).toEqual(["real"]);
+  });
+
+  it("folds abandoned questions older than 72 hours into one group and keeps fresh ones in the list", () => {
+    const feed = needsYouFeed([failed("a", 1, 100, "abandoned_question"), failed("b", 2, 80, "abandoned_question"), failed("fresh", 3, 10, "abandoned_question")], now);
+    expect(feed.oldQuestions.map((s) => s.id).sort()).toEqual(["a", "b"]);
+    expect(feed.rows.map((s) => s.id)).toEqual(["fresh"]);
+    expect(attentionCount([failed("a", 1, 100, "abandoned_question"), failed("b", 2, 80, "abandoned_question")])).toBe(1);
+  });
+});

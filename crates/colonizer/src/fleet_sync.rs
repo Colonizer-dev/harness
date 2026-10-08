@@ -218,11 +218,11 @@ impl DrainState {
         match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => DrainState::default(),
             Err(e) => {
-                eprintln!("fleet sync: could not read {} ({e}); starting the drain over", path.display());
+                tracing::warn!( path = %path.display(), error = %e, "fleet sync: could not read {} ({e}); starting the drain over", path.display() );
                 DrainState::default()
             }
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                eprintln!("fleet sync: {} does not parse ({e}); starting the drain over", path.display());
+                tracing::warn!( path = %path.display(), error = %e, "fleet sync: {} does not parse ({e}); starting the drain over", path.display() );
                 DrainState::default()
             }),
         }
@@ -722,7 +722,7 @@ impl Drainer<'_> {
 
     async fn save(&self) {
         if let Err(e) = self.state.save(self.data_dir).await {
-            eprintln!("fleet sync: could not save the drain state: {e:#}");
+            tracing::error!( error = %format!("{e:#}"), "fleet sync: could not save the drain state: {e:#}" );
         }
     }
 }
@@ -883,14 +883,14 @@ async fn run(app: Shared) {
         // The fleet's egress floor (#690) rides the same cadence: it governs booting colonies, not
         // history, so it is fetched whatever the history consent.
         if let Err(e) = crate::fleet_policy::refresh(&app).await {
-            eprintln!("fleet policy: {e:#}");
+            tracing::warn!( error = %format!("{e:#}"), "fleet policy: {e:#}" );
         }
         // Off unless this machine has joined a fleet and its operator consented: an owner, a
         // machine alone, or a member that has not said yes pushes nothing.
         if !disabled()
             && let Err(e) = drain_app(&app, false).await
         {
-            eprintln!("fleet sync: {e:#}");
+            tracing::error!( error = %format!("{e:#}"), "fleet sync: {e:#}" );
         }
         tokio::select! {
             _ = tokio::time::sleep(DRAIN_INTERVAL) => {}

@@ -63,6 +63,7 @@ export function boundaryEvent(kind, control, detail, { target = null, now = () =
 }
 
 const WRITE_WORDS = new Set(['cp', 'mv', 'tee', 'install', 'touch', 'ln', 'rsync', 'dd']);
+const NAVIGATION = new Set(['cd', 'pushd', 'popd']);
 
 /** Strips one layer of quotes off a shell word. */
 const unquote = (word) => word.replace(/^(['"])(.*)\1$/, '$2');
@@ -82,7 +83,8 @@ export function commandTarget(command) {
   let fallback;
   for (const segment of text.split(/&&|\|\||[;|\n]/)) {
     const words = segment.trim().split(/\s+/).filter(Boolean).map(unquote);
-    if (!words.length) continue;
+    // `cd /workspace && cat .env` was after `.env`: where a command moves to is not its target.
+    if (!words.length || NAVIGATION.has(words[0])) continue;
     const args = words.slice(1).filter((w) => !w.startsWith('-'));
     if (WRITE_WORDS.has(words[0])) {
       const of = args.find((w) => w.startsWith('of='));
@@ -94,10 +96,11 @@ export function commandTarget(command) {
   return fallback;
 }
 
-/** The `boundary` event an exec-policy deny becomes. */
+/** The `boundary` event an exec-policy deny becomes. Its target is the path the rule matched when
+ * the rule names one (a `touches` rule), else the path the command plainly names. */
 export function execPolicyBoundary(hit, command, opts = {}) {
   return boundaryEvent('exec_policy_deny', `exec_policy:${hit.rule}`, `${hit.decision} (${hit.layer}): ${command}`, {
-    target: commandTarget(command),
+    target: hit.target ?? commandTarget(command),
     ...opts,
   });
 }

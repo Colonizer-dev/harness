@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, duplicateHolder, epicMarker, heldByFor, heldInBatch, isEpic } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
-import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
+import { colonyLabel, needsYouFeed, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, sessionCost } from "../spend";
 import type { DuplicateHolder, HarnessStatus, Issue, OrgInfo, Repo, Session, StorageHealth } from "../types";
 import { type ImagePull } from "../useImagePull";
 import { Avatar } from "./Avatar";
+import { WorkspacePanel } from "../cockpit/WorkspaceMenu";
 import { DuplicateNotice } from "./DuplicateNotice";
 import { diskSize } from "./SessionView";
 import {
-  IconCheck,
   IconChevron,
   IconChevronDown,
   IconExternal,
@@ -59,6 +59,7 @@ export function Sidebar({
   selectedOrg,
   onSelectOrg,
   onOpenOrgSettings,
+  onManageOrgs,
   view,
   onOpenMemory,
   pendingMemory,
@@ -84,6 +85,8 @@ export function Sidebar({
   selectedOrg: string | null;
   onSelectOrg: (org: string | null) => void;
   onOpenOrgSettings: (org: string) => void;
+  /** "Manage orgs…": Settings → Workspaces → Show or hide orgs (issue #1213). */
+  onManageOrgs?: () => void;
   view: MainView;
   onOpenMemory: () => void;
   pendingMemory: number;
@@ -139,7 +142,7 @@ export function Sidebar({
       </div>
 
       <div className="mx-3 mb-1 flex items-center gap-1.5">
-        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} onOpenSettings={onOpenOrgSettings} />
+        <OrgSwitcher orgs={orgs} sessions={sessions} selected={selectedOrg} onSelect={onSelectOrg} onOpenSettings={onOpenOrgSettings} onManageOrgs={onManageOrgs} />
         {selectedOrg && (
           <button
             type="button"
@@ -238,10 +241,6 @@ function SidebarTab({ active, onClick, children }: { active: boolean; onClick: (
   );
 }
 
-function colonyCount(n: number): string {
-  return `${n} ${n === 1 ? "colony" : "colonies"}`;
-}
-
 /** "3 live · 2 queued"; either half drops out, and neither means show nothing. */
 function liveQueuedLabel(live: number, queued: number): string {
   return [live > 0 ? `${live} live` : null, queued > 0 ? `${queued} queued` : null].filter(Boolean).join(" · ");
@@ -253,6 +252,7 @@ function OrgSwitcher({
   selected,
   onSelect,
   onOpenSettings,
+  onManageOrgs,
 }: {
   orgs: OrgInfo[];
   sessions: Session[];
@@ -260,26 +260,10 @@ function OrgSwitcher({
   onSelect: (org: string | null) => void;
   /** A hidden org is not a workspace choice, but its settings dialog must stay reachable — this is how. */
   onOpenSettings: (org: string) => void;
+  onManageOrgs?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const trigger = useRef<HTMLButtonElement>(null);
 
   const { visible, hidden } = orgEntries(orgs, sessions);
   // A hidden org still answers "where am I" if it was selected when it was switched off.
@@ -289,17 +273,13 @@ function OrgSwitcher({
   const live = current ? current.live : totalLive;
   const queued = current ? current.queued : totalQueued;
   const counts = liveQueuedLabel(live, queued);
-  const choose = (org: string | null) => {
-    onSelect(org);
-    setOpen(false);
-  };
-
   return (
-    <div ref={ref} className="relative min-w-0 flex-1">
+    <div className="relative min-w-0 flex-1">
       <button
+        ref={trigger}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-haspopup="listbox"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="Switch organisation"
         className="flex h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-border bg-panel px-2.5 text-left hover:bg-panel-2"
@@ -316,122 +296,18 @@ function OrgSwitcher({
         <IconChevronDown size={14} className={cx("shrink-0 text-faint transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="scroll-thin absolute inset-x-0 top-[calc(100%+4px)] z-30 max-h-80 overflow-y-auto rounded-xl border border-border bg-panel p-1 shadow-[var(--shadow)]">
-          <ul role="listbox" aria-label="Organisations">
-            <OrgOption
-              label="All orgs"
-              meta={colonyCount(sessions.length)}
-              live={totalLive}
-              queued={totalQueued}
-              pending={0}
-              active={!selected}
-              icon={
-                <span className="grid size-5 shrink-0 place-items-center rounded-md bg-panel-3 text-muted">
-                  <IconOrg size={12} />
-                </span>
-              }
-              onClick={() => choose(null)}
-            />
-            {visible.length > 0 && <li role="separator" className="my-1 border-t border-border" />}
-            {visible.map((e) => (
-              <OrgOption
-                key={e.org}
-                label={e.org}
-                meta={colonyCount(e.total)}
-                live={e.live}
-                queued={e.queued}
-                pending={e.pending}
-                avatar={e.avatar}
-                active={sameOrg(selected, e.org)}
-                onClick={() => choose(e.org)}
-              />
-            ))}
-          </ul>
-          {hidden.length > 0 && (
-            <div className="mt-1 border-t border-border pt-1">
-              <button
-                type="button"
-                onClick={() => setShowHidden((v) => !v)}
-                aria-expanded={showHidden}
-                className="flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-small text-muted hover:bg-panel-2 hover:text-text"
-              >
-                <IconChevron size={12} className={cx("shrink-0 transition-transform", showHidden && "rotate-90")} />
-                Hidden ({hidden.length})
-              </button>
-              {showHidden && (
-                <ul className="pb-1">
-                  {hidden.map((e) => (
-                    <li key={e.org} className="flex items-center gap-2 rounded-lg px-2.5 py-1.5">
-                      <Avatar name={e.org} src={e.avatar} size={20} rounded="md" />
-                      <span className="min-w-0 flex-1 truncate text-body-sm text-muted">{e.org}</span>
-                      <Badge tone="neutral">Off</Badge>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setOpen(false);
-                          onOpenSettings(e.org);
-                        }}
-                        aria-label={`Settings for ${e.org}`}
-                        title={`Settings for ${e.org}`}
-                        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-3 hover:text-text"
-                      >
-                        <IconSettings size={14} />
-                      </button>
-                    </li>
-                  ))}
-                  <li className="px-2.5 pt-0.5 text-meta-lg text-faint">Switched off in their settings; their colonies stay listed.</li>
-                </ul>
-              )}
-            </div>
-          )}
-        </div>
+        <WorkspacePanel
+          anchor={trigger}
+          orgs={visible}
+          hiddenOrgs={hidden}
+          selectedOrg={selected}
+          onSelect={onSelect}
+          onOpenOrgSettings={onOpenSettings}
+          onManageOrgs={onManageOrgs}
+          onClose={() => setOpen(false)}
+        />
       )}
     </div>
-  );
-}
-
-function OrgOption({
-  label,
-  meta,
-  live,
-  queued,
-  pending,
-  avatar,
-  icon,
-  active,
-  onClick,
-}: {
-  label: string;
-  meta: string;
-  live: number;
-  queued: number;
-  pending: number;
-  avatar?: string | null;
-  /** A fixed tile for the row that is not one org ("All orgs"). */
-  icon?: ReactNode;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const counts = liveQueuedLabel(live, queued);
-  return (
-    <li role="option" aria-selected={active}>
-      <button
-        type="button"
-        onClick={onClick}
-        className={cx("flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left", active ? "bg-accent-soft" : "hover:bg-panel-2")}
-      >
-        {icon ?? <Avatar name={label} src={avatar} size={20} rounded="md" />}
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-body font-medium">{label}</span>
-          <span className="block text-meta-lg text-faint">
-            {meta}
-            {pending > 0 && ` · ${pending} to review`}
-          </span>
-        </span>
-        {counts && <Badge tone="info">{counts}</Badge>}
-        <IconCheck size={14} className={cx("shrink-0 text-accent", !active && "invisible")} />
-      </button>
-    </li>
   );
 }
 
@@ -509,7 +385,7 @@ function StatusRow({ status, error, onOpenSettings }: { status: HarnessStatus | 
  * can follow.
  */
 function AttentionStrip({ sessions, onOpenColony }: { sessions: Session[]; onOpenColony: (session: Session) => void }) {
-  const needing = useMemo(() => sortSessions(sessions.filter(needsYou)), [sessions]);
+  const needing = useMemo(() => sortSessions(needsYouFeed(sessions).rows), [sessions]);
   if (needing.length === 0) return null;
   return (
     <div role="region" aria-label={needsYouLabel(needing.length)} className="mx-3 mt-2 rounded-xl border border-warn/40 bg-warn-soft px-2 py-2">

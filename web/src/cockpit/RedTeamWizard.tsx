@@ -8,7 +8,8 @@ import { ModelPicker } from "../components/ModelPicker";
 import { Button, Spinner, cx } from "../components/ui";
 import { formatCost } from "../spend";
 import type { HunterProbe, RedTeamPreset, RedTeamRun, Repo, Session, StartRedTeamRunRequest } from "../types";
-import { PRESETS, WEEKDAYS, estimateCost, toUtcCadence, type ScheduleChoice } from "./redTeamPlan";
+import { PRESETS, WEEKDAYS, activeLine, activeRunFor, estimateCost, historyLine, plural, sortForRedTeam, toUtcCadence, type ScheduleChoice } from "./redTeamPlan";
+import { CancelRunButton } from "./RedTeamCancel";
 import { IconAnt } from "../components/icons";
 import { HackerIcon } from "./HackerIcon";
 import strixLogo from "../assets/hunters/strix.png";
@@ -59,9 +60,12 @@ export function RedTeamWizard({
   onDone,
   onOpenHistory,
   onStart,
+  onCancel,
 }: {
   org: string | null;
   open: boolean;
+  /** Cancels a run (the repository list's Cancel run button). */
+  onCancel?: (id: string) => Promise<void>;
   /** App's start, which also drops the new run into its list; the api call when absent. */
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   sessions: Session[];
@@ -85,7 +89,7 @@ export function RedTeamWizard({
       aria-labelledby="redteam-wizard-title"
       className="m-auto w-[min(620px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
     >
-      {open && org && <WizardBody key={org} org={org} sessions={sessions} runs={runs} onClose={onClose} onDone={onDone} onOpenHistory={onOpenHistory} onStart={onStart} />}
+      {open && org && <WizardBody key={org} org={org} sessions={sessions} runs={runs} onClose={onClose} onDone={onDone} onOpenHistory={onOpenHistory} onStart={onStart} onCancel={onCancel} />}
     </dialog>
   );
 }
@@ -98,12 +102,14 @@ export function WizardBody({
   onDone,
   onOpenHistory,
   onStart,
+  onCancel,
   initialStep = 0,
   initialPreset = "general",
   initialHunter = "swarm",
 }: {
   org: string;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
+  onCancel?: (id: string) => Promise<void>;
   sessions: Session[];
   runs: RedTeamRun[];
   onClose: () => void;
@@ -121,7 +127,7 @@ export function WizardBody({
   const models = useModels();
   const [step, setStep] = useState<Step>(initialStep);
   const [repos, setRepos] = useState<Repo[] | null>(null);
-  const [picked, setPicked] = useState<string[]>([]);
+  const [pickedRaw, setPicked] = useState<string[]>([]);
   const [probes, setProbes] = useState<Record<string, HunterProbe | null>>({});
   const [model, setModel] = useState("");
   const [subagentModel, setSubagentModel] = useState("");
@@ -131,10 +137,11 @@ export function WizardBody({
   const [preset, setPreset] = useState<RedTeamPreset>(initialPreset);
   const [schedule, setSchedule] = useState<ScheduleChoice>({ every: "once" });
   const [busy, setBusy] = useState(false);
-  // Read once when the repositories arrive: a poll's fresh session list must not reset the picks.
-  const sessionsAtOpen = useRef(sessions);
+  // Read once when the repositories arrive: a poll's fresh run list must not reset the picks.
+  const runsAtOpen = useRef(runs);
 
-  // The org's repositories, most active first; the one with the most colonies starts picked.
+  // The org's repositories, most recently pushed first; the first one that is free starts picked.
+  // The list's own order (never hunted first, oldest hunt next, active last) is applied at render.
   useEffect(() => {
     let cancelled = false;
     api
@@ -142,10 +149,9 @@ export function WizardBody({
       .then((list) => {
         if (cancelled) return;
         const mine = list.filter((r) => !r.archived && r.full_name.split("/")[0]?.toLowerCase() === org.toLowerCase());
-        const activity = (repo: string) => sessionsAtOpen.current.filter((s) => s.repo === repo).length;
-        mine.sort((a, b) => activity(b.full_name) - activity(a.full_name) || (b.pushed_at ?? "").localeCompare(a.pushed_at ?? ""));
+        mine.sort((a, b) => (b.pushed_at ?? "").localeCompare(a.pushed_at ?? ""));
         setRepos(mine);
-        setPicked(mine.slice(0, 1).map((r) => r.full_name));
+        setPicked(sortForRedTeam(mine, runsAtOpen.current).filter((r) => !activeRunFor(runsAtOpen.current, r.full_name)).slice(0, 1).map((r) => r.full_name));
       })
       .catch(() => !cancelled && setRepos([]));
     for (const id of ["strix", "shannon"]) {
@@ -158,6 +164,9 @@ export function WizardBody({
       cancelled = true;
     };
   }, [api, org]);
+
+  // A repository that has an active run cannot be picked, even if it was when its run started.
+  const picked = useMemo(() => pickedRaw.filter((r) => !activeRunFor(runs, r)), [pickedRaw, runs]);
 
   // Shannon runs one colony per repository whatever the picker says, so its swarm size is always one.
   const swarmSize = hunter === "shannon" ? 1 : swarm;
@@ -172,7 +181,7 @@ export function WizardBody({
       const shared = { hunter, preset, model: model || null, subagent_model: subagentModel || null, swarm_size: swarmSize, autofix };
       if (cadence) {
         await api.createRedTeamSchedule({ org, repos: picked, cadence, ...shared });
-        toast(`Red team scheduled for ${picked.length} ${picked.length === 1 ? "repository" : "repositories"} in ${org}`);
+        toast(`Red team scheduled for ${plural(picked.length, "repository", "repositories")} in ${org}`);
       } else {
         const failed: string[] = [];
         for (const repo of picked) {
@@ -227,17 +236,13 @@ export function WizardBody({
           <div className="space-y-5">
             <RedTeamIntro />
             <Field label="Who hunts">
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-1 items-stretch gap-2 sm:grid-cols-3">
                 {HUNTERS.map((h) => {
                   const selectable = h.id === "swarm" || h.id === "shannon";
                   const probe = probes[h.id];
-                  const note = h.id === "shannon"
-                    ? "Ready · runs in a colony"
-                    : selectable
-                      ? "Ready"
-                      : probe?.manifest.available === false || !probe?.installed
-                        ? "Coming soon"
-                        : "Installed · runs coming soon";
+                  // Short pills that never wrap; what does not fit in one goes on a muted line under it.
+                  const note = selectable ? "Ready" : "Coming soon";
+                  const detail = h.id === "shannon" ? "runs in a colony" : null;
                   return (
                     <button
                       key={h.id}
@@ -247,7 +252,7 @@ export function WizardBody({
                       onClick={() => selectable && setHunter(h.id)}
                       title={selectable ? undefined : `${h.name} installs and probes, but red-team runs do not drive its scans yet${probe ? ` — ${probe.probe.detail}` : ""}`}
                       className={cx(
-                        "flex flex-col gap-1 rounded-xl border p-3 text-left",
+                        "flex h-full flex-col items-start gap-1.5 rounded-xl border p-3 text-left",
                         !selectable
                           ? "cursor-not-allowed border-border bg-panel-2 opacity-70"
                           : hunter === h.id
@@ -255,18 +260,19 @@ export function WizardBody({
                             : "cursor-pointer border-border bg-panel-2 hover:border-text/30",
                       )}
                     >
-                      <span className="flex items-center justify-between gap-2 text-body font-semibold">
-                        <span className="flex min-w-0 items-center gap-2">
-                          {h.logo ? (
-                            <img src={h.logo} alt="" width={22} height={22} className="size-[22px] shrink-0 rounded-md" />
-                          ) : (
-                            <span className="grid size-[22px] shrink-0 place-items-center rounded-md bg-accent text-on-accent">
-                              <IconAnt size={14} />
-                            </span>
-                          )}
-                          <span className="truncate">{h.name}</span>
-                        </span>
-                        <span className={cx("rounded-full px-1.5 py-px text-meta-sm font-medium", selectable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
+                      <span className="flex items-center gap-2 text-body font-semibold">
+                        {h.logo ? (
+                          <img src={h.logo} alt="" width={22} height={22} className="size-[22px] shrink-0 rounded-md" />
+                        ) : (
+                          <span className="grid size-[22px] shrink-0 place-items-center rounded-md bg-accent text-on-accent">
+                            <IconAnt size={14} />
+                          </span>
+                        )}
+                        <span className="break-words">{h.name}</span>
+                      </span>
+                      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className={cx("whitespace-nowrap rounded-full px-1.5 py-px text-meta-sm font-medium", selectable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
+                        {detail && <span className="whitespace-nowrap text-meta-lg text-muted">{detail}</span>}
                       </span>
                       <span className="text-small leading-snug text-muted">{h.blurb}</span>
                     </button>
@@ -294,31 +300,22 @@ export function WizardBody({
                 ))}
               </div>
             </Field>
-            <Field label="Repositories" hint="One run per repository. A repository that already has an active run is skipped.">
+            <Field label="Repositories" hint="One run per repository. A repository that already has an active run is shown disabled and skipped.">
               {repos === null ? (
                 <p className="flex items-center gap-2 text-body-sm text-muted">
                   <Spinner /> Loading repositories…
                 </p>
-              ) : repos.length === 0 ? (
-                <p className="text-body-sm text-muted">No repositories found for {org}.</p>
               ) : (
-                <div className="max-h-48 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1.5 scroll-thin">
-                  <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-small-lg text-muted hover:bg-panel-2">
-                    <input type="checkbox" checked={picked.length === repos.length} onChange={(e) => setPicked(e.target.checked ? repos.map((r) => r.full_name) : [])} />
-                    All {repos.length}
-                  </label>
-                  {repos.map((r) => (
-                    <label key={r.full_name} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-body-sm hover:bg-panel-2">
-                      <input
-                        type="checkbox"
-                        checked={picked.includes(r.full_name)}
-                        onChange={(e) => setPicked((p) => (e.target.checked ? [...p, r.full_name] : p.filter((x) => x !== r.full_name)))}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{r.full_name.split("/")[1]}</span>
-                      <span className="text-meta-lg tabular-nums text-faint">{sessions.filter((s) => s.repo === r.full_name).length} colonies</span>
-                    </label>
-                  ))}
-                </div>
+                <RepoList
+                  org={org}
+                  repos={repos}
+                  runs={runs}
+                  sessions={sessions}
+                  picked={picked}
+                  onPick={setPicked}
+                  onCancel={onCancel}
+                  onOpenRun={() => onOpenHistory(org)}
+                />
               )}
             </Field>
           </div>
@@ -347,7 +344,7 @@ export function WizardBody({
             <div role="note" className="rounded-xl border border-warn/40 bg-warn/10 p-3.5 text-body-sm leading-snug">
               <p className="font-semibold text-warn">Red-team runs are expensive</p>
               <p className="mt-1 text-text">
-                This starts {hunters} autonomous {hunters === 1 ? "colony" : "colonies"} ({swarmSize} per repository × {picked.length}), each in long sessions reading and reproducing code
+                This starts {plural(hunters, "autonomous colony", "autonomous colonies")} ({swarmSize} per repository × {picked.length}), each in long sessions reading and reproducing code
                 {schedule.every === "once" ? "" : `, and repeats ${schedule.every === "weekly" ? "every week" : "every month"} until you switch the schedule off`}.
               </p>
               <p className="mt-1 text-muted">
@@ -421,7 +418,7 @@ export function WizardBody({
 
       <div className="flex shrink-0 items-center gap-2 border-t border-border px-5 py-3">
         <span className="mr-auto text-small-lg text-muted">
-          {picked.length} {picked.length === 1 ? "repository" : "repositories"} · {hunters} {hunters === 1 ? "hunter" : "hunters"}
+          {plural(picked.length, "repository", "repositories")} · {plural(hunters, "hunter")}
           {preset === "security" ? " · security" : ""}
         </span>
         {step > 0 && <Button onClick={() => setStep((s) => (s - 1) as Step)}>Back</Button>}
@@ -447,5 +444,88 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {!hint && <div className="mb-2" />}
       {children}
     </section>
+  );
+}
+
+/**
+ * The repositories a red team can target (#1145): one row each, with a single muted line to choose by
+ * (its red-team history and last push) — or, for a repository with an active run, the row is disabled
+ * and says how far the run is, with a link to it and a Cancel run button. "All" skips those rows.
+ */
+export function RepoList({
+  org,
+  repos,
+  runs,
+  sessions,
+  picked,
+  onPick,
+  onCancel,
+  onOpenRun,
+  now = Date.now(),
+}: {
+  org: string;
+  repos: Repo[];
+  runs: RedTeamRun[];
+  sessions: Session[];
+  picked: string[];
+  onPick: (picked: string[] | ((p: string[]) => string[])) => void;
+  onCancel?: (id: string) => Promise<void>;
+  onOpenRun?: (run: RedTeamRun) => void;
+  now?: number;
+}) {
+  if (repos.length === 0) return <p className="text-body-sm text-muted">No repositories found for {org}.</p>;
+  const rows = sortForRedTeam(repos, runs).map((r) => ({ repo: r, active: activeRunFor(runs, r.full_name) }));
+  const free = rows.filter((r) => !r.active).map((r) => r.repo.full_name);
+  const skipped = rows.filter((r) => r.active);
+  const name = (full: string) => full.split("/")[1] ?? full;
+  return (
+    <div className="max-h-56 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1.5 scroll-thin">
+      <div className="flex flex-wrap items-center gap-x-2 rounded-md px-2 py-1 text-small-lg text-muted">
+        <label className="flex cursor-pointer items-center gap-2 hover:text-text">
+          <input
+            type="checkbox"
+            disabled={free.length === 0}
+            checked={free.length > 0 && free.every((f) => picked.includes(f))}
+            onChange={(e) => onPick(e.target.checked ? free : [])}
+          />
+          All {free.length}
+        </label>
+        {skipped.length > 0 && (
+          <span className="text-meta-lg text-faint">
+            {free.length} of {rows.length}: {skipped.map((r) => name(r.repo.full_name)).join(", ")} already {skipped.length === 1 ? "has a run" : "have runs"}
+          </span>
+        )}
+      </div>
+      {rows.map(({ repo: r, active }) => (
+        <div
+          key={r.full_name}
+          aria-disabled={active ? true : undefined}
+          className={cx("flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-2 py-1", active ? "bg-panel-2/60" : "hover:bg-panel-2")}
+        >
+          <input
+            id={`rt-repo-${r.full_name}`}
+            type="checkbox"
+            aria-label={name(r.full_name)}
+            disabled={active !== null}
+            checked={!active && picked.includes(r.full_name)}
+            onChange={(e) => onPick((p) => (e.target.checked ? [...p, r.full_name] : p.filter((x) => x !== r.full_name)))}
+          />
+          <label htmlFor={`rt-repo-${r.full_name}`} className={cx("min-w-0 flex-1 basis-32 cursor-pointer", active && "cursor-not-allowed")}>
+            <span className={cx("block truncate text-body-sm", active && "text-muted")}>{name(r.full_name)}</span>
+            <span className="block truncate text-meta-lg text-faint">{active ? activeLine(active, sessions) : historyLine(runs, r.full_name, r.pushed_at, now)}</span>
+          </label>
+          {active && (
+            <span className="flex shrink-0 items-center gap-1">
+              {onOpenRun && (
+                <button type="button" onClick={() => onOpenRun(active)} className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-small text-accent hover:underline">
+                  View run
+                </button>
+              )}
+              {onCancel && <CancelRunButton run={active} onCancel={onCancel} />}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }

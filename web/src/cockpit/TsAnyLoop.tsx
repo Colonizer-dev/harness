@@ -6,7 +6,11 @@
 // anything.
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { Badge, Button, Spinner, Switch, cx, inputClass } from "../components/ui";
+import { Badge, Button, cx, inputClass } from "../components/ui";
+import { RepoMultiSelect } from "../components/RepoMultiSelect";
+import { DetailSection, GroupedDetails, LoopCard, scheduleLine } from "./LoopCard";
+import { IconBrackets } from "./loopIcons";
+import { BUILTIN_HISTORY_ID, type DetailGroupDef, type DetailItem } from "./loopHistory";
 import type { LoopCadence, TsAnyLoop as LoopView, TsAnyReport, TsAnyRun, TsAnySettings } from "../types";
 import { describeLoopCadence, relative } from "./loops";
 
@@ -80,11 +84,33 @@ export function Sparkline({ values, width = 120, height = 28 }: { values: number
   );
 }
 
-/** A run's report: the counts, the busiest modules, what was dispatched and skipped, the recounts. */
+const TS_ANY_GROUPS: DetailGroupDef[] = [
+  { key: "dispatched", label: "Dispatched", tone: "ok" },
+  { key: "checks", label: "Recounted after publishing", tone: "info" },
+  { key: "skipped", label: "Skipped", tone: "neutral" },
+  { key: "warnings", label: "Warnings", tone: "warn" },
+];
+
+/** A report's dispatches, skips, recounts and warnings as grouped detail items. */
+export function tsAnyItems(report: TsAnyReport): DetailItem[] {
+  const items: DetailItem[] = [];
+  // A repository with no TypeScript is not counted, so its notes are not the run's news.
+  for (const r of report.repos.filter((x) => x.typescript)) {
+    if (r.error) items.push({ group: "warnings", repo: r.repo, reason: r.error });
+    for (const n of r.notes) items.push({ group: "warnings", repo: r.repo, reason: n });
+  }
+  for (const d of report.dispatched) items.push({ group: "dispatched", repo: d.repo, ref: { text: d.title, bare: true }, colony: d.session ?? undefined, reason: "" });
+  for (const s of report.skipped) items.push({ group: "skipped", repo: s.repo, reason: `${s.module ? `${s.module}: ` : ""}${s.reason}` });
+  for (const c of report.checks) items.push({ group: "checks", repo: c.repo, ref: { text: c.module, bare: true }, reason: `${c.flagged ? "needs a look: " : ""}${c.summary}` });
+  return items;
+}
+
+/** A run's report: the counts, the busiest modules, then what was dispatched, skipped and recounted, grouped. */
 export function TsAnyReportView({ report, now = Date.now(), onOpenColony }: { report: TsAnyReport; now?: number; onOpenColony?: (id: string) => void }): ReactElement {
   const counted = report.repos.filter((r) => r.typescript);
+  const defs = TS_ANY_GROUPS.map((g) => (g.key === "dispatched" && report.dry_run ? { ...g, label: "Would dispatch" } : g));
   return (
-    <div className="mt-3 space-y-3 text-small-lg">
+    <div className="space-y-3 text-small-lg">
       <div className="flex flex-wrap items-center gap-2 text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Dry run" : "Last run"}</span>
         <span>{relative(report.finished_at, now)}</span>
@@ -95,7 +121,7 @@ export function TsAnyReportView({ report, now = Date.now(), onOpenColony }: { re
       </div>
       {report.note && <p className="m-0 text-muted">{report.note}</p>}
       {report.attention.length > 0 && (
-        <div className="rounded-lg border border-[var(--err,#dc2626)] px-3 py-2">
+        <div className="rounded-lg border border-err px-3 py-2">
           <div className="font-medium text-text">Needs attention</div>
           <ul className="m-0 mt-1 list-none space-y-1 p-0">
             {report.attention.map((a) => (
@@ -115,8 +141,8 @@ export function TsAnyReportView({ report, now = Date.now(), onOpenColony }: { re
         </div>
       )}
       {counted.map((r) => (
-        <div key={r.repo}>
-          <div className="flex flex-wrap items-center gap-2">
+        <div key={r.repo} className="rounded-xl border border-border bg-panel px-3.5 py-3">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="font-mono text-text">{r.repo}</span>
             <span className="text-muted">
               {r.total} explicit any
@@ -126,79 +152,28 @@ export function TsAnyReportView({ report, now = Date.now(), onOpenColony }: { re
           </div>
           <div className="text-faint">{r.method === "typescript" ? `counted with ${r.method_note}` : r.method_note}</div>
           {r.modules.length > 0 && (
-            <table className="mt-1 w-full border-collapse text-left">
+            <table className="mt-2 w-full border-collapse text-left">
               <thead className="text-faint">
                 <tr>
                   <th className="py-1 pr-2 font-normal">Module</th>
-                  <th className="py-1 pr-2 font-normal">any</th>
-                  <th className="py-1 pr-2 font-normal">Files</th>
+                  <th className="py-1 pr-2 text-right font-normal">any</th>
+                  <th className="py-1 pl-2 text-right font-normal">Files</th>
                 </tr>
               </thead>
               <tbody>
                 {r.modules.slice(0, 5).map((m) => (
                   <tr key={m.module} className="border-t border-border">
                     <td className="py-1 pr-2 font-mono text-text">{m.module}</td>
-                    <td className="py-1 pr-2 text-muted">{m.explicit}</td>
-                    <td className="py-1 pr-2 text-muted">{m.files}</td>
+                    <td className="py-1 pr-2 text-right tabular-nums text-muted">{m.explicit}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums text-muted">{m.files}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
-          {(r.error || r.notes.length > 0) && (
-            <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
-              {[...(r.error ? [r.error] : []), ...r.notes].map((line) => (
-                <li key={line}>⚠ {line}</li>
-              ))}
-            </ul>
-          )}
         </div>
       ))}
-      {report.dispatched.length > 0 && (
-        <div>
-          <div className="font-medium text-text">{report.dry_run ? "Would dispatch" : "Dispatched"}</div>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
-            {report.dispatched.map((d) => (
-              <li key={`${d.repo}:${d.module}`}>
-                {d.session && onOpenColony ? (
-                  <button type="button" onClick={() => onOpenColony(d.session!)} className="cursor-pointer border-0 bg-transparent p-0 text-left text-muted underline decoration-dotted hover:text-text">
-                    {d.title}
-                  </button>
-                ) : (
-                  d.title
-                )}{" "}
-                · <span className="font-mono">{d.repo}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {report.skipped.length > 0 && (
-        <div>
-          <div className="font-medium text-text">Skipped</div>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
-            {report.skipped.map((s, i) => (
-              <li key={`${s.repo}:${s.module}:${i}`}>
-                <span className="font-mono">{s.repo}</span>
-                {s.module ? ` (${s.module})` : ""}: {s.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {report.checks.length > 0 && (
-        <div>
-          <div className="font-medium text-text">Recounted after publishing</div>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
-            {report.checks.map((c) => (
-              <li key={c.session}>
-                {c.flagged ? "⚠ " : "✓ "}
-                <span className="font-mono">{c.repo}</span> ({c.module}): {c.summary}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <GroupedDetails items={tsAnyItems(report)} defs={defs} unit={{ one: "batch", many: "batches" }} onOpenColony={onOpenColony} />
     </div>
   );
 }
@@ -209,8 +184,6 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
   const toast = useToast();
   const [view, setView] = useState<LoopView | null>(null);
   const [draft, setDraft] = useState<TsAnySettings | null>(null);
-  const [allowText, setAllowText] = useState("");
-  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<"save" | "dry" | "run" | null>(null);
   const [dry, setDry] = useState<TsAnyReport | null>(null);
 
@@ -219,7 +192,6 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
       (v) => {
         setView(v);
         setDraft((d) => d ?? v.settings);
-        setAllowText((t) => t || v.settings.allow.join(", "));
       },
       () => setView(null),
     );
@@ -238,7 +210,6 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
       const v = await api.saveTsAnyLoop(settings);
       setView(v);
       setDraft(v.settings);
-      setAllowText(v.settings.allow.join(", "));
       toast(v.settings.enabled ? `${v.name}: on for ${v.settings.allow.length || "no"} entr${v.settings.allow.length === 1 ? "y" : "ies"}` : `${v.name}: off`);
     } catch (e) {
       toast(errorMessage(e), "error");
@@ -265,49 +236,56 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
   };
 
   const s = view.settings;
-  const withAllow = { ...draft, allow: parseTsAnyAllow(allowText) };
+  const withAllow = draft;
   const shown = dry ?? view.last_report;
   const trend = trendOf(view.history);
+  const ready = s.allow.length > 0;
+  const attention = view.blocked
+    ? "Report only: external writes are blocked."
+    : view.attention.length > 0 && !dry
+      ? `${view.attention.length} published batch${view.attention.length === 1 ? "" : "es"} need${view.attention.length === 1 ? "s" : ""} review: ${view.attention.map((a) => `${a.repo} ${a.module}`).join(", ")}.`
+      : null;
 
   return (
-    <section className="mt-6 rounded-xl border border-border px-4 py-3" aria-label={view.name}>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="min-w-0 flex-1 basis-64">
-          <div className="flex items-center gap-2">
-            <span className="text-body-lg font-medium text-text">{view.name}</span>
-            <Badge>built-in</Badge>
-            {view.running && <Spinner />}
-          </div>
-          <div className="mt-0.5 text-small-lg text-muted">
-            {s.enabled && s.allow.length > 0
-              ? `${describeLoopCadence(s.cadence)} · ${s.allow.join(", ")}${view.next_run_at ? ` · next ${relative(view.next_run_at)}` : ""}`
-              : s.enabled
-                ? "on, but nothing is opted in: add an org or a repository"
-                : "off · counts explicit any on the host and hands one small batch per repository to a colony"}
-            {view.blocked ? " · report only (external writes are blocked)" : ""}
-          </div>
-        </div>
-        <Sparkline values={trend} />
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Switch checked={s.enabled} disabled={busy !== null} onChange={(on) => void save({ ...withAllow, enabled: on })} label={`${view.name} enabled`} />
+    <LoopCard
+      historyId={BUILTIN_HISTORY_ID.tsAny}
+      icon={<IconBrackets />}
+      name={view.name}
+      purpose="Counts explicit any in your TypeScript and hands one small batch per repository to a colony."
+      enabled={s.enabled}
+      onToggle={(on) => void save({ ...withAllow, enabled: on })}
+      busy={busy !== null}
+      running={view.running}
+      schedule={scheduleLine(describeLoopCadence(s.cadence), s.enabled, view.next_run_at, ready)}
+      scope={{ text: ready ? s.allow.join(", ") : "Not set up: add an org or a repository", ready }}
+      attention={attention}
+      refreshKey={view.last_report?.id}
+      onOpenColony={onOpenColony}
+      actions={
+        <>
           <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void run(true)}>
             {busy === "dry" ? "Counting…" : "Dry run"}
           </Button>
-          <Button size="sm" variant="secondary" disabled={busy !== null || !s.enabled || s.allow.length === 0} onClick={() => void run(false)}>
+          <Button size="sm" variant="secondary" disabled={busy !== null || !s.enabled || !ready} onClick={() => void run(false)}>
             {busy === "run" ? "Running…" : "Run now"}
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-            Settings
-          </Button>
-        </div>
-      </div>
-
-      {open && (
-        <div className="mt-3 grid gap-3 border-t border-border pt-3 text-small-lg sm:grid-cols-2">
-          <label className="sm:col-span-2">
+        </>
+      }
+    >
+      <DetailSection title="Explicit any over time" meta={trend.length > 1 ? `${trend[0]} to ${trend[trend.length - 1]}` : undefined}>
+        {trend.length > 1 ? <Sparkline values={trend} width={320} height={44} /> : <p className="m-0 text-body-sm text-faint">The trend appears after a second run.</p>}
+      </DetailSection>
+      <DetailSection title={dry ? "Dry run" : "Last run"}>
+        {shown ? <TsAnyReportView report={shown} onOpenColony={onOpenColony} /> : <p className="m-0 text-body-sm text-faint">Not run yet. A dry run counts without starting anything.</p>}
+      </DetailSection>
+      <DetailSection title="Settings">
+        <div className="grid gap-3 text-small-lg sm:grid-cols-2">
+          <div className="sm:col-span-2">
             <span className="text-muted">Opted-in orgs and repositories (empty: nothing runs)</span>
-            <input className={cx(inputClass, "mt-1")} value={allowText} placeholder="acme, globex/web" onChange={(e) => setAllowText(e.target.value)} aria-label="allowlist" />
-          </label>
+            <div className="mt-1">
+              <RepoMultiSelect label="allowlist" value={draft.allow} onChange={(allow) => setDraft({ ...draft, allow })} disabled={busy !== null} placeholder="Choose orgs or repositories" />
+            </div>
+          </div>
           <label>
             <span className="text-muted">How often</span>
             <select className={cx(inputClass, "mt-1")} value={tsAnyCadenceChoice(draft.cadence)} onChange={(e) => setDraft({ ...draft, cadence: tsAnyCadenceFor(e.target.value as TsAnyCadenceChoice, draft.cadence) })} aria-label="cadence">
@@ -330,7 +308,7 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
             <span className="text-muted">Cooldown per repository (hours)</span>
             <input type="number" min={1} max={720} className={cx(inputClass, "mt-1")} value={draft.cooldown_hours} onChange={(e) => setDraft({ ...draft, cooldown_hours: Number(e.target.value) })} aria-label="cooldown" />
           </label>
-          <div className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5 sm:col-span-2">
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={draft.offline_install} onChange={(e) => setDraft({ ...draft, offline_install: e.target.checked })} /> Install the repository's TypeScript offline, from the host's cache
             </label>
@@ -343,30 +321,11 @@ export function TsAnyLoopCard({ onOpenColony }: { onOpenColony: (id: string) => 
           </div>
           <div className="sm:col-span-2">
             <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void save(withAllow)}>
-              {busy === "save" ? "Saving…" : "Save"}
+              {busy === "save" ? "Saving…" : "Save changes"}
             </Button>
           </div>
         </div>
-      )}
-
-      {view.attention.length > 0 && !dry && (
-        <p className="mt-2 text-small-lg text-text">
-          ⚠ {view.attention.length} published batch{view.attention.length === 1 ? "" : "es"} need{view.attention.length === 1 ? "s" : ""} review: {view.attention.map((a) => `${a.repo} ${a.module}`).join(", ")}.
-        </p>
-      )}
-      {shown && <TsAnyReportView report={shown} onOpenColony={onOpenColony} />}
-      {view.history.length > 1 && (
-        <details className="mt-2 text-small-lg text-muted">
-          <summary className="cursor-pointer">History ({view.history.length} runs)</summary>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
-            {view.history.map((h) => (
-              <li key={h.id}>
-                {relative(h.at)} · {h.trigger} · {h.summary}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </section>
+      </DetailSection>
+    </LoopCard>
   );
 }

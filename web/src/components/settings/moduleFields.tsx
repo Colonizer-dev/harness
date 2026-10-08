@@ -43,20 +43,15 @@ export function valueOf(settings: Record<string, unknown>, key: string, field: S
   return field.type === "boolean" ? false : "";
 }
 
-/** What goes behind a field's "i": the schema description plus its default and range. */
+/** What goes behind a field's "i": its default and range. The description is the row's own help line. */
 function fieldInfo(field: SchemaField): ReactNode | null {
   const facts: string[] = [];
   if (field.default !== undefined && field.default !== null && field.default !== "") {
     facts.push(`Default ${typeof field.default === "boolean" ? (field.default ? "on" : "off") : String(field.default)}`);
   }
   if (field.minimum != null || field.maximum != null) facts.push(`Range ${field.minimum ?? "…"}–${field.maximum ?? "…"}`);
-  if (!field.description && facts.length === 0) return null;
-  return (
-    <>
-      {field.description && <p>{field.description}</p>}
-      {facts.length > 0 && <p className="text-muted">{facts.join(" · ")}</p>}
-    </>
-  );
+  if (facts.length === 0) return null;
+  return <p>{facts.join(" · ")}</p>;
 }
 
 /** The Headroom bundle download (GET/POST /api/headroom), polled while it runs. */
@@ -352,7 +347,7 @@ export function SettingField({
     // checked again at save time by the mothership (path policy: modules.rs `validate_settings`).
     const entries = Array.isArray(value) ? value.map(String) : [];
     return (
-      <Row id={id} label={label} info={info}>
+      <Row id={id} label={label} help={field.description} info={info}>
         <input
           id={id}
           type="text"
@@ -366,7 +361,7 @@ export function SettingField({
 
   if (field.type === "boolean") {
     return (
-      <Row id={id} label={label} info={info} inline>
+      <Row id={id} label={label} help={field.description} info={info} inline>
         <Switch id={id} checked={Boolean(value)} onChange={onChange} label={label} labelledBy={`${id}-label`} />
       </Row>
     );
@@ -374,7 +369,7 @@ export function SettingField({
 
   if (models && !field.enum) {
     return (
-      <Row id={id} label={label} info={info}>
+      <Row id={id} label={label} help={field.description} info={info}>
         <ModelPicker
           id={id}
           value={text}
@@ -389,7 +384,7 @@ export function SettingField({
 
   const numeric = field.type === "integer" || field.type === "number";
   return (
-    <Row id={id} label={label} info={info}>
+    <Row id={id} label={label} help={field.description} info={info}>
       {field.enum ? (
         <select
           id={id}

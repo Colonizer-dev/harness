@@ -300,7 +300,7 @@ pub async fn side_effects(app: &crate::Shared, marked: Vec<Session>) {
                 "its pull request is left open"
             };
             app.session_log(&session.id, "info", format!("{note}; {outcome}")).await;
-        } else if session.suspended.is_some() || session.status == SessionStatus::Queued {
+        } else if session.suspended.is_some() || matches!(session.status, SessionStatus::Queued | SessionStatus::Blocked) {
             app.session_log(&session.id, "info", format!("{note}; it will not start until it is kept"))
                 .await;
         } else if session.status.is_live() && session.status != SessionStatus::Starting {

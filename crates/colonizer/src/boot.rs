@@ -16,7 +16,7 @@ use crate::{
     sandbox::{self, BootSpec, Mount, Secret},
     sessions::{
         AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, ModelSubstitution, RunEndCause, Session, SessionLogger, SessionStatus,
-        agent_env, agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
+        agent_env, agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled, wait_until_ready,
     },
     stack,
     util::{append_line, random_token, truncate},
@@ -324,6 +324,10 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
         app.session_log(&id, "error", format!("session failed to start: {message}"))
             .await;
         teardown_vm(&app, &s).await;
+        // Issue #1206: a parent that cannot lend a branch moves the child, never fails it.
+        if e.downcast_ref::<stack::StackHold>().is_some() && requeue_stack_hold(&app, &id).await {
+            return;
+        }
         // A failed pre-warm boot (issue #701) is not a colony failure: the question is still open
         // and answerable, so the colony goes back to exactly what the suspension left.
         let mut attention = None;
@@ -355,6 +359,47 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             s.boot_retries = 0;
         })
         .await;
+    }
+}
+
+/// Puts a colony whose boot found its parent unable to lend a branch back where the parent's state
+/// says (issue #1206): blocked while the parent is paused, re-based on the default branch when the
+/// parent is gone for good, queued for the queue's own gate to decide otherwise (it walks a child of
+/// a failed parent up the stack or re-bases it). Never failed. `false` when the colony is no longer the boot's to move.
+async fn requeue_stack_hold(app: &Shared, id: &str) -> bool {
+    let sessions = app.sessions.read().await.clone();
+    let moved = app
+        .update_session(id, |x| {
+            if x.status != SessionStatus::Starting {
+                return None;
+            }
+            x.error = None;
+            x.updated_at = Utc::now();
+            Some(match crate::blocked::parent_state(x, &sessions) {
+                crate::blocked::ParentState::Paused(reason) => {
+                    x.status = SessionStatus::Blocked;
+                    x.blocked_reason = Some(reason.clone());
+                    format!("blocked: {reason}; no slot is held while it waits")
+                }
+                crate::blocked::ParentState::Gone(why) => {
+                    crate::blocked::rebase_on_default(x);
+                    x.status = SessionStatus::Queued;
+                    crate::blocked::rebased_message(&why)
+                }
+                crate::blocked::ParentState::Fine => {
+                    x.status = SessionStatus::Queued;
+                    "the colony it is stacked on cannot lend a branch yet; back in the queue".to_string()
+                }
+            })
+        })
+        .await
+        .and_then(|(_, message)| message);
+    match moved {
+        Some(message) => {
+            app.session_log(id, "info", message).await;
+            true
+        }
+        None => false,
     }
 }
 
@@ -811,6 +856,23 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // the marker, and only a *fresh* boot reads it: a resume carries the work forward instead.
     let handoff = !resume && crate::handoff::seeded(&dir);
     let bare = app.bare_repo(&s.repo);
+    // A fresh colony's mirror sync (a `git fetch`) needs only the repository, not the issue or the
+    // base, so it runs while the issue is fetched (issue #1143). The sync holds the repository lock
+    // only for itself; the worktree is cut under the lock again afterwards. A resume syncs nothing.
+    let sync = (!resume).then(|| {
+        let (app, repo, bare, log) = (app.clone(), s.repo.clone(), bare.clone(), app.logger(id));
+        tokio::spawn(async move {
+            let lock = app.repo_lock(&repo).await;
+            let _guard = lock.lock().await;
+            github::with_boot_retry(
+                &format!("syncing the local clone of {repo}"),
+                Some(&log),
+                boot_started_at,
+                || github::sync_repo(&app, &repo, &bare, &log),
+            )
+            .await
+        })
+    });
     // A fresh colony reads its issue from GitHub, riding out blips on the boot retry budget; a
     // resumed one already has it — stored at its first boot, or recovered from its first brief —
     // and does not ask GitHub again, so a GitHub that refuses or is unreachable cannot fail it.
@@ -834,6 +896,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
     })
     .await?;
+    // A colony auto mode started (issue #1219) is vetted again right before it reads the issue: the
+    // author is still trusted, nobody outside the org edited it, and only trusted comments stay.
+    let issue = match issue {
+        Some(mut issue) if !resume && crate::auto_colonize::is_auto(&s) => {
+            crate::auto_colonize::vet_at_boot(app, &s, &mut issue)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            store_issue(app.store(), &s.id, &issue, &log).await;
+            Some(issue)
+        }
+        other => other,
+    };
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked
@@ -871,10 +945,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             None => default_base(app, &s.repo, &log, boot_started_at).await?,
         },
         stack::BootBase::Default => default_base(app, &s.repo, &log, boot_started_at).await?,
+        // Issue #1206: neither is the child's failure; `boot` puts it back where its parent says.
         stack::BootBase::Wait { colony } => {
-            bail!("the colony `{colony}` this one is stacked on has no branch to build on yet")
+            return Err(stack::StackHold(format!(
+                "the colony `{colony}` this one is stacked on has no branch to build on yet"
+            ))
+            .into());
         }
-        stack::BootBase::Refuse(reason) => bail!("{reason}"),
+        stack::BootBase::Refuse(reason) => return Err(stack::StackHold(reason).into()),
     };
     let title = issue.as_ref().and_then(|i| i["title"].as_str()).map(String::from);
     app.update_session(id, |x| {
@@ -896,18 +974,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         refresh_base(app, &s.repo, &bare, &base, &log).await;
         admin
     } else {
-        let lock = app.repo_lock(&s.repo).await;
-        let _guard = lock.lock().await;
-        let synced = github::with_boot_retry(
-            &format!("syncing the local clone of {}", s.repo),
-            Some(&log),
-            boot_started_at,
-            || github::sync_repo(app, &s.repo, &bare, &log),
-        )
-        .await;
+        let synced = match sync.context("a fresh boot starts the mirror sync")?.await {
+            Ok(synced) => synced,
+            Err(e) => Err(anyhow::anyhow!("the mirror sync task failed: {e}")),
+        };
         if let Err(e) = synced {
             return Err(github::access_error(app, &s.repo, e).await);
         }
+        let lock = app.repo_lock(&s.repo).await;
+        let _guard = lock.lock().await;
         log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
             .await;
         // A hand-off names the branch the local session ran on; the worktree is cut from origin, so a
@@ -1076,7 +1151,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let sensitivity = crate::sensitivity::classify_paths(named_paths, &sensitivity_config);
     // Jev (jev.rs): an optional external classifier's second opinion, fetched here in the async boot
     // path — never inside `routing::decide`, which stays synchronous and pure. Off by default, and a
-    // silent no-op without both a setting and a `JEV_API_KEY` secret. Shadow mode records it for
+    // silent no-op without both a setting and a TypeSafe key (Secrets page or `JEV_API_KEY`). Shadow mode records it for
     // comparison; act mode (issue #583) lets a confident opinion pick the tier, never below the
     // floor `decide` derives from `sensitive` — whether this org's gateway demands more than any
     // provider for the task's class (sensitivity.rs `required_mark`).
@@ -1368,6 +1443,32 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         bail!("{message}");
     }
     let used = routing.used(&runner_env);
+    // The Claude account fallback (#1130): a colony of the Claude Code module asks the gateway, before
+    // each request that would go to Anthropic, whether the account is out and where to send it
+    // instead. The fallback's provider and model join the colony's recorded scope so the gateway
+    // carries those requests; nothing is probed or refused here, since the fallback may never be used.
+    let account_fallback = if agent.id == "claude-code" {
+        let model = setting_str(&agent_choice, &agent.schema, "account_fallback_model");
+        let model = model.trim().to_string();
+        routing
+            .providers
+            .iter()
+            .find(|p| providers::names_model_on(&model, &p.id))
+            .map(|p| (p.id.clone(), model.clone()))
+    } else {
+        None
+    };
+    if account_fallback.is_some() {
+        runner_env.insert(
+            "COLONIZER_ACCOUNT_ROUTE".into(),
+            json!({
+                "url": format!("http://host.microsandbox.internal:{}/account-route", app.cfg.gateway_bind.port()),
+                "headers": {crate::gateway::COLONY_HEADER: gateway_token},
+            })
+            .to_string()
+            .into(),
+        );
+    }
     // Recorded on the session because the gateway needs it long after boot: every proxied call is
     // checked against these sets (issue #409), so a colony's token opens only the providers — and
     // only the models — its model settings route to. Before the token is written (issue #681): the
@@ -1375,6 +1476,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.update_session(id, |x| {
         x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect());
         x.allowed_models = Some(routing.used_models(&runner_env));
+        if let Some((provider, model)) = &account_fallback {
+            if let Some(allowed) = x.allowed_providers.as_mut()
+                && !allowed.contains(provider)
+            {
+                allowed.push(provider.clone());
+            }
+            if let Some(allowed) = x.allowed_models.as_mut()
+                && !allowed.contains(model)
+            {
+                allowed.push(model.clone());
+            }
+        }
         // What the sensitivity resolution above settled on, for the cockpit to show (issue #704).
         x.model_substitutions = substitutions.clone();
     })
@@ -1533,9 +1646,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ("GIT_DIR".into(), admin.display().to_string()),
         ("GIT_WORK_TREE".into(), "/workspace".into()),
         ("GIT_INDEX_FILE".into(), "/tmp/colonizer-git-index".into()),
-        ("GIT_CONFIG_COUNT".into(), "1".into()),
+        ("GIT_CONFIG_COUNT".into(), "2".into()),
         ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
         ("GIT_CONFIG_VALUE_0".into(), "*".into()),
+        ("GIT_CONFIG_KEY_1".into(), "core.excludesFile".into()),
+        ("GIT_CONFIG_VALUE_1".into(), crate::path_policy::GUEST_EXCLUDE_FILE.into()),
     ];
     let mut mounts = vec![
         Mount {
@@ -1992,7 +2107,27 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // repository when the configured preset was `auto`, otherwise the one the
     // operator or the org pinned — and anything set explicitly in modules.json
     // still wins. See crates/colonizer/src/presets.rs.
-    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &crate::presets::defaults(&stack));
+    let mut preset_defaults = crate::presets::defaults(&stack);
+    // Issue #1141: under `auto` with no fixed parallel number, the machine size comes from the host
+    // — cores and RAM less the host's reserve — instead of the stack's table. Still only a default:
+    // a `cpus` or `memory` set in Settings wins, as it does over the stack's.
+    if orgs::effective_stack(&modules, &sandbox_schema, &org_settings) == crate::presets::AUTO
+        && let Some(size) = crate::capacity::boot_size(app, &modules).await
+    {
+        if let (Some(into), Some(auto)) = (preset_defaults.as_object_mut(), size.defaults().as_object()) {
+            into.extend(auto.clone());
+        }
+        log.info(format!(
+            "auto: sized this colony from the host at {} vCPUs and {}G (host keeps {}G and {} vCPUs)",
+            size.cpus, size.memory_gib, size.reserve_gib, size.reserve_cpus
+        ))
+        .await;
+        if size.slots <= 1 {
+            log.info(format!("auto: small host, running 1 colony at {} GB", size.memory_gib))
+                .await;
+        }
+    }
+    let sandbox_settings = crate::config::with_preset(&modules.sandbox, &preset_defaults);
     // Path policy (docs/path-policy.md, issue #300): credential-shaped files in the worktree are
     // masked out of the colony's view and its agent-facing config pinned read-only. The host plans
     // the enforcement — binds, plus an empty placeholder for every listed path the checkout does
@@ -2016,6 +2151,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE),
         &planned.placeholder_names(),
     )?;
+    // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
+    // credential files about to be committed, and the agent goes to ignore or inspect them. The
+    // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise.
+    let mut excludes = crate::path_policy::exclude_lines(&planned);
+    excludes.extend(crate::path_policy::ua_exclude_lines(&plugin_names));
+    crate::path_policy::write_list(&vm_dir.join(crate::path_policy::EXCLUDE_FILE), &excludes)?;
     crate::path_policy::apply(&wt, &planned)?;
     log.info(crate::path_policy::summary(&policy, &planned)).await;
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
@@ -2027,6 +2168,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Written before the VM starts, like the path policy above (a failed write fails the launch; a
     // missing list would leave the policy's conservative fallback — every absolute path asks).
     std::fs::write(vm_dir.join(sandbox::HOST_MOUNTS_FILE), sandbox::host_mounts_text(&mounts))?;
+    // The repository's own scripts at the base commit (issue #1239): the exec policy runs them
+    // without `script-egress` while their bytes are still the committed ones. Best effort; an
+    // empty list exempts nothing.
+    crate::tracked_scripts::write(app, &admin, &base, &vm_dir).await;
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
@@ -2099,6 +2244,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         let node = app.mesh().await?.wait_online(&s.sandbox, Duration::from_secs(120)).await?;
         let _ = app.store().remove_file(id, "vm/mesh-authkey").await;
         log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
+        // Bring the WireGuard path up now, so the first real request does not pay for the handshake.
+        let warmed = app.mesh().await?.warm(&node.ip).await;
+        app.session_log(id, "debug", format!("mesh path warm-up to {}: {warmed}", node.ip))
+            .await;
         app.update_session(id, |x| {
             x.mesh = Some(MeshInfo {
                 name: x.sandbox.clone(),
@@ -2114,12 +2263,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The base covers the guest's own start plus one health attempt left in flight when agentd
     // starts serving; a resume's readiness waits ride on top of it (issue #700, `restore_wait`).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90) + restore_wait;
-    loop {
-        match agentd_http(app, &s, "GET", "/v1/health").await {
-            Ok((200, _)) => break,
-            _ if tokio::time::Instant::now() > deadline => bail!("{}", AGENTD_NOT_READY),
-            _ => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
+    // Each attempt is cut off after a short limit and the next starts at once (issue #1143): the
+    // first dial through the mesh's SOCKS proxy can sit on a lost SYN for ~5 s before it fails.
+    let ready = wait_until_ready(
+        deadline,
+        || agentd_http(app, &s, "GET", "/v1/health"),
+        |n, took, outcome| async move {
+            app.session_log(id, "debug", format!("agentd readiness attempt {n}: {outcome} after {took:?}"))
+                .await
+        },
+    )
+    .await;
+    if !ready {
+        bail!("{}", AGENTD_NOT_READY);
     }
     log.info("agent daemon is ready").await;
     timing.mark("agentd");
@@ -2215,7 +2371,7 @@ pub(crate) fn jev_compaction(
         "Jev compaction is switched on, but fast-jev-compaction isn't installed (scripts/install.sh stages it); running without it",
     )?;
     let key =
-        key.ok_or("Jev compaction is switched on, but the mothership has no TypeSafe key (set JEV_API_KEY); running without it")?;
+        key.ok_or("Jev compaction is switched on, but the mothership has no TypeSafe key (save it on the Secrets page, or set JEV_API_KEY); running without it")?;
     Ok((source, key))
 }
 
@@ -2639,6 +2795,67 @@ mod tests {
                 .any(|w| w.contains("retrying in 1 min") && w.contains("retry 1 of 3")),
             "{warned:?}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1206: a boot that finds its parent unable to lend a branch puts the colony back — never
+    /// `failed`: blocked behind a failed parent it strictly stacks on, re-based on the default branch
+    /// when the parent is gone, queued otherwise.
+    #[tokio::test]
+    async fn a_boot_that_finds_its_parent_unable_to_lend_a_branch_never_fails_the_colony() {
+        let (app, root) = crate::sessions::tests::app_with_colony("kid", SessionStatus::Starting).await;
+        let mut parent = crate::sessions::tests::colony("acme", SessionStatus::Failed);
+        parent.id = "parentparent".into();
+        parent.issue = Some(6);
+        let set = |parent: Session, stack: bool| {
+            let app = app.clone();
+            async move {
+                *app.sessions.write().await = {
+                    let mut kid = app
+                        .session("kid")
+                        .await
+                        .unwrap_or_else(|| crate::sessions::tests::colony("acme", SessionStatus::Starting));
+                    kid.id = "kid".into();
+                    kid.status = SessionStatus::Starting;
+                    kid.parent = Some("parentparent".into());
+                    kid.stack = stack;
+                    vec![kid, parent]
+                };
+            }
+        };
+
+        // A paused parent blocks the child, with a reason that names it; nothing fails.
+        let mut paused = parent.clone();
+        paused.status = SessionStatus::Stopped;
+        set(paused, true).await;
+        assert!(requeue_stack_hold(&app, "kid").await);
+        let s = app.session("kid").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Blocked);
+        assert!(
+            s.blocked_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("#6") && r.contains("stopped")),
+            "{:?}",
+            s.blocked_reason
+        );
+        assert!(s.error.is_none());
+
+        // A parent gone for good re-bases the child on the default branch, queued.
+        let mut gone = parent.clone();
+        gone.status = SessionStatus::NoChanges;
+        set(gone, true).await;
+        assert!(requeue_stack_hold(&app, "kid").await);
+        let s = app.session("kid").await.unwrap();
+        assert_eq!((s.status, s.parent.clone()), (SessionStatus::Queued, None));
+
+        // A failed parent goes back to the queue, whose gate walks the child up the stack or re-bases it.
+        set(parent, true).await;
+        assert!(requeue_stack_hold(&app, "kid").await);
+        assert_eq!(app.session("kid").await.unwrap().status, SessionStatus::Queued);
+
+        // A colony that is no longer the boot's to move is left alone.
+        app.update_session("kid", |x| x.status = SessionStatus::Stopped).await;
+        assert!(!requeue_stack_hold(&app, "kid").await);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3500,7 +3717,7 @@ mod tests {
         );
         assert_eq!(
             jev_compaction(payload, None).unwrap_err(),
-            "Jev compaction is switched on, but the mothership has no TypeSafe key (set JEV_API_KEY); running without it"
+            "Jev compaction is switched on, but the mothership has no TypeSafe key (save it on the Secrets page, or set JEV_API_KEY); running without it"
         );
     }
 }

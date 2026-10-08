@@ -13,14 +13,14 @@
 //
 // The words, the grouping and the request bodies are pure functions, so the tests (no DOM) pin them
 // directly and render the panel to static markup from given data.
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, store, stored } from "../components/ui";
 import { untilWords } from "../resetTime";
-import type { ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
-import { PlanList } from "./ModelPlans";
-import { ProfileBar } from "./ModelProfiles";
+import type { AutonomyStatus, LeftoverClaude, ModelProvider, ModuleInfo, ModelAssignments, ModelProfile, ModelRoleRow, ModelSource, ModelSwitchReply, ModelSwitchRequest, PlanUsage, SwitchableModel } from "../types";
+import { judgeFailing, judgeSaveBody } from "./JudgeModel";
+import { ModelSwitcherPanel, type ModelView } from "./ModelMenu";
 import { formatResetUtc } from "./ProviderQuotaCard";
 
 /** The window event that opens the switcher (⌘K's `/model`, or anything else that wants it). */
@@ -63,7 +63,7 @@ export function modelHealth(id: string, models: readonly SwitchableModel[]): Hea
   return m.degraded ? "warn" : "ok";
 }
 
-const TONE_DOT: Record<HealthTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", unknown: "bg-faint" };
+export const TONE_DOT: Record<HealthTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", unknown: "bg-faint" };
 
 /** `out of quota until Oct 6, 09:00 UTC`, from the reset's timestamp or its words. */
 export function quotaUntil(m: SwitchableModel): string {
@@ -218,6 +218,53 @@ export function switchSummary(reply: ModelSwitchReply): string {
   return parts.join(" · ");
 }
 
+/** The role that names the model Claude's roles run on while the account is out (issue #1130). */
+export const ACCOUNT_FALLBACK_ROLE = "account_fallback_model";
+
+/**
+ * The groups a role's select offers: every model, except for the account fallback, which must be a
+ * model on another provider — a Claude model would be out with the account.
+ */
+export function groupsForRole(role: string, groups: readonly ModelGroup[]): ModelGroup[] {
+  return role === ACCOUNT_FALLBACK_ROLE ? groups.filter((g) => g.provider !== "anthropic") : [...groups];
+}
+
+/** The "no value" option's words for a row: the account fallback's is "off", not "module default". */
+export function inheritOptionLabel(role: string, fallbackLabel: string): string {
+  return role === ACCOUNT_FALLBACK_ROLE ? "Off — wait for the reset" : fallbackLabel;
+}
+
+/** The line under the account fallback's select, so it reads as what it does. */
+export const ACCOUNT_FALLBACK_NOTE =
+  "When the Claude plan runs out, roles that use Claude run on this model until the reset, then go back to Claude by themselves. Restricted tasks need a trusted provider.";
+
+/** True when a switch left Claude names in colony or org overrides, and they are not cleared yet. */
+export function hasLeftovers(left: LeftoverClaude | null | undefined): left is LeftoverClaude {
+  return !!left && !left.cleared && left.colonies.length + left.orgs.length > 0;
+}
+
+/** "2 colonies and 1 org override still name a Claude model: opus (2), sonnet (acme)." */
+export function leftoverLine(left: LeftoverClaude): string {
+  const colonies = left.colonies.length;
+  const orgs = left.orgs.length;
+  const parts: string[] = [];
+  if (colonies) parts.push(`${colonies} ${colonies === 1 ? "colony" : "colonies"}`);
+  if (orgs) parts.push(`${orgs} org ${orgs === 1 ? "override" : "overrides"}`);
+  const names = [...new Set([...left.colonies.map((c) => c.model), ...left.orgs.map((o) => o.model)])];
+  return `${parts.join(" and ")} still ${colonies + orgs === 1 ? "names" : "name"} a Claude model (${names.join(", ")}), which uses the Claude plan.`;
+}
+
+/** The request that clears the leftovers a switch reported, for the same scope. */
+export function clearLeftoversRequest(scope: ModelScope): ModelSwitchRequest {
+  return {
+    scope: scope.kind,
+    ...(scope.kind === "org" ? { org: scope.org } : null),
+    roles: {},
+    apply: "new",
+    clear_leftovers: true,
+  };
+}
+
 /** The recent list: model ids, newest first, five at most, kept in this browser only. */
 export const RECENT_KEY = "colonizer.models.recent";
 export const RECENT_MAX = 5;
@@ -293,7 +340,7 @@ export function roleQuotaBadge(modelId: string, models: readonly SwitchableModel
   return { text: `${name} out${left}`, title: `${name} plan exhausted: ${quotaUntil(m)}` };
 }
 
-type Stage = { step: "edit" } | { step: "counting" } | { step: "confirm"; affected: string[] } | { step: "applying" };
+export type Stage = { step: "edit" } | { step: "counting" } | { step: "confirm"; affected: string[] } | { step: "applying" };
 
 export interface ModelSwitcherProps {
   /** For the tests, which render without effects: the assignments in hand and the popover open. */
@@ -303,11 +350,19 @@ export interface ModelSwitcherProps {
   initialDraft?: ModelDraft;
   initialApply?: "new" | "running";
   initialStage?: Stage;
+  /** For the tests: the menu starts on this list instead of the root. */
+  initialView?: ModelView;
   initialRecent?: string[];
   initialPlans?: PlanUsage[];
   initialProfiles?: ModelProfile[];
+  initialLeftovers?: LeftoverClaude;
   /** The cockpit's chosen workspace: the popover opens on it. */
   selectedOrg?: string | null;
+  /** The autonomy judge's health (the cockpit's poll): a warning on the chip while it is failing. */
+  judge?: AutonomyStatus | null;
+  /** For the tests: the autonomy module and providers in hand. */
+  initialAutonomy?: ModuleInfo;
+  initialProviders?: ModelProvider[];
 }
 
 export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
@@ -326,7 +381,38 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   const [profiles, setProfiles] = useState<ModelProfile[] | null>(props.initialProfiles ?? null);
   const [profileMessage, setProfileMessage] = useState<{ text: string; tone: "info" | "err" } | null>(null);
   const [profileBusy, setProfileBusy] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
+  const [leftovers, setLeftovers] = useState<LeftoverClaude | null>(props.initialLeftovers ?? null);
+  const [autonomy, setAutonomy] = useState<ModuleInfo | null>(props.initialAutonomy ?? null);
+  const [providers, setProviders] = useState<ModelProvider[]>(props.initialProviders ?? []);
+  const [judgeStatus, setJudgeStatus] = useState<AutonomyStatus | null>(props.judge ?? null);
+  const [judgeSaving, setJudgeSaving] = useState(false);
+  const [judgeError, setJudgeError] = useState<{ message: string; model: string } | null>(null);
+  const chip = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => setJudgeStatus(props.judge ?? null), [props.judge]);
+
+  const loadJudge = useCallback(() => {
+    api.modules().then((list) => setAutonomy(list.find((m) => m.kind === "autonomy") ?? null)).catch(() => {});
+    api.providers().then(setProviders).catch(() => {});
+    api.autonomyStatus().then(setJudgeStatus).catch(() => {});
+  }, [api]);
+
+  const saveJudge = async (model: string, saveAnyway = false) => {
+    if (!autonomy) return;
+    setJudgeSaving(true);
+    setJudgeError(null);
+    try {
+      const saved = await api.saveModule("autonomy", { ...judgeSaveBody(autonomy, model), ...(saveAnyway ? { save_anyway: true } : {}) });
+      setAutonomy(saved);
+      toast({ title: "Judge model switched", body: model, kind: "success" });
+      api.autonomyStatus().then(setJudgeStatus).catch(() => {});
+    } catch (e) {
+      // The judge's save runs a live test call; its refusal is shown here with the "Save anyway".
+      setJudgeError({ message: errorMessage(e), model });
+    } finally {
+      setJudgeSaving(false);
+    }
+  };
 
   const loadExtras = useCallback(() => {
     setPlansError(null);
@@ -352,10 +438,11 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
     if (!open) return;
     load();
     loadExtras();
+    loadJudge();
     // The countdowns and balances move while the popover stays open: re-read them every 30 s.
     const timer = window.setInterval(loadExtras, 30_000);
     return () => window.clearInterval(timer);
-  }, [open, load, loadExtras]);
+  }, [open, load, loadExtras, loadJudge]);
 
   const show = useCallback(() => {
     setOpen(true);
@@ -370,19 +457,6 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
     window.addEventListener(SWITCH_MODEL_EVENT, show);
     return () => window.removeEventListener(SWITCH_MODEL_EVENT, show);
   }, [show]);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent | KeyboardEvent) => {
-      if (e instanceof KeyboardEvent ? e.key === "Escape" : !root.current?.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", close);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", close);
-    };
-  }, [open]);
 
   const remember = (ids: string[]) => {
     setRecent((list) => {
@@ -402,6 +476,8 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
       const now = body.roles.model;
       remember(now ? [before, now] : [before]);
       toast({ title: "Models switched", body: switchSummary(reply), kind: reply.failed.length ? "error" : "success" });
+      // The Claude names the switch left in overrides stay on screen until cleared or dismissed.
+      setLeftovers(hasLeftovers(reply.leftover_claude) ? reply.leftover_claude : null);
       setDraft(EMPTY_DRAFT);
       setStage({ step: "edit" });
       load();
@@ -446,22 +522,30 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   const tone = modelHealth(main, assignments.models);
 
   return (
-    <div ref={root} className="relative shrink-0">
+    <div className="relative shrink-0">
       <button
+        ref={chip}
         type="button"
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Models · main model ${name}`}
+        aria-label={`Models · main model ${name}${judgeFailing(judgeStatus) ? " · judge failing" : ""}`}
         title="Switch models · /model in ⌘K"
         onClick={() => (open ? setOpen(false) : show())}
         className="inline-flex h-8 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 text-small-lg font-medium text-text transition-colors hover:border-border-strong hover:bg-panel-2"
       >
         <span aria-hidden="true" data-health={tone} className={cx("size-1.5 shrink-0 rounded-full", TONE_DOT[tone])} />
         <span className="truncate">{name}</span>
+        {judgeFailing(judgeStatus) && (
+          <span data-judge-warning title="The autonomy judge is failing — open to switch it" className="shrink-0 font-semibold text-warn">
+            !
+          </span>
+        )}
         <span aria-hidden="true" className="text-micro-lg text-faint">▾</span>
       </button>
       {open && (
         <ModelSwitcherPanel
+          anchor={chip}
+          initialView={props.initialView}
           assignments={assignments}
           scope={scope}
           draft={draft}
@@ -484,6 +568,19 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onConfirm={() => void run(switchRequest(scope, draft, "running"))}
           onCancel={() => setStage({ step: "edit" })}
           onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, "new"))}
+          judge={{
+            module: autonomy,
+            providers,
+            status: judgeStatus,
+            models: assignments.models,
+            saving: judgeSaving,
+            error: judgeError?.message ?? null,
+            onPick: (model) => void saveJudge(model),
+            onSaveAnyway: judgeError ? () => void saveJudge(judgeError.model, true) : undefined,
+          }}
+          leftovers={leftovers}
+          onClearLeftovers={() => void run(clearLeftoversRequest(scope))}
+          onDismissLeftovers={() => setLeftovers(null)}
           onClose={() => setOpen(false)}
           plans={plans}
           plansError={plansError}
@@ -521,242 +618,4 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   );
 }
 
-export interface ModelSwitcherPanelProps {
-  assignments: ModelAssignments;
-  scope: ModelScope;
-  draft: ModelDraft;
-  apply: "new" | "running";
-  stage: Stage;
-  error: string | null;
-  recent: string[];
-  onScope: (scope: ModelScope) => void;
-  onDraft: (draft: ModelDraft) => void;
-  onApplyMode: (apply: "new" | "running") => void;
-  onApply: () => void;
-  onConfirm: () => void;
-  onCancel: () => void;
-  onRecent: (id: string) => void;
-  onClose: () => void;
-  /** Plan usage (GET /api/models/plans): null while loading. */
-  plans?: PlanUsage[] | null;
-  plansError?: string | null;
-  /** Saved profiles and starters (GET /api/models/profiles): null while loading. */
-  profiles?: ModelProfile[] | null;
-  profileNote?: { text: string; tone: "info" | "err" } | null;
-  profileBusy?: boolean;
-  onUseProfile?: (profile: ModelProfile) => void;
-  onSaveProfile?: (name: string) => Promise<boolean>;
-  onRenameProfile?: (profile: ModelProfile, name: string) => Promise<boolean>;
-  onDeleteProfile?: (profile: ModelProfile) => Promise<boolean>;
-  /** For the tests: the clock the countdowns read. */
-  nowMs?: number;
-}
-
-const SOURCE_TONE: Record<ModelSource, string> = {
-  org: "bg-accent-soft text-accent",
-  install: "bg-panel-2 text-muted",
-  default: "bg-panel-2 text-faint",
-};
-
-export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
-  const { assignments: a, scope, draft, stage } = p;
-  const view = scopeView(a, scope, draft.module);
-  const groups = useMemo(() => groupModels(a.models), [a.models]);
-  const installModule = a.modules.find((m) => m.id === a.install.module);
-  const busy = stage.step === "counting" || stage.step === "applying";
-  const mainNow = view.rows.find((r) => r.role === "model")?.value ?? "";
-  const recent = recentChoices(p.recent, mainNow);
-  const select = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-small-lg text-text disabled:opacity-60";
-  const scopeValue = scope.kind === "org" ? `org:${scope.org}` : "install";
-  const moduleValue = scope.kind === "org" && view.moduleSource === "install" ? "" : view.module;
-  const blocked = a.modules.find((m) => m.id === view.module)?.blocked ?? null;
-
-  return (
-    <div
-      role="dialog"
-      aria-label="Switch models"
-      className="absolute right-0 top-10 z-50 flex max-h-[min(80vh,640px)] w-[380px] flex-col overflow-y-auto rounded-xl border border-border-strong bg-panel p-3 shadow-[0_16px_48px_rgb(0_0_0/0.35)] max-sm:fixed max-sm:inset-x-4 max-sm:top-14 max-sm:w-auto"
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="m-0 text-body-sm font-semibold text-text">Models</h2>
-        <button type="button" aria-label="Close" onClick={p.onClose} className="cursor-pointer border-0 bg-transparent text-lead text-faint hover:text-text">
-          ×
-        </button>
-      </div>
-
-      <PlanList plans={p.plans ?? null} error={p.plansError} nowMs={p.nowMs} />
-
-      <label className="mb-2 block text-meta-lg text-muted">
-        Scope
-        <select
-          aria-label="scope"
-          value={scopeValue}
-          onChange={(e) => p.onScope(e.target.value === "install" ? INSTALL_SCOPE : { kind: "org", org: e.target.value.slice(4) })}
-          className={cx(select, "mt-0.5")}
-        >
-          <option value="install">All orgs (install default)</option>
-          {a.orgs.map((o) => (
-            <option key={o.org} value={`org:${o.org}`}>
-              {o.org}
-              {o.roles.some((r) => r.source === "org") || o.module_source === "org" ? " · overrides" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <ProfileBar
-        profiles={p.profiles ?? null}
-        note={p.profileNote?.text ?? null}
-        noteTone={p.profileNote?.tone}
-        busy={busy || p.profileBusy === true}
-        canSave={view.rows.length > 0}
-        onUse={(profile) => p.onUseProfile?.(profile)}
-        onSave={(name) => p.onSaveProfile?.(name) ?? Promise.resolve(false)}
-        onRename={(profile, name) => p.onRenameProfile?.(profile, name) ?? Promise.resolve(false)}
-        onDelete={(profile) => p.onDeleteProfile?.(profile) ?? Promise.resolve(false)}
-      />
-
-      <label className="mb-1 block text-meta-lg text-muted">
-        Agent
-        <select
-          aria-label="agent module"
-          value={moduleValue}
-          disabled={busy}
-          onChange={(e) => p.onDraft(pickModule(draft, a, scope, e.target.value))}
-          className={cx(select, "mt-0.5")}
-        >
-          {scope.kind === "org" && <option value="">Use install default ({installModule?.name ?? a.install.module})</option>}
-          {a.modules.map((m) => (
-            <option key={m.id} value={m.id} disabled={m.blocked !== null && m.id !== view.module} title={m.blocked ?? undefined}>
-              {m.name}
-              {m.blocked ? " — can't launch here" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      <p className="m-0 mb-2 text-meta text-faint">
-        {scope.kind === "org" ? (view.moduleSource === "org" ? "This org's own pick" : "From the install") : "The install's agent module"} · new colonies only
-      </p>
-      {blocked && <p className="m-0 mb-2 text-meta-lg text-warn">{blocked}</p>}
-
-      <div role="group" aria-label="model roles" className="space-y-2">
-        {view.rows.map((row) => {
-          const value = rowSelectValue(row, scope, draft);
-          const known = value === INHERIT || a.models.some((m) => m.id === value);
-          const effective = value === INHERIT ? row.value : value;
-          const badge = roleQuotaBadge(effective, a.models, p.nowMs);
-          const inheritLabel =
-            scope.kind === "org"
-              ? `Use install default${row.source !== "org" && row.value ? ` (${shortModelName(row.value, a.models)})` : ""}`
-              : "Module default";
-          return (
-            <div key={row.role} data-role={row.role}>
-              <div className="mb-0.5 flex items-center justify-between gap-2 text-meta-lg">
-                <span className="min-w-0 truncate text-muted">{row.title}</span>
-                <span className="flex shrink-0 items-center gap-1">
-                  {badge && (
-                    <span data-quota-badge title={badge.title} className="rounded-full bg-err-soft px-1.5 py-px text-meta-sm font-semibold text-err">
-                      {badge.text}
-                    </span>
-                  )}
-                  <span className={cx("rounded-full px-1.5 py-px text-meta-sm", SOURCE_TONE[row.source])}>
-                    {row.role in draft.roles ? "changed" : row.editable ? sourceLabel(row.source, scope) : "install-wide only"}
-                  </span>
-                </span>
-              </div>
-              <select
-                aria-label={`${row.title} model`}
-                value={value}
-                disabled={!row.editable || busy}
-                onChange={(e) => p.onDraft(pickRole(draft, row, scope, e.target.value))}
-                className={select}
-              >
-                <option value={INHERIT}>{inheritLabel}</option>
-                {!known && <option value={value}>{value}</option>}
-                {groups.map((g) => (
-                  <optgroup key={g.provider} label={g.name}>
-                    {g.models.map((m) => (
-                      <option key={m.id} value={m.id} disabled={m.out_of_quota}>
-                        {modelOptionLabel(m)}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            </div>
-          );
-        })}
-      </div>
-
-      <fieldset className="m-0 mt-3 border-0 p-0">
-        <legend className="mb-1 p-0 text-meta-lg text-muted">Apply to</legend>
-        {(
-          [
-            ["new", "New colonies only"],
-            ["running", "Also switch running colonies"],
-          ] as const
-        ).map(([mode, label]) => (
-          <label key={mode} className="mr-3 inline-flex items-center gap-1.5 text-small-lg text-text">
-            <input type="radio" name="model-apply" value={mode} checked={p.apply === mode} disabled={busy} onChange={() => p.onApplyMode(mode)} />
-            {label}
-          </label>
-        ))}
-      </fieldset>
-
-      {p.error && (
-        <p role="alert" className="m-0 mt-2 whitespace-pre-line text-small text-err">
-          {p.error}
-        </p>
-      )}
-
-      {stage.step === "confirm" ? (
-        <div role="alertdialog" aria-label="confirm the switch" className="mt-3 rounded-lg border border-border bg-panel-2 p-2">
-          <p className="m-0 text-small-lg text-text">{confirmLine(stage.affected.length)}</p>
-          <div className="mt-2 flex justify-end gap-2">
-            <button type="button" onClick={p.onCancel} className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted hover:text-text">
-              Cancel
-            </button>
-            <button type="button" onClick={p.onConfirm} className="cursor-pointer rounded-md border-0 bg-accent px-2.5 py-1 text-small-lg font-semibold text-on-accent hover:brightness-110">
-              {stage.affected.length ? `Switch and restart ${stage.affected.length}` : "Switch"}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="mt-3 flex justify-end">
-          <button
-            type="button"
-            disabled={!draftDirty(draft) || busy}
-            onClick={p.onApply}
-            className="cursor-pointer rounded-md border-0 bg-accent px-3 py-1.5 text-small-lg font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {stage.step === "counting" ? "Counting colonies…" : stage.step === "applying" ? "Switching…" : "Apply"}
-          </button>
-        </div>
-      )}
-
-      {recent.length > 0 && (
-        <div className="mt-3 border-t border-border pt-2">
-          <div className="mb-1 text-meta-lg text-muted">Recent · main model, new colonies</div>
-          <div className="flex flex-wrap gap-1.5">
-            {recent.map((id) => {
-              const m = a.models.find((x) => x.id === id);
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  disabled={busy || m?.out_of_quota === true}
-                  title={m?.out_of_quota ? quotaUntil(m) : `Switch the main model to ${id}`}
-                  onClick={() => p.onRecent(id)}
-                  className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-small text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <span aria-hidden="true" className={cx("size-1.5 rounded-full", TONE_DOT[modelHealth(id, a.models)])} />
-                  {shortModelName(id, a.models)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+export { ModelSwitcherPanel };

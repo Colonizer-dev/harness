@@ -2,7 +2,7 @@
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, isLive, sleep } from "../../mockShared";
 import { REPOS } from "../../features/repos/mock";
-import type { ModelSpend, OrgInfo, OrgSpend, SpendDay, SpendHistory, SpendOrgDay, SpendTokens } from "../../types";
+import type { MergeStewardInfo, ModelSpend, OrgInfo, OrgSpend, SpendDay, SpendHistory, SpendOrgDay, SpendTokens } from "../../types";
 import type { MockState } from "../../mockState";
 import type { OrgsApi } from "./api";
 
@@ -55,8 +55,27 @@ export const mockOrgSpend: Record<string, OrgSpend> = {
   },
 };
 
+/** The merge steward's list in the demo: acme has it on, with one pull request in each interesting state. */
+const mockSteward = (): MergeStewardInfo => ({
+  last_cycle: new Date(Date.now() - 3 * 60_000).toISOString(),
+  orgs: [
+    {
+      org: "acme",
+      auto_merge: "green+rebase",
+      ci_blocked: null,
+      prs: [
+        { session: "a1", repo: "acme/webshop", url: "https://github.com/acme/webshop/pull/61", title: "Fix the cart total", colony_status: "pr_opened", state: "waiting", reason: "its checks are still running", since: null },
+        { session: "a2", repo: "acme/webshop", url: "https://github.com/acme/webshop/pull/62", title: "Add a coupon field", colony_status: "running", state: "fixing", reason: "round 1 of 2: unit", since: null },
+        { session: "a3", repo: "acme/api", url: "https://github.com/acme/api/pull/18", title: "Paginate orders", colony_status: "pr_opened", state: "rebasing", reason: "GitHub is updating the branch from its base", since: null },
+      ],
+    },
+  ],
+});
+
 export function orgsMock(ms: MockState): OrgsApi {
   return {
+    mergeSteward: () => ms.later(mockSteward),
+    mergeNow: () => ms.later(() => ({ merged: true, message: "merged from the cockpit" })),
     orgs: () =>
       ms.later((): OrgInfo[] => {
     const names = new Set([

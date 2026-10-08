@@ -22,6 +22,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_SUBAGENT_MODEL` | orchestrator model | Default subagent model (`CLAUDE_CODE_SUBAGENT_MODEL`); used only when the agent delegates to one |
 | `COLONIZER_BACKGROUND_MODEL` | Claude Code default | Background model for small auxiliary calls (`ANTHROPIC_DEFAULT_HAIKU_MODEL`) |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1) |
+| `COLONIZER_ACCOUNT_ROUTE` | none | JSON `{url, headers}` of the mothership's `GET /account-route` (set when the module's `account_fallback_model` is): before a request that would go to Anthropic, the router asks whether the Claude account is out and, if so, sends it to the fallback model's route instead (issue #1130) |
 | `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
 | `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
 | `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
@@ -103,6 +104,13 @@ else passes through to `https://api.anthropic.com` unchanged, so a subscription 
 the orchestrator. Routed `count_tokens` calls the provider doesn't support get an estimate. Provider key
 variables are removed from Claude Code's own environment.
 
+With `COLONIZER_ACCOUNT_ROUTE` set, a request for a Claude model first asks the mothership whether the
+Claude account is out (the answer is reused for 5 s; a slow, failed or unrecognised answer means
+Claude, as without the feature). When it is out and the install names an `account_fallback_model`, the
+request goes to that model's route like any `<provider>/<model>` request, with the same stripping of the
+Anthropic credential; at the reset it goes back to Anthropic by itself. A task the fallback may not
+carry (restricted work, an untrusted provider) stays on Anthropic and parks on the limit.
+
 Responses stream through as they arrive, with no overall time limit. The router gives an upstream 30 s
 to connect and lets it stay silent for up to `router_idle_timeout_secs` (600 s by default) before its
 answer starts or between two chunks of it. A failure is answered for what it is — unreachable (DNS,
@@ -179,7 +187,11 @@ below). The reason on the card says which: a host-backed path, a read-only mount
 Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env*` and the files the
 path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
 not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
-stays the egress policy's business; ask `writes-outside-repo`), **install** (the agent module's
+stays the egress policy's business. A syntax check (`bash -n`, `node --check`, `ruby -c`) runs
+nothing and is not read, and the repository's own scripts, byte for byte as the base commit has
+them (the boot writes their object ids to `/colonizer/tracked-scripts`, #1239), are left to the
+egress policy too; a script the colony adds or edits is read as before, and other layers still see
+every script; ask `writes-outside-repo`), **install** (the agent module's
 `exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (the org's workspace settings → Exec
 policy, stored as `exec_policy` in `orgs.json` and passed as `COLONIZER_EXEC_POLICY_ORG`) and
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot

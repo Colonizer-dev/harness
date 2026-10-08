@@ -5,7 +5,11 @@
 // same report without starting anything or saving anything.
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { errorMessage, useApi, useToast } from "../context";
-import { Badge, Button, Spinner, Switch, cx, inputClass } from "../components/ui";
+import { Badge, Button, cx, inputClass } from "../components/ui";
+import { RepoMultiSelect } from "../components/RepoMultiSelect";
+import { DetailSection, GroupedDetails, LoopCard, scheduleLine } from "./LoopCard";
+import { IconShield } from "./loopIcons";
+import { BUILTIN_HISTORY_ID, type DetailGroupDef, type DetailItem } from "./loopHistory";
 import type { LoopCadence, SupplyChainLoop as LoopView, SupplyChainReport, SupplyChainSettings, SupplySeverity } from "../types";
 import { describeLoopCadence, relative } from "./loops";
 
@@ -55,11 +59,44 @@ export function countsLine(counts: SupplyChainReport["counts"]): string {
   return parts.length ? parts.join(" · ") : "no findings";
 }
 
+const SUPPLY_GROUPS: DetailGroupDef[] = [
+  { key: "critical", label: "Critical", tone: "err" },
+  { key: "high", label: "High", tone: "err" },
+  { key: "moderate", label: "Moderate", tone: "warn" },
+  { key: "low", label: "Low", tone: "neutral" },
+  { key: "dispatched", label: "Dispatched", tone: "ok" },
+  { key: "skipped", label: "Skipped", tone: "neutral" },
+  { key: "warnings", label: "Warnings", tone: "warn" },
+];
+
+/** A report's findings, dispatches, skips and warnings as grouped detail items. */
+export function supplyItems(report: SupplyChainReport): DetailItem[] {
+  const items: DetailItem[] = [];
+  for (const r of report.repos) {
+    for (const f of r.findings) {
+      const fix = f.fixed ? `fix ${f.fix_via ? `${f.fix_via} ` : ""}${f.fixed}${f.major_bump ? " (major)" : ""}` : f.fix_available ? "fix available" : "no fix yet";
+      items.push({
+        group: f.severity,
+        repo: r.repo,
+        ref: { text: `${f.package}${f.version ? ` ${f.version}` : ""}`, url: f.url ?? undefined, bare: true },
+        title: "",
+        reason: `${f.kind !== "vulnerability" ? `${f.kind}: ` : ""}${f.id ? `${f.id} — ` : ""}${f.title} · ${fix}`,
+      });
+    }
+    if (r.error) items.push({ group: "warnings", repo: r.repo, reason: r.error });
+    for (const m of r.missing) items.push({ group: "warnings", repo: r.repo, reason: m });
+  }
+  for (const d of report.dispatched) items.push({ group: "dispatched", repo: d.repo, ref: { text: d.title, bare: true }, colony: d.session ?? undefined, reason: "" });
+  for (const s of report.skipped) items.push({ group: "skipped", repo: s.repo, reason: `${s.ecosystem ? `${s.ecosystem}: ` : ""}${s.reason}` });
+  return items;
+}
+
 /** The last run's report: what was found, what was dispatched, what was skipped and why. */
 export function SupplyReport({ report, now = Date.now(), onOpenColony }: { report: SupplyChainReport; now?: number; onOpenColony?: (id: string) => void }): ReactElement {
   const findings = report.repos.flatMap((r) => r.findings.map((f) => ({ ...f, repo: r.repo })));
+  const defs = SUPPLY_GROUPS.map((g) => (g.key === "dispatched" && report.dry_run ? { ...g, label: "Would dispatch" } : g));
   return (
-    <div className="mt-3 space-y-3 text-small-lg">
+    <div className="space-y-3 text-small-lg">
       <div className="flex flex-wrap items-center gap-2 text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Dry run" : "Last run"}</span>
         <span>{relative(report.finished_at, now)}</span>
@@ -76,7 +113,7 @@ export function SupplyReport({ report, now = Date.now(), onOpenColony }: { repor
       </div>
       {report.note && <p className="m-0 text-muted">{report.note}</p>}
       {report.attention.length > 0 && (
-        <div className="rounded-lg border border-[var(--err,#dc2626)] px-3 py-2">
+        <div className="rounded-lg border border-err px-3 py-2">
           <div className="font-medium text-text">Needs attention</div>
           <ul className="m-0 mt-1 list-none space-y-1 p-0">
             {report.attention.map((a) => (
@@ -88,88 +125,7 @@ export function SupplyReport({ report, now = Date.now(), onOpenColony }: { repor
           </ul>
         </div>
       )}
-      {findings.length > 0 && (
-        <table className="w-full border-collapse text-left">
-          <thead className="text-faint">
-            <tr>
-              <th className="py-1 pr-2 font-normal">Severity</th>
-              <th className="py-1 pr-2 font-normal">Package</th>
-              <th className="py-1 pr-2 font-normal">Finding</th>
-              <th className="py-1 pr-2 font-normal">Fix</th>
-            </tr>
-          </thead>
-          <tbody>
-            {findings.map((f, i) => (
-              <tr key={`${f.repo}:${f.ecosystem}:${f.package}:${f.id ?? f.kind}:${i}`} className="border-t border-border align-top">
-                <td className="py-1 pr-2">
-                  <Badge tone={SEVERITY_TONE[f.severity]}>{f.severity}</Badge>
-                </td>
-                <td className="py-1 pr-2">
-                  <span className="text-text">{f.package}</span>
-                  {f.version ? <span className="text-faint"> {f.version}</span> : null}
-                  <div className="font-mono text-meta text-faint">
-                    {f.repo} · {f.lockfile || f.ecosystem}
-                  </div>
-                </td>
-                <td className="py-1 pr-2 text-muted">
-                  {f.kind !== "vulnerability" && <span className="text-text">{f.kind}: </span>}
-                  {f.url ? (
-                    <a href={f.url} target="_blank" rel="noreferrer" className="text-muted underline decoration-dotted">
-                      {f.id ?? f.title}
-                    </a>
-                  ) : (
-                    f.id
-                  )}
-                  {f.id ? " — " : ""}
-                  {f.title}
-                </td>
-                <td className="py-1 pr-2 text-muted">
-                  {f.fixed ? `${f.fix_via ? `${f.fix_via} ` : ""}${f.fixed}${f.major_bump ? " (major)" : ""}` : f.fix_available ? "available" : "none"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {report.dispatched.length > 0 && (
-        <div>
-          <div className="font-medium text-text">{report.dry_run ? "Would dispatch" : "Dispatched"}</div>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
-            {report.dispatched.map((d) => (
-              <li key={`${d.repo}:${d.ecosystem}`}>
-                {d.session && onOpenColony ? (
-                  <button type="button" onClick={() => onOpenColony(d.session!)} className="cursor-pointer border-0 bg-transparent p-0 text-left text-muted underline decoration-dotted hover:text-text">
-                    {d.title}
-                  </button>
-                ) : (
-                  d.title
-                )}{" "}
-                · <span className="font-mono">{d.repo}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {report.skipped.length > 0 && (
-        <div>
-          <div className="font-medium text-text">Skipped</div>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
-            {report.skipped.map((s, i) => (
-              <li key={`${s.repo}:${s.ecosystem}:${i}`}>
-                <span className="font-mono">{s.repo}</span>
-                {s.ecosystem ? ` (${s.ecosystem})` : ""}: {s.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {report.repos.some((r) => r.missing.length > 0 || r.error) && (
-        <ul className="m-0 list-none space-y-0.5 p-0 text-muted">
-          {report.repos.flatMap((r) => [...(r.error ? [`${r.repo}: ${r.error}`] : []), ...r.missing.map((m) => `${r.repo}: ${m}`)]).map((line) => (
-            <li key={line}>⚠ {line}</li>
-          ))}
-        </ul>
-      )}
+      <GroupedDetails items={supplyItems(report)} defs={defs} unit={{ one: "finding", many: "findings" }} onOpenColony={onOpenColony} />
     </div>
   );
 }
@@ -180,8 +136,6 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
   const toast = useToast();
   const [view, setView] = useState<LoopView | null>(null);
   const [draft, setDraft] = useState<SupplyChainSettings | null>(null);
-  const [allowText, setAllowText] = useState("");
-  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<"save" | "dry" | "run" | null>(null);
   const [dry, setDry] = useState<SupplyChainReport | null>(null);
 
@@ -190,7 +144,6 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
       (v) => {
         setView(v);
         setDraft((d) => d ?? v.settings);
-        setAllowText((t) => t || v.settings.allow.join(", "));
       },
       () => setView(null),
     );
@@ -209,7 +162,6 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
       const v = await api.saveSupplyChainLoop(settings);
       setView(v);
       setDraft(v.settings);
-      setAllowText(v.settings.allow.join(", "));
       toast(v.settings.enabled ? `${v.name}: on for ${v.settings.allow.length || "no"} entr${v.settings.allow.length === 1 ? "y" : "ies"}` : `${v.name}: off`);
     } catch (e) {
       toast(errorMessage(e), "error");
@@ -236,48 +188,53 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
   };
 
   const s = view.settings;
-  const withAllow = { ...draft, allow: parseAllow(allowText) };
+  const withAllow = draft;
   const missing = Object.entries(view.scanners).filter(([, on]) => !on).map(([name]) => name);
   const shown = dry ?? view.last_report;
+  const ready = s.allow.length > 0;
+  const attention = view.blocked
+    ? "Report only: external writes are blocked."
+    : view.attention.length > 0 && !dry
+      ? `${view.attention.length} critical or high finding${view.attention.length === 1 ? "" : "s"} with no fixed version need${view.attention.length === 1 ? "s" : ""} a person.`
+      : null;
 
   return (
-    <section className="mt-6 rounded-xl border border-border px-4 py-3" aria-label={view.name}>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="min-w-0 flex-1 basis-64">
-          <div className="flex items-center gap-2">
-            <span className="text-body-lg font-medium text-text">{view.name}</span>
-            <Badge>built-in</Badge>
-            {view.running && <Spinner />}
-          </div>
-          <div className="mt-0.5 text-small-lg text-muted">
-            {s.enabled && s.allow.length > 0
-              ? `${describeLoopCadence(s.cadence)} · ${s.allow.join(", ")}${view.next_run_at ? ` · next ${relative(view.next_run_at)}` : ""}`
-              : s.enabled
-                ? "on, but nothing is opted in: add an org or a repository"
-                : "off · checks lockfiles on the host and opens pull requests with minimal bumps"}
-            {view.blocked ? " · report only (external writes are blocked)" : ""}
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Switch checked={s.enabled} disabled={busy !== null} onChange={(on) => void save({ ...withAllow, enabled: on })} label={`${view.name} enabled`} />
+    <LoopCard
+      historyId={BUILTIN_HISTORY_ID.supplyChain}
+      icon={<IconShield />}
+      name={view.name}
+      purpose="Checks your lockfiles for known vulnerabilities and opens pull requests with the smallest bump."
+      enabled={s.enabled}
+      onToggle={(on) => void save({ ...withAllow, enabled: on })}
+      busy={busy !== null}
+      running={view.running}
+      schedule={scheduleLine(describeLoopCadence(s.cadence), s.enabled, view.next_run_at, ready)}
+      scope={{ text: ready ? s.allow.join(", ") : "Not set up: add an org or a repository", ready }}
+      attention={attention}
+      refreshKey={view.last_report?.id}
+      onOpenColony={onOpenColony}
+      actions={
+        <>
           <Button size="sm" variant="secondary" disabled={busy !== null} onClick={() => void run(true)}>
             {busy === "dry" ? "Checking…" : "Dry run"}
           </Button>
-          <Button size="sm" variant="secondary" disabled={busy !== null || !s.enabled || s.allow.length === 0} onClick={() => void run(false)}>
+          <Button size="sm" variant="secondary" disabled={busy !== null || !s.enabled || !ready} onClick={() => void run(false)}>
             {busy === "run" ? "Running…" : "Run now"}
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-            Settings
-          </Button>
-        </div>
-      </div>
-
-      {open && (
-        <div className="mt-3 grid gap-3 border-t border-border pt-3 text-small-lg sm:grid-cols-2">
-          <label className="sm:col-span-2">
+        </>
+      }
+    >
+      <DetailSection title={dry ? "Dry run" : "Last run"}>
+        {shown ? <SupplyReport report={shown} onOpenColony={onOpenColony} /> : <p className="m-0 text-body-sm text-faint">Not run yet. A dry run lists the findings and what it would dispatch.</p>}
+      </DetailSection>
+      <DetailSection title="Settings">
+        <div className="grid gap-3 text-small-lg sm:grid-cols-2">
+          <div className="sm:col-span-2">
             <span className="text-muted">Opted-in orgs and repositories (empty: nothing runs)</span>
-            <input className={cx(inputClass, "mt-1")} value={allowText} placeholder="acme, globex/api" onChange={(e) => setAllowText(e.target.value)} aria-label="allowlist" />
-          </label>
+            <div className="mt-1">
+              <RepoMultiSelect label="allowlist" value={draft.allow} onChange={(allow) => setDraft({ ...draft, allow })} disabled={busy !== null} placeholder="Choose orgs or repositories" />
+            </div>
+          </div>
           <label>
             <span className="text-muted">How often</span>
             <select className={cx(inputClass, "mt-1")} value={cadenceChoice(draft.cadence)} onChange={(e) => setDraft({ ...draft, cadence: cadenceFor(e.target.value as CadenceChoice, draft.cadence) })} aria-label="cadence">
@@ -324,30 +281,11 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
           </div>
           <div className="sm:col-span-2">
             <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void save(withAllow)}>
-              {busy === "save" ? "Saving…" : "Save"}
+              {busy === "save" ? "Saving…" : "Save changes"}
             </Button>
           </div>
         </div>
-      )}
-
-      {view.attention.length > 0 && !dry && (
-        <p className="mt-2 text-small-lg text-text">
-          ⚠ {view.attention.length} critical or high finding{view.attention.length === 1 ? "" : "s"} with no fixed version need{view.attention.length === 1 ? "s" : ""} a person.
-        </p>
-      )}
-      {shown && <SupplyReport report={shown} onOpenColony={onOpenColony} />}
-      {view.history.length > 1 && (
-        <details className="mt-2 text-small-lg text-muted">
-          <summary className="cursor-pointer">History ({view.history.length} runs)</summary>
-          <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
-            {view.history.map((h) => (
-              <li key={h.id}>
-                {relative(h.at)} · {h.trigger} · {h.summary}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </section>
+      </DetailSection>
+    </LoopCard>
   );
 }

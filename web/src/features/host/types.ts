@@ -1,5 +1,16 @@
 import type { QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
+import type { MergeStewardStatus } from "../orgs/types";
 import type { AccountAlert, GitHubPause, ModelProviderStatus, StatusQuota } from "../providers/types";
+
+/** GET /api/status `backlog` (issue #1144): open issues (never pull requests) in the repositories of the orgs Colonizer works in, excluding forks, archived repositories and repositories with issues off. Cached about ten minutes, so `as_of` can be minutes old. */
+export interface Backlog {
+  issues: number;
+  repos: number;
+  /** When the counts were taken (RFC3339). */
+  as_of: string;
+  /** The same two numbers per org, keyed by login, for the selected workspace. */
+  by_org?: Record<string, { issues: number; repos: number }>;
+}
 
 export interface HarnessStatus {
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
@@ -23,6 +34,30 @@ export interface HarnessStatus {
     cpus?: number;
     memory?: string;
     max_parallel?: number;
+    /** Issue #1177: the settings form's own values. In auto mode `cpus`, `memory` and `max_parallel` above are the auto colony size and the effective ceiling (running + room), so the static settings live here. Older builds omit these. */
+    configured_cpus?: number;
+    configured_memory?: string;
+    configured_max_parallel?: number;
+    /** Issue #1141: `auto` sizes colonies from the host and admits them from its live free memory and load; `fixed` is the static `max_parallel`. Older mothership builds omit the rest of this block. */
+    mode?: "auto" | "fixed";
+    /** Auto mode only: what one colony is given, computed from the host. */
+    size?: { cpus: number; memory_gb: number; slots: number; reserve_gb: number; reserve_cpus: number };
+    /** Colonies holding a microVM slot now. */
+    running?: number;
+    /** How many more colonies fit right now. */
+    room_for?: number;
+    /** Why the next colony waits, when none fits; null otherwise. */
+    waiting_reason?: "memory" | "cpu" | "cap" | null;
+    /** Auto mode only: memory committed to live colonies (their sizes summed), in GB. */
+    committed_gb?: number;
+    /** Auto mode only: the tightest admission check. */
+    limited_by?: "cap" | "memory-commit" | "cpu-commit" | "free" | "load";
+    /** Auto mode only: the safety cap that holds whatever the host has free. */
+    auto_max_parallel?: number;
+    /** Auto mode only, and only what the host measured: free memory for a new colony, the 1-minute load and the core count. */
+    free_bytes?: number;
+    load?: number;
+    cpu_cores?: number;
     claude_bin?: string | null;
     claude_bin_error?: string | null;
   };
@@ -52,8 +87,12 @@ export interface HarnessStatus {
   quota_cards?: QuotaCard[];
   /** Claude accounts that need the owner (issue #984): a rejected sign-in or an exhausted plan, with the colonies waiting on each. Empty when everything is fine; older mothership builds omit it. */
   account_alerts?: AccountAlert[];
+  /** The Nest frontier badge's counts (issue #1144); null until the first count lands, omitted by older mothership builds. */
+  backlog?: Backlog | null;
   /** The GitHub account's circuit breaker (issue #1074): paused while GitHub refuses the account, with the cause and the next step. Older mothership builds omit it. */
   github_pause?: GitHubPause;
+  /** The merge steward's one banner per org whose GitHub Actions is blocked (issue #1172). Older mothership builds omit it. */
+  merge_steward?: MergeStewardStatus;
   /**
    * A drain is holding the queue while an update or a restart waits for the colonies still booting
    * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.
@@ -352,6 +391,11 @@ export interface BehindColony {
   slot: string | null;
   /** The notice lines whose probe matched this colony: the fixes it needs the restart for. */
   affected_by: string[];
+}
+
+/** GET /api/setup: the advisory Setup rows the person marked "don't ask again". */
+export interface SetupState {
+  dismissed: string[];
 }
 
 /** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */

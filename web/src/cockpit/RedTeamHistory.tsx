@@ -7,7 +7,8 @@ import { Button, Spinner, cx, sameOrg, type Tone } from "../components/ui";
 import { formatCost } from "../spend";
 import type { NewRedTeamSchedule, PreScan, RedTeamRun, RedTeamSchedule, Session } from "../types";
 import { RED_TEAM_SYNTHESIS } from "../redTeam";
-import { CHECKLIST_LABEL, SECURITY_FOCUSES, describeCadence, presetOf, runCost } from "./redTeamPlan";
+import { CHECKLIST_LABEL, SECURITY_FOCUSES, describeCadence, plural, presetOf, runCost } from "./redTeamPlan";
+import { CancelRunButton } from "./RedTeamCancel";
 
 const ACTIVE = new Set(["armed", "waiting", "running", "draining"]);
 
@@ -28,6 +29,7 @@ export function RedTeamHistory({
   runs,
   onClose,
   onStop,
+  onCancel,
   onSynthesize,
   onOpenColony,
   onNew,
@@ -38,6 +40,7 @@ export function RedTeamHistory({
   runs: RedTeamRun[];
   onClose: () => void;
   onStop?: (id: string) => Promise<void>;
+  onCancel?: (id: string) => Promise<void>;
   onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
   /** Opens the wizard for this org. */
@@ -58,7 +61,7 @@ export function RedTeamHistory({
       className="m-auto w-[min(760px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50"
     >
       {open && org && (
-        <HistoryBody org={org} sessions={sessions} runs={runs} onClose={onClose} onStop={onStop} onSynthesize={onSynthesize} onOpenColony={onOpenColony} onNew={onNew} />
+        <HistoryBody org={org} sessions={sessions} runs={runs} onClose={onClose} onStop={onStop} onCancel={onCancel} onSynthesize={onSynthesize} onOpenColony={onOpenColony} onNew={onNew} />
       )}
     </dialog>
   );
@@ -70,6 +73,7 @@ export function HistoryBody({
   runs,
   onClose,
   onStop,
+  onCancel,
   onSynthesize,
   onOpenColony,
   onNew,
@@ -80,6 +84,7 @@ export function HistoryBody({
   runs: RedTeamRun[];
   onClose: () => void;
   onStop?: (id: string) => Promise<void>;
+  onCancel?: (id: string) => Promise<void>;
   onSynthesize?: (id: string) => Promise<void>;
   onOpenColony: (id: string) => void;
   onNew: (org: string) => void;
@@ -142,7 +147,7 @@ export function HistoryBody({
             Red-team history · {org}
           </h2>
           <p className="mt-0.5 text-small-lg tabular-nums text-muted">
-            {mine.length} {mine.length === 1 ? "run" : "runs"} · {live} live · {formatCost(spent)} spent
+            {plural(mine.length, "run")} · {live} live · {formatCost(spent)} spent
           </p>
         </div>
         <Button variant="primary" onClick={() => onNew(org)}>
@@ -212,15 +217,21 @@ export function HistoryBody({
                       <span className="ml-auto text-small tabular-nums text-muted">{new Date(r.created_at).toLocaleString()}</span>
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-small tabular-nums text-muted">
-                      <span>{r.hunter === "swarm" || !r.hunter ? "Colony swarm" : r.hunter} · {r.hunters.length || r.swarm_size} hunters</span>
+                      <span>{r.hunter === "swarm" || !r.hunter ? "Colony swarm" : r.hunter} · {plural(r.hunters.length || r.swarm_size, "hunter")}</span>
                       {(r.model || r.subagent_model) && <span>{[r.model, r.subagent_model].filter(Boolean).join(" / ")}</span>}
                       <span>
                         {r.counts.found} found{r.counts.merged != null ? ` · ${r.counts.merged} merged` : ""} · {r.counts.validated} validated · {r.counts.filed} filed{r.counts.rejected > 0 ? ` · ${r.counts.rejected} rejected` : ""}
                       </span>
                       <span>{cost != null ? formatCost(cost) : "—"}</span>
                       {r.gate_reason && <span className="text-warn">{r.gate_reason}</span>}
+                      {r.state === "cancelled" && (
+                        <span>
+                          cancelled by {r.cancelled_by ?? "you"}
+                          {r.cancelled_at ? ` · ${new Date(r.cancelled_at).toLocaleString()}` : ""} · findings so far kept
+                        </span>
+                      )}
                     </div>
-                    {(r.hunters.length > 0 || (active && onStop)) && (
+                    {(r.hunters.length > 0 || (active && (onStop || onCancel))) && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         {r.hunters.map((h, i) => (
                           <button
@@ -240,6 +251,9 @@ export function HistoryBody({
                           <Button size="sm" variant="ghost" disabled={pending === r.id} onClick={() => act(r.id, () => onStop(r.id))} className="ml-auto">
                             Stop run
                           </Button>
+                        )}
+                        {active && onCancel && (
+                          <CancelRunButton run={r} onCancel={onCancel} className={onStop ? undefined : "ml-auto"} />
                         )}
                       </div>
                     )}

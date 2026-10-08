@@ -189,7 +189,7 @@ fn jitter() -> f64 {
 
 /// The signing secret for a target, read where it is used: the owner's, or a webhook
 /// subscription's own (issue #899). `None` when the target is gone — a subscription deleted since
-/// the delivery was queued — and `Some(None)` when it signs nothing.
+/// the delivery was queued — and `Some(None)` when there is a target but nothing to sign with.
 fn signing_secret(app: &App, target: &str) -> Option<Option<String>> {
     match target {
         OWNER => Some(secret(app).map(|(value, _)| value)),
@@ -197,12 +197,17 @@ fn signing_secret(app: &App, target: &str) -> Option<Option<String>> {
     }
 }
 
-/// One attempt at a delivery: the same body, signed afresh.
+/// One attempt at a delivery: the same body, signed afresh. Never sent unsigned (issue #900), so
+/// this is also the backstop for a delivery queued while the secret existed and the secret has
+/// since been removed — it is refused rather than posted with no signature, however it got queued.
 async fn attempt(app: &App, client: &reqwest::Client, delivery: &Delivery) -> anyhow::Result<()> {
     let Some(signing) = signing_secret(app, &delivery.target) else {
         anyhow::bail!("its webhook subscription was deleted");
     };
-    post(client, &delivery.url, signing.as_deref(), &delivery.event_id, &delivery.body).await
+    let Some(secret) = signing else {
+        anyhow::bail!("its webhook has no signing secret");
+    };
+    post(client, &delivery.url, &secret, &delivery.event_id, &delivery.body).await
 }
 
 /// What became of a failed attempt.
@@ -276,12 +281,22 @@ pub async fn retry_due(app: &App, client: &reqwest::Client, now: DateTime<Utc>) 
     let due: Vec<Delivery> = {
         let _guard = STORE.lock().await;
         let mut book = load(app);
-        // A delivery to a subscription deleted since is dropped, not retried or dead-lettered:
-        // nobody is left to want it.
+        // A delivery whose target cannot be signed for is dropped, not retried or dead-lettered,
+        // and the drop is logged: a subscription deleted since has nobody left to want it, and a
+        // target with no readable signing secret (issue #900) has nobody who will ever be able to
+        // sign it, so retrying only fills the dead letter with letters that can never succeed. The
+        // secret is read with `read_secret`, which fails closed — a lost or unset
+        // `COLONIZER_MASTER_KEY` reads exactly like no secret, and only the log line separates them.
         let before = book.pending.len();
-        book.pending.retain(|d| signing_secret(app, &d.target).is_some());
-        if book.pending.len() != before {
+        book.pending.retain(|d| signing_secret(app, &d.target).flatten().is_some());
+        let dropped = before - book.pending.len();
+        if dropped > 0 {
             save(app, &book);
+            eprintln!(
+                "notify: dropped {dropped} queued webhook deliver{}: no signing secret is readable for {} (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET; check COLONIZER_MASTER_KEY too)",
+                if dropped == 1 { "y" } else { "ies" },
+                if dropped == 1 { "its target" } else { "their targets" },
+            );
         }
         book.pending
             .into_iter()

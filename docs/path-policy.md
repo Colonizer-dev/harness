@@ -118,6 +118,19 @@ mount. The boot logs one info line — *path policy: masking N path(s), protecti
 M; K placeholder(s) in the worktree*, plus any skipped paths — and a warn line
 naming every `unmask_paths` opt-out.
 
+The placeholders are also listed, anchored and in gitignore syntax, in
+`vm/path-policy.exclude`; the guest's git reads it as `core.excludesFile` (set
+through `GIT_CONFIG_*`), so `git status` never shows them as untracked. It is
+per colony and guest-only: nothing is written into the repository's
+`info/exclude`, and a file git already tracks is never hidden. The colony brief
+tells the agent they are placeholders to leave alone. The exec policy's
+`secret-paths` rule does not count a command that only asks about a path's
+*name* or size (`git check-ignore`, `git status`, `ls`, `stat`, `wc -c`,
+`test -e/-f/-d/-s`, `[ -f x ]`, or a plain `for` loop over them), as long as
+the command has no redirect other than `2>&1` or `>/dev/null`, no substitution
+or subshell, and pipes only into `head`, `tail`, `sort`, `uniq` or `wc` with no
+path of their own; anything that can read the bytes is still refused.
+
 **Guest, before the agent.** The boot script reads `/colonizer/path-policy`
 before it `exec`s the agent daemon: a `mask-file` entry is covered by a bind
 of `/dev/null`, a `mask-dir` entry by an empty read-only tmpfs of an explicit

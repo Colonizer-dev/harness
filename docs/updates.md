@@ -170,6 +170,27 @@ not recognise. Delete the recorded file to stop re-signing; an identity in the
 environment still signs. See [The system
 keychain](configuration.md#the-system-keychain).
 
+## Applying updates automatically
+
+`updates.auto_apply` chooses whether the mothership installs a newer release by itself:
+
+| Value | Behaviour |
+|---|---|
+| `off` (default) | A person presses update, or runs `colonizer update`. |
+| `when_idle` | Installs once the spare app slot is not in use: no colony still runs from the slot a previous update left behind (the `behind` list below), so the install is not refused for it. While colonies hold the slot it waits, and says so once. |
+| `always` | Installs whenever a newer release is known. The install's own refusals (a development build, a slot a process is running from) still stand and are reported. |
+
+The check runs on the existing cadence (a minute after start, then every six hours), and the
+auto-apply poll runs right after each check, so a `when_idle` wait is looked at again at the next
+check. It starts the same apply the Settings button does: the queue drains, in-flight boots and
+publishes finish, the installer runs, and the mothership restarts in place; colonies keep running,
+and colonies on the previous version restart at their next turn. The poll's result is logged
+(`update: auto-apply: ...`) and returned by `GET /api/update` as `auto_apply` (the mode) and
+`auto_apply_last` (`{at, what}`).
+
+Set it with `PUT /api/update` and `{"auto_apply": "when_idle"}`; it is kept in `updates.json`
+beside the check's own switch, which still turns the whole check, and so auto-apply, off.
+
 ## Notices and affected colonies
 
 Most releases are routine, and the cockpit says so quietly: a dot in the rail and the release in
@@ -297,7 +318,7 @@ owner token (the sign-in link's).
 | Route | What it answers |
 | :--- | :--- |
 | `GET /api/version` | The build: version, commit, dirty, built at, the release it descends from, whether it is a development build |
-| `GET /api/update` | `installed` (the above), plus `enabled` and `blocked_by` (the check's switch and the variable holding it off), `latest`, `available`, `last_checked`, `error`, `can_apply` (`{ok, reason}`), `apply`, how an update in flight is getting on (`phase`, `version`, `started_at`, `error`, `log`, `colonies`, `backup`), `notices` (the [notices](#notices-and-affected-colonies) newer than this build: `version`, `severity`, `line`, `probe`, `issue`, `affected` — `{count, colonies}` or `null`), `behind` (colonies still on a previous app slot: `id`, `repo`, `status`, `slot`, `affected_by`), `restarts` (`{restarting, failed}`) and `switch_to_releases` (`{reason, command, then}`, or `null` for a release install) |
+| `GET /api/update` | `installed` (the above), plus `enabled` and `blocked_by` (the check's switch and the variable holding it off), `auto_apply` and `auto_apply_last` ([automatic apply](#applying-updates-automatically)), `latest`, `available`, `last_checked`, `error`, `can_apply` (`{ok, reason}`), `apply`, how an update in flight is getting on (`phase`, `version`, `started_at`, `error`, `log`, `colonies`, `backup`), `notices` (the [notices](#notices-and-affected-colonies) newer than this build: `version`, `severity`, `line`, `probe`, `issue`, `affected` — `{count, colonies}` or `null`), `behind` (colonies still on a previous app slot: `id`, `repo`, `status`, `slot`, `affected_by`), `restarts` (`{restarting, failed}`) and `switch_to_releases` (`{reason, command, then}`, or `null` for a release install) |
 | `PUT /api/update` | `{"enabled": true\|false}` — the check. Answers the same body as `GET`, or `409` while the environment keeps the check off |
 | `POST /api/update/apply` | Install the newer release and restart into it; an optional `{"force": true}` body installs the latest release over a development build or a newer release instead (no body means no force, anything else that is not JSON is a 400) |
 | `POST /api/update/restart` | `{"ids": [...]}` or `{"all": true}`: stop and resume the colonies in `behind` so they boot on this version. Answers `{restarting, skipped}` at once (an id that is not behind, or already restarting, is skipped with the reason); `400` with neither, `409` while an update is being applied |

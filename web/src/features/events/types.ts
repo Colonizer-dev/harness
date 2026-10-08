@@ -178,12 +178,69 @@ export type AgentEventBody =
 
 export type AgentEvent = Sequenced & AgentEventBody;
 
+/**
+ * What the mothership derived from the colony's whole run (issue #1210), so the cockpit need not replay it:
+ * the settlers in order of first appearance, the latest cost, the turn count, the brief and the last state.
+ */
+export interface HistorySummary {
+  last_seq: number;
+  events: number;
+  turns: number;
+  cost_usd: number | null;
+  /** The colony's first message (`user_message` with id `initial`) as it was recorded. */
+  brief: (Sequenced & { type: "user_message"; id: string; text: string }) | null;
+  model: string | null;
+  agent_state: { state: AgentState; detail: string | null } | null;
+  settlers: HistorySettler[];
+}
+
+export interface HistorySettler {
+  id: string;
+  name: string;
+  description: string | null;
+  steps: number;
+  errors: number;
+  last_tool: string | null;
+}
+
+/** What names the page behind a loaded one: the run, the `seq` and the byte the oldest loaded event sits at. */
+export interface HistoryCursor {
+  epoch: number;
+  seq: number;
+  offset: number;
+}
+
+/** `GET /api/sessions/{id}/events?before=…`: one page of the log, oldest event first. */
+export interface EventsPage {
+  events: AgentEvent[];
+  has_more: boolean;
+  oldest_seq: number;
+  epoch: number;
+  offset: number;
+  /** The colony-cumulative `model_usage` as of the last turn end before the page. */
+  baseline_usage: Record<string, ModelTokens> | null;
+  run_epoch: number;
+}
+
 export type ServerFrame =
   | AgentEvent
   | { type: "session"; session: Session }
   | { type: "harness_log"; level: LogLevel; message: string; ts: string; origin?: Origin }
   | { type: "memory_proposed"; proposal: MemoryProposal }
   | { type: "run_epoch"; epoch: number }
+  /**
+   * First paint with a `limit` (issue #1210): sent before the newest page's events. `has_more` says older
+   * events are on record, behind the cursor (`epoch`, `oldest_seq`, `offset`).
+   */
+  | {
+      type: "history";
+      has_more: boolean;
+      oldest_seq: number;
+      epoch: number;
+      offset: number;
+      baseline_usage: Record<string, ModelTokens> | null;
+      summary: HistorySummary;
+    }
   /** The backlog replay is complete; everything after it is live. */
   | { type: "replay_done"; seq: number };
 

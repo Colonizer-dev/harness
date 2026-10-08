@@ -1,7 +1,9 @@
 // Local model router (docs/protocol.md §6.1, §6.5). Claude Code's ANTHROPIC_BASE_URL points here;
 // requests for `<provider>/<model>` go to that provider's route (normally the mothership's provider
 // gateway), and everything else passes through to Anthropic untouched. When the gateway reports that a
-// provider is unavailable, the request is retried on the route's Claude fallback model.
+// provider is unavailable, the request is retried on the route's Claude fallback model. With an account
+// route (COLONIZER_ACCOUNT_ROUTE, issue #1130) a request that would go to Anthropic first asks the
+// gateway whether the Claude account is out and the install names a fallback model for that case.
 
 import { subscribe } from 'node:diagnostics_channel';
 import { createServer } from 'node:http';
@@ -10,7 +12,7 @@ import { Readable } from 'node:stream';
 import { Agent, fetch as undiciFetch } from 'undici';
 
 const AUTH_MODES = new Set(['x-api-key', 'bearer', 'none']);
-const PROVIDER_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]*\//;
+export const PROVIDER_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]*\//;
 const HEADER_NAME = /^[A-Za-z0-9-]+$/;
 const MODEL_VARS = ['COLONIZER_MODEL', 'COLONIZER_SUBAGENT_MODEL', 'COLONIZER_BACKGROUND_MODEL'];
 // Hop-by-hop and length/encoding headers are recomputed by fetch and node:http.
@@ -28,6 +30,11 @@ const DEFAULT_TIMEOUT_SECS = 300;
 // event) and between two chunks of the body. Node's built-in fetch caps both silences at 300 s.
 const DEFAULT_CONNECT_TIMEOUT_SECS = 30;
 const DEFAULT_IDLE_TIMEOUT_SECS = 600;
+// How long the mothership's answer about the Claude account is reused, and how long the router waits
+// for it. A slow or dead answer means Claude, exactly as without the feature: the fallback only ever
+// adds a route, it never holds a request back.
+const ACCOUNT_ROUTE_TTL_MS = 5_000;
+const ACCOUNT_ROUTE_TIMEOUT_MS = 3_000;
 // Idle keep-alive sockets in the router's pool. A pooled socket that the server (or a NAT or egress
 // filter on the way) has already closed fails the next request on it at once with UND_ERR_SOCKET "other
 // side closed": the keep-alive race. Reusing a socket only within a few seconds of its last answer makes
@@ -86,6 +93,22 @@ export function parseRoutes(raw) {
   return { routes, warnings };
 }
 
+/**
+ * COLONIZER_ACCOUNT_ROUTE → `{url, headers}`, or null: where the router asks the mothership whether the
+ * Claude account is out and a fallback model is carrying its requests (issue #1130). A value that is
+ * not that shape is ignored, which leaves every request on Anthropic as before.
+ */
+export function parseAccountRoute(raw) {
+  if (!raw?.trim()) return null;
+  try {
+    const data = JSON.parse(raw);
+    if (typeof data?.url !== 'string' || !/^https?:\/\//.test(data.url)) return null;
+    return { url: data.url, headers: routeHeaders(data.headers) };
+  } catch {
+    return null;
+  }
+}
+
 /** Decides from the environment whether a router is needed, and which routes it serves. */
 export function routingPlan(env = process.env) {
   const warnings = [];
@@ -101,7 +124,8 @@ export function routingPlan(env = process.env) {
       warnings.push(`${key}=${env[key]} names a provider without a route; those requests will go to Anthropic`);
     }
   }
-  return { routes, warnings, needsRouter: routes.length > 0 || prefixed.length > 0 };
+  const asksAccount = parseAccountRoute(env.COLONIZER_ACCOUNT_ROUTE) !== null;
+  return { routes, warnings, needsRouter: routes.length > 0 || prefixed.length > 0 || asksAccount };
 }
 
 /**
@@ -308,6 +332,7 @@ const errorTypeFor = (failure) => (failure.class === 'timeout' ? 'timeout_error'
  * @param {Function} [args.fetchImpl]  replaces the upstream client (and its timeouts) entirely
  * @param {number} [args.connectTimeoutMs]  overrides `upstreamTimeouts(env, routes).connectMs`
  * @param {number} [args.idleTimeoutMs]  overrides `upstreamTimeouts(env, routes).idleMs`
+ * @param {{url: string, headers: object}|null} [args.accountRoute]  the mothership's account-fallback question
  * @returns {Promise<{url: string, close: () => Promise<void>}>}
  */
 export async function startRouter({
@@ -318,6 +343,7 @@ export async function startRouter({
   log = () => {},
   connectTimeoutMs,
   idleTimeoutMs,
+  accountRoute = parseAccountRoute(env.COLONIZER_ACCOUNT_ROUTE),
 } = {}) {
   const timeouts = upstreamTimeouts(env, routes);
   const connectMs = connectTimeoutMs ?? timeouts.connectMs;
@@ -351,6 +377,40 @@ export async function startRouter({
     say(failureClass === 'rate_limit' || failureClass === 'client_error' ? 'warn' : 'error', parts.join(' '));
   };
 
+  // The mothership's answer to "is the Claude account out, and where do its requests go instead?"
+  // (issue #1130), reused for a few seconds and asked once at a time. Null — Claude — on any failure.
+  const account = { at: 0, value: null, pending: null, action: 'claude' };
+  const accountDecision = () => {
+    if (!accountRoute) return null;
+    if (Date.now() - account.at < ACCOUNT_ROUTE_TTL_MS) return account.value;
+    account.pending ??= (async () => {
+      let value = null;
+      try {
+        const answer = await upstreamFetch(accountRoute.url, {
+          method: 'GET',
+          headers: accountRoute.headers,
+          signal: AbortSignal.timeout(ACCOUNT_ROUTE_TIMEOUT_MS),
+        });
+        if (answer.ok) value = await answer.json();
+        else await answer.body?.cancel().catch(() => {});
+      } catch {
+        value = null;
+      }
+      account.value = value;
+      account.at = Date.now();
+      account.pending = null;
+      const action = value?.action ?? 'claude';
+      if (action !== account.action) {
+        account.action = action;
+        if (action === 'fallback') say('warn', `Claude account is out; Claude requests go to ${value.model}`);
+        else if (action === 'parked') say('warn', `Claude account is out and cannot be replaced: ${value.reason ?? 'the fallback may not carry this task'}`);
+        else say('info', 'Claude account is back; requests go to Claude again');
+      }
+      return value;
+    })();
+    return account.pending;
+  };
+
   const server = createServer(async (req, res) => {
     const started = Date.now();
     const abort = new AbortController();
@@ -368,8 +428,22 @@ export async function startRouter({
           parsed = null;
         }
       }
-      const model = typeof parsed?.model === 'string' ? parsed.model : null;
+      let model = typeof parsed?.model === 'string' ? parsed.model : null;
       let route = model ? routes.find((r) => model.startsWith(r.prefix)) : undefined;
+      // A request for Claude while the account is out, with a fallback model set: it goes to the
+      // fallback's route like any `<provider>/<model>` request (issue #1130). Only the fallback's own
+      // route can take it; anything else — no such route, a parked answer — stays on Anthropic.
+      if (!route && model && accountRoute) {
+        const decision = await accountDecision();
+        const target = decision?.action === 'fallback' && typeof decision.model === 'string'
+          ? routes.find((r) => decision.model.startsWith(r.prefix))
+          : undefined;
+        if (target) {
+          model = decision.model;
+          parsed.model = model;
+          route = target;
+        }
+      }
       // Who answers this request, and which model, for the log.
       let provider = route ? route.provider : 'anthropic';
       let upstreamModel = route ? model.slice(route.prefix.length) : model;
@@ -486,6 +560,7 @@ export async function startRouter({
       upstream.headers.forEach((value, name) => {
         if (!DROP_RESPONSE.has(name)) outHeaders[name] = value;
       });
+      if (upstream.status === 429 && accountRoute && !route) account.at = 0;
       if (upstream.status >= 400) {
         // An error answer is small: read it to name its class in the log, then pass it on byte for
         // byte, with its status and headers (retry-after included), so Claude Code sees exactly what

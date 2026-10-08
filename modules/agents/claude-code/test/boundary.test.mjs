@@ -12,6 +12,7 @@ import {
   redactDetail,
 } from '../boundary.mjs';
 import { classifyDenial } from '../denials.mjs';
+import { evaluateExecPolicy, loadExecPolicy } from '../execpolicy.mjs';
 import { readFileSync } from 'node:fs';
 
 const at = new Date('2026-01-01T00:00:00.000Z');
@@ -54,6 +55,21 @@ test('commandTarget names the path a refused command was after', () => {
   assert.equal(commandTarget('cat .env && ls'), '.env');
   assert.equal(commandTarget('make 2>&1'), undefined, 'a descriptor duplication names no path');
   assert.equal(commandTarget('npm test'), undefined);
+  // #1079: where the command moved to is not what it was after.
+  assert.equal(commandTarget('cd /workspace && cat .env'), '.env');
+  assert.equal(commandTarget('cd /workspace'), undefined);
+});
+
+test('an exec-policy deny names the path its rule matched, not the directory the command ran in', () => {
+  const policy = loadExecPolicy({}, { cwd: '/workspace', readFile: () => null });
+  const command = 'cd /workspace && git check-ignore -v .env 2>&1 | cat .netrc';
+  const hit = evaluateExecPolicy(policy, command, { cwd: '/workspace' });
+  assert.equal(hit.rule, 'secret-paths');
+  assert.equal(execPolicyBoundary(hit, command, { now }).target, '.env');
+  const home = evaluateExecPolicy(policy, 'cd /workspace; cat ~/.ssh/id_rsa', { cwd: '/workspace' });
+  assert.equal(execPolicyBoundary(home, 'cd /workspace; cat ~/.ssh/id_rsa', { now }).target, '~/.ssh/id_rsa', 'as the command spelled it');
+  // A rule with no `touches` keeps the plain-path fallback.
+  assert.equal(execPolicyBoundary({ decision: 'deny', rule: 'x', layer: 'repo' }, 'cd /workspace && cp a /etc/foo', { now }).target, '/etc/foo');
 });
 
 test('an exec-policy hit becomes an exec_policy_deny naming its rule', () => {

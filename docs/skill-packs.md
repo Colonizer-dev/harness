@@ -238,6 +238,17 @@ workflow refuses a tag whose version differs from `vendor/graft/package.json`), 
 release's `SHA256SUMS` in `graft.lock` by pull request, one row per architecture. A pinned release newer than what is on
 disk shows the Download button again.
 
+### understand-anything
+
+[understand-anything](https://github.com/Egonex-AI/Understand-Anything) (MIT, by Egonex) is the
+second downloadable skillset: a knowledge graph of the repository that answers what a change would
+affect, shows a domain and business-flow view, and gives onboarding tours. Same shape as graft —
+`crates/colonizer/understand-anything.lock` pins one release by commit and sha256, Settings →
+Skillsets downloads it, a download is checked fail-closed before it unpacks anything, and the switch
+is the operator's. In a colony the full-repository pass and the two skills that need network or a
+writable plugin root are refused, so colonies use the file-scoped commands only.
+[docs/understand-anything.md](understand-anything.md) has the API, the pin and the cost guard.
+
 ## Reference migration: superpowers
 
 superpowers ([obra/superpowers](https://github.com/obra/superpowers), v6.4.2, MIT) is the

@@ -37,6 +37,13 @@
 #   COLONIZER_RELEASE_URL=<url>
 #                              fetch the app from <url>/<file> instead of the GitHub release; the
 #                              build attestation belongs to the official release, so it is skipped
+#   COLONIZER_LOCAL_ARCHIVE=<file>
+#                              install from this colonizer-<platform>.tar.gz instead of downloading
+#                              one: the macOS app (Colonizer-arm64.dmg) carries the archive and calls
+#                              the installer with it. No download, SHA256SUMS or attestation check
+#                              happens for the archive — the app it came in is what you chose to
+#                              trust — but everything fetched at install (the Claude Agent SDK,
+#                              Claude Code, Node.js) is still downloaded and checked as usual
 #   COLONIZER_REQUIRE_ATTESTATION=1
 #                              make a provenance check that comes back without a verdict a
 #                              failure, not a note
@@ -82,6 +89,9 @@ main() {
     base="https://github.com/$repo/releases/download/$version"
   fi
   app=${COLONIZER_APP:-$HOME/.local/share/colonizer/app}
+  # A trailing slash makes readlink and [ -L ] look through the $app symlink at the slot it points
+  # to, so the swap below would pick the live slot and remove it. Strip every one (but keep "/").
+  while [ "${app%/}" != "$app" ] && [ -n "${app%/}" ]; do app=${app%/}; done
   archive="colonizer-$platform.tar.gz"
 
   tmp=$(mktemp -d)
@@ -90,16 +100,23 @@ main() {
   # dash runs a trap and then carries on, so a signal has to end the script here.
   trap 'cleanup; exit 1' INT TERM
 
-  say "downloading Colonizer ($version, $platform)"
-  fetch "$base/$archive" "$tmp/$archive"
-  fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
-  expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
-  [ -n "$expected" ] || fail "$archive is not listed in the release's SHA256SUMS"
-  [ "$(sha256_of "$tmp/$archive")" = "$expected" ] || fail "checksum mismatch for $archive; nothing was installed"
-  verify_provenance "$tmp/SHA256SUMS"
+  if [ -n "${COLONIZER_LOCAL_ARCHIVE:-}" ]; then
+    [ -f "$COLONIZER_LOCAL_ARCHIVE" ] || fail "COLONIZER_LOCAL_ARCHIVE $COLONIZER_LOCAL_ARCHIVE is not a file"
+    say "installing Colonizer from $COLONIZER_LOCAL_ARCHIVE"
+    archive_path=$COLONIZER_LOCAL_ARCHIVE
+  else
+    say "downloading Colonizer ($version, $platform)"
+    fetch "$base/$archive" "$tmp/$archive"
+    fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
+    expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
+    [ -n "$expected" ] || fail "$archive is not listed in the release's SHA256SUMS"
+    [ "$(sha256_of "$tmp/$archive")" = "$expected" ] || fail "checksum mismatch for $archive; nothing was installed"
+    verify_provenance "$tmp/SHA256SUMS"
+    archive_path=$tmp/$archive
+  fi
 
   mkdir -p "$tmp/unpack"
-  tar -xzf "$tmp/$archive" -C "$tmp/unpack"
+  tar -xzf "$archive_path" -C "$tmp/unpack"
   [ -x "$tmp/unpack/colonizer/bin/colonizer" ] || fail "$archive has no colonizer/bin/colonizer"
   installed=$(cat "$tmp/unpack/colonizer/VERSION" 2>/dev/null || echo "$version")
 
@@ -350,10 +367,31 @@ verify_provenance() {
     case "$gh_help" in
       *--signer-workflow*) set -- "$@" --signer-workflow "$release_workflow" ;;
     esac
-    if out=$("$@" 2>&1); then
-      say "provenance verified: $(basename "$file") is what $release_workflow signed"
-      return
-    elif printf '%s\n' "$out" | grep -qi 'no attestations'; then
+    # gh reaches Sigstore's TUF root and the transparency log; a timeout there says nothing about the
+    # signature, so a network-looking failure is retried with backoff (COLONIZER_ATTESTATION_BACKOFF
+    # seconds, doubled each time) and, if it persists, reported as unreachable, not as "wrong".
+    net_re='tuf|timeout|timed out|deadline exceeded|connection|no such host|dial tcp|network is unreachable|temporary failure'
+    attempt=1
+    while :; do
+      if out=$("$@" 2>&1); then
+        say "provenance verified: $(basename "$file") is what $release_workflow signed"
+        return
+      fi
+      if printf '%s\n' "$out" | grep -qi 'no attestations\|gh auth login' ||
+        ! printf '%s\n' "$out" | grep -qiE "$net_re"; then
+        break
+      fi
+      [ "$attempt" -lt 3 ] || break
+      sleep $((${COLONIZER_ATTESTATION_BACKOFF:-2} * attempt))
+      attempt=$((attempt + 1))
+    done
+    if printf '%s\n' "$out" | grep -qi 'no attestations\|gh auth login'; then
+      :
+    elif printf '%s\n' "$out" | grep -qiE "$net_re"; then
+      line=$(printf '%s\n' "$out" | grep -iE "$net_re" | head -n 1)
+      fail "could not reach Sigstore to verify the build (network: $line); nothing was installed. Try again."
+    fi
+    if printf '%s\n' "$out" | grep -qi 'no attestations'; then
       # An unattested release, not a wrong one — see the comment above the function for why this is
       # not a downgrade an attacker can steer a tampered file into.
       why="$(basename "$file") carries no build provenance; that is expected for releases published before the release workflow began signing, and would mean something was wrong on a current one"

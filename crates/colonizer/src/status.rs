@@ -97,7 +97,11 @@ async fn reduced_status(app: &Shared) -> Value {
     // The same "holds a slot" definition the full body counts.
     let microvms_live = sessions.iter().filter(|s| s.holds_slot()).count();
     drop(sessions);
-    let microvms_ceiling = orgs::global_max_parallel(&modules);
+    // The last verdict of the queue tick, not a probe of its own: strangers must not run probes.
+    let microvms_ceiling =
+        app.capacity
+            .last()
+            .map_or_else(|| orgs::global_max_parallel(&modules) as usize, |limit| limit.max_parallel) as u64;
     // Cached probes only: strangers must not force the probe subprocesses to rerun.
     let (runtime, host) = tokio::join!(runtime::status_runtime(app, false), runtime::status_host(app, false),);
     let mut host_value = json!({
@@ -204,7 +208,8 @@ pub(crate) async fn status(
     // or a live-origin publish keeps its microVM claimed, while a publish from a stopped colony holds
     // nothing. Kept in step with it; `Session::holds_slot` is the shared predicate both sides express.
     let microvms_live = app.sessions.read().await.iter().filter(|s| s.holds_slot()).count();
-    let microvms_ceiling = orgs::global_max_parallel(&modules);
+    let capacity = crate::capacity::limit(&app, &modules).await;
+    let microvms_ceiling = capacity.max_parallel as u64;
     // Queued colonies hold no microVM (see `Session::holds_slot`), so this is disjoint from
     // `microvms_live`. Carried in `/api/status` so a fleet peer-poll of this endpoint (issue #231)
     // gets everything `fleet::HostSummary` needs without a second round trip.
@@ -277,6 +282,26 @@ pub(crate) async fn status(
         let sessions = app.sessions.read().await;
         account_alerts(troubled, &sessions)
     };
+    // The configured size, plus issue #1141's picture of the limit in force: `mode` ("auto" or
+    // "fixed"), the computed `size`, `room_for` and the `waiting_reason` (memory, cpu or cap).
+    let mut sandbox_status = json!({
+        "provider": modules.sandbox.provider,
+        "image": config::setting_str(&modules.sandbox, &sandbox_schema, "image"),
+        "cpus": setting_u64(&modules.sandbox, &sandbox_schema, "cpus"),
+        "memory": config::setting_str(&modules.sandbox, &sandbox_schema, "memory"),
+        "max_parallel": setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel"),
+        // The static settings, kept for the settings form: in auto mode the keys above carry the
+        // effective ceiling and the auto colony size instead (issue #1177).
+        "configured_cpus": setting_u64(&modules.sandbox, &sandbox_schema, "cpus"),
+        "configured_memory": config::setting_str(&modules.sandbox, &sandbox_schema, "memory"),
+        "configured_max_parallel": setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel"),
+        "msb_version": msb_version.ok().map(|v| v.trim().to_string()),
+        "claude_bin": claude_bin.as_ref().ok().map(|p| p.display().to_string()),
+        "claude_bin_error": claude_bin.err().map(|e| format!("{e:#}")),
+    });
+    if let (Some(into), Some(extra)) = (sandbox_status.as_object_mut(), capacity.status_json().as_object()) {
+        into.extend(extra.clone());
+    }
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
@@ -290,16 +315,7 @@ pub(crate) async fn status(
             Err(e) => json!({"connected": false, "error": format!("{e:#}")}),
         },
         "claude": claude,
-        "sandbox": {
-            "provider": modules.sandbox.provider,
-            "image": config::setting_str(&modules.sandbox, &sandbox_schema, "image"),
-            "cpus": setting_u64(&modules.sandbox, &sandbox_schema, "cpus"),
-            "memory": config::setting_str(&modules.sandbox, &sandbox_schema, "memory"),
-            "max_parallel": setting_u64(&modules.sandbox, &sandbox_schema, "max_parallel"),
-            "msb_version": msb_version.ok().map(|v| v.trim().to_string()),
-            "claude_bin": claude_bin.as_ref().ok().map(|p| p.display().to_string()),
-            "claude_bin_error": claude_bin.err().map(|e| format!("{e:#}")),
-        },
+        "sandbox": sandbox_status,
         "mesh": mesh,
         "storage": storage_status(storage_alert, &disk_verdict),
         "runtime": runtime,
@@ -312,13 +328,21 @@ pub(crate) async fn status(
             "reset_unix": quota.reset_unix,
             "providers": quota.providers,
             "kind": quota.kind,
+            "fallback": quota.fallback,
             "provider_details": quota.details.iter().map(providers::QuotaProviderDetail::to_json).collect::<Vec<_>>(),
         }),
         "quota_cards": quota_cards,
         "account_alerts": account_alerts,
+        // The Nest frontier badge (issue #1144): open issues, not pull requests, in the repositories
+        // of the orgs Colonizer works in. The last counts, `null` until the first refresh lands; a
+        // refresh runs behind this answer, so the poll never waits for GitHub.
+        "backlog": crate::backlog::status_json(&app).await,
         // Issue #1074: the GitHub account's circuit breaker, so the cockpit banners a suspension or
         // a revoked token above every view without a second poll. `{"paused": false}` when all is well.
         "github_pause": crate::github_breaker::status_json(&app, chrono::Utc::now()).await,
+        // Issue #1172: the merge steward's one banner per org whose GitHub Actions is blocked
+        // (billing or a spending limit). `{"ci_blocked": []}` when none is.
+        "merge_steward": crate::merge_steward::status_json(&app).await,
         // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
         "ledger": app.ledger.snapshot(),
         "modules": {

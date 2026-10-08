@@ -14,7 +14,7 @@ POST <webhook_url>
 content-type: application/json
 X-Colonizer-Timestamp: 1789000000
 X-Colonizer-Event-Id: evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5
-X-Colonizer-Signature: sha256=<hex>     (only when a signing secret is set)
+X-Colonizer-Signature: sha256=<hex>
 ```
 
 ```json
@@ -117,12 +117,16 @@ a hash, so it carries nothing of the colony or the repository.
 
 ## Verifying the signature
 
-When a signing secret is set (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`;
-`PUT /api/notify/secret` saves one), the request carries `X-Colonizer-Signature: sha256=<hex>`:
-HMAC-SHA256 with the secret over the exact bytes `"{timestamp}.{body}"`, where `timestamp` is the
-`X-Colonizer-Timestamp` header. Recompute it from the raw body before parsing, compare in constant
-time, and refuse a timestamp more than a few minutes old. The body includes `id`, so the signature
-covers it. Without a secret the request is sent unsigned.
+Every request carries `X-Colonizer-Signature: sha256=<hex>`: HMAC-SHA256 with the signing secret
+over the exact bytes `"{timestamp}.{body}"`, where `timestamp` is the `X-Colonizer-Timestamp`
+header. The secret lives in `config/notify-secret` (mode 0600) or `COLONIZER_NOTIFY_SECRET`, and
+`PUT /api/notify/secret` saves one. Recompute the signature from the raw body before parsing, compare
+in constant time, and refuse a timestamp more than a few minutes old. The body includes `id`, so the
+signature covers it.
+
+A webhook with no secret is never sent (issue [#900](https://github.com/Colonizer-dev/harness/issues/900)):
+there is no unsigned delivery to fall back on, so a receiver may treat a missing signature as a
+forged request.
 
 ## Subscriptions
 
@@ -134,7 +138,7 @@ dead letter (below).
 
 | Method & path | Purpose |
 | --- | --- |
-| `POST /api/webhooks` | `{url, events, secret}` registers one for the caller: `{id, url, events, has_secret, token, created_at}`. `events` is a list of event names (empty or absent: every event the caller may see); `secret` is optional and write-only. **400** for a bad address, an unknown event or a bad secret; **409** past 20 per token or 200 in all |
+| `POST /api/webhooks` | `{url, events, secret}` registers one for the caller: `{id, url, events, has_secret, token, created_at}`. `events` is a list of event names (empty or absent: every event the caller may see); `secret` is required and write-only — a subscription with none is refused (**400**). **400** also for a bad address, an unknown event or a bad secret; **409** past 20 per token or 200 in all |
 | `GET /api/webhooks` | The caller's subscriptions: a scoped token sees its own, the owner sees all. Never a secret |
 | `DELETE /api/webhooks/{id}` | Removes one. A scoped token removes only its own; any other id is **404** |
 
@@ -156,8 +160,39 @@ What a subscription receives:
   addresses are refused, so a token cannot make the mothership POST to what only it can reach. The
   check is on the address as written; a public name that resolves to a private address is not
   caught. The owner may use any address.
-- **Secrets.** Stored in `config/webhook-subscriptions.json` (mode 0600), never answered, never in
-  a payload. A delivery waiting for a retry to a subscription deleted since is dropped.
+- **Secrets.** Required (issue [#900](https://github.com/Colonizer-dev/harness/issues/900)): every
+  delivery is signed, so a subscription registered without one is refused (**400**). Stored in
+  `config/webhook-subscriptions.json` (mode 0600), never answered, never in a payload. A delivery
+  waiting for a retry whose subscription has since been deleted — or has no secret to sign it with —
+  is dropped rather than sent unsigned.
+
+## Upgrading
+
+An install that had a webhook URL and no signing secret before issue
+[#900](https://github.com/Colonizer-dev/harness/issues/900) is not stranded:
+
+- The webhook stops delivering, with one line in the log naming the fix: `notify: the webhook stays
+  off: no signing secret is set (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET)`. The notify
+  loop says it once per run, not once per event, so a busy install is not flooded — an announcement
+  made outside that loop (a merge-train line, say) starts a fresh run and may repeat it, the same
+  way a bad URL does. Everything else in the notify module keeps working.
+- Set the secret and it resumes. `PUT /api/notify/secret` with the secret in a `secret` field saves
+  one on the mothership, and `COLONIZER_NOTIFY_SECRET` in the environment is read too (the saved
+  file wins if both are set). Nothing needs a restart: the secret is read where each attempt is
+  made.
+- A URL that is already stored stays editable until a secret is set — the operator can still save
+  the module's other settings, and can still turn the webhook off by clearing the URL. Changing it,
+  or adding one, is refused until the secret is set, and an organisation's `notify.webhook_url`
+  override is refused the same way. `save_anyway` does not skip either: an unsigned URL is not a
+  setting to fix up later.
+- Deliveries waiting in the outbox are dropped, not sent unsigned, with one line in the log saying
+  how many. Nothing that was going to be delivered anyway is lost; set the secret and the live
+  webhook starts from the next event. A secret that cannot be *read* — a lost or unset
+  `COLONIZER_MASTER_KEY` — is logged the same way, so check both settings if the line appears with
+  a secret you believe is set.
+- Webhook subscriptions registered before this release have no secret and will not be delivered to.
+  Delete each one with `DELETE /api/webhooks/{id}` and re-create it with a `secret`. The owner's own
+  `webhook_url` needs nothing but the secret.
 
 ## Delivery, retries and the dead letter
 

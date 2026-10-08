@@ -100,7 +100,7 @@ pub fn clean(answer: &str) -> Option<String> {
 }
 
 /// How a summary request is sent.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
     /// Through a configured model provider, as the autonomy judge does: `<provider>/<model>`, or a
     /// plain Claude model on the operator's Anthropic provider.
@@ -445,6 +445,7 @@ fn live(status: SessionStatus) -> bool {
     matches!(
         status,
         SessionStatus::Queued
+            | SessionStatus::Blocked
             | SessionStatus::Starting
             | SessionStatus::Running
             | SessionStatus::WaitingForAnswer

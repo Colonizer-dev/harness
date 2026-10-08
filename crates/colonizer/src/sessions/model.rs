@@ -8,6 +8,10 @@ use super::*;
 pub enum SessionStatus {
     /// Waiting for a free slot: no microVM, no worktree, nothing claimed yet.
     Queued,
+    /// Waiting on the colony it is stacked on, which is stopped or parked (issue #1140): no slot, no
+    /// microVM, not failed. It is `Queued` again the moment that colony resumes or finishes, and
+    /// re-bases on the default branch when it is gone for good. Neither live nor finished.
+    Blocked,
     Starting,
     Running,
     WaitingForAnswer,
@@ -63,6 +67,7 @@ impl SessionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::Blocked => "blocked",
             Self::Starting => "starting",
             Self::Running => "running",
             Self::WaitingForAnswer => "waiting_for_answer",
@@ -84,6 +89,24 @@ impl Session {
     /// routed and priced (`routed_cost_usd`).
     pub fn total_cost_usd(&self) -> f64 {
         self.cost_usd.unwrap_or_default() + self.routed_cost_usd.unwrap_or_default()
+    }
+
+    /// Records that autopilot held this colony's publish for `cause` (issue #1175): the same cause
+    /// as the last hold counts one more repeat, a different one starts the count over at one.
+    pub(crate) fn note_hold(&mut self, cause: &str) {
+        if self.hold_cause.as_deref() == Some(cause) {
+            self.hold_cause_repeats = self.hold_cause_repeats.saturating_add(1);
+        } else {
+            self.hold_cause = Some(cause.to_string());
+            self.hold_cause_repeats = 1;
+        }
+    }
+
+    /// Forgets the hold cause: a publish went ahead, so the next hold is a first one again.
+    pub(crate) fn clear_hold_cause(&mut self) {
+        self.hold_cause = None;
+        self.hold_cause_repeats = 0;
+        self.verify_fix_rounds = 0;
     }
 
     /// Drop the attention flag the watchdog or autopilot set (`stalled`, `nudges_exhausted`,
@@ -320,6 +343,10 @@ pub struct Session {
     /// person started. The event origin resolver (`events.rs`) reads the machine launchers back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// What the cockpit shows on a colony auto mode started (issue #1219): `auto: trusted author
+    /// @login`. `None` for every other colony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_note: Option<String>,
     /// The id of the scoped API token that launched this colony (issue #508, api_tokens.rs), when
     /// one did: the concurrency cap and daily budget count a token's own colonies by it, and the
     /// boot resolves the id back to the token's name to mark the instructions as external input.
@@ -419,6 +446,11 @@ pub struct Session {
     /// stays the waiter's whole wait.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claim_wait: bool,
+    /// This colony's own place in the start queue (issue #1156), overriding its org's
+    /// `queue_priority` while it waits: higher starts first, ties go to the older colony. Set by
+    /// `POST /api/sessions/{id}/priority`, `move-to-front` and `move-to-back`; `None` follows the org.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     /// How this colony's completion claims are verified (issue #328): the `verify` configuration
     /// resolved at launch — `auto` (the default), `none`, or an explicit test command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +460,15 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<crate::verify::Verification>,
     pub error: Option<String>,
+    /// Why a `Blocked` colony waits, in words a person can act on: "waiting on #5 (`c8a6d23c`,
+    /// stopped)" (issue #1140). `None` in every other status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    /// Whether the one automatic message asking the agent to rewrite `/harness/out/pr.md` has been
+    /// sent for the "didn't write or update its PR description" case (issue #1140), so a colony is
+    /// asked once and then left to park.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pr_rewrite_nudged: bool,
     /// What Claude Code itself reports at turn end: an estimate over the Claude models only. Routed
     /// providers report tokens but no dollars; the gateway prices those into `routed_cost_usd`, and
     /// [`Session::total_cost_usd`] is the two added up.
@@ -522,6 +563,26 @@ pub struct Session {
     /// and a colony that parks again must not start the schedule over.
     #[serde(default)]
     pub hold_resumes: u32,
+    /// Why autopilot last held this colony's publish (issue #1175), e.g. `verification: <detail>`,
+    /// and how many holds in a row had exactly that cause. A hold that repeats with nothing changed
+    /// is not a question a person can answer by waiting: [`Session::note_hold`] counts it, and the
+    /// hold-park backoff fails the colony with `publish_blocked` instead of cycling park and resume.
+    /// Cleared when a publish goes ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_cause: Option<String>,
+    #[serde(default)]
+    pub hold_cause_repeats: u32,
+    /// How many automatic fix rounds a contradicted verification has already sent this colony's
+    /// agent (issue #1186). Capped at [`crate::verify::FIX_ROUNDS_MAX`]; cleared when a publish
+    /// goes ahead.
+    #[serde(default)]
+    pub verify_fix_rounds: u32,
+    /// What the watchdog's remediation playbook has fixed on this colony by itself (issue #1191),
+    /// newest last and capped at [`crate::playbook::KEPT_FIXES`]. Each entry is also a
+    /// `auto-fixed: <signature>` line in the colony's log; the cockpit reads this list for its
+    /// header line, and the playbook counts its entries against each rule's `max_tries`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_fixes: Vec<crate::playbook::AutoFix>,
     /// How many automatic continues have been scheduled after a transient provider error
     /// (issue #980): the 1-based attempt the colony is backing off for, so the delay already
     /// spent is `provider_retries - 1` into the schedule. Reset to 0 on a successful turn and
@@ -551,6 +612,20 @@ pub struct Session {
     /// cleared — like `pending_answer` but with no suspension behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_note: Option<String>,
+    /// How many times a publish stopped on a secret-shaped literal and resumed the colony to remove it
+    /// (issue #1206). The first time the colony is resumed with the path, line and kind; after that the
+    /// scan stands aside and GitHub's own push protection has the last word.
+    #[serde(default)]
+    pub secret_fix_rounds: u8,
+    /// How many times a push found the branch moved on GitHub, could not fold the colony's commits onto it
+    /// and resumed the colony to resolve the conflict (issue #1206). Bounded like `secret_fix_rounds`.
+    #[serde(default)]
+    pub push_conflict_rounds: u8,
+    /// Set when a held publish (issue #1206) left the colony `stopped` with a resume note: the queue's
+    /// next tick resumes it and clears this. Kept apart from the publish itself because the resume
+    /// is the queue's to run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub publish_resume_pending: bool,
     /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
     /// question and the queue has not started (or has already given up on) the warm-up boot.
     /// `None` unless a request is live.
@@ -644,6 +719,7 @@ impl Default for Session {
             stack: false,
             stack_fork: None,
             origin: None,
+            auto_note: None,
             launched_by_token: None,
             placement: None,
             worktree: String::new(),
@@ -669,7 +745,10 @@ impl Default for Session {
             rebase_orphaned: false,
             unseen_failure: false,
             queued_behind: None,
+            blocked_reason: None,
+            pr_rewrite_nudged: false,
             claim_wait: false,
+            priority: None,
             verify: None,
             verification: None,
             error: None,
@@ -694,11 +773,18 @@ impl Default for Session {
             run_end_cause: None,
             parked: None,
             hold_resumes: 0,
+            hold_cause: None,
+            hold_cause_repeats: 0,
+            verify_fix_rounds: 0,
+            auto_fixes: Vec::new(),
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,
             switch_note: None,
             resume_note: None,
+            secret_fix_rounds: 0,
+            push_conflict_rounds: 0,
+            publish_resume_pending: false,
             prewarm: None,
             supply_chain: None,
             supply_chain_targets: Vec::new(),

@@ -2,6 +2,7 @@
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, isLive, now, sleep } from "../../mockShared";
 import { mockDocsLoop } from "../../cockpit/docsLoopMock";
+import { buildHistory } from "./mockHistory";
 import type { MergeLoopReport, RedTeamRun, StartRedTeamRunRequest, SupplyChainReport, TsAnyReport } from "../../types";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
@@ -27,7 +28,8 @@ export function loopsMock(ms: MockState): LoopsApi {
     );
       }
       if (ms.redActive(repo)) {
-    throw new ApiError("a red-team run is already active on this repo", 409);
+        const holder = ms.redRuns.find((r) => r.repo === repo && r.state !== "done" && r.state !== "stopped" && r.state !== "cancelled");
+        throw new ApiError(`a red-team run (${holder?.id ?? "?"}) is already active for ${repo}`, 409);
       }
       const run: RedTeamRun = {
     id: `rt-${Math.random().toString(16).slice(2, 8)}`,
@@ -162,6 +164,7 @@ export function loopsMock(ms: MockState): LoopsApi {
       if (!body.dry_run) ms.tsAnyLoop = { ...ms.tsAnyLoop, last_report: report };
       return clone(report);
     },
+    loopHistory: (id, days) => ms.later(() => buildHistory(id, ms.loopRunHistory[id] ?? [], Math.min(90, Math.max(1, days)), -new Date().getTimezoneOffset())),
     loopRuns: (id) => ms.later(() => [...ms.sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
     ...mockDocsLoop(now),
     redTeamSchedules: () => ms.later(() => ms.redSchedules.map(clone)),
@@ -208,7 +211,7 @@ export function loopsMock(ms: MockState): LoopsApi {
       await sleep(250);
       const run = ms.redRuns.find((r) => r.id === id);
       if (!run) throw new ApiError("no such red-team run", 404);
-      if (run.state === "done" || run.state === "stopped") throw new ApiError("this run is already over", 409);
+      if (run.state === "done" || run.state === "stopped" || run.state === "cancelled") throw new ApiError("this run is already over", 409);
       run.state = "stopped";
       run.ended_at = now();
       // Send the hunters home too, when there is a chapel to close: a live mock colony just
@@ -219,6 +222,24 @@ export function loopsMock(ms: MockState): LoopsApi {
       s.halt();
       s.patch({ status: "stopped", mesh: null });
     }
+      }
+      return clone(run);
+    },
+    cancelRedTeamRun: async (id) => {
+      await sleep(250);
+      const run = ms.redRuns.find((r) => r.id === id);
+      if (!run) throw new ApiError("no such red-team run", 404);
+      if (run.state === "done" || run.state === "stopped" || run.state === "cancelled") return clone(run);
+      run.state = "cancelled";
+      run.ended_at = now();
+      run.cancelled_at = run.ended_at;
+      run.cancelled_by = "you";
+      for (const hunter of run.hunters) {
+        const s = ms.sessions.get(hunter.session_id);
+        if (s && isLive(s.session.status)) {
+          s.halt();
+          s.patch({ status: "stopped", mesh: null });
+        }
       }
       return clone(run);
     },

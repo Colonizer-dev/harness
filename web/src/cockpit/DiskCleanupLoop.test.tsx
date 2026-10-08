@@ -1,27 +1,29 @@
-// The disk-cleanup row and its dry-run preview, rendered to static markup (the test environment has
+// The disk-cleanup card and its dry-run preview, rendered to static markup (the test environment has
 // no DOM): the switch, the preview's paths and sizes, what it keeps and why, and the attention item.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { DiskCleanupReportView, DiskCleanupRow, DiskCleanupSettingsForm } from "./DiskCleanupLoop";
+import type { Api } from "../api";
+import { ApiContext } from "../context";
+import { DiskCleanupCard, DiskCleanupReportView, DiskCleanupSettingsForm } from "./DiskCleanupLoop";
 import { CLEANUP_LOOP, PREVIEW } from "./testFixtures";
 import { DEFAULT_DISK_CLEANUP_SETTINGS } from "./diskCleanup";
 
 const row = (loop = CLEANUP_LOOP) =>
   renderToStaticMarkup(
-    <ul>
-      <DiskCleanupRow loop={loop} now={Date.parse("2026-09-30T10:00:00Z")} onToggle={() => {}} onOpen={() => {}} onRunNow={() => {}} />
-    </ul>,
+    <ApiContext.Provider value={{} as Api}>
+      <DiskCleanupCard loop={loop} onChanged={() => {}} />
+    </ApiContext.Provider>,
   );
 
 describe("DiskCleanupLoop", () => {
-  it("shows the built-in loop off, with its switch and a preview button", () => {
+  it("shows the built-in loop off, with its switch and its place among the built-in loops", () => {
     const out = row();
     expect(out).toContain("Disk cleanup");
+    expect(out).toContain("Built-in");
     expect(out).toContain('role="switch"');
     expect(out).toContain('aria-checked="false"');
-    expect(out).toContain("Preview");
-    expect(out).toContain("every hour");
-    expect(out).toContain("not run yet");
+    expect(out).toContain("Off · every hour");
+    expect(out).toContain("Not run yet");
   });
 
   it("shows the switch on, the last run and a standing attention item", () => {
@@ -32,7 +34,6 @@ describe("DiskCleanupLoop", () => {
       disk_cleanup: { ...CLEANUP_LOOP.disk_cleanup!, history: [{ ...PREVIEW, dry_run: false }], attention: "Disk still 94% full after cleanup — 40G in live colonies" },
     });
     expect(out).toContain('aria-checked="true"');
-    expect(out).toContain("freed 3G · 1 item");
     expect(out).toContain("Disk still 94% full after cleanup — 40G in live colonies");
   });
 

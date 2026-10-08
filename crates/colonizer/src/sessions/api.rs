@@ -736,12 +736,14 @@ async fn hold_answer(
             let paused = crate::reclaim::admission_paused(app).await || crate::providers::quota_status(app).await.paused;
             // Resolved before the admission read: `org_settings` reads the orgs file with blocking IO.
             let org_settings = app.org_settings(&x.org);
+            // Resolved before the sessions lock: auto mode reads the sessions itself.
+            let max_parallel = crate::capacity::max_parallel(app, &modules).await;
             let note = {
                 let sessions = app.sessions.read().await;
                 crate::queue::restore_line_note(
                     &sessions,
                     &x,
-                    orgs::global_max_parallel(&modules) as usize,
+                    max_parallel,
                     orgs::org_max_parallel(&org_settings),
                     crate::queue::repo_limit(&modules, &org_settings),
                     paused,
@@ -850,6 +852,12 @@ async fn answer_parked(
 pub struct SinceQuery {
     since: Option<u64>,
     epoch: Option<u64>,
+    /// Issue #1210: how many events a first paint (the socket) or a page (plain GET) carries. A
+    /// socket without it replays the whole run, as before.
+    limit: Option<usize>,
+    /// A page of the events before this `seq` (of run `epoch`, at byte `offset` when known).
+    before: Option<u64>,
+    offset: Option<u64>,
 }
 
 /// Who is on a colony's events socket, and what their token allows (issue #508): the `Via` the
@@ -868,12 +876,16 @@ pub async fn events_ws(
     via: Option<axum::Extension<crate::auth::Via>>,
     scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
     revocation: Option<axum::Extension<crate::auth::Revocation>>,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Result<Response, crate::AppError> {
     let revocation = revocation.map(|axum::Extension(r)| r);
     app.session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    // A plain GET is a page of the log (issue #1210); only an upgrade opens the live socket.
+    let Ok(ws) = ws else {
+        return events_page(&app, &id, &query).await;
+    };
     let rt = app.runtime(&id).await;
     let via = via.map(|axum::Extension(via)| via);
     let scoped = scoped.map(|axum::Extension(scoped)| scoped);
@@ -882,7 +894,7 @@ pub async fn events_ws(
     Ok(ws.on_upgrade(move |socket| {
         crate::auth::Revocation::until(
             revocation,
-            events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, actor, socket),
+            events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, query.limit, actor, socket),
         )
     }))
 }
@@ -896,12 +908,40 @@ pub(crate) fn replay_line(chunk: &[u8]) -> Option<(u64, &str)> {
     Some((seq, line))
 }
 
+/// `GET /api/sessions/{id}/events` without an upgrade (issue #1210): the newest `limit` events, or
+/// with `before=<seq>` (and the `epoch` and `offset` the previous page named) the page before them.
+/// Read from the end of the log, stepping back through the rotated `events-N.jsonl`, so the cost of
+/// a page does not grow with the history behind it.
+async fn events_page(app: &Shared, id: &str, query: &SinceQuery) -> Result<Response, crate::AppError> {
+    let current = run_epoch(app.store(), id).await;
+    let before = query.before.map(|seq| history::Before {
+        epoch: query.epoch.filter(|e| *e != 0).unwrap_or(current),
+        seq,
+        offset: query.offset,
+    });
+    let limit = query.limit.unwrap_or(history::DEFAULT_LIMIT);
+    let page = history::page(app.store(), id, current, before, limit, true)
+        .await
+        .map_err(|e| {
+            client_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("could not read the event log: {e}"),
+            )
+        })?;
+    let mut body = page.meta();
+    body["events"] = Value::Array(page.events);
+    body["run_epoch"] = json!(current);
+    Ok(Json(body).into_response())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn events_socket(
     app: Shared,
     id: String,
     rt: Arc<Runtime>,
     since: u64,
     client_epoch: Option<u64>,
+    limit: Option<usize>,
     actor: SocketActor,
     socket: WebSocket,
 ) {
@@ -949,7 +989,39 @@ async fn events_socket(
     // `InvalidData` error, which reads exactly like EOF here and would silently truncate the
     // replay at the first corrupt line. Split chunks decode (or skip) one at a time instead.
     let mut skipped = 0u64;
-    if let Ok(Some(bytes)) = app.store().read_file(&id, "events.jsonl").await {
+    // A first paint with a `limit` (issue #1210) is the newest page of this run, a `history` frame
+    // saying whether more is behind it, and the summary of what the older part held. A reconnect
+    // (`since` > 0) only needs what it missed, which is small, and replays it as before.
+    let mut tailed = false;
+    if let Some(limit) = limit.filter(|_| effective == 0) {
+        match history::page(app.store(), &id, current_epoch, None, limit, false).await {
+            Ok(page) => {
+                let summary = rt.summary(app.store(), &id).await;
+                let mut frame = page.meta();
+                frame["type"] = json!("history");
+                frame["summary"] = json!(summary);
+                if tx.send(text(frame.to_string())).await.is_err() {
+                    return;
+                }
+                for event in &page.events {
+                    replayed = replayed.max(event["seq"].as_u64().unwrap_or(0));
+                    if tx.send(text(event.to_string())).await.is_err() {
+                        return;
+                    }
+                }
+                tailed = true;
+            }
+            Err(e) => {
+                app.session_log(
+                    &id,
+                    "warn",
+                    format!("could not read the newest events ({e}); replaying the whole log"),
+                )
+                .await;
+            }
+        }
+    }
+    if !tailed && let Ok(Some(bytes)) = app.store().read_file(&id, "events.jsonl").await {
         for chunk in bytes.split(|b| *b == b'\n') {
             if chunk.is_empty() {
                 continue;

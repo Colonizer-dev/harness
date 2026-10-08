@@ -16,12 +16,36 @@ export interface OrgSettings {
   max_parallel?: number | null;
   /** Live colonies one repository of this org may run at once; null inherits the global per-repository limit. */
   repo_max_parallel?: number | null;
+  /** Where this org's queued colonies start relative to other orgs' (issue #1156): higher first, null is Normal (0). */
+  queue_priority?: number | null;
+  /** Hours a colony may queue before it counts as High whatever its priority; null or absent turns the guard off. */
+  max_wait_hours?: number | null;
   /**
    * Repositories of this org (full `owner/name`) whose superseded colonies' pull requests Colonizer
    * may close on GitHub when another colony's pull request merges over them (issue #673). Empty —
-   * the default — only marks the colonies superseded and leaves their pull requests open.
+   * the default — only marks the colonies superseded and leaves their pull requests open. An entry
+   * may also be an org (`acme`) or `*` for every repository of every shown org.
    */
   close_superseded_prs?: string[];
+  /** Repositories (`owner/name`, an org, or `*`) whose pull requests a colony in a GitHub loop may ask the mothership to merge. */
+  merge_prs?: string[];
+  /**
+   * The merge steward (issue #1172): whether Colonizer merges this org's colonies' own green pull
+   * requests itself. `green` merges a clean one; `green+rebase` also brings a stale branch up to
+   * date (GitHub's update-branch first, then the colony). Absent, null and `off` leave every merge
+   * to a person.
+   */
+  auto_merge?: AutoMergeMode | null;
+  /**
+   * Trusted auto-colonize (issue #1219): a new issue written by an org member, a collaborator with
+   * write access or an allowlisted login becomes a queued colony without a click. Absent, null and
+   * `off` leave every issue to a person; a stranger's issue never starts by itself.
+   */
+  auto_colonize?: "off" | "trusted" | null;
+  /** How the steward merges; null is squash. */
+  merge_method?: MergeMethod | null;
+  /** Whether the steward deletes the branch after merging; null keeps it. */
+  delete_branch?: boolean | null;
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
@@ -36,6 +60,12 @@ export interface OrgSettings {
    * colonies stay listed and resumable. Absent and null mean on, like every field above.
    */
   enabled?: boolean | null;
+  /**
+   * Hide the org from Colonizer (issue #1213): out of the workspace switcher, the repository pickers
+   * and every "All repositories" scope. Nothing is deleted and its running colonies keep running.
+   * Absent and false mean shown.
+   */
+  hidden?: boolean;
   /**
    * Whether this org's colonies may consult Jev at any decision point (issue #582). False turns every
    * point off for the org's colonies — no network call — while absent, null or true follows the
@@ -139,6 +169,8 @@ export type ActivityKind =
   | "colony.answer"
   | "chat.colony"
   | "chat.issue"
+  | "chat.approve"
+  | "chat.reject"
   | "colonize.issue"
   | "colonize.colony"
   | "decision.shadow"
@@ -153,6 +185,7 @@ export type ActivityKind =
   | "loop.docs"
   | "redteam.start"
   | "redteam.stop"
+  | "redteam.cancel"
   | "redteam.schedule"
   | "redteam.unschedule"
   | "remote.enable"
@@ -217,4 +250,54 @@ export interface ActivityQuery {
   org?: string;
   repo?: string;
   q?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Merge steward (issue #1172)
+// ---------------------------------------------------------------------------
+
+export type AutoMergeMode = "off" | "green" | "green+rebase";
+export type MergeMethod = "squash" | "merge" | "rebase";
+
+/** What the steward is doing about one pull request. */
+export type StewardPhase = "waiting" | "merging" | "rebasing" | "fixing" | "ci_blocked" | "needs_attention";
+
+/** One pull request a colony opened, as GET /api/merge-steward lists it. */
+export interface StewardPr {
+  session: string;
+  repo: string;
+  url: string;
+  title: string;
+  /** The colony's own status, e.g. `pr_opened`, or `running` while it fixes something. */
+  colony_status: string;
+  state: StewardPhase;
+  /** Why it is in that state, in a sentence. */
+  reason: string;
+  /** When the steward last decided it; null before its first read. */
+  since: string | null;
+}
+
+/** An org whose GitHub Actions is blocked (billing or a spending limit). */
+export interface StewardBlock {
+  since: string;
+  reason: string;
+  message: string;
+}
+
+export interface StewardOrg {
+  org: string;
+  auto_merge: AutoMergeMode;
+  ci_blocked: StewardBlock | null;
+  prs: StewardPr[];
+}
+
+/** GET /api/merge-steward. */
+export interface MergeStewardInfo {
+  orgs: StewardOrg[];
+  last_cycle: string | null;
+}
+
+/** GET /api/status `merge_steward`: one entry per org whose Actions is blocked. */
+export interface MergeStewardStatus {
+  ci_blocked: (StewardBlock & { org: string; prs: number })[];
 }

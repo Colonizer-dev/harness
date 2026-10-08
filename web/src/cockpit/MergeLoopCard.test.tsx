@@ -3,6 +3,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import type { Api } from "../api";
+import { ApiContext } from "../context";
 import type { MergeLoopReport, MergeLoopView } from "../types";
 import { MergeLoopPanel, MergeLoopReportView } from "./MergeLoopCard";
 import { actionLabel, defaultMergeLoopSettings, parseNames, reportRows, repoOptIn, setRepoCap, setRepoNever, setRepoOptIn, toggleRepos } from "./mergeLoop";
@@ -109,32 +111,47 @@ describe("merge-train loop report", () => {
     const out = renderToStaticMarkup(<MergeLoopReportView report={report({ dry_run: true, forced_dry_run: true })} />);
     expect(out).toContain("Last dry run");
     expect(out).toContain("COLONIZER_NO_EXTERNAL_EFFECTS");
-    expect(out).toContain("would merge");
+    expect(out).toContain("Would merge");
+  });
+
+  it("files pull requests by what happened and puts identical reasons on one line", () => {
+    const billing = "GitHub Actions did not start the checks: the job was not started because recent account payments have failed or your spending limit needs to be increased.";
+    const waiting = Array.from({ length: 11 }, (_, i) => ({ session: `k${i}`, pr_url: `https://github.com/kontinuum-ai/kontinuum/pull/${300 + i}`, title: `PR ${i}`, action: "waiting" as const, reason: billing }));
+    const out = renderToStaticMarkup(<MergeLoopReportView report={report({ repos: [{ repo: "kontinuum-ai/kontinuum", main: "green", paused: null, heal: [], items: waiting }] })} />);
+    expect(out).toContain("11 PRs in kontinuum-ai/kontinuum");
+    expect(out).toContain("GitHub Actions is blocked (billing)");
+    expect(out).toContain('href="https://github.com/organizations/kontinuum-ai/settings/billing"');
+    expect(out.split("payments have failed").length - 1).toBe(0);
   });
 });
 
 describe("MergeLoopPanel", () => {
   const panel = (v: MergeLoopView, draft = v.settings, dirty = false) =>
-    renderToStaticMarkup(<MergeLoopPanel view={v} draft={draft} repoNames={["acme/web", "acme/api"]} dirty={dirty} busy={false} onChange={() => {}} onSave={() => {}} onRun={() => {}} />);
+    renderToStaticMarkup(
+      <ApiContext.Provider value={{} as Api}>
+        <MergeLoopPanel view={v} draft={draft} repoNames={["acme/web", "acme/api"]} dirty={dirty} busy={false} open onChange={() => {}} onSave={() => {}} onRun={() => {}} />
+      </ApiContext.Provider>,
+    );
 
   it("shows the built-in loop off, with a dry run and no report yet", () => {
     const out = panel(view());
     expect(out).toContain("Merge train");
-    expect(out).toContain("built-in");
-    expect(out).toContain("Off");
+    expect(out).toContain("Built-in");
+    expect(out).toContain("Not set up: add a repository");
     expect(out).toContain("Dry run");
     expect(out).toContain("Not run yet");
-    expect(out).not.toContain(">Save<");
+    expect(out).not.toContain(">Save changes<");
   });
 
   it("shows the cadence, the opted-in count, repository toggles and the last report", () => {
     const settings = { ...defaultMergeLoopSettings(), enabled: true, allow: ["acme/web"], never: ["acme/api"] };
     const out = panel(view({ settings, last_report: report(), repos: { "acme/web": { paused: "main is red", needs_redo: {} } } }), settings, true);
-    expect(out).toContain("Every 60 min in 1 repository");
+    expect(out).toContain("Every hour");
+    expect(out).toContain("1 repository");
     expect(out).toContain("acme/web");
     expect(out).toContain("acme/api");
     expect(out).toContain("paused");
-    expect(out).toContain(">Save<");
+    expect(out).toContain(">Save changes<");
     expect(out).toContain("Fix totals");
   });
 

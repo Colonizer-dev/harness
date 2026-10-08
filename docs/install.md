@@ -109,6 +109,37 @@ curl -fsSL https://colonizer.dev/install.sh | sh -s -- --pull-image
 
 The installer's other variables are listed under [Installer and build](#installer-and-build).
 
+## macOS DMG (unsigned)
+
+Apple Silicon Macs can also install from `Colonizer-arm64.dmg`, attached to every
+[release](https://github.com/Colonizer-dev/harness/releases) and listed in its `SHA256SUMS` and build
+attestation. `curl -fsSL https://colonizer.dev/install.sh | sh` stays the recommended path; the DMG is for
+people who would rather drag an app.
+
+1. Open the DMG and drag **Colonizer** to **Applications** (the DMG also carries a `First open.txt`).
+2. Open Colonizer. macOS blocks it, because the app is signed ad hoc (which Apple silicon requires) but not
+   with an Apple Developer ID, and not notarized. Open **System Settings → Privacy & Security**, scroll to
+   the message about Colonizer and click **Open Anyway**. You do this once.
+3. The app installs Colonizer from the archive it carries, with no download of the app itself: the same
+   `scripts/install-release.sh` the one-liner runs, so the slots under `~/.local/share/colonizer`, the
+   `~/.local/bin/colonizer` link and `COLONIZER_KEEP_PREVIOUS` behave the same. It then sets up the
+   `dev.colonizer.mothership` LaunchAgent ([`colonizer login-item enable`](#desktop-install-the-cockpit-as-an-app-start-at-login))
+   and opens the cockpit sign-in. The installer still fetches Claude Code and Node.js for colonies, each checked
+   against its pin, so the first open needs a network. What it does is logged in
+   `~/Library/Logs/Colonizer-app.log`.
+
+To update, download the newer DMG and open its app again: it installs the version it carries and leaves
+the same version alone. A running mothership keeps running the old version until you restart it (or use
+`colonizer update`).
+
+**Keychain.** While the app is unsigned, the macOS Keychain asks again for the secrets Colonizer saved
+after each update, because it ties a secret to the binary that wrote it; choose **Always Allow**. Signing with
+your own identity keeps the grant ([`COLONIZER_CODESIGN_IDENTITY`](#installer-and-build)).
+
+`scripts/build-dmg.sh <tarball> <version> <out.dmg>` builds the DMG; the release workflow runs it.
+Developer ID signing and notarization are planned
+([#1138](https://github.com/Colonizer-dev/harness/issues/1138)).
+
 ## Build from source
 
 ```sh
@@ -406,7 +437,7 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub. With neither, and nothing saved, the `gh` CLI login is used |
 | `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` | Claude, in that order, when no Claude account is saved |
 | `MEM0_API_KEY` | The mem0 shared-memory provider |
-| `JEV_API_KEY` | Jev compaction and the Jev second opinion (TypeSafe). Never saved; only the environment |
+| `JEV_API_KEY` | Jev compaction and the Jev second opinion (TypeSafe). A key saved on the Secrets page wins; this is the fallback |
 | `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY` | Speech to text in the composer, one per voice service (the last is the OpenAI-compatible one) |
 | `OPENAI_API_KEY`, `XAI_API_KEY` | Also the vendor key the `codex` and `grok-build` agent modules get, when no `openai` or `xai-grok` provider has a saved key ([docs/runner-authoring.md](runner-authoring.md)) |
 | `COLONIZER_NOTIFY_SECRET` | Signing outgoing notification webhooks |
@@ -444,6 +475,7 @@ mothership they talk to is `--host`, else `COLONIZER_BIND`. See [docs/cli.md](cl
 | `COLONIZER_KEEP_PREVIOUS` | `install.sh` | `1` keeps the slot being replaced; an in-place update sets it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)) |
 | `COLONIZER_IMAGE` | both scripts, with `--pull-image` | The image to pull instead of the pinned `node:24-bookworm` |
 | `COLONIZER_MSB` | `scripts/install.sh` | A microsandbox binary to build with instead of the vendored one |
+| `COLONIZER_LOCAL_ARCHIVE` | `install-release.sh` | Install from this `colonizer-<platform>.tar.gz` instead of downloading one, skipping the archive's checksum and attestation checks; what the [macOS app](#macos-dmg-unsigned) sets. Claude Code, Node.js and the SDK are still fetched and checked |
 | `COLONIZER_CODESIGN_IDENTITY` | `install.sh`, `install-release.sh` | On macOS, sign the binary with this identity so the Keychain keeps granting access across rebuilds; a release install also records it, so later updates re-sign ([docs/configuration.md](configuration.md#the-system-keychain)) |
 | `COLONIZER_PREBUILT` | `scripts/install.sh` | A directory of prebuilt binaries to use instead of building them; the release workflow sets it |
 | `COLONIZER_DESCRIBE`, `COLONIZER_COMMIT` | the Rust build | The version and commit to stamp into the binary when git is not available; the release workflow sets them ([docs/updates.md](updates.md#which-version-am-i-running)) |

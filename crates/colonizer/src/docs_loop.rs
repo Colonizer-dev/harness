@@ -25,7 +25,7 @@ use crate::{
     activity::Entry,
     authority, client_error,
     sessions::{self, NewSession, Session, SessionStatus},
-    util::{exec_within, short_id, valid_repo, write_atomic},
+    util::{exec_within, short_id, write_atomic},
 };
 use anyhow::{Context, Result};
 use axum::{Json, extract::State, http::StatusCode};
@@ -164,11 +164,7 @@ async fn update<R>(app: &App, f: impl FnOnce(&mut Saved) -> R) -> Result<(Saved,
 
 /// An allowlist entry: `owner` or `owner/name`, by the same rules as any repository name.
 fn valid_entry(entry: &str) -> bool {
-    if entry.contains('/') {
-        valid_repo(entry)
-    } else {
-        valid_repo(&format!("{entry}/x"))
-    }
+    crate::repo_scope::valid_entry(entry)
 }
 
 fn check_settings(s: &Settings) -> Result<Settings, String> {
@@ -2391,7 +2387,9 @@ pub fn open_docs_colony<'a>(sessions: &'a [Session], repo: &str) -> Option<&'a S
     sessions.iter().find(|s| {
         s.repo.eq_ignore_ascii_case(repo)
             && s.origin.as_deref() == Some(ORIGIN)
-            && (s.status == SessionStatus::Queued || s.status.busy() || s.status == SessionStatus::PrOpened)
+            && (matches!(s.status, SessionStatus::Queued | SessionStatus::Blocked)
+                || s.status.busy()
+                || s.status == SessionStatus::PrOpened)
     })
 }
 
@@ -2488,7 +2486,9 @@ async fn clone_for(app: &Shared, repo: &str, mirror: Mirror) -> Result<PathBuf> 
 async fn repos_of(app: &Shared, allow: &[String]) -> (Vec<String>, Vec<RepoReport>) {
     let mut repos: Vec<String> = Vec::new();
     let mut failed = Vec::new();
-    for entry in allow {
+    // `*` is every visible org, resolved now so a hidden org is left out (issue #1213).
+    let allow = app.resolve_scope(allow).await;
+    for entry in &allow {
         if entry.contains('/') {
             repos.push(entry.clone());
             continue;
@@ -2660,6 +2660,7 @@ pub async fn run_once(
             &format!("could not save the report: {e:#}"),
         )
     })?;
+    crate::loop_history::record(app, crate::loop_history::from_docs(&report)).await;
     for r in &report.repos {
         let mut entry = Entry::new("loop.docs", "colony");
         entry.org = r.repo.split('/').next().map(str::to_string);

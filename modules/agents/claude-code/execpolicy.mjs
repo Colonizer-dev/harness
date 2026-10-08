@@ -11,6 +11,7 @@
 // (`.colonizer/exec-policy.json`, read once at start); a malformed layer is dropped with a
 // warning, so the policy fails closed on the default.
 
+import { createHash } from 'node:crypto';
 import { openSync, readSync, closeSync, statSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, normalize, posix } from 'node:path';
@@ -20,6 +21,10 @@ export const EXEC_POLICY_REPO_FILE = join('.colonizer', 'exec-policy.json');
 /** Where the boot mounts the writable-bind list (boot.rs writes `vm_dir/host-mounts`, exposed at
  * guest `/colonizer`, alongside `path-policy`). */
 export const HOST_MOUNTS_FILE = '/colonizer/host-mounts';
+/** Where the boot writes the repository's own scripts as the base commit has them, `<object id>
+ * <path>` per line (crates/colonizer/src/tracked_scripts.rs, issue #1239). */
+export const TRACKED_SCRIPTS_FILE = '/colonizer/tracked-scripts';
+const TRACKED_SCRIPTS_MAX_BYTES = 4 * 1024 * 1024;
 const EXEC_POLICY_MAX_BYTES = 64 * 1024; // a policy file is rules, not data; more is a mistake
 const HOST_MOUNTS_MAX_BYTES = 64 * 1024; // the list is paths, not data; more is a mistake
 const SCRIPT_MAX_BYTES = 256 * 1024;
@@ -31,6 +36,14 @@ const LOG_COMMAND_CHARS = 200;
 // Interpreters (and `source` and `.`, which run a script in place) whose first non-flag argument
 // names the script the command runs.
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'python', 'python3', 'node', 'deno', 'bun', 'ruby', 'perl', 'source', '.']);
+// Flags that make an interpreter parse its script and stop, running nothing (#1227): `bash -n`,
+// `node --check`, `ruby -c`. Only when these are the interpreter's only flags; `bash -n -c …` or
+// `bash -n -x …` is not recognised and is read as a run, as before.
+const SYNTAX_ONLY = new Map([
+  ...['bash', 'sh', 'zsh', 'dash', 'ksh'].map((shell) => [shell, new Set(['-n', '--noexec'])]),
+  ['node', new Set(['--check', '-c'])],
+  ['ruby', new Set(['-c'])],
+]);
 const WRITE_WORDS = new Set(['cp', 'mv', 'rm', 'touch', 'mkdir', 'tee', 'truncate', 'install']);
 const WRITE_TARGET_FLAGS = /^(-|--|[a-zA-Z]=)/;
 // Write targets that are never "outside the repository": scratch space and the kernel's own sinks.
@@ -214,7 +227,48 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
   if (env.COLONIZER_EXEC_POLICY_ORG) add('org', env.COLONIZER_EXEC_POLICY_ORG);
   const repo = readFile(join(cwd, EXEC_POLICY_REPO_FILE), EXEC_POLICY_MAX_BYTES);
   if (repo) add('repo', repo);
-  return { layers, warnings, hostMounts: loadHostMounts(env, readFile) };
+  return {
+    layers,
+    warnings,
+    hostMounts: loadHostMounts(env, readFile),
+    trackedScripts: loadTrackedScripts(env, readFile),
+  };
+}
+
+/**
+ * The repository's own scripts at the base commit, path to git object id (#1239). The guest cannot
+ * see that commit by itself, and the agent can rewrite the worktree's index and refs, so the host
+ * writes this list at boot into the read-only `/colonizer` mount. Empty when absent.
+ * @param {string} text
+ * @returns {Map<string, string>}
+ */
+export function parseTrackedScripts(text) {
+  const tracked = new Map();
+  for (const line of String(text ?? '').split('\n')) {
+    const match = line.match(/^([0-9a-f]{40}|[0-9a-f]{64}) (.+)$/);
+    if (match) tracked.set(posix.normalize(match[2]), match[1]);
+  }
+  return tracked;
+}
+
+function loadTrackedScripts(env, readFile) {
+  const file = env.COLONIZER_TRACKED_SCRIPTS || TRACKED_SCRIPTS_FILE;
+  return parseTrackedScripts(readFile(file, TRACKED_SCRIPTS_MAX_BYTES));
+}
+
+/** The git object id of a blob with these bytes, SHA-1 or SHA-256 to match `id`'s length. */
+export function gitBlobId(bytes, algorithm = 'sha1') {
+  const body = Buffer.from(bytes);
+  return createHash(algorithm).update(`blob ${body.length}\0`).update(body).digest('hex');
+}
+
+/** True when the script at `path` is one the base commit carries, with the same bytes. */
+function isTrackedScript(path, text, cwd, tracked) {
+  if (!tracked?.size || text.length >= SCRIPT_MAX_BYTES) return false; // a capped read cannot be hashed
+  const rel = posix.relative(posix.normalize(cwd), posix.normalize(path));
+  if (!rel || rel.startsWith('..') || rel.startsWith('/')) return false;
+  const id = tracked.get(rel);
+  return Boolean(id) && gitBlobId(text, id.length === 64 ? 'sha256' : 'sha1') === id;
 }
 
 /**
@@ -229,11 +283,11 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
  */
 export function evaluateExecPolicy(policy, command, opts = {}) {
   if (!policy || typeof command !== 'string' || !command) return null;
-  const ctx = buildContext(command, opts, policy.hostMounts ?? null);
+  const ctx = buildContext(command, opts, policy.hostMounts ?? null, policy.trackedScripts ?? null);
   let best = null;
   for (const layer of policy.layers) {
     for (const rule of layer.rules) {
-      if (!ruleMatches(rule, ctx)) continue;
+      if (!ruleMatches(rule, ctx, layer.name)) continue;
       // A `writes_outside` rule reports WHY: the specific path classification the context found (a
       // read-only mount, the checkout's .git, a host-backed mount), falling back to the rule's own
       // reason for the plain strict case (a VM-local write, which no single path names).
@@ -241,6 +295,11 @@ export function evaluateExecPolicy(policy, command, opts = {}) {
         : rule.writes === 'outside' ? ctx.writeReason ?? rule.reason
         : rule.reason;
       const hit = { decision: rule.decision, rule: rule.id, layer: layer.name, reason };
+      // A `touches` rule names the path it matched, as the command spelled it, so the boundary event
+      // reports the refused file and not the first path-looking word (`cd /workspace && cat .env`
+      // refuses `.env`, not the workspace root the watchdog would then see every call reach).
+      const target = touchedWord(rule, ctx);
+      if (target) hit.target = target;
       if (!best || RANK[hit.decision] > RANK[best.decision]) best = hit;
       break; // first matching rule in this layer wins
     }
@@ -317,17 +376,22 @@ export function createExecAllowCache() {
 // --- matching ------------------------------------------------------------------
 
 /** One rule: every predicate present must hold. */
-function ruleMatches(rule, ctx) {
+function ruleMatches(rule, ctx, layer) {
   for (const p of rule.predicates) {
     switch (p.kind) {
       case 'command':
         if (!p.res.some((re) => re.test(ctx.command))) return false;
         break;
-      case 'script':
+      case 'script': {
         // No readable script, no match: the rule is about what the command runs, and a command
         // that runs nothing readable cannot show it (the default layer's other rules still hold).
-        if (!ctx.scripts.some((s) => p.res.some((re) => re.test(s.text)))) return false;
+        // The repository's own scripts, byte for byte as the base commit has them, are not the
+        // colony's to answer for (#1239): the default layer leaves them to the VM's network
+        // policy. A layer an operator or the repository adds still sees them.
+        const scripts = layer === 'default' ? ctx.scripts.filter((s) => !s.tracked) : ctx.scripts;
+        if (!scripts.some((s) => p.res.some((re) => re.test(s.text)))) return false;
         break;
+      }
       case 'touches':
         if (!ctx.tokens.some((t) => p.res.some((re) => re.test(t)) && !p.keepOut.some((re) => re.test(t)))) return false;
         break;
@@ -337,6 +401,14 @@ function ruleMatches(rule, ctx) {
     }
   }
   return true;
+}
+
+/** The word, as the command spelled it, that made a rule's `touches` predicate match, or null. */
+function touchedWord(rule, ctx) {
+  const p = rule.predicates.find((q) => q.kind === 'touches');
+  if (!p) return null;
+  const token = ctx.tokens.find((t) => p.res.some((re) => re.test(t)) && !p.keepOut.some((re) => re.test(t)));
+  return token === undefined ? null : ctx.spelled.get(token) ?? token;
 }
 
 // --- commands ------------------------------------------------------------------
@@ -384,6 +456,17 @@ export function splitCommands(command) {
   return segments.map((s) => s.trim()).filter(Boolean);
 }
 
+// tar and rsync `--exclude PATTERN` names what NOT to copy, so its pattern is not a path the command
+// touches: excluding the placeholder dotfiles while copying a repository is the safe thing to do
+// (#1169). Only the pattern itself goes; `--exclude-from FILE` reads FILE and keeps counting, and so
+// does every other word of the segment.
+const EXCLUDE_ARG = /(^|\s)--exclude(?:=|\s+)('[^']*'|"[^"]*"|[^\s;|&<>]+)/g;
+function withoutExcludes(segment) {
+  const first = String(segment ?? '').trim().split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && w !== 'sudo' && w !== 'env');
+  const bin = (first ?? '').split('/').pop();
+  return bin === 'tar' || bin === 'rsync' ? segment.replace(EXCLUDE_ARG, '$1') : segment;
+}
+
 /** The words of one command segment, cleaned of the punctuation that glues paths to words. */
 function words(text) {
   return String(text ?? '')
@@ -392,6 +475,21 @@ function words(text) {
     .map((w) => w.replace(/^[@:=+]+/, '').replace(/[,;:]+$/, ''))
     // One-char words are noise (`echo x`), except the filesystem root, which a `rm -rf /` writes.
     .filter((w) => w.length > 1 || w === '/');
+}
+
+/**
+ * The paths a git segment names inside `<rev>:<path>` object specs (#1241): `git show HEAD:.env`,
+ * `git cat-file -p origin/main:.npmrc` or `<sha>:config/.netrc` read the file as committed, and the
+ * `<rev>:` prefix would otherwise hide it from a `touches` glob. Any git subcommand counts; a word
+ * without a colon, or with only a leading one (`:.env`, which [`words`] already strips), adds
+ * nothing.
+ */
+function gitObjectPaths(segment) {
+  if (basename(commandWords(segment)[0] ?? '') !== 'git') return [];
+  return words(segment)
+    .filter((w) => w.indexOf(':') > 0)
+    .map((w) => w.slice(w.indexOf(':') + 1))
+    .filter((path) => path.length > 1);
 }
 
 /** A segment's words past its env assignments and a leading sudo/env/command/exec. */
@@ -409,8 +507,15 @@ function scriptArg(segment) {
   const ws = /^\s*\.\s+\S/.test(segment) ? ['.', ...commandWords(segment)] : commandWords(segment);
   const head = ws[0] ?? '';
   if (INTERPRETERS.has(basename(head))) {
+    const flags = [];
     for (const w of ws.slice(1)) {
-      if (!w.startsWith('-')) return expandTilde(w); // the first non-flag argument is the script
+      if (!w.startsWith('-')) {
+        // A syntax check reads the script and runs none of it (#1227).
+        const syntax = SYNTAX_ONLY.get(basename(head));
+        if (syntax && flags.length && flags.every((f) => syntax.has(f))) return null;
+        return expandTilde(w); // the first non-flag argument is the script
+      }
+      flags.push(w);
     }
     return null;
   }
@@ -532,6 +637,122 @@ function classifyWrite(segment, cwd, hostMounts) {
   return best;
 }
 
+// --- name-only commands (#1169) ------------------------------------------------------------
+
+// Commands that can only learn a path's NAME, existence or size, never its bytes: `git
+// check-ignore`, `git status`, `ls`, `stat`, `wc -c`, `test -e|-f|-d|-s|...` and `[ -f P ]`. The
+// path policy's empty placeholders (.env, .netrc, ...) show up to an agent as dotfiles, and asking
+// git whether one is ignored, or how big it is, is not an attempt to read a secret, so such a
+// segment does not feed the `touches` predicate.
+const SHORT_FLAGS = /^-[A-Za-z]+$/;
+const LONG_FLAGS = /^--[a-z][a-z-]*$/; // no `=value`: nothing here takes an argument worth smuggling
+const NUMBER = /^-?\d+$/;
+// A `stat` format: conversions and plain punctuation, never a path or an expansion.
+const STAT_FORMAT = /^[%A-Za-z0-9_.:,+=-]+$/;
+// `test` and `[` operators that look at a path's metadata only.
+const FILE_TESTS = ['-e', '-f', '-d', '-s', '-r', '-w', '-x', '-L', '-h'];
+// Filters that, given no path, only read their stdin: what follows a pipe from a name-only
+// command, so `git check-ignore -v .env | head` sees names and nothing else.
+const STDIN_FILTERS = new Set(['head', 'tail', 'sort', 'uniq', 'wc']);
+// Anything that can feed or redirect bytes, or run another command, and so turn a name-only
+// segment into a read: pipes, redirects, substitutions, subshells, braces and backslash escapes.
+const UNSAFE_SHELL = /[|<>`$(){}\\]/;
+// The same, minus the pipe: a pipe is checked segment by segment (only into a STDIN_FILTERS
+// command with no path of its own).
+const UNSAFE_SHELL_PIPED = /[<>`$(){}\\]/;
+// Redirects that move no bytes into or out of a file: stderr onto stdout, or output thrown away.
+const HARMLESS_REDIRECT = /(^|\s)(?:2>&1|[12]?>\s*\/dev\/null|&>\s*\/dev\/null)(?=\s|;|\||&|$)/g;
+
+/** True when one segment (already split on `;`, `&&` and the like) only asks about path names. */
+function isNameOnlySegment(segment, cwd) {
+  const ws = segment.trim().split(/\s+/).map((w) => w.replace(/^["']|["']$/g, ''));
+  if (!ws.length || ws.some((w) => /["']/.test(w))) return false;
+  const paths = (rest) => rest.every((w) => !w.startsWith('-'));
+  const flags = (rest) => rest.filter((w) => w.startsWith('-')).every((w) => SHORT_FLAGS.test(w) || LONG_FLAGS.test(w));
+  if (ws[0] === 'git') {
+    // `-C <dir>` is allowed only when it names the repository the command already runs in (#1079
+    // follow-up: `git -C /workspace check-ignore --no-index ...`); another directory could carry a
+    // config whose hooks run. Then the subcommand must come first: `git -c core.pager=... status`
+    // could run a command.
+    let i = 1;
+    while (ws[i] === '-C') {
+      const dir = ws[i + 1] ?? '';
+      if (!(dir === '.' || (cwd && dir.startsWith('/') && posix.normalize(dir).replace(/\/+$/, '') === posix.normalize(cwd).replace(/\/+$/, '')))) return false;
+      i += 2;
+    }
+    if (!['check-ignore', 'status'].includes(ws[i])) return false;
+    return flags(ws.slice(i + 1));
+  }
+  if (ws[0] === 'ls') return flags(ws.slice(1));
+  // `echo` of literal words (the caller already refused every expansion) only prints its own text.
+  if (ws[0] === 'echo') return true;
+  // `wc -c` reports a size, the same thing `ls -l` shows; `-l`, `-w` and `-m` count what is inside.
+  if (ws[0] === 'wc') {
+    const rest = ws.slice(1);
+    return rest.some((w) => w.startsWith('-')) && rest.filter((w) => w.startsWith('-')).every((w) => w === '-c' || w === '--bytes');
+  }
+  if (ws[0] === 'stat') return statArgs(ws.slice(1));
+  if (ws[0] === 'test') return ws.length === 3 && FILE_TESTS.includes(ws[1]) && paths([ws[2]]);
+  if (ws[0] === '[') return ws.length === 4 && FILE_TESTS.includes(ws[1]) && paths([ws[2]]) && ws[3] === ']';
+  return false;
+}
+
+/** `stat` arguments: flags, an optional `-c`/`--format`/`--printf` format, and paths. */
+function statArgs(rest) {
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i];
+    if (w === '-c' || w === '--format' || w === '--printf') {
+      if (!STAT_FORMAT.test(rest[i + 1] ?? '')) return false;
+      i++;
+    } else if (/^--(?:format|printf)=/.test(w)) {
+      if (!STAT_FORMAT.test(w.replace(/^--(?:format|printf)=/, ''))) return false;
+    } else if (w.startsWith('-') && !SHORT_FLAGS.test(w) && !LONG_FLAGS.test(w)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** True when a segment is a stdin filter given no path: `head`, `head -n 5`, `sort -u`, `wc -l`. */
+function isStdinFilter(segment) {
+  const ws = segment.trim().split(/\s+/);
+  return STDIN_FILTERS.has(ws[0]) && ws.slice(1).every((w) => SHORT_FLAGS.test(w) || LONG_FLAGS.test(w) || NUMBER.test(w));
+}
+
+/**
+ * The segments whose words feed the `touches` predicate: all of them, minus the name-only ones,
+ * when the whole command is plain (no pipe, redirect, substitution or subshell anywhere, so no
+ * other segment can consume what a name-only one prints, and nothing hides bytes in a segment).
+ * The one loop the incident ran, `for f in .env .netrc; do git check-ignore -v "$f"; done`, counts
+ * as name-only when its body is. Anything touching `.ssh` keeps counting; any other segment, such
+ * as `cat .env`, keeps its tokens and is refused as before.
+ */
+function nameOnlyFiltered(command, segments, cwd) {
+  if (/\.ssh/.test(command)) return segments;
+  // One line only: a newline inside the body would hide a second command (`hash -p /bin/cat ls`).
+  const loop = !/[\r\n]/.test(command.trim()) && command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;|&<>`(){}\\]+?);?\s*done$/);
+  if (loop) {
+    const [, name, , body] = loop;
+    const ref = new RegExp(`"?\\$(?:${name}|\\{${name}\\})"?`, 'g');
+    const plain = body.replace(ref, 'X');
+    return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain, cwd) ? [] : segments;
+  }
+  if (!UNSAFE_SHELL.test(command)) {
+    // All or nothing: one other segment (`alias ls=cat`, `export PATH=...`, `hash -p /bin/cat ls`)
+    // can change what a later `ls` or `test` runs, so only a command made of name-only segments
+    // and nothing else drops its tokens.
+    return segments.every((segment) => !segment.trim() || isNameOnlySegment(segment, cwd)) ? [] : segments;
+  }
+  // The shape agents reach for to keep output short: `git check-ignore -v .env 2>&1 | head; wc -c
+  // .env 2>&1 | head`. With `2>&1` and `>/dev/null` gone, and no other redirect, substitution or
+  // escape left, every segment must be name-only or a stdin filter with no path of its own (`head`,
+  // not `head .env`, and never `cat` or `xargs`), so what crosses a pipe is names and sizes.
+  const plain = command.replace(HARMLESS_REDIRECT, '$1');
+  if (/[\r\n]/.test(plain.trim()) || UNSAFE_SHELL_PIPED.test(plain)) return segments;
+  const parts = splitCommands(plain);
+  return parts.length && parts.every((segment) => isNameOnlySegment(segment, cwd) || isStdinFilter(segment)) ? [] : segments;
+}
+
 /**
  * Everything the predicates see, derived from the command alone: its segments, the tokens the
  * `touches` globs match against (the command's words and every script's words), the scripts it
@@ -541,7 +762,7 @@ function classifyWrite(segment, cwd, hostMounts) {
  * of those plus a write into the microVM's own root filesystem. Each carries the reason for the
  * write it matched; a VM-local write has no reason of its own, so a strict rule names it.
  */
-function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null) {
+function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null, tracked = null) {
   const segments = splitCommands(command);
   const scripts = [];
   const seen = new Set();
@@ -552,11 +773,14 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     if (seen.has(path)) continue;
     seen.add(path);
     const text = readFile(path);
-    if (text) scripts.push({ path, text });
+    if (text) scripts.push({ path, text, tracked: isTrackedScript(path, text, cwd, tracked) });
   }
   const tokens = new Set();
-  for (const word of [...segments.flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
-    tokens.add(expandTilde(word));
+  const spelled = new Map(); // token -> the word as the command spelled it (`~/.ssh`, not /root/.ssh)
+  for (const word of [...nameOnlyFiltered(command, segments, cwd).map(withoutExcludes).flatMap((s) => [...words(s), ...gitObjectPaths(s)]), ...scripts.flatMap((s) => words(s.text))]) {
+    const token = expandTilde(word);
+    tokens.add(token);
+    if (!spelled.has(token)) spelled.set(token, word);
   }
   const writes = segments.map((segment) => classifyWrite(segment, cwd, hostMounts)).filter(Boolean);
   const pick = (kinds) => writes
@@ -568,6 +792,7 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     command,
     segments,
     tokens: [...tokens],
+    spelled,
     scripts,
     writesOutside: outside !== null,
     writesOutsideAny: strict !== null,

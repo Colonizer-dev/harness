@@ -140,6 +140,24 @@ them so the form prefills.
   fallback is refused when you save it. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
   connection the colonies route to is exhausted, the queue pauses, and a colony whose turn died on the
   plan is stopped with its worktree kept until the provider recovers.
+- **Claude account fallback.** The Claude subscription is not a connection, so it has no
+  `fallback_model` of its own. The Claude Code module's **If Claude runs out, use**
+  (`account_fallback_model`, a `<provider>/<model>` such as `minimax/MiniMax-M3.1`; install-wide) names
+  one. While the account's session or weekly limit holds, every request that would go to Claude — the
+  orchestrator, the subagents, the background, small-task and large-task roles, a per-colony or org
+  override that names a Claude model — goes to that model through the gateway instead. A colony's model
+  router asks the gateway (`GET /account-route`, with the colony token) before each such request, so
+  the decision is made at request time from the live quota record: no saved setting changes, and at the
+  reset the same colonies are back on Claude with nothing to switch back. Running colonies carry on, new
+  ones start as usual, and colonies the limit parked resume on the fallback; the colony's log says so
+  once per switch ("Claude account is out; this colony's Claude requests run on …") and once on the
+  way back. A **restricted-sensitivity** task takes the fallback only when its connection meets the
+  class's bar (marked `trusted`, unless the org's sensitivity override says otherwise). Otherwise the
+  request stays on Claude, the turn fails on the limit, and the colony parks with the reason on its
+  card: "needs a trusted provider: Claude is out until 19:51; MiniMax is not marked trusted". A
+  fallback that names no configured connection, or whose own plan is out, counts as no fallback. With
+  the setting empty (the default) nothing changes: the queue pauses on the account's limit and
+  colonies wait for the reset.
 - **Out-of-quota card.** Colonies blocked on an exhausted connection (every request since their last
   success answered with the quota error, and no `fallback_model` retry) show on one "Provider out of
   quota" card per connection — in the inbox's "Needs you" list and at the top of Settings →

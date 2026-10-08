@@ -111,6 +111,43 @@ pub struct PathPolicyOverrides {
     pub protect_paths: Option<Vec<String>>,
 }
 
+/// The merge steward's switch for an org (issue #1172, `merge_steward.rs`).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AutoMerge {
+    /// The steward leaves the org's pull requests alone.
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// Merge a colony's pull request once every check is green and GitHub reports it clean.
+    #[serde(rename = "green")]
+    Green,
+    /// As `green`, and also bring a pull request that fell behind or conflicts up to date: GitHub's
+    /// update-branch first, then the colony itself.
+    #[serde(rename = "green+rebase")]
+    GreenRebase,
+}
+
+/// How the merge steward merges a pull request.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    #[default]
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The `gh pr merge` flag.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Squash => "--squash",
+            Self::Merge => "--merge",
+            Self::Rebase => "--rebase",
+        }
+    }
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -119,6 +156,12 @@ pub struct OrgSettings {
     /// refuses to start new colonies for it, while keeping its settings and its existing colonies.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Whether the operator hid this org from Colonizer (issue #1213). Unlike `enabled`, which stops
+    /// colonies, hiding only takes the org out of sight: it leaves the workspace switcher, the
+    /// repository pickers, the `*` ("all repositories") scope of every loop and setting, the merge
+    /// steward and the backlog count. Nothing is deleted and the org's running colonies keep running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     /// Whether this org's colonies may consult Jev at any decision point (issue #582). `Some(false)`
     /// turns every point off for the org's colonies — no network call is made — while `None` or
     /// `Some(true)` follows the module settings, point by point.
@@ -137,6 +180,17 @@ pub struct OrgSettings {
     /// module's `repo_max_parallel`; the global and org limits apply as well.
     #[serde(default)]
     pub repo_max_parallel: Option<u64>,
+    /// Where this org's queued colonies stand in the start queue (issue #1156): an integer, higher
+    /// first, `None` meaning 0. The queue orders by `(priority desc, created_at asc)`, so a colony of
+    /// a higher-priority org starts before an older one of a normal org; the global, org and
+    /// per-repository limits still decide whether it fits. A colony's own `priority` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_priority: Option<i32>,
+    /// The starvation guard (issue #1156): after a queued colony of this org has waited this many
+    /// hours, it is treated as high priority whatever its org or colony priority says, so a low
+    /// priority colony cannot wait for ever. `None` or `0` turns the guard off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wait_hours: Option<u64>,
     /// The repositories of this org (full `owner/name`) whose superseded colonies' pull requests
     /// Colonizer may close on GitHub when another colony's pull request merges over them (issue
     /// #673). Empty — the default — marks the colonies superseded but never touches GitHub.
@@ -147,6 +201,18 @@ pub struct OrgSettings {
     /// request, so merges stay off until the operator lists a repository here.
     #[serde(default)]
     pub merge_prs: Vec<String>,
+    /// The merge steward (issue #1172): whether Colonizer merges this org's colonies' own pull
+    /// requests when they are green, and rebases them when they fall behind. `None` — the default —
+    /// is `off`; the steward never calls GitHub for an org that has not opted in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge: Option<AutoMerge>,
+    /// How the steward merges (issue #1172): `None` is `squash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<MergeMethod>,
+    /// Whether the steward deletes the branch after merging (issue #1172). `None` keeps it, and a
+    /// branch another colony's pull request is stacked on is always kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch: Option<bool>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -185,6 +251,21 @@ pub struct OrgSettings {
     /// (sensitivity.rs).
     #[serde(default)]
     pub sensitivity: Option<SensitivityOverrides>,
+    /// Trusted auto-colonize (issue #1219): whether a new issue from an org member, a collaborator
+    /// with write access, an allowlisted login or Colonizer itself becomes a queued colony without a
+    /// click. `None` is `off`; a stranger's issue never starts by itself (`auto_colonize.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_colonize: Option<crate::auto_colonize::AutoColonize>,
+    /// Repositories of this org (full `owner/name`) with a choice of their own, which wins over the
+    /// org's `auto_colonize`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub auto_colonize_repos: BTreeMap<String, crate::auto_colonize::AutoColonize>,
+    /// Logins always trusted for auto mode, such as the mothership's own bot account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_colonize_allow: Vec<String>,
+    /// The most colonies auto mode starts per repository per hour; `None` is 5, `0` pauses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_colonize_rate: Option<u32>,
 }
 
 pub fn valid_org(org: &str) -> bool {
@@ -471,6 +552,16 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").clamp(1, 1440) as i64)
 }
 
+/// How long an idle, held or flagged colony with no open question and no publish in flight keeps its
+/// microVM slot before the queue parks it (issue #1140), from the watchdog module's
+/// `idle_park_minutes`. Clamped where read, for the reason [`hold_timeout`] is: modules.json is not
+/// re-validated on load and `chrono::Duration::minutes` panics out of bounds. A module config
+/// written before the setting existed reads the schema default of 15 minutes.
+pub fn idle_park(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.watchdog, &schema, "idle_park_minutes").clamp(1, 1440) as i64)
+}
+
 /// How many times autopilot retries automatically after a turn dies on a *transient* provider error
 /// before it holds the colony for a person (issue #980), from the watchdog module. Zero turns the
 /// automatic retry off: the first transient error holds at once, the pre-#980 behaviour. Clamped
@@ -586,9 +677,7 @@ pub fn repo_max_parallel(org: &OrgSettings) -> Option<u64> {
 /// GitHub itself reads repository names. Empty — the default — never closes: the colony is only
 /// marked superseded and its pull request is left for a person.
 pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
-    org.close_superseded_prs
-        .iter()
-        .any(|named| named.trim().eq_ignore_ascii_case(repo))
+    in_list(org, &org.close_superseded_prs, repo)
 }
 
 /// Whether a colony in a GitHub loop may ask the mothership to merge a pull request in `repo` (issue
@@ -596,7 +685,34 @@ pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
 /// GitHub itself reads repository names. Empty — the default — never merges: the operator opts in
 /// per repository, and until then a merge request is refused before `gh` is reached.
 pub fn merges_prs(org: &OrgSettings, repo: &str) -> bool {
-    org.merge_prs.iter().any(|named| named.trim().eq_ignore_ascii_case(repo))
+    in_list(org, &org.merge_prs, repo)
+}
+
+/// Whether a repository-list setting of `org` names `repo`: `owner/name`, the org as `owner`, or
+/// `*` for every repository of every visible org (issue #1212). The wildcard never reaches into an
+/// org that is hidden (issue #1213); naming the repository or the org outright still counts.
+fn in_list(org: &OrgSettings, list: &[String], repo: &str) -> bool {
+    let hidden = if org.hidden {
+        BTreeSet::from([repo.split('/').next().unwrap_or_default().to_ascii_lowercase()])
+    } else {
+        BTreeSet::new()
+    };
+    crate::repo_scope::covers(list, repo, &hidden)
+}
+
+/// The org's merge steward mode (issue #1172): `off` unless the operator opted in.
+pub fn auto_merge_mode(org: &OrgSettings) -> AutoMerge {
+    org.auto_merge.unwrap_or_default()
+}
+
+/// How the merge steward merges for this org (issue #1172): squash unless the org says otherwise.
+pub fn merge_method(org: &OrgSettings) -> MergeMethod {
+    org.merge_method.unwrap_or_default()
+}
+
+/// Whether the merge steward deletes a merged branch (issue #1172); off unless the org says so.
+pub fn deletes_merged_branch(org: &OrgSettings) -> bool {
+    org.delete_branch.unwrap_or(false)
 }
 
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
@@ -780,6 +896,19 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
 }
 
 pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
+    crate::auto_colonize::validate(settings)?;
+    if let Some(priority) = settings.queue_priority
+        && !crate::queue_priority::valid_priority(i64::from(priority))
+    {
+        return Err(format!(
+            "queue_priority is a whole number from {} to {}",
+            -crate::queue_priority::PRIORITY_LIMIT,
+            crate::queue_priority::PRIORITY_LIMIT
+        ));
+    }
+    if settings.max_wait_hours.is_some_and(|hours| hours > 24 * 365) {
+        return Err("max_wait_hours is at most a year (8760); 0 turns the guard off".into());
+    }
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
             .into_iter()
@@ -816,20 +945,19 @@ pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
     if settings.repo_max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("per-repository parallel limit must be between 1 and 32".into());
     }
-    // Every entry names a repository of this org, as `owner/name` — the shape the colonies
-    // themselves carry, and what the close step compares against.
+    // Every entry is `owner/name` (the shape the colonies themselves carry), an `owner`, or `*`.
     if let Some(bad) = settings
         .close_superseded_prs
         .iter()
-        .find(|repo| !crate::util::valid_repo(repo.trim()))
+        .find(|repo| !crate::repo_scope::valid_entry(repo))
     {
         return Err(format!(
-            "close_superseded_prs entries are repositories like acme/api, and {bad:?} is not one"
+            "close_superseded_prs entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
         ));
     }
-    if let Some(bad) = settings.merge_prs.iter().find(|repo| !crate::util::valid_repo(repo.trim())) {
+    if let Some(bad) = settings.merge_prs.iter().find(|repo| !crate::repo_scope::valid_entry(repo)) {
         return Err(format!(
-            "merge_prs entries are repositories like acme/api, and {bad:?} is not one"
+            "merge_prs entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
         ));
     }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
@@ -1003,6 +1131,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("enabled") {
         incoming.enabled = saved.enabled;
     }
+    if !named("hidden") {
+        incoming.hidden = saved.hidden;
+    }
     if !named("jev") {
         incoming.jev = saved.jev;
     }
@@ -1025,11 +1156,38 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("repo_max_parallel") {
         incoming.repo_max_parallel = saved.repo_max_parallel;
     }
+    if !named("queue_priority") {
+        incoming.queue_priority = saved.queue_priority;
+    }
+    if !named("max_wait_hours") {
+        incoming.max_wait_hours = saved.max_wait_hours;
+    }
     if !named("close_superseded_prs") {
         incoming.close_superseded_prs = saved.close_superseded_prs.clone();
     }
     if !named("merge_prs") {
         incoming.merge_prs = saved.merge_prs.clone();
+    }
+    if !named("auto_merge") {
+        incoming.auto_merge = saved.auto_merge;
+    }
+    if !named("auto_colonize") {
+        incoming.auto_colonize = saved.auto_colonize;
+    }
+    if !named("auto_colonize_repos") {
+        incoming.auto_colonize_repos = saved.auto_colonize_repos.clone();
+    }
+    if !named("auto_colonize_allow") {
+        incoming.auto_colonize_allow = saved.auto_colonize_allow.clone();
+    }
+    if !named("auto_colonize_rate") {
+        incoming.auto_colonize_rate = saved.auto_colonize_rate;
+    }
+    if !named("merge_method") {
+        incoming.merge_method = saved.merge_method;
+    }
+    if !named("delete_branch") {
+        incoming.delete_branch = saved.delete_branch;
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -1123,6 +1281,23 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     let _config = app.config_write.lock().await;
     let mut all: BTreeMap<String, OrgSettings> =
         crate::util::read_json_or_default(&app.orgs_file()).map_err(|e| config_unreadable(&app.orgs_file(), &e))?;
+    // An org's webhook URL is an address outside this machine, so it needs the mothership's signing
+    // secret like the owner's does (issue #900) — one secret signs both. An unchanged URL is let
+    // through, so an org that upgraded with one can still save its other settings and clear it.
+    if crate::notify::secret(&app).is_none()
+        && let Some(url) = req.settings.notify.as_ref().and_then(|notify| notify.webhook_url.as_deref())
+        && !url.is_empty()
+        && Some(url)
+            != all
+                .get(&org)
+                .and_then(|saved| saved.notify.as_ref())
+                .and_then(|notify| notify.webhook_url.as_deref())
+    {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "this org's webhook URL needs the mothership's signing secret (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET): a webhook delivery is never sent unsigned",
+        ));
+    }
     // A skillset switched on must exist, or boot fails. One switched off must exist only when this save
     // adds the switch, which catches a misspelt disable; an off override already saved for a skillset
     // since uninstalled is harmless and the org dialog sends it back on every save.
@@ -1207,6 +1382,33 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_priority_survives_a_save_that_does_not_name_it_and_is_range_checked() {
+        let saved = OrgSettings {
+            queue_priority: Some(10),
+            max_wait_hours: Some(24),
+            ..Default::default()
+        };
+        let body = json!({"max_parallel": 3});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.queue_priority, Some(10), "an older build's save keeps the priority");
+        assert_eq!(incoming.max_wait_hours, Some(24));
+
+        let body = json!({"queue_priority": -10, "max_wait_hours": null});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.queue_priority, Some(-10), "what the client names wins");
+        assert_eq!(incoming.max_wait_hours, None, "a named null clears it");
+
+        assert!(validate(&incoming).is_ok());
+        let wild = OrgSettings {
+            queue_priority: Some(i32::MAX),
+            ..Default::default()
+        };
+        assert!(validate(&wild).is_err());
+    }
 
     #[test]
     fn org_overrides_layer_over_global_settings() {
@@ -1538,6 +1740,48 @@ mod tests {
     }
 
     #[test]
+    fn a_save_from_a_build_that_never_names_hidden_keeps_it_and_one_that_does_wins() {
+        let saved = OrgSettings {
+            hidden: true,
+            ..Default::default()
+        };
+        let mut old_build = OrgSettings::default();
+        keep_unnamed_fields(&mut old_build, &saved, Some(&json!({"enabled": true})));
+        assert!(old_build.hidden, "an old web build must not unhide an org");
+        let mut toggled = OrgSettings::default();
+        keep_unnamed_fields(&mut toggled, &saved, Some(&json!({"hidden": false})));
+        assert!(!toggled.hidden, "naming it wins, so the toggle can turn it back off");
+    }
+
+    #[test]
+    fn the_merge_steward_is_off_by_default_and_squashes() {
+        let org = OrgSettings::default();
+        assert_eq!(auto_merge_mode(&org), AutoMerge::Off);
+        assert_eq!(merge_method(&org), MergeMethod::Squash);
+        assert!(!deletes_merged_branch(&org));
+        let set: OrgSettings =
+            serde_json::from_value(json!({"auto_merge": "green+rebase", "merge_method": "rebase", "delete_branch": true}))
+                .unwrap();
+        assert_eq!(auto_merge_mode(&set), AutoMerge::GreenRebase);
+        assert_eq!(merge_method(&set).flag(), "--rebase");
+        assert!(deletes_merged_branch(&set));
+        assert_eq!(serde_json::to_value(&set).unwrap()["auto_merge"], "green+rebase");
+        assert!(serde_json::from_value::<OrgSettings>(json!({"auto_merge": "always"})).is_err());
+        // An unset steward is not written at all, so an old build reads the file unchanged.
+        assert!(serde_json::to_value(&org).unwrap().get("auto_merge").is_none());
+        // A save from a web build that predates the settings keeps them; a named null clears them.
+        let mut incoming = OrgSettings::default();
+        keep_unnamed_fields(&mut incoming, &set, Some(&json!({})));
+        assert_eq!(incoming.auto_merge, Some(AutoMerge::GreenRebase));
+        assert_eq!(incoming.merge_method, Some(MergeMethod::Rebase));
+        assert_eq!(incoming.delete_branch, Some(true));
+        let clears = json!({"auto_merge": null});
+        let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared, &set, Some(&clears));
+        assert_eq!(cleared.auto_merge, None);
+    }
+
+    #[test]
     fn the_held_colony_timeout_reads_the_sandbox_setting_with_a_30_minute_default() {
         let modules = ModulesConfig::default();
         assert_eq!(hold_timeout(&modules), chrono::Duration::minutes(30));
@@ -1547,6 +1791,26 @@ mod tests {
         // A hand-edited 0 is no timeout at all, so it reads as the smallest real one.
         configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(0));
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
+    }
+
+    #[test]
+    fn the_idle_park_timeout_reads_the_watchdog_setting_with_a_15_minute_default() {
+        let modules = ModulesConfig::default();
+        assert_eq!(idle_park(&modules), chrono::Duration::minutes(15));
+        let mut configured = ModulesConfig::default();
+        configured.watchdog.settings.insert("idle_park_minutes".into(), json!(5));
+        assert_eq!(idle_park(&configured), chrono::Duration::minutes(5));
+        configured.watchdog.settings.insert("idle_park_minutes".into(), json!(0));
+        assert_eq!(
+            idle_park(&configured),
+            chrono::Duration::minutes(1),
+            "a hand-edited 0 reads as the smallest real one"
+        );
+        configured
+            .watchdog
+            .settings
+            .insert("idle_park_minutes".into(), json!(u64::MAX));
+        assert_eq!(idle_park(&configured), chrono::Duration::minutes(1440));
     }
 
     /// Issue #980/#1093: the automatic-retry budget reads the watchdog setting, defaults to three,
@@ -2440,6 +2704,64 @@ mod tests {
     fn org_app() -> (Shared, PathBuf) {
         let root = std::env::temp_dir().join(format!("colonizer-orgs-{}", crate::util::short_id()));
         (crate::tests::test_app(&root), root)
+    }
+
+    /// One save of an org, as `PUT /api/orgs/{org}` makes it: the handler is called directly with
+    /// the JSON a Settings dialog sends, so the refusal runs exactly where a request would.
+    async fn save_org(app: &Shared, org: &str, settings: Value) -> Result<Json<Value>, crate::AppError> {
+        put(State(app.clone()), Path(org.into()), Json(json!({ "settings": settings }))).await
+    }
+
+    /// An org's `notify.webhook_url` is an address outside this machine, so it needs the signing
+    /// secret the owner's does — one secret signs both (issue #900). A new or changed URL is
+    /// refused without one; an override that is already stored and unchanged still saves, which is
+    /// what keeps an install that upgraded with one editable rather than bricked.
+    #[tokio::test]
+    async fn an_org_webhook_url_is_only_saved_with_a_signing_secret() {
+        let (app, root) = org_app();
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let secret = app.cfg.config_dir.join("notify-secret");
+        assert!(
+            crate::notify::secret(&app).is_none(),
+            "this App starts with no signing secret"
+        );
+        let url = |value: &str| json!({ "notify": { "webhook_url": value } });
+
+        // A brand-new URL has nothing stored to be grandfathered from.
+        let err = save_org(&app, "acme", url("https://hooks.example.com/hook"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("needs the mothership's signing secret"),
+            "and it says what to do: {}",
+            err.message()
+        );
+        assert!(
+            save_org(&app, "acme", url("")).await.is_ok(),
+            "an empty URL is nothing to sign"
+        );
+
+        // With a secret, the same URL saves.
+        crate::util::write_secret(&secret, "whsec-test").unwrap();
+        assert!(save_org(&app, "acme", url("https://hooks.example.com/hook")).await.is_ok());
+
+        // The secret goes away again — an install that upgraded, exactly.
+        crate::util::delete_secret(&secret);
+        assert!(crate::notify::secret(&app).is_none());
+        assert!(
+            save_org(&app, "acme", url("https://hooks.example.com/hook")).await.is_ok(),
+            "an unchanged URL stays editable, so the other org settings can still be saved"
+        );
+        let err = save_org(&app, "acme", url("https://elsewhere.example.com/hook"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST, "changing it needs a secret");
+        assert!(
+            save_org(&app, "acme", url("")).await.is_ok(),
+            "and clearing it is always allowed"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

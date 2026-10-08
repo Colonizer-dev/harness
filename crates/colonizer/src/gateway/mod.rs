@@ -15,7 +15,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{any, post},
+    routing::{any, get, post},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
@@ -421,6 +421,14 @@ pub struct Gateway {
     quota_file: PathBuf,
     /// Colonies blocked on an exhausted provider, by colony id (see [`ColonyQuotaHit`]).
     colony_quota: Mutex<HashMap<String, ColonyQuotaHit>>,
+    /// What each colony's Claude requests were last told by the account fallback (#1130), so the
+    /// colony's log gets one line per switch. Colonies on Claude have no entry.
+    account_notes: Mutex<HashMap<String, account_fallback::AccountRoute>>,
+    /// The provider each colony's last request through the gateway went to (#1168): what a turn's
+    /// quota error that names no provider is attributed to. In memory only.
+    last_route: Mutex<HashMap<String, String>>,
+    /// Per-day usage, balance samples and plan events behind the providers page's charts (#1204).
+    pub(crate) history: crate::provider_history::History,
 }
 
 impl Gateway {
@@ -463,6 +471,9 @@ impl Gateway {
             quota: Mutex::new(quota),
             quota_file,
             colony_quota: Default::default(),
+            account_notes: Default::default(),
+            last_route: Default::default(),
+            history: crate::provider_history::History::load(data_dir),
         })
     }
 
@@ -588,6 +599,7 @@ impl Gateway {
 
     /// Records a provider's plan as exhausted, with the reset the error named, if any.
     pub fn mark_quota_exhausted(&self, provider: &str, reset_at: Option<String>, reset_unix: Option<i64>) {
+        self.history.record_event(provider, "exhausted", Utc::now());
         let mut quota = self.quota.lock().unwrap();
         quota.insert(
             provider.to_string(),
@@ -674,6 +686,7 @@ impl Gateway {
         let mut quota = self.quota.lock().unwrap();
         if quota.remove(provider).is_some() {
             self.write_quota(&quota);
+            self.history.record_event(provider, "recovered", Utc::now());
         }
     }
 
@@ -695,6 +708,19 @@ impl Gateway {
                 );
             }
         }
+    }
+
+    /// Notes that `colony`'s latest request was routed to `provider`.
+    pub fn note_route(&self, colony: &str, provider: &str) {
+        let mut map = self.last_route.lock().unwrap();
+        if map.get(colony).is_none_or(|p| p != provider) {
+            map.insert(colony.to_string(), provider.to_string());
+        }
+    }
+
+    /// The provider `colony`'s last gateway request went to, if it made one.
+    pub fn last_route(&self, colony: &str) -> Option<String> {
+        self.last_route.lock().unwrap().get(colony).cloned()
     }
 
     /// Forgets a colony's quota block: one of its requests succeeded, or it was switched, stopped
@@ -823,6 +849,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/providers/{id}/{*path}", any(proxy))
+        .route("/account-route", get(account_fallback::account_route))
         .route("/recall", post(recall))
         .route("/history", post(crate::history::history))
         .route("/coordinate", post(crate::coordination::coordinate))
@@ -879,6 +906,7 @@ pub(crate) fn api_error(status: StatusCode, kind: &str, message: impl Into<Strin
     response
 }
 
+mod account_fallback;
 mod probe;
 mod proxy;
 mod stream;
@@ -891,6 +919,7 @@ use self::{proxy::*, stream::*};
 // surface (boot, providers, server) whole, plus the single items the other children export.
 pub(crate) use self::probe::*;
 pub(crate) use self::{
+    account_fallback::{AccountRoute, fallback_usable, route_for},
     proxy::{MODEL_ERROR_REASON, bearer_token},
     stream::credential_header,
 };

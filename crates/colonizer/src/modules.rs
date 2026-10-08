@@ -645,6 +645,10 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "root_disk": {"type": "string", "title": "Root disk", "default": "16G"},
                 "max_duration": {"type": "string", "title": "Max session length", "description": "e.g. 8h", "default": "8h"},
                 "max_parallel": {"type": "integer", "title": "Parallel sessions", "minimum": 1, "maximum": 32, "default": 3},
+                "auto_max_parallel": {"type": "integer", "title": "Safety cap on colonies (automatic mode)", "minimum": 1, "maximum": 256, "default": crate::capacity::DEFAULT_AUTO_MAX_PARALLEL,
+                    "description": "With the Automatic stack and no fixed number in Parallel sessions, colonies are sized from the host and admitted from its live free memory and load, with no fixed limit: this is the ceiling that stays whatever the host has free. Setting Parallel sessions to a number switches back to a fixed limit."},
+                "auto_overcommit": {"type": "number", "title": "Memory overcommit (automatic mode)", "minimum": 0.5, "maximum": 1.0, "default": crate::capacity::DEFAULT_AUTO_OVERCOMMIT,
+                    "description": "In automatic mode a colony is admitted only while the memory sizes of all live colonies, times this factor, plus the host's reserve, fit in RAM. A microVM allocates lazily, so free memory alone lets too many in at once. 0.75 means colonies may be sized up to a third beyond what the host holds; 1.0 commits no more than the RAM."},
                 "repo_max_parallel": {"type": "integer", "title": "Parallel sessions per repository", "minimum": 1, "maximum": 32, "default": 3,
                     "description": "Live colonies one repository may run at once, on top of the overall limit above and any org's own. An org can set its own figure in its settings."},
                 "egress": {"type": "string", "title": "Egress policy", "enum": ["open", "allowlist"], "default": "open",
@@ -766,6 +770,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "stall_minutes": {"type": "integer", "title": "Nudge after minutes without progress", "minimum": 1, "maximum": 1440, "default": 15},
                 "max_nudges": {"type": "integer", "title": "Nudges before flagging", "minimum": 0, "maximum": 20, "default": 3},
                 "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30},
+                "idle_park_minutes": {"type": "integer", "title": "Park an idle colony after minutes", "description": "A colony that is idle, held or flagged, with no open question and no publish in flight, is parked after this long: its microVM stops and its slot is freed, the worktree is kept, and Resume brings it back.", "minimum": 1, "maximum": 1440, "default": 15},
                 "provider_retry_max_attempts": {"type": "integer", "title": "Automatic retries for a provider error before holding", "description": "A turn that ends on a model gateway error (a 5xx or 529, a dropped connection, a gateway restart) is continued automatically this many times before the colony is held for you. 0 turns the automatic retry off.", "minimum": 0, "maximum": 10, "default": 3},
                 "provider_retry_schedule_minutes": {"type": "string", "title": "Wait before each automatic retry (minutes)", "description": "Comma-separated, one wait per retry; retries past the end of the list wait its last entry.", "default": "1, 5, 15"}
             }}),
@@ -825,7 +830,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "on_quota": {"type": "boolean", "title": "When a provider runs out of quota", "description": "One line per provider whose plan ran out while colonies wait on it — its name, how many colonies wait and when it resets — not one per colony. Opens the Inbox card that switches, waits or stops them", "default": true},
                 "on_lifecycle": {"type": "boolean", "title": "Send every colony lifecycle event to the webhook", "description": "One webhook event per status change — queued, started, running, idle, answered, publishing, merged, closed, no changes, parked, resumed, stopped, cleaned — besides the ones above. Webhook only, never the desktop or a phone, and never rate-limited, so a receiver can keep an exact record", "default": false},
                 "desktop": {"type": "boolean", "title": "Desktop notifications", "description": "Notify the desktop the mothership runs on. Does nothing over SSH or on a headless machine, and says so once in the log", "default": false},
-                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and it is unsigned unless a signing secret is set in Settings", "default": ""}
+                "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and every note is signed with the signing secret in Settings, which this URL cannot be saved without", "default": ""}
             }}),
         )],
         "burn_down" => vec![p(
@@ -981,6 +986,27 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
         }
         crate::observability::settings::validate(&provider.id, &stored, &effective, req.enabled, req.confirm_content)
             .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    }
+    // The owner's webhook URL needs a signing secret (issue #900): every delivery carries a
+    // signature, so a URL saved without one is an address whose notes anybody who can read the
+    // request could forge. An unchanged URL is let through, which is what keeps an install that
+    // upgraded with an unsigned webhook editable — it can still save its other notify settings, and
+    // can still turn the webhook off by clearing the URL. Not skippable by `save_anyway`, for the
+    // reason the model check below gives: an unsigned URL is not settings to fix up later, it is a
+    // channel that never delivers.
+    if kind == "notify" && crate::notify::secret(&app).is_none() {
+        let mut effective = stored.clone();
+        for (key, value) in settings.iter() {
+            effective.insert(key.clone(), value.clone());
+        }
+        let url = effective.get("webhook_url").and_then(Value::as_str).unwrap_or_default();
+        let was = stored.get("webhook_url").and_then(Value::as_str).unwrap_or_default();
+        if !url.is_empty() && url != was {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "the webhook URL needs a signing secret (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET): a webhook delivery is never sent unsigned",
+            ));
+        }
     }
     check_plugin_dirs(&app.cfg, &provider.schema, &settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;

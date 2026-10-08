@@ -1204,6 +1204,7 @@ async fn record(app: &Shared, report: &RunReport, now: DateTime<Utc>) {
         })
         .await
         .is_some_and(|(_, raised)| raised);
+    crate::loop_history::record(app, crate::loop_history::from_disk_cleanup(report)).await;
     let mut entry = crate::activity::Entry::new("disk_cleanup.run", "mothership");
     entry.target = Some(LOOP_NAME.into());
     entry.section = Some("loops".into());

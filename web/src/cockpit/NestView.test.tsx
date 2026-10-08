@@ -99,8 +99,8 @@ describe("NestView", () => {
     expect(quiet).toContain('title="webshop#42 is working"');
   });
 
-  it("draws only as many chambers as the machine runs at once: 5 by default", () => {
-    const sessions = Array.from({ length: 7 }, (_, i) => session({ id: `s${i + 1}` }));
+  it("draws only as many chambers as the machine runs at once: 5 by default, for colonies that are not live", () => {
+    const sessions = Array.from({ length: 7 }, (_, i) => session({ id: `s${i + 1}`, status: "failed" }));
     const markup = renderToStaticMarkup(
       <NestView
         sessions={sessions}
@@ -117,7 +117,7 @@ describe("NestView", () => {
     );
     // Each chamber is a real button naming its colony; the carriers' own buttons read
     // "webshop#42 · working" with no org, so only chambers match here.
-    expect(markup.match(/aria-label="acme\/webshop #42, Working"/g)?.length ?? 0).toBe(5);
+    expect(markup.match(/aria-label="acme\/webshop #42, Failed"/g)?.length ?? 0).toBe(5);
     // All five chambers are taken, so there is nowhere left to dig.
     expect(markup).not.toContain("DIG");
   });
@@ -222,5 +222,108 @@ describe("planBalloons", () => {
     expect(shown).toContain("new");
     expect(shown).not.toContain("old");
     expect(shown).toContain("far");
+  });
+
+  it("words the frontier's tooltip from the mothership's count, and shows … until it has one", () => {
+    const render = (backlogCount: number | null, backlogTitle?: string) =>
+      renderToStaticMarkup(
+        <NestView
+          sessions={[]}
+          selectedId={null}
+          mothershipSelected={false}
+          settlers={[]}
+          backlogCount={backlogCount}
+          backlogTitle={backlogTitle}
+          avatarFor={() => null}
+          onSelect={noop}
+          onOpen={noop}
+          onSelectMothership={noop}
+          onLaunch={noop}
+        />,
+      );
+    const counted = render(21, "21 open issues in 5 repositories you colonize · as of 14:07");
+    expect(counted).toContain('title="21 open issues in 5 repositories you colonize · as of 14:07"');
+    expect(counted).toContain('aria-label="frontier: 21 open issues in 5 repositories you colonize · as of 14:07, launch a colony"');
+    expect(counted).toContain(">21</span>");
+    expect(render(null)).toContain(">…</span>");
+  });
+
+  // Issue #1177: in auto mode a stale capacity (3) once hid 11 of 14 live colonies.
+  const crowd = (n: number, capacity: number | null, extra: Partial<Parameters<typeof NestView>[0]> = {}) =>
+    renderToStaticMarkup(
+      <NestView
+        sessions={Array.from({ length: n }, (_, i) => session({ id: `s${i + 1}` }))}
+        capacity={capacity}
+        selectedId={null}
+        mothershipSelected={false}
+        settlers={[]}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+        {...extra}
+      />,
+    );
+
+  it("draws a chamber for every live colony even when the capacity reads lower", () => {
+    const markup = crowd(14, 3);
+    expect(markup.match(/aria-label="acme\/webshop #42, Working"/g)?.length ?? 0).toBe(14);
+  });
+
+  it("names the auto ceiling in the header when the host reports one", () => {
+    expect(crowd(14, 14, { capacityNote: "auto: 14 now (cap 32)" })).toContain("auto: 14 now (cap 32)");
+    expect(crowd(14, 14)).toContain("capacity 14/14");
+  });
+
+  it("puts every ant on a drawn tunnel, or on the surface for a colony that has a chamber", () => {
+    const sessions = [
+      ...Array.from({ length: 14 }, (_, i) => session({ id: `s${i + 1}` })),
+      session({ id: "q1", status: "queued" }),
+      session({ id: "p1", status: "pr_opened" }),
+    ];
+    for (const capacity of [3, 14, null]) {
+      const markup = renderToStaticMarkup(
+        <NestView
+          sessions={sessions}
+          capacity={capacity}
+          selectedId={null}
+          mothershipSelected={false}
+          settlers={[]}
+          backlogCount={3}
+          avatarFor={() => null}
+          onSelect={noop}
+          onOpen={noop}
+          onSelectMothership={noop}
+          onLaunch={noop}
+        />,
+      );
+      const drawn = new Set([...markup.matchAll(/<path d="([^"]+)" fill="none" stroke="var\(--tunnel-floor\)"/g)].map((m) => m[1]));
+      const rides = [...markup.matchAll(/data-ride="([^"]+)"/g)].map((m) => m[1]);
+      expect(drawn.size).toBeGreaterThanOrEqual(14);
+      expect(rides.length).toBeGreaterThanOrEqual(14);
+      for (const ride of rides) expect(ride === "surface" || drawn.has(ride)).toBe(true);
+    }
+  });
+
+  it("parks no ant for a colony whose chamber is not drawn", () => {
+    // Capacity 1 and one live colony: the queued and returned colonies get no chamber, so no ant.
+    const markup = renderToStaticMarkup(
+      <NestView
+        sessions={[session({ id: "s1" }), session({ id: "q1", status: "queued" }), session({ id: "p1", status: "pr_opened" })]}
+        capacity={1}
+        selectedId={null}
+        mothershipSelected={false}
+        settlers={[]}
+        backlogCount={3}
+        avatarFor={() => null}
+        onSelect={noop}
+        onOpen={noop}
+        onSelectMothership={noop}
+        onLaunch={noop}
+      />,
+    );
+    expect(markup).not.toContain('data-ride="surface"');
   });
 });

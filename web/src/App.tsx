@@ -84,6 +84,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
+  const [dismissed, setDismissed] = useState<string[]>([]);
   const [usage, setUsage] = useState<UsageStatus | null>(null);
   // The remote-access view (issue #535), one state for the whole app: the header's badge and the
   // settings pane read it, and the pane's setter folds a toggle or reset straight back in.
@@ -204,6 +205,14 @@ export function App() {
     }
   }, [api]);
 
+  const loadDismissed = useCallback(async () => {
+    try {
+      setDismissed((await api.setupState()).dismissed);
+    } catch {
+      /* older mothership: nothing was ever dismissed */
+    }
+  }, [api]);
+
   const loadUsage = useCallback(async () => {
     try {
       setUsage(await api.usage());
@@ -233,6 +242,7 @@ export function App() {
     void loadFleet();
     void loadSessions();
     void loadTelemetry();
+    void loadDismissed();
     void loadUsage();
     void loadOrgs();
     void loadPendingMemory();
@@ -240,7 +250,7 @@ export function App() {
     void loadRedRuns();
     void loadRemote();
     api.modules().then(applyModules).catch(() => {});
-  }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadUsage, loadUpdate, loadRedRuns, loadRemote, applyModules]);
+  }, [api, loadStatus, loadFleet, loadSessions, loadOrgs, loadPendingMemory, loadTelemetry, loadDismissed, loadUsage, loadUpdate, loadRedRuns, loadRemote, applyModules]);
 
   // The poll schedule lives in a module worker (usePollTick) whose timers keep their cadence
   // while the tab is hidden — Chrome throttles hidden-tab main-thread timers to one wake-up per
@@ -406,12 +416,13 @@ export function App() {
             status,
             pull: pull.status,
             telemetry,
+            dismissed,
             stackPreset: stackPresetOf(sandboxModule?.settings),
             sessionCount: sessions.length,
             now: Date.now(),
           })
         : null,
-    [status, pull.status, telemetry, sandboxModule, sessions.length],
+    [status, pull.status, telemetry, dismissed, sandboxModule, sessions.length],
   );
 
   /**
@@ -476,6 +487,15 @@ export function App() {
   const stopRedRun = useCallback(
     async (id: string) => {
       const run = await api.stopRedTeamRun(id);
+      setRedRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
+    },
+    [api],
+  );
+
+  // Cancel (#1145): the server stops every hunter and keeps the findings; fold the cancelled run in.
+  const cancelRedRun = useCallback(
+    async (id: string) => {
+      const run = await api.cancelRedTeamRun(id);
       setRedRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
     },
     [api],
@@ -651,6 +671,11 @@ export function App() {
         setSidebarOpen(false);
         setOrgSettingsFor(org);
       }}
+      onManageOrgs={() => {
+        setSidebarOpen(false);
+        setSettingsSection("orgs");
+        setSettingsOpen(true);
+      }}
       view={view}
       onOpenMemory={openMemory}
       pendingMemory={pendingMemory}
@@ -720,6 +745,7 @@ export function App() {
       onModulesChanged={applyModules}
       telemetry={telemetry}
       onTelemetryChanged={setTelemetry}
+      onDismissedChanged={setDismissed}
       usage={usage}
       onUsageChanged={setUsage}
       notifications={notifyPrefs}
@@ -806,6 +832,7 @@ export function App() {
               onSessionChanged={upsertSession}
               onRedStart={startRedRun}
               onRedStop={stopRedRun}
+              onRedCancel={cancelRedRun}
               onRedSynthesize={synthesizeRedRun}
               onCreated={(session) => {
                 upsertSession(session);
@@ -834,6 +861,7 @@ export function App() {
         onModulesChanged={applyModules}
         telemetry={telemetry}
         onTelemetryChanged={setTelemetry}
+        onDismissedChanged={setDismissed}
         usage={usage}
         onUsageChanged={setUsage}
         notifications={notifyPrefs}

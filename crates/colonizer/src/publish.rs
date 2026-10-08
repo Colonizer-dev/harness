@@ -173,6 +173,13 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
             }
         }
         Err(e) => {
+            // Issue #1206: a branch that conflicts with what GitHub now holds, or a secret-shaped
+            // literal, is the colony's to fix: resume it with the exact note instead of failing it.
+            if let Some(hold) = e.downcast_ref::<crate::push_guard::PublishHold>()
+                && resume_for_hold(&app, &id, hold, s.base.as_deref().unwrap_or("main")).await
+            {
+                return;
+            }
             let message = format!("{e:#}");
             log.error(format!("publishing failed: {message}")).await;
             let mut attention = None;
@@ -197,6 +204,63 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
         // transcripts are final, so index them for the org's recall. Fire-and-forget.
         crate::deja::spawn_after_stop(app.clone(), &ended);
     }
+}
+
+/// How many times one colony is resumed for each kind of publish hold (issue #1206).
+const HOLD_ROUNDS_MAX: u8 = 1;
+/// A push conflict is allowed one more round than a secret: the branch can move again while the
+/// colony resolves the first.
+const CONFLICT_ROUNDS_MAX: u8 = 2;
+
+/// Turns a colony whose publish was held into one that resumes with the note for `hold`: counts the
+/// round, leaves the status `stopped` (the resumable shape) and sets the one-shot resume note.
+/// `None` when the colony has no round left of that kind or is not mid-publish, and nothing changes.
+pub(crate) fn stage_hold(s: &mut Session, hold: &crate::push_guard::PublishHold, base: &str) -> Option<String> {
+    use crate::push_guard::{PublishHold, conflict_note, secrets_note};
+    if s.status != SessionStatus::Publishing {
+        return None;
+    }
+    let note = match hold {
+        PublishHold::Secrets(spots) => {
+            if s.secret_fix_rounds >= HOLD_ROUNDS_MAX {
+                return None;
+            }
+            s.secret_fix_rounds += 1;
+            secrets_note(spots, base)
+        }
+        PublishHold::Conflict { files } => {
+            if s.push_conflict_rounds >= CONFLICT_ROUNDS_MAX {
+                return None;
+            }
+            s.push_conflict_rounds += 1;
+            conflict_note(&s.branch, files)
+        }
+    };
+    s.status = SessionStatus::Stopped;
+    s.error = None;
+    s.resume_note = Some(note.clone());
+    s.publish_resume_pending = true;
+    Some(note)
+}
+
+/// Hands a colony whose publish was held to the queue's next tick, which resumes it with the note
+/// ([`crate::queue::resume_publish_holds`]; the resume is the queue's to run). `false` leaves the
+/// colony to fail as before: no round left of that kind.
+async fn resume_for_hold(app: &Shared, id: &str, hold: &crate::push_guard::PublishHold, base: &str) -> bool {
+    let staged = app
+        .update_session(id, |x| stage_hold(x, hold, base).map(|_| x.clear_attention()))
+        .await;
+    let Some((_, Some(attention))) = staged else {
+        return false;
+    };
+    app.note_cleared_attention(id, attention).await;
+    app.session_log(
+        id,
+        "warn",
+        format!("publish held: {hold}; resuming the colony once to fix it instead of failing it"),
+    )
+    .await;
+    true
 }
 
 /// Colonies whose pull request still needs watching. `merged` is final; a closed PR can be reopened,
@@ -1113,6 +1177,12 @@ pub async fn publish(
     Ok(Json(s))
 }
 
+/// Starts a publish in the background (issue #1191: the watchdog playbook's publish). A plain
+/// function, so a caller's async body does not carry `publish_session`'s future type with it.
+pub(crate) fn spawn_publish(app: Shared, id: String, grant: crate::authority::Grant) {
+    tokio::spawn(publish_session(app, id, Some(grant)));
+}
+
 /// Mints the publish grant at a real approval (issue #98): the operator's Create PR press
 /// ([`publish`]) or autopilot's confirmed verdict (`verify::after_turn`). Bound to the tree the
 /// publish would commit right now plus the pr.md bytes the approval reviewed; held in memory
@@ -1399,6 +1469,50 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 pub(crate) mod tests {
     use super::*;
     use crate::sessions::tests::colony;
+
+    #[test]
+    fn a_held_publish_stages_one_resume_with_the_note_and_then_fails_as_before() {
+        use crate::push_guard::{PublishHold, SecretSpot};
+        let spot = SecretSpot {
+            path: "tests/schema.rs".into(),
+            line: 46,
+            kind: "stripe_key".into(),
+        };
+        let mut s = colony("acme", SessionStatus::Publishing);
+        let note = stage_hold(&mut s, &PublishHold::Secrets(vec![spot.clone()]), "main").expect("the first round is free");
+        assert!(
+            note.contains("`tests/schema.rs:46` contains a stripe key-shaped literal"),
+            "{note}"
+        );
+        assert_eq!(
+            (s.status, s.publish_resume_pending, s.secret_fix_rounds),
+            (SessionStatus::Stopped, true, 1),
+            "stopped is the resumable shape, never failed"
+        );
+        assert_eq!(s.resume_note.as_deref(), Some(note.as_str()));
+
+        // Once only: a second secret hold on the same colony is not staged.
+        s.status = SessionStatus::Publishing;
+        assert!(stage_hold(&mut s, &PublishHold::Secrets(vec![spot]), "main").is_none());
+        assert_eq!(s.status, SessionStatus::Publishing, "nothing changed");
+
+        // A conflict gets two rounds, with a rebase note, and counts separately from secrets.
+        let conflict = PublishHold::Conflict {
+            files: vec!["CHANGELOG.md".into()],
+        };
+        for round in 1..=2u8 {
+            s.status = SessionStatus::Publishing;
+            let note = stage_hold(&mut s, &conflict, "main").expect("a round is left");
+            assert!(note.contains("CHANGELOG.md") && note.contains("rebase"), "{note}");
+            assert_eq!(s.push_conflict_rounds, round);
+        }
+        s.status = SessionStatus::Publishing;
+        assert!(stage_hold(&mut s, &conflict, "main").is_none());
+
+        // Only a publish in flight is staged.
+        let mut idle = colony("acme", SessionStatus::Running);
+        assert!(stage_hold(&mut idle, &conflict, "main").is_none());
+    }
 
     #[test]
     fn the_publish_claim_holds_a_slot_only_when_the_colony_was_live() {

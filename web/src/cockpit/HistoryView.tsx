@@ -382,7 +382,7 @@ export function HistoryView({
         </div>
       </div>
 
-      <TranscriptSearch org={org} onOpen={onOpenTurn ?? ((id) => onOpenColony(id))} />
+      <TranscriptSearch org={org} sessions={sessions} onOpen={onOpenTurn ?? ((id) => onOpenColony(id))} />
 
       <div className="overflow-hidden border-y border-border">
         <div className="grid [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">

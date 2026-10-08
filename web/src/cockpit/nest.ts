@@ -70,11 +70,53 @@ export const MAX_CHAMBERS = SLOT_FRACTIONS.length;
  */
 export const DEFAULT_CHAMBERS = 5;
 
-export function chamberCount(capacity: number | null | undefined): number {
-  if (capacity == null || Number.isNaN(capacity)) return DEFAULT_CHAMBERS;
-  const floored = Math.floor(capacity);
-  if (!Number.isFinite(floored)) return DEFAULT_CHAMBERS;
-  return Math.min(MAX_CHAMBERS, Math.max(1, floored));
+export function chamberCount(capacity: number | null | undefined, live = 0): number {
+  const base = (() => {
+    if (capacity == null || Number.isNaN(capacity)) return DEFAULT_CHAMBERS;
+    const floored = Math.floor(capacity);
+    if (!Number.isFinite(floored)) return DEFAULT_CHAMBERS;
+    return Math.min(MAX_CHAMBERS, Math.max(1, floored));
+  })();
+  // Every live colony gets its own chamber, whatever the capacity reads (issue #1177): a stale or
+  // low ceiling must never hide a colony that is running.
+  return Math.min(MAX_NEST_CHAMBERS, Math.max(base, Math.floor(live) || 0));
+}
+
+/** The most chambers the nest ever draws, however many colonies are live. */
+export const MAX_NEST_CHAMBERS = 64;
+
+/**
+ * Which sessions get a chamber: every live colony, then the rest in order while `count` allows,
+ * kept in the order given. `isLive` is passed in so this stays free of UI imports.
+ */
+export function chamberSessions<T extends { status: string }>(sessions: readonly T[], count: number, isLive: (status: T["status"]) => boolean): T[] {
+  const liveTotal = sessions.filter((s) => isLive(s.status)).length;
+  let spare = Math.max(0, count - liveTotal);
+  return sessions.filter((s) => {
+    if (isLive(s.status)) return true;
+    if (spare <= 0) return false;
+    spare -= 1;
+    return true;
+  });
+}
+
+/** More colonies than the named layouts hold: a grid of smaller chambers over the underground. */
+function gridSlot(index: number, box: NestBox, count: number): Slot {
+  const cols = Math.ceil(Math.sqrt(count * 1.7));
+  const rows = Math.ceil(count / cols);
+  const top = SURFACE_Y + 40;
+  const cellW = box.width / cols;
+  const cellH = (box.height - top - 24) / rows;
+  const row = Math.floor(index / cols);
+  const inRow = row === rows - 1 ? count - row * cols : cols;
+  // The last row is centred rather than left-packed.
+  const offset = ((cols - inRow) * cellW) / 2;
+  const col = index % cols;
+  return {
+    x: Math.round(offset + (col + 0.5) * cellW),
+    y: Math.round(top + (row + 0.5) * cellH),
+    r: Math.max(14, Math.round(Math.min(cellW, cellH) * 0.38)),
+  };
 }
 
 /**
@@ -90,6 +132,10 @@ export const FIVE_SLOT_FRACTIONS: readonly (readonly [number, number, number])[]
 ];
 
 export function slotAt(index: number, box: NestBox, count: number = MAX_CHAMBERS): Slot {
+  if (count > MAX_CHAMBERS) {
+    if (index < 0 || index >= count) throw new RangeError(`no slot ${index}, the nest holds ${count} chambers`);
+    return gridSlot(index, box, count);
+  }
   const fractions = count <= FIVE_SLOT_FRACTIONS.length ? FIVE_SLOT_FRACTIONS : SLOT_FRACTIONS;
   const frac = fractions[index];
   if (!frac) throw new RangeError(`no slot ${index}, the nest holds ${fractions.length} chambers`);

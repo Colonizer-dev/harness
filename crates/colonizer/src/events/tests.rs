@@ -10,7 +10,18 @@ fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
     ));
     assert!(matches!(autopilot_step(false, false, false, true, true), Autopilot::Wait(_)));
     assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, false, false, false, true), Autopilot::Hold(_)));
+    assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
+}
+
+/// Issue #1176: a turn that errored after writing a fresh pr.md goes on to verify and publish rather
+/// than holding a finished colony; an open question or an interrupt still wins, and a transient
+/// error still retries.
+#[test]
+fn an_errored_turn_with_a_fresh_pr_description_still_goes_to_verification() {
+    assert_eq!(autopilot_step(true, false, false, false, true), Autopilot::Publish);
+    assert!(matches!(autopilot_step(true, false, false, true, true), Autopilot::Wait(_)));
+    assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
+    assert!(matches!(autopilot_step(true, true, false, false, true), Autopilot::Retry(_)));
     assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
 }
 
@@ -482,6 +493,63 @@ async fn a_refused_proposal_never_reaches_mem0() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A colony routed only to minimax whose turn ends with a generic usage-limit error marks minimax
+/// (#1168), not the Claude account, and the queue's pause reason names the provider.
+#[tokio::test]
+async fn an_unattributed_hit_on_a_minimax_only_colony_marks_minimax() {
+    let root = std::env::temp_dir().join(format!("colonizer-routed-quota-{}", crate::util::short_id()));
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let providers = vec![json!({"id": "minimax", "name": "MiniMax", "base_url": "http://127.0.0.1:1", "auth": "none"})];
+    std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&providers).unwrap()).unwrap();
+    let app = crate::tests::test_app(&root);
+    let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+    s.id = "mm".into();
+    s.allowed_providers = Some(vec!["minimax".into()]);
+    s.model_usage = Some(json!({"minimax/MiniMax-M3.1-Flash-Preview": {"input_tokens": 100}}));
+    app.sessions.write().await.push(s);
+    tokio::fs::create_dir_all(app.session_dir("mm")).await.unwrap();
+
+    let text = "You've reached your usage limit, resets 7am (UTC)";
+    let hit = provider_quota::classify_quota_exhaustion(0, "", text).expect("usage limit classifies");
+    assert!(hit.account_wide, "the text alone reads as the Claude account's cap");
+    park_quota_colony(&app, "mm", text, &hit).await;
+
+    assert!(app.gateway.is_quota_exhausted("minimax"), "the routed provider is marked");
+    assert!(!app.gateway.is_account_quota_exhausted(), "the Claude account is not");
+    let status = crate::providers::quota_status(&app).await;
+    assert!(status.paused);
+    let reason = status.reason.unwrap_or_default();
+    assert!(reason.contains("MiniMax") && !reason.contains("Claude account"), "{reason}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The gateway's record of the colony's last routed request beats `allowed_providers`.
+#[tokio::test]
+async fn the_gateways_last_route_attributes_an_unnamed_hit() {
+    let root = std::env::temp_dir().join(format!("colonizer-last-route-{}", crate::util::short_id()));
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let providers: Vec<Value> = ["bailian", "zai"]
+        .iter()
+        .map(|id| json!({"id": id, "name": id, "base_url": "http://127.0.0.1:1", "auth": "none"}))
+        .collect();
+    std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&providers).unwrap()).unwrap();
+    let app = crate::tests::test_app(&root);
+    let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+    s.id = "lr".into();
+    s.allowed_providers = Some(vec!["bailian".into(), "zai".into()]);
+    app.sessions.write().await.push(s);
+    tokio::fs::create_dir_all(app.session_dir("lr")).await.unwrap();
+    app.gateway.note_route("lr", "zai");
+
+    let text = "You've reached your usage limit, resets 7am (UTC)";
+    let hit = provider_quota::classify_quota_exhaustion(0, "", text).unwrap();
+    park_quota_colony(&app, "lr", text, &hit).await;
+    assert!(app.gateway.is_quota_exhausted("zai"));
+    assert!(!app.gateway.is_quota_exhausted("bailian"));
+    assert!(!app.gateway.is_account_quota_exhausted());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// An account-level session-limit hit names no provider, so the park records the dedicated
 /// account record instead of any real provider: healthy providers stay healthy, the queue pauses
 /// on the account record alone, a routed success does not lift it, and the colony resumes when it
@@ -601,10 +669,10 @@ async fn an_account_hit_pauses_with_no_providers_configured() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// #761: a secret in `pr.md` is redacted, and autopilot holds the publish for a person with a
-/// log line naming what was redacted, instead of publishing the redacted text silently.
+/// #761, #1175: a secret in `pr.md` is redacted, and autopilot publishes the redacted text with a
+/// log line naming what was redacted: the value is already replaced, so there is nothing to hold.
 #[tokio::test]
-async fn a_secret_in_pr_md_holds_autopilot_and_says_what_was_redacted() {
+async fn a_secret_in_pr_md_is_redacted_and_autopilot_still_publishes() {
     let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
     app.update_session("abc", |x| x.autopilot = true).await;
     // The runtime remembers the description it booted with; the turn below writes a new one.
@@ -625,14 +693,45 @@ async fn a_secret_in_pr_md_holds_autopilot_and_says_what_was_redacted() {
     );
     let end = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
     handle_agent_event(&app, "abc", &rt, end).await;
-    let attention = app.session("abc").await.unwrap().attention.expect("the colony is flagged");
-    assert_eq!(attention["reason"], "autopilot_held");
+    let held = app.session("abc").await.unwrap().attention;
+    assert!(
+        held.as_ref().is_none_or(|a| a["reason"] != "autopilot_held"),
+        "a redacted description is not a hold: {held:?}"
+    );
     let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
     assert!(
-        log.contains("autopilot: not publishing, pr.md contained 1 secret (github token), redacted before publishing"),
+        log.contains(
+            "autopilot: pr.md contained 1 secret (github token), redacted before publishing; publishing the redacted text"
+        ),
         "{log}"
     );
+    assert!(
+        log.contains("verifying the claim"),
+        "the publish went on to verification: {log}"
+    );
+    assert!(!log.contains("not publishing"), "{log}");
     assert!(!log.contains(secret), "{log}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// #1175: AWS's documented example key in `pr.md` is not a secret at all: no note, no hold.
+#[tokio::test]
+async fn the_aws_example_key_in_pr_md_publishes_without_a_note() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let rt = app.runtime("abc").await;
+    let out = app.session_dir("abc").join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        out.join("pr.md"),
+        "# Redaction tests\n\nThe only literal in the tests is AWS's documented AKIAIOSFODNN7EXAMPLE.\n",
+    )
+    .unwrap();
+    let end = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(!log.contains("secret"), "{log}");
+    assert!(log.contains("verifying the claim"), "{log}");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1531,5 +1630,90 @@ async fn a_refused_host_reached_by_a_later_call_flags_deny_then_reach() {
     let attention = app.session("cd2").await.unwrap().attention.expect("flagged");
     assert_eq!(attention["signature"], "deny_then_reach");
     assert_eq!(attention["evidence"][0]["target"], "evil.example");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+const EXEC_ASK: &str = r#"{"seq":1,"type":"question","question_id":"call_1","questions":[{"question":"Allow rm?"}],"kind":"exec_policy","blocking":true,"risk":"workspace_write"}"#;
+
+/// Issue #1189: an exec-policy ask whose tool call gets its `tool_result` without an answer is closed
+/// (`question_closed`, reason `tool_resolved`), so autopilot goes on to verify and publish instead of
+/// waiting on a question nobody can see.
+#[tokio::test]
+async fn a_question_whose_tool_call_resolves_unanswered_is_closed_and_autopilot_proceeds() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let rt = app.runtime("abc").await;
+    let out = app.session_dir("abc").join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("pr.md"), "# Fix\n\nBody.\n").unwrap();
+
+    handle_agent_event(&app, "abc", &rt, EXEC_ASK).await;
+    assert!(rt.open_question().await.is_some());
+    let result = r#"{"seq":2,"type":"tool_result","tool_call_id":"call_1","output":"denied","is_error":true}"#;
+    handle_agent_event(&app, "abc", &rt, result).await;
+    assert!(rt.open_question().await.is_none(), "the resolved call closed its question");
+    assert!(!rt.question_holds_tool_call.load(Ordering::SeqCst));
+    assert!(rt.activity.lock().await.question_since.is_none());
+    let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+    assert!(
+        events.contains(r#""type":"question_closed""#) && events.contains(r#""reason":"tool_resolved""#),
+        "{events}"
+    );
+
+    let end = r#"{"seq":3,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(!log.contains("a question is open"), "{log}");
+    assert!(log.contains("verifying the claim"), "autopilot went on to verify: {log}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A timed-out ask says so, a result for another call leaves the question alone, and a turn that
+/// ends while a question holds a tool call closes it with `turn_end`.
+#[tokio::test]
+async fn question_close_reasons_and_the_questions_they_leave_open() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+
+    handle_agent_event(&app, "abc", &rt, EXEC_ASK).await;
+    let other = r#"{"seq":2,"type":"tool_result","tool_call_id":"call_other","output":"ok","is_error":false}"#;
+    handle_agent_event(&app, "abc", &rt, other).await;
+    assert!(rt.open_question().await.is_some(), "another call's result closes nothing");
+    let timeout = r#"{"seq":3,"type":"tool_result","tool_call_id":"call_1","output":"the ask timed out","is_error":true}"#;
+    handle_agent_event(&app, "abc", &rt, timeout).await;
+    assert!(rt.open_question().await.is_none());
+    let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+    assert!(events.contains(r#""reason":"timeout""#), "{events}");
+
+    let ask = EXEC_ASK.replace(r#""seq":1"#, r#""seq":4"#).replace("call_1", "call_2");
+    handle_agent_event(&app, "abc", &rt, &ask).await;
+    let end = r#"{"seq":5,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert!(rt.open_question().await.is_none(), "the turn ending closed it");
+    let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+    assert!(events.contains(r#""reason":"turn_end""#), "{events}");
+
+    // The lead's own question holds no call: a turn end leaves it open for its answer.
+    let lead = r#"{"seq":6,"type":"question","question_id":"lead-1","questions":[{"question":"Which?"}]}"#;
+    handle_agent_event(&app, "abc", &rt, lead).await;
+    let end = r#"{"seq":7,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert!(rt.open_question().await.is_some());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Autopilot never waits silently: a question it waits on is put on the record as
+/// `waiting_for_answer`, which is what the cockpit lists.
+#[tokio::test]
+async fn autopilot_waiting_on_a_question_exposes_it_on_the_record() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Idle).await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    let rt = app.runtime("abc").await;
+    let lead = r#"{"seq":1,"type":"question","question_id":"lead-1","questions":[{"question":"Which?"}]}"#;
+    handle_agent_event(&app, "abc", &rt, lead).await;
+    app.update_session("abc", |x| x.status = SessionStatus::Idle).await;
+    let end = r#"{"seq":2,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::WaitingForAnswer);
     let _ = std::fs::remove_dir_all(root);
 }

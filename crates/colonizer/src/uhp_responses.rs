@@ -746,7 +746,7 @@ fn project(resolved: &Resolved) -> Projection {
 
 /// Whether a colony in this state may still add to its current turn.
 fn still_running(status: SessionStatus) -> bool {
-    status.is_live() || status == SessionStatus::Queued
+    status.is_live() || matches!(status, SessionStatus::Queued | SessionStatus::Blocked)
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,7 +1121,9 @@ async fn continue_colony(
                 }
             }
         }
-        status if status.busy() || matches!(status, SessionStatus::Queued | SessionStatus::Parked) => Err(busy()),
+        status if status.busy() || matches!(status, SessionStatus::Queued | SessionStatus::Blocked | SessionStatus::Parked) => {
+            Err(busy())
+        }
         _ => Err(expired()),
     }
 }

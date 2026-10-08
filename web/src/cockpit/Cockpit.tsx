@@ -3,6 +3,7 @@
 // It owns only what is its own — which view is showing, what the inspector is looking at, and the
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
+import { isActive } from "../redTeam";
 import { CodeView } from "./CodeView";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -15,16 +16,21 @@ import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { colonyFromUrl, pushTarget } from "../push";
+import { formatRoute, isRootPath, parseRoute, type Route } from "../routes";
+import { currentLocation, navigate as pushUrl, routerBase, subscribe } from "../router";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
-import { buildThread, useSessionStream } from "../sessionStream";
+import { settlersOf, useSessionStream } from "../sessionStream";
 import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
+import { AskProvider } from "./spotlight/Ask";
+import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
+import { autoCeilingLabel } from "./host";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
 import { MobileTabBar } from "./MobileTabBar";
@@ -49,7 +55,9 @@ import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { AccountBanner } from "./AccountBanner";
 import { GitHubBanner } from "./GitHubBanner";
+import { StewardBanner } from "./StewardBanner";
 import { needCountByOrg } from "./feed";
+import { backlogBadge } from "./backlog";
 import { providerSnapshots } from "./dash";
 import { GATEWAY_RETRY_MESSAGE } from "./questions";
 
@@ -115,6 +123,7 @@ export function Cockpit({
   onSessionChanged,
   onRedStart,
   onRedStop,
+  onRedCancel,
   onRedSynthesize,
   onCreated,
   onOpenSettings,
@@ -167,6 +176,8 @@ export function Cockpit({
   onSessionChanged: (session: Session) => void;
   onRedStart?: (body: StartRedTeamRunRequest) => Promise<void>;
   onRedStop?: (id: string) => Promise<void>;
+  /** Cancels a red-team run (#1145): every hunter stopped, findings kept. */
+  onRedCancel?: (id: string) => Promise<void>;
   /** (Re)launches a done run's synthesis colony (issue #309). */
   onRedSynthesize?: (id: string) => Promise<void>;
   onCreated: (session: Session) => void;
@@ -199,9 +210,19 @@ export function Cockpit({
     };
   }, [api]);
   // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
-  const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? storedView());
+  // The address names the view (issue #1180): `/nest`, `/settings/models/providers`, `/colonies/<id>`.
+  // The bare root is the Overview, but a returning visitor's remembered view still wins there, so a
+  // bookmark of `/` keeps opening where it always did.
+  const [bootRoute] = useState<Route | null>(() => {
+    if (DEMO) return null;
+    const { pathname, search } = currentLocation();
+    return isRootPath(pathname, routerBase()) ? null : parseRoute(pathname, search, routerBase());
+  });
+  const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? (bootRoute?.view === "colony" ? "home" : bootRoute?.view) ?? storedView());
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
+  // A conversation Spotlight expanded into the Chat page (or `null`: a fresh one), opened once.
+  const [chatRequest, setChatRequest] = useState<{ id: string | null; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
   const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
   // An issue a share-target launch handed over (`?share_url=…`, issue #745), kept until the colony
@@ -210,7 +231,7 @@ export function Cockpit({
   const [launchPrefill, setLaunchPrefill] = useState<SharedIssue | null>(null);
   // A colony a push deep link asked for (issue #516): `?colony=<id>` from boot, or a
   // `colonizer:open` message from the service worker, opened once the session list has it.
-  const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href));
+  const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href) ?? bootRoute?.colony ?? null);
   // A phone that just signed in through a scanned code lands on `?welcome=phone` (issue #746),
   // which offers the install-and-notify sheet once.
   const [welcome, setWelcome] = useState<"phone" | null>(() => welcomeFromUrl(window.location.href));
@@ -314,9 +335,8 @@ export function Cockpit({
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
   const spend = sumCosts(inOrg.map(sessionCost));
-  const backlogCount = repos
-    .filter((r) => !selectedOrg || sameOrg(r.full_name.split("/")[0], selectedOrg))
-    .reduce((total, r) => total + r.open_issues_count, 0);
+  // Counted by the mothership (issues only, Colonizer's own orgs) and refreshed with the status poll.
+  const backlog = useMemo(() => backlogBadge(status?.backlog, selectedOrg), [status?.backlog, selectedOrg]);
 
   const selectColony = useCallback(
     (id: string) => {
@@ -344,7 +364,7 @@ export function Cockpit({
   // down can be reported when the mothership finally refuses it.
   const outbox = useOutbox();
   const queuedAnswers = useRef(new Set<string>());
-  const settlers = useMemo(() => Object.values(buildThread(state).subagents), [state]);
+  const settlers = useMemo(() => settlersOf(state), [state]);
   // The inspector answers the colony's question from this same stream, so the pane clears itself
   // the moment `question_answered` arrives — nothing here is cached from render to render.
   const pendingQuestions = useMemo(() => pendingQuestionsOf(state), [state]);
@@ -501,6 +521,65 @@ export function Cockpit({
     setPendingOpen(null);
   }, [pendingOpen, selectedId, sessions, onSelectSession]);
 
+  // ---- The address bar (issue #1180) ---------------------------------------------------------
+  //
+  // State to address: whenever the view, the open colony or the workspace changes, the address
+  // follows with pushState (replaceState when only the query moved), so back and forward walk the
+  // views. The settings page and the colony's tab live in the address itself, written by the panes,
+  // so they are read back from it here rather than overwritten.
+  useEffect(() => {
+    if (DEMO) return;
+    // A colony or a shared issue is still being looked up: the address names it, so leave it be.
+    if (deeplink || shared) return;
+    const here = currentLocation();
+    const base = routerBase();
+    const current = parseRoute(here.pathname, here.search, base);
+    const route: Route = { view, org: selectedOrg ?? undefined };
+    if (view === "colony") {
+      route.colony = selectedId ?? undefined;
+      if (current?.view === "colony" && current.colony === selectedId) route.colonyTab = current.colonyTab;
+    }
+    if (view === "settings") route.section = current?.view === "settings" ? current.section : null;
+    const next = formatRoute(route, here.search, base);
+    const now = here.pathname + here.search;
+    if (next === now) return;
+    // Same path, different query (the workspace chip, a stripped launch param): not a new page.
+    pushUrl(next + here.hash, { replace: next.split("?")[0] === now.split("?")[0], silent: true });
+  }, [view, selectedId, selectedOrg, deeplink, shared]);
+
+  // Address to state: back, forward, and links the app makes itself (a settings page that opens
+  // Secrets) arrive as navigations, and the cockpit follows them. A colony the list does not have
+  // yet waits as a deep link; a path the cockpit has no view at is ignored.
+  const followAddress = useCallback(() => {
+    if (DEMO) return;
+    const here = currentLocation();
+    const route = parseRoute(here.pathname, here.search, routerBase());
+    if (!route) return;
+    if (route.view === "colony" && route.colony) setDeeplink(route.colony);
+    else setView(route.view);
+    if (route.org !== (selectedOrgRef.current ?? undefined)) onSelectOrgRef.current(route.org ?? null);
+  }, []);
+  const selectedOrgRef = useRef(selectedOrg);
+  selectedOrgRef.current = selectedOrg;
+  const onSelectOrgRef = useRef(onSelectOrg);
+  onSelectOrgRef.current = onSelectOrg;
+  useEffect(() => subscribe(followAddress), [followAddress]);
+
+  // The workspace a deep link names, applied once at boot (App reconciles it if it does not exist).
+  useEffect(() => {
+    if (bootRoute?.org) onSelectOrg(bootRoute.org);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A colony the address names that the mothership does not have (deleted, or another machine's):
+  // once the list is in, stop waiting so the address settles on the Nest.
+  useEffect(() => {
+    if (deeplink && sessionsLoaded && !sessions.some((s) => s.id === deeplink)) {
+      setDeeplink(null);
+      if (view === "colony") setView("home");
+    }
+  }, [deeplink, sessionsLoaded, sessions, view]);
+
   const act = useCallback(
     async (id: string, action: "stop" | "resume", run: (id: string) => Promise<Session>) => {
       try {
@@ -512,6 +591,18 @@ export function Cockpit({
       }
     },
     [onSessionChanged, sessions, toast],
+  );
+
+  // Move to front / back on a queued colony's row (issue #1156): the 4s poll shows the new order.
+  const moveQueued = useCallback(
+    async (id: string, to: "front" | "back") => {
+      try {
+        onSessionChanged(await api.moveSession(id, to));
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      }
+    },
+    [api, onSessionChanged, toast],
   );
 
   // Retry on a colony stopped on a model gateway error (issue #1093): one backing off an automatic
@@ -551,7 +642,7 @@ export function Cockpit({
         return <Page width="full">{memory}</Page>;
       case "settings":
         return (
-          <Page width="full" cap="readable">
+          <Page width="full">
             {settings(() => setView("home"))}
           </Page>
         );
@@ -577,9 +668,11 @@ export function Cockpit({
             providers={providerSnapshots(status?.model_providers)}
             onStart={onRedStart}
             onStop={onRedStop}
+            onCancel={onRedCancel}
             onSynthesize={onRedSynthesize}
             onOpenColony={openColonyById}
             onResume={(id) => act(id, "resume", (x) => api.resumeSession(x))}
+            onMove={moveQueued}
             onOpenSettings={(section) => onOpenSettings(section)}
           />
         );
@@ -594,6 +687,7 @@ export function Cockpit({
             statusKnown={status !== null}
             autopilotDefault={autopilotDefault}
             maxParallel={status?.sandbox.max_parallel ?? null}
+            capacityNote={autoCeilingLabel(status?.sandbox)}
             sessions={sessions}
             prefill={launchPrefill}
             onOpenColony={(session) => openColonyById(session.id)}
@@ -632,6 +726,7 @@ export function Cockpit({
                 autopilotDefault={autopilotDefault}
                 initialPrompt={askPrompt}
                 onPromptTaken={() => setAskPrompt(null)}
+                openRequest={chatRequest}
                 onCreated={(session) => {
                   onCreated(session);
                   setView("home");
@@ -703,6 +798,7 @@ export function Cockpit({
           <NestView
             sessions={inOrg}
             capacity={status?.sandbox.max_parallel ?? null}
+            capacityNote={autoCeilingLabel(status?.sandbox)}
             // The inspector wins while it is open; otherwise the chamber for the colony App has
             // selected stays lit, so coming back from the colony view lands somewhere familiar.
             selectedId={inspector?.kind === "colony" ? inspector.session.id : selectedId}
@@ -712,7 +808,8 @@ export function Cockpit({
             // The single open stream's live detail: the selected chamber's balloon escalates to
             // it while non-empty, every other chamber reading its colony-level feed line.
             liveDetail={state.agentDetail}
-            backlogCount={backlogCount}
+            backlogCount={backlog.count}
+            backlogTitle={backlog.title}
             avatarFor={avatarFor}
             onSelect={selectColony}
             onOpen={openColonyById}
@@ -724,9 +821,37 @@ export function Cockpit({
     }
   };
 
+  // What Spotlight searches and how it goes to each thing (issue #1218).
+  const spotlightHost: SpotlightHost = {
+    sessions,
+    repos,
+    orgs: workspaces.map((w) => w.org),
+    org: selectedOrg,
+    view,
+    colony: view === "colony" ? (sessions.find((s) => s.id === selectedId) ?? null) : view === "home" && inspector?.kind === "colony" ? inspector.session : null,
+    updateAvailable: Boolean(update?.available),
+    onNavigate: navigate,
+    onOpenColony: openColonyById,
+    onOpenSettings: (section) => onOpenSettings(section),
+    onSelectOrg: switchOrg,
+    onOpenRepo: (repo) => {
+      const owner = repo.split("/")[0];
+      if (selectedOrg && !sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+      setCodeRequest((r) => ({ repo, path: "README.md", n: (r?.n ?? 0) + 1 }));
+      setView("code");
+    },
+    onOpenChat: (id) => {
+      setChatRequest({ id, n: Date.now() });
+      setView("chat");
+    },
+  };
+
   return (
-    // Colonize — the rail's button, the dashboard's, ⌘K — is one pane, owned here for every view.
+    // Colonize — the rail's button, the dashboard's, Spotlight's "Do" row — is one pane, owned here for every view.
+    // ⌘K belongs to Spotlight, which reaches Colonize from there.
     <ColonizeProvider
+      shortcut={false}
+      avatarFor={avatarFor}
       repos={repos}
       org={selectedOrg}
       sessions={sessions}
@@ -736,6 +861,8 @@ export function Cockpit({
       onOpenColony={openColonyById}
       onOpenLaunch={() => setView("launch")}
     >
+    <SpotlightProvider host={spotlightHost}>
+    <AskProvider host={spotlightHost}>
     <div className="cockpit relative isolate grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] bg-bg text-text">
       <NavRail
         orgs={workspaces}
@@ -743,6 +870,7 @@ export function Cockpit({
         selectedOrg={selectedOrg}
         onSelectOrg={switchOrg}
         onOpenOrgSettings={(org) => onOpenOrgSettings?.(org)}
+        onManageOrgs={onOpenSettings ? () => onOpenSettings("orgs") : undefined}
         needByOrg={needByOrg}
         view={view}
         onNavigate={navigate}
@@ -770,7 +898,8 @@ export function Cockpit({
         judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
-        models={<ModelSwitcher selectedOrg={selectedOrg} />}
+        models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}
+        search={<SpotlightSearch />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,
@@ -806,6 +935,9 @@ export function Cockpit({
           {/* Issue #1074: while GitHub refuses the account (suspended, a revoked token, repeated
               secondary limits), one banner above every view names the cause and the next step. */}
           <GitHubBanner pause={status?.github_pause} onReconnect={() => onOpenSettings("connections")} />
+          {/* Issue #1172: an org whose GitHub Actions is blocked (billing or a spending limit) is one
+              banner, whatever number of its pull requests that fails. */}
+          <StewardBanner steward={status?.merge_steward} />
           {/* Issue #1097: a release whose notes flag a critical or fixes-running fix is a banner
               above every view, with how many colonies its probe found affected here; after the
               update, the affected colonies still on the previous version are offered a restart. */}
@@ -889,6 +1021,8 @@ export function Cockpit({
             onClose={() => setInspector(null)}
             onOpenColony={openColonyById}
             onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
+            hunterRun={inspector?.kind === "colony" ? (redRuns.find((r) => isActive(r) && r.hunters.some((h) => h.session_id === inspector.session.id)) ?? null) : null}
+            onCancelRun={onRedCancel}
             onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
             onRetry={(id) => void retry(id)}
             onLaunch={() => setView("launch")}
@@ -918,6 +1052,8 @@ export function Cockpit({
           Self-gating, so it renders null when it has nothing to say. */}
       {!welcome && !DEMO && <BookmarkPrompt />}
     </div>
+    </AskProvider>
+    </SpotlightProvider>
     </ColonizeProvider>
   );
 }

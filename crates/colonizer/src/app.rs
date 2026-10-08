@@ -164,11 +164,15 @@ pub struct App {
     pub github_viewer: Mutex<Option<crate::github::ViewerStatus>>,
     /// The graft skillset download (graft.rs), for Settings.
     pub graft: Mutex<crate::graft::Status>,
+    /// The understand-anything skillset download (understand_anything.rs), for Settings.
+    pub understand_anything: Mutex<crate::graft::Status>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<crate::headroom::Status>,
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
     /// bypasses it.
     pub host_cache: Mutex<Option<crate::runtime::HostCached>>,
+    /// The live host probe behind `auto` sizing and admission, and its last verdict (issue #1141).
+    pub capacity: crate::capacity::Capacity,
     /// Response bodies kept with their ETag / Last-Modified, so a refresh re-asks GitHub and the
     /// registries conditionally and a 304 reuses the body (`<data_dir>/cache/http`).
     pub http_cache: crate::cache_store::DiskCache,
@@ -188,10 +192,14 @@ pub struct App {
     pub disk_cleanup: crate::disk_cleanup::Runtime,
     /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
     pub loops: crate::loops::LoopStore,
+    /// Every loop's runs for 90 days (loop_history.rs), saved to `<config_dir>/loop-history.json`.
+    pub loop_history: crate::loop_history::HistoryStore,
     pub memory: crate::memory::MemoryStore,
     /// GitHub orgs on the signed-in account that the operator has not answered for yet — login to
     /// avatar, shown with a prompt instead of being adopted silently. In-memory on purpose: after a
     /// restart `refresh_orgs` recomputes it from `known-orgs.json`.
+    /// The Nest frontier badge's cached issue counts (backlog.rs).
+    pub backlog: crate::backlog::Cache,
     pub new_orgs: RwLock<BTreeMap<String, Option<String>>>,
     /// Each org's GitHub description, from the same `/user/orgs` fetch, for the workspace page.
     /// In-memory: the first refresh after a restart fills it again.
@@ -292,8 +300,10 @@ impl App {
             gateway: crate::gateway::Gateway::new(&cfg.data_dir)?,
             github_viewer: Mutex::new(None),
             graft: Mutex::new(Default::default()),
+            understand_anything: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             host_cache: Mutex::new(None),
+            capacity: crate::capacity::Capacity::new(),
             http_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), crate::cache_store::HTTP_MAX_BYTES),
             img_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), crate::cache_store::IMG_MAX_BYTES),
             judge_health: Mutex::new(crate::autonomy::Health::default()),
@@ -301,7 +311,9 @@ impl App {
             login: Default::default(),
             disk_cleanup: Default::default(),
             loops: crate::loops::LoopStore::new(&cfg.config_dir),
+            loop_history: crate::loop_history::HistoryStore::new(&cfg.config_dir),
             memory: crate::memory::MemoryStore::new(cfg.data_dir.join("memory")),
+            backlog: Default::default(),
             new_orgs: RwLock::new(BTreeMap::new()),
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_failed_at: Mutex::new(None),
@@ -419,7 +431,7 @@ impl App {
     /// Records a confirmed storage failure: printed loudly here, kept as the sticky alert the UI
     /// shows, and counted so a run of failures reads as more than one.
     pub async fn storage_failed(&self, what: &str, err: &anyhow::Error) {
-        eprintln!("storage: {what}: {err:#}");
+        tracing::error!( error = %format!("{err:#}"), "storage: {what}: {err:#}" );
         let mut alert = self.storage_alert.write().await;
         let failures = alert.as_ref().map_or(0, |a| a.failures) + 1;
         *alert = Some(StorageAlert {
@@ -502,7 +514,7 @@ impl App {
                 }
                 drop(damage);
                 if fresh {
-                    eprintln!("config: {message}");
+                    tracing::error!("config: {message}");
                 }
                 T::default()
             }
@@ -637,6 +649,21 @@ async fn walk_claude_candidates(candidates: &[PathBuf], elf_only: bool) -> Resul
 // HTTP plumbing
 // ---------------------------------------------------------------------------
 
+/// A red-team start refused because the repository already has an active run.
+#[derive(Debug)]
+pub struct RunActive {
+    pub run_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RunActive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunActive {}
+
 #[derive(Debug)]
 pub struct AppError(pub(crate) StatusCode, pub(crate) anyhow::Error);
 
@@ -647,6 +674,10 @@ impl IntoResponse for AppError {
         // Allow duplicate (issue #832).
         if let Some(refusal) = self.1.downcast_ref::<crate::duplicates::Refusal>() {
             body["duplicate"] = json!(refusal.holder);
+        }
+        // A start refused because the repository already has a red-team run names it (#1145).
+        if let Some(active) = self.1.downcast_ref::<RunActive>() {
+            body["run_id"] = json!(active.run_id);
         }
         (self.0, Json(body)).into_response()
     }
@@ -736,7 +767,7 @@ pub(crate) async fn load_sessions(store: &dyn SessionStore, index_path: &FsPath)
         saved.display(),
         damaged
     );
-    eprintln!("sessions: {message}");
+    tracing::error!("sessions: {message}");
     Ok((
         sessions,
         Some(StorageAlert {
@@ -769,7 +800,7 @@ fn unusable(path: &FsPath, saved: &FsPath, reason: String) -> (Vec<Session>, Opt
         path.display(),
         saved.display()
     );
-    eprintln!("sessions: {message}");
+    tracing::error!("sessions: {message}");
     (
         Vec::new(),
         Some(StorageAlert {

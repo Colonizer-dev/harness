@@ -1,8 +1,9 @@
 // The built-in Docs & README loop (docs_loop.rs, docs/loops.md#docs--readme): its settings, its
 // reports, and the small pure helpers the Loops page's card is built from.
+import { entryError } from "../components/repoSelect";
 
 export interface DocsLoopSettings {
-  /** Repositories (`owner/name`) and orgs (`owner`) the loop runs on; empty means off. */
+  /** Repositories (`owner/name`), orgs (`owner`) or `*` (every shown org) the loop runs on; empty means off. */
   allow: string[];
   /** Hours between runs: 24 (daily) by default, down to 1 (hourly). */
   interval_hours: number;
@@ -72,17 +73,8 @@ export function describeInterval(hours: number): string {
   return hours % 24 === 0 ? `every ${hours / 24} days` : `every ${hours} hours`;
 }
 
-/** An allowlist entry the server accepts: `owner` or `owner/name`. `null` when it is fine, else why not. */
-export function allowEntryError(raw: string): string | null {
-  const entry = raw.trim();
-  if (!entry) return "Name a repository (owner/name) or an org (owner).";
-  const parts = entry.split("/");
-  const part = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-  if (parts.length > 2 || !parts.every((p) => part.test(p) && p !== "." && p !== "..")) {
-    return `"${entry}" is not an owner or owner/name.`;
-  }
-  return null;
-}
+/** An allowlist entry the server accepts: `*`, `owner` or `owner/name`. `null` when it is fine, else why not. */
+export const allowEntryError = entryError;
 
 export const DOCS_KIND_LABEL: Record<DocsFindingKind, string> = {
   undocumented_change: "code changed, docs did not",

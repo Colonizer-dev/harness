@@ -22,6 +22,8 @@ export function eventsMock(ms: MockState): EventsApi {
       });
       return socket as unknown as SocketLike;
     },
+    // The mock colony replays its whole (short) history on connect, so there is never an older page.
+    eventsPage: async () => ({ events: [], has_more: false, oldest_seq: 0, epoch: 1, offset: 0, baseline_usage: null, run_epoch: 1 }),
     openStream: () =>
       ({
     binaryType: "blob",

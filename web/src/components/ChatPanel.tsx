@@ -12,7 +12,7 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useToast } from "../context";
 import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { usePendingTurn } from "../cockpit/turnFocus";
@@ -21,6 +21,7 @@ import {
   ASK_USER_TOOL,
   END_OF_THREAD,
   buildThread,
+  earlierTotals,
   isWatchdogMessageId,
   type AskUserArgs,
   type AskUserResult,
@@ -59,6 +60,7 @@ import {
 } from "./icons";
 import { InlineCode } from "./Markdown";
 import { EnterContext, useEnter, useFollowBottom, useSettled } from "./motion";
+import { JUMP_AFTER_TURNS, nearTop, restoreAnchor, takeAnchor, underfilled, type Anchor } from "./scrollAnchor";
 import { SettlerCard, useStumble } from "./SettlerCard";
 import { Spinner, cx, formatDuration, store, stored } from "./ui";
 import "../cockpit/turnFocus.css";
@@ -137,6 +139,7 @@ export function ChatPanel({
 
   const settled = useSettled(connected, state.lastSeq);
   const { viewportRef, contentRef, stickToBottom } = useFollowBottom();
+  const loadEarlier = useLoadEarlier(stream, state, viewportRef);
   // Sending a message brings the reader back to the foot of the thread, wherever they had scrolled to.
   const lastUserId = [...thread.messages].reverse().find((m) => m.role === "user")?.id;
   useEffect(() => {
@@ -250,6 +253,7 @@ export function ChatPanel({
                 contentRef.current = el;
               }}
             >
+              {state.history.hasMore && <EarlierRow state={state} onLoad={loadEarlier.load} onJump={loadEarlier.jumpToStart} />}
               <ThreadPrimitive.Messages>
                 {({ message }) => (
                   <div id={`turn-${message.id}`}>
@@ -297,6 +301,101 @@ export function ChatPanel({
       </SimpleViewContext.Provider>
       </EnterContext.Provider>
     </QuestionActionsContext.Provider>
+  );
+}
+
+/**
+ * Loads the page of events before the oldest one held when the reader scrolls near the top (or the thread is
+ * too short to scroll), and keeps their place: the thread's height before the prepend is remembered and the
+ * view moved by what was added above it, so nothing jumps (issue #1210).
+ */
+function useLoadEarlier(stream: SessionStream | null, state: StreamState, viewportRef: { current: HTMLElement | null }) {
+  const anchor = useRef<Anchor | null>(null);
+  const { hasMore, loading, error, loaded } = state.history;
+  const load = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el || !stream || !hasMore || loading) return;
+    anchor.current = takeAnchor(el);
+    void stream.loadOlder();
+  }, [stream, hasMore, loading, viewportRef]);
+
+  // An older page just went in above the reader: put the view back where it was, and once more a frame
+  // later for content (markdown, code) that settles its height after the first layout.
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    const held = anchor.current;
+    if (!el || !held || loaded === 0) return;
+    restoreAnchor(el, held);
+    const frame = requestAnimationFrame(() => {
+      if (anchor.current === held) {
+        restoreAnchor(el, held);
+        anchor.current = null;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loaded, viewportRef]);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (nearTop(el.scrollTop)) load();
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [load, viewportRef]);
+
+  // A thread too short to scroll never fires a scroll event, so older pages are fetched until it fills.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (el && hasMore && !loading && !error && underfilled(el)) load();
+  }, [hasMore, loading, error, loaded, state.messages.length, load, viewportRef]);
+
+  const jumpToStart = useCallback(async () => {
+    if (!stream) return;
+    await stream.loadAllOlder();
+    requestAnimationFrame(() => {
+      if (viewportRef.current) viewportRef.current.scrollTop = 0;
+    });
+  }, [stream, viewportRef]);
+
+  return { load, jumpToStart };
+}
+
+/** The row above the first loaded message while older ones are still on record. */
+function EarlierRow({ state, onLoad, onJump }: { state: StreamState; onLoad: () => void; onJump: () => void }) {
+  const { loading, error } = state.history;
+  const earlier = earlierTotals(state);
+  const detail = [
+    earlier.turns > 0 ? `${earlier.turns} earlier ${earlier.turns === 1 ? "turn" : "turns"}` : null,
+    earlier.costUsd != null ? `$${earlier.costUsd.toFixed(2)} so far` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div role="status" className="flex items-center justify-center gap-3 py-2 text-small-lg text-muted">
+      {loading ? (
+        <>
+          <Spinner className="text-faint" /> Loading earlier…
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={onLoad}
+            className="cursor-pointer rounded-md border border-border px-2 py-0.5 text-small text-muted hover:bg-panel-2 hover:text-text"
+          >
+            {error ? "Could not load earlier messages. Retry" : "Load earlier messages"}
+          </button>
+          {detail && <span className="text-small text-faint">{detail}</span>}
+          {earlier.turns >= JUMP_AFTER_TURNS && (
+            <button type="button" onClick={onJump} className="cursor-pointer text-small text-accent hover:underline">
+              Jump to start
+            </button>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

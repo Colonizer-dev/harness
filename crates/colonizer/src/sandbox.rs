@@ -2,6 +2,7 @@
 
 use axum::extract::State;
 
+use crate::doctor::Component;
 use crate::util::{exec, exec_within, mount_spec};
 use anyhow::{Context, Result, bail};
 use std::{collections::HashSet, path::PathBuf, time::Duration};
@@ -94,9 +95,11 @@ pub async fn boot(msb: &str, spec: &BootSpec) -> Result<()> {
         cmd.arg("-p").arg(format!("127.0.0.1:{host}:{guest}"));
     }
     cmd.arg(&spec.image).arg("--").args(&spec.command);
+    // A libkrun or KVM refusal arrives as the child's own stderr, which says less than the check
+    // that explains it does; `doctor::failed_anyhow` appends both.
     exec(&mut cmd)
         .await
-        .with_context(|| format!("microVM {} failed to boot", spec.name))?;
+        .map_err(|e| crate::doctor::failed_anyhow(Component::MicroVm, &format!("microVM {} failed to boot", spec.name), &e))?;
     Ok(())
 }
 
@@ -368,8 +371,46 @@ pub async fn pull_configured(State(app): State<crate::Shared>) -> crate::ApiResu
     Ok(axum::Json(started))
 }
 
+/// What an `Idle` pull status becomes once the cache has been looked at: `Cached` for the configured
+/// image when it is already there, otherwise nothing changes. The status lives in memory, so after
+/// every restart it starts `Idle`, which says "unknown", not "absent" (issue #1200). Any other state
+/// is a real verdict (a running, finished or failed pull) and is never overwritten here.
+fn settle_idle(current: &PullStatus, image: &str, cached: bool) -> Option<PullStatus> {
+    (current.state == PullState::Idle && cached && !image.is_empty()).then(|| PullStatus {
+        image: image.to_string(),
+        state: PullState::Cached,
+        generation: current.generation,
+        ..Default::default()
+    })
+}
+
+/// Looks at the image cache when nothing has been pulled yet since the mothership started, so a
+/// colony image that is already on disk reads `cached` without anybody clicking a stack.
+pub(crate) async fn refresh_idle(app: &crate::Shared) {
+    if app.pull.lock().await.state != PullState::Idle {
+        return;
+    }
+    let modules = app.modules.read().await.clone();
+    let image = configured_image(app, &modules);
+    if image.is_empty() {
+        return;
+    }
+    let cached = is_cached(&app.cfg.msb, &image).await; // not under the lock: it spawns msb
+    let mut status = app.pull.lock().await;
+    if let Some(settled) = settle_idle(&status, &image, cached) {
+        *status = settled;
+    }
+}
+
+/// Settles the pull status once at startup, so the first Setup poll already has the answer.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    let app = app.clone();
+    tokio::spawn(async move { refresh_idle(&app).await });
+}
+
 /// `GET /api/sandbox/pull` — the status of the most recent pull.
 pub async fn pull_status(State(app): State<crate::Shared>) -> axum::Json<PullStatus> {
+    refresh_idle(&app).await;
     axum::Json(app.pull.lock().await.clone())
 }
 
@@ -421,6 +462,36 @@ mod tests {
         .map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_string())
         .collect();
         assert_eq!(spelled, ["idle", "cached", "pulling", "done", "failed"]);
+    }
+
+    #[test]
+    fn an_idle_status_after_a_restart_reads_cached_when_the_image_is_on_disk() {
+        // Issue #1200: the in-memory status is Idle after every restart; a cached image must not read as absent.
+        let idle = PullStatus {
+            generation: 3,
+            ..Default::default()
+        };
+        let settled = settle_idle(&idle, "node:24-bookworm", true).expect("settles to cached");
+        assert_eq!(settled.state, PullState::Cached);
+        assert_eq!(settled.image, "node:24-bookworm");
+        assert_eq!(settled.generation, 3, "the generation guard is kept");
+        assert!(
+            settle_idle(&idle, "node:24-bookworm", false).is_none(),
+            "not on disk: stay idle"
+        );
+        assert!(settle_idle(&idle, "", true).is_none(), "no image configured");
+    }
+
+    #[test]
+    fn a_real_pull_verdict_is_never_overwritten_by_the_cache_check() {
+        for state in [PullState::Pulling, PullState::Done, PullState::Failed, PullState::Cached] {
+            let current = PullStatus {
+                state,
+                image: "x".into(),
+                ..Default::default()
+            };
+            assert!(settle_idle(&current, "node:24-bookworm", true).is_none());
+        }
     }
 
     #[test]

@@ -56,7 +56,31 @@ default comes from the **Publish** module's `autopilot` setting, which is on.
 
 A launch past the parallel limit is not refused. The colony is created `queued` and starts when
 a slot frees. The limits are the Sandbox settings `max_parallel` (default 3) and
-`repo_max_parallel` (default 3), plus an org's own limit if it sets one. See
+`repo_max_parallel` (default 3), plus an org's own limit if it sets one.
+
+**Queue priority.** Queued colonies start by `(priority desc, created_at asc)`, so with nothing set
+it is first in, first out. An org's `queue_priority` (High = 10, Normal = 0, Low = -10 in the
+cockpit; any integer through the API) puts all its colonies ahead of or behind other orgs'. A single
+queued colony can be moved with **Move to front** (above every other queued colony) or **Move to
+back** (below), on its page and in the Overview table; the Nest header names the colony that is
+**next up**. Priority only picks who is tried first: the global, org and per-repository limits still
+apply, and a colony whose repository is at its cap is skipped for the next one that fits. An org's
+optional `max_wait_hours` is a starvation guard: once a colony has queued that long it counts as
+High, however low its org or own priority, though never above a colony moved to the front.
+
+**Automatic mode.** With the stack on Automatic and no number in `max_parallel`, there is no fixed
+parallel limit. Each colony is sized from the host: the host keeps the larger of 8 GB or a tenth of
+its RAM and 2 vCPUs, the colonies share the rest (3 vCPUs and 11 GB on 32 cores and 124 GB; a
+`cpus` or `memory` you set still wins). A queued colony starts when the live free memory (`MemAvailable`
+on Linux, free plus inactive pages from `vm_stat` on macOS) less that reserve holds its memory and the
+1-minute load average leaves room for its vCPUs, re-checked on every queue tick. Below the reserve
+nothing new starts and admission resumes when memory frees; running colonies are never stopped for it.
+A microVM allocates lazily, so free memory alone would let a burst of colonies in that the host cannot hold once they work. Admission therefore also counts what is committed: the memory sizes of the live colonies times `auto_overcommit` (default 0.75, kept within 0.5 to 1.0), plus the reserve, must fit in RAM, and their vCPUs must stay within 1.5 times the cores. Over the limit, nothing new starts.
+`auto_max_parallel` (default 32) is the cap that holds regardless, and a number in `max_parallel`
+switches back to a fixed limit. If the host cannot be measured the fixed `max_parallel` applies.
+`/api/status` reports it as `sandbox.mode`, `size`, `room_for`, `waiting_reason`, `committed_gb` and `limited_by` (`cap`, `memory-commit`, `cpu-commit`, `free` or `load`).
+
+See
 [architecture.md, Session lifecycle](architecture.md#session-lifecycle) for every state a colony
 passes through.
 
@@ -197,6 +221,37 @@ supply-chain loop started holds every finding it was given, so the Packages tab,
 **Limits.** Only this mothership's colonies are compared, and a pull request's file list is capped
 at 500 paths. The API shapes are in
 [protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
+
+## The merge steward: getting a colony's pull request merged
+
+Off by default, per org. In **Settings → Workspaces → (org) → Pull requests**, **Auto-merge** is `off`,
+`green` or `green+rebase`, next to the **Merge method** (squash unless you pick otherwise) and
+**Delete branch** (off; a branch another colony's pull request is stacked on is always kept). The
+steward only looks at pull requests this mothership's colonies opened, and never calls GitHub for an
+org that has not opted in.
+
+Every five minutes it reads an org's pull requests with **one GraphQL query** and decides each one
+from what GitHub says. The decision is a pure function, `merge_steward::decide`:
+
+| What it finds | What it does |
+|---|---|
+| Green, GitHub says `CLEAN`, not a draft, no `hold` / `do-not-merge` / `needs-human` label, no open question on the colony | Merges, pinned to the head it read (`--match-head-commit`). A merge queue is asked for GitHub's auto-merge instead. At most one per repository per cycle. |
+| Behind or conflicting, in `green+rebase` | GitHub's **update-branch** first. If that conflicts, and the watcher's own rebase has flagged the colony (`needs_rebase`), the colony is resumed with a rebase task. |
+| A real failing check | The colony is resumed with the failing job's name and the tail of its log. Two rounds at most, and never twice for the same head; then the pull request is marked **needs attention**. |
+| Every failed job ended in under 10 s with no steps, or GitHub's annotation names billing or a spending limit | Marked **ci blocked**. No colony is spent on it, and one banner per org says GitHub Actions is blocked there. |
+| It adds a `changelog.d/` fragment while a `release: vX.Y.Z` pull request is open in the repository | Waits: the [release train](release.md#the-freeze)'s changelog check would fail on a fragment that lands after the release assembled its own. |
+| Anything else (running or missing checks, `BLOCKED`, a requested change, a fork) | Waits, and says why. |
+
+Branch protection is never second-guessed: only `mergeStateStatus: CLEAN` merges, so a pending or
+failing required check, a missing review or a merge queue is GitHub's to settle. The steward waits
+out an open GitHub circuit breaker ([GitHub failures](#github-failures)), and leaves a repository the
+publish module's merge train or the merge-train loop drives to them.
+
+The cockpit lists each pull request with its state (waiting, merging, rebasing, fixing, ci blocked,
+needs attention) and a **Merge now** button, which asks GitHub again and merges only a pull request
+GitHub itself calls mergeable. `GET /api/merge-steward` serves the list; `/api/status` carries the
+blocked orgs as `merge_steward.ci_blocked`. A pull request needs at least one check to report before
+the steward merges it.
 
 ## Epics are refused
 
@@ -411,6 +466,27 @@ A separate Sandbox setting, `hold_timeout_minutes` (default 30), parks a colony 
 held. It removes the microVM and keeps the worktree. The full design, including why this is not
 a VM snapshot, is in
 [architecture.md, Suspending colonies that wait for an answer](architecture.md#suspending-colonies-that-wait-for-an-answer).
+
+A Watchdog setting, `idle_park_minutes` (default 15, 1 to 1440), parks a colony sooner when it is
+doing nothing. A colony that is idle, held by autopilot or flagged by the watchdog, with no open
+question and no publish or verification in flight, is parked once it has sat that long: its microVM
+stops and its slot is freed, the worktree and branch are kept, and Resume brings it back. A colony
+with an open question keeps the behaviour above. When the colony is idle because its last turn did
+not write or update `/harness/out/pr.md` (for example after a redacted description was held), it
+first gets one automatic message asking it to rewrite the description; if that does not help, it
+parks like any other.
+
+## Stacked colonies that wait
+
+A colony stacked on another (`after`) builds on that colony's branch, and one failure used to take
+the whole chain with it. Now a dependent whose parent is stopped or parked goes to `blocked`
+instead: it holds no slot and no microVM and is not failed, and its card says what it waits on
+("waiting on #5 (`c8a6d23c`, stopped)"). It is `queued` again when the parent resumes or finishes,
+and waits for the parent's branch as before. When the parent is gone for good (failed with no
+parent of its own, cleaned up before it published, a closed pull request, no changes, or deleted)
+the dependent re-bases on the default branch and queues like any other colony; a conflict is then
+handled by the normal rebase path. A cascade never produces `failed`. A blocked colony can be
+stopped (Leave the queue) or deleted like a queued one.
 
 ## Stop, resume and delete
 
@@ -690,6 +766,71 @@ its own homework: that check comes back unverifiable and nothing runs. A check w
 branch deleted is skipped rather than run to a meaningless exit 1. A base result is remembered
 per repository, image, base commit and check, so a re-verification does not pay for it twice. The
 full description is in [architecture.md, Session lifecycle](architecture.md#session-lifecycle), step 5.
+
+## Self-healing: the watchdog playbook
+
+The watchdog used to send a generic "no progress" nudge, and a person (or an outside agent polling
+`harness.jsonl`) did the rest: recognise a known stall, send the colony the exact fix, publish,
+switch model. The playbook is that step done by the mothership. It is a table of **signature,
+action, tries**; each fix is logged as `auto-fixed: <signature>` in the colony's `harness.jsonl`,
+listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: pr_md_write").
+
+| Signature | Matches | Action | Tries |
+|---|---|---|---|
+| `placeholder_dotfiles` | a `secret-paths` denial whose target is a harness placeholder (`.env`, `.netrc`, ...) in the worktree and names no real credential path | message: the placeholders are harness mounts, leave them, continue the issue | 1 |
+| `pr_md_write` | a `writes-outside-repo` denial on `/harness/out/pr.md` | message: write `pr.md` with the file tool | 1 |
+| `toolchain_installer` | a `script-egress` denial on a toolchain installer (rustup, swift, ghcup, ...) | message: no toolchains, say in `pr.md` what was not compiled | 1 |
+| `provider_unavailable` | a turn-error hold on `unrecognized_model`, or a provider quota flag, where the provider's `fallback_model` is a `<provider>/<model>` on a configured provider that is not itself out of quota | `switch_fallback_and_resume` | 2 |
+| `idle_verified` | idle, autopilot on, `pr.md` written, a confirmed verification of the tree as it stands now, nothing flagged, quiet for 10 minutes | `publish` | 1 |
+
+The same denial coming back after its tries are spent (the colony is looping) runs `stop_looping`:
+the colony is stopped, its slot is freed, and it carries the attention reason `looping` naming the
+signature. Between a fix and the next action on the same signature the playbook waits
+`settle_secs` (120 by default) for the agent to read the message. A person's resume gives a
+stopped colony fresh tries.
+
+Rows handled by their own mechanism are not repeated here: a contradicted verification is sent back
+to the agent in fix rounds, a `pr.md` that only redaction changed is published redacted, and an
+open question is closed by the judge.
+
+**The playbook never releases a security hold.** A colony carrying a control-defeat flag, or any
+attention reason naming a secret, a redaction or a defeat, is left alone, and a denial that
+completes a control-defeat signature is flagged as before and not answered with a message. The
+publish action refuses when the tree is not the one that was verified, when the kill-switch is up,
+or when GitHub's breaker is open.
+
+### Adding a pattern: `playbook.toml`
+
+The table is data. The compiled-in rows are the defaults; `<config dir>/playbook.toml` (next to
+`updates.json`) adds rows, replaces a default by naming the same `signature`, or turns one off. It
+is read on each use, so a new pattern needs no release and no restart. A file that does not parse
+is ignored with a line in the mothership's output.
+
+```toml
+# replace = true            # start from an empty table instead of the defaults
+
+[[entry]]
+signature = "npm_registry_denied"       # what the cockpit shows as "auto-fixed: ..."
+trigger = "denial"                      # denial (default) | provider_failure | idle_verified
+action = "send_message"                 # send_message | publish | switch_fallback_and_resume | stop_looping
+message = "The npm registry is not reachable from here; use the vendored packages."
+max_tries = 2                           # fixes per colony before the signature counts as looping
+settle_secs = 120                       # wait this long after a fix before acting again
+stop_when_exhausted = true              # stop the colony (attention `looping`) when it comes back
+# enabled = false                       # switch a default off by repeating its signature
+
+[entry.when]
+kind = "egress_denied"                  # the boundary kind; exec_policy_deny when absent
+control = "egress"                      # substring of the control
+text_any = ["registry.npmjs.org"]       # one of these in the denial's detail or target
+text_none = []                          # none of these
+target_in = []                          # target must be a relative path with one of these file names
+# error_any = ["unrecognized_model"]    # provider_failure: words in the hold's detail
+# quota = true                          # provider_failure: a quota flag matches too
+```
+
+A stall that no row matches goes to `playbook::on_unmatched_stall`, which does nothing today; it is
+the hook for an operator agent (#1192).
 
 ## Conditional instructions
 

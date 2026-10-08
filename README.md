@@ -88,12 +88,12 @@ the mothership has sanitized it and opened the pull request. The diagram is in
 
 | | |
 | :--- | :--- |
-| [Install](docs/install.md) · [Configuration](docs/configuration.md) · [Updates](docs/updates.md) | Requirements, first run, every setting, budgets and quotas, upgrading |
+| [Install](docs/install.md) · [Configuration](docs/configuration.md) · [Updates](docs/updates.md) · [Releases](docs/release.md) | Requirements, first run, every setting, budgets and quotas, upgrading |
 | [CLI](docs/cli.md) · [MCP](docs/mcp.md) · [Colonies](docs/colonies.md) · [Fleet](docs/fleet.md) | Driving a mothership, colony lifecycle, pairing motherships |
 | [Architecture](docs/architecture.md) · [Protocol](docs/protocol.md) · [Conformance](docs/conformance.md) | Modules, repository layout, the wire format, [UHP](https://unifiedharnessprotocol.org/) conformance |
 | [Trust model](docs/trust-model.md) · [Boundaries](docs/boundaries.md) · [Audit](docs/audit.md) · [Path policy](docs/path-policy.md) | Where secrets live, what is enforced, what the audit found |
 | [Providers](docs/providers.md) · [Loops](docs/loops.md) · [Jev](docs/jev.md) · [Hosted](docs/hosted.md) | Model providers, built-in loops, second opinions, the hosted contract |
-| [Vision](docs/vision.md) · [Gaps](docs/gaps.md) · [Decisions](docs/decisions.md) | Why, the roadmap, what is not built, what was decided against |
+| [Bench](docs/bench.md) · [Vision](docs/vision.md) · [Gaps](docs/gaps.md) · [Decisions](docs/decisions.md) | The fixed task set, what it measures and what it does not, the roadmap, what was decided against |
 | [CHANGELOG](CHANGELOG.md) · [changelog.d/](changelog.d/README.md) | Every release, and what has merged since |
 | [Development](docs/development.md) · [Runner authoring](docs/runner-authoring.md) · [Good first issues](docs/good-first-issues.md) | Tests, a new agent module, starter issues |
 

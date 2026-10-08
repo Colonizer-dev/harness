@@ -38,6 +38,22 @@ export interface StatusQuota {
    * banner covers by looking the ids up in the provider catalog.
    */
   provider_details?: QuotaProviderDetail[];
+  /**
+   * The Claude account is out but its `account_fallback_model` is carrying the work (issue #1130):
+   * the queue is not paused, and the banner says where Claude's roles run until the reset. Absent
+   * from older mothership builds and null whenever the account works or has no usable fallback.
+   */
+  fallback?: QuotaFallback | null;
+}
+
+/** Where Claude's roles run while the account is out. */
+export interface QuotaFallback {
+  /** `<provider>/<model>`. */
+  model: string;
+  /** The provider's display name, e.g. "MiniMax". */
+  provider_name: string;
+  reset_at: string | null;
+  reset_unix: number | null;
 }
 
 /** One exhausted plan in GET /api/status `quota.provider_details`. */
@@ -140,6 +156,33 @@ export interface ProviderQuotaProbe {
   pointer: string;
   /** Optional RFC 6901 pointer naming the plan's total in the same answer, so used vs. limit can be drawn. */
   limit_pointer?: string;
+  /** Optional RFC 6901 pointer naming when the plan refills in the same answer: unix seconds, milliseconds or RFC 3339 (issue #1204). */
+  reset_pointer?: string;
+}
+
+/** One plan-balance reading. */
+export interface ProviderBalance {
+  at: string;
+  remaining: number;
+  /** The plan's total, when the probe names one. */
+  limit?: number | null;
+  /** When the plan refills (unix seconds), when the probe has a reset pointer. */
+  reset_unix?: number | null;
+}
+
+/** GET /api/providers/{id}/usage?days= (issue #1204): what the provider's page draws. */
+export interface ProviderUsageReport {
+  provider: string;
+  days: number;
+  /** One row per day, oldest first, today last; quiet days are zeros. */
+  daily: { date: string; requests: number; failures: number; avg_latency_ms: number }[];
+  /** Plan-balance readings in the window, oldest first. Empty without a balance reader. */
+  balance: ProviderBalance[];
+  /** `exhausted`, `recovered` or `reset`, with when. */
+  events: { at: string; kind: "exhausted" | "recovered" | "reset" }[];
+  has_balance: boolean;
+  /** Present while the plan is out. */
+  exhausted?: { reset_at: string | null; reset_unix: number | null };
 }
 
 export interface ModelProvider extends ProviderLimits {
@@ -177,6 +220,13 @@ export interface ModelProvider extends ProviderLimits {
   health?: ProviderUsageHealth;
   /** The Mothership's quota record for this provider (issue #225); absent when the plan is not exhausted. */
   quota_exhausted?: ProviderQuotaState | null;
+  /** The last plan-balance reading the Mothership kept (issue #1204); null or absent until a reader has run. */
+  balance?: ProviderBalance | null;
+  /**
+   * Models the endpoint itself lists (issue #1167), separate from the enabled `models`. Absent until
+   * the Mothership discovers them; the page then says "N enabled · +M available".
+   */
+  discovered_models?: string[];
   /** The model settings currently routed here; empty means none are, so it stays idle. */
   used_by?: ModelSetting[];
 }

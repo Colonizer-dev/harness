@@ -15,6 +15,8 @@ const RANK: Record<SessionStatus, number> = {
   idle: 1,
   publishing: 2,
   queued: 3,
+  // Blocked (issue #1140) waits on its parent with no slot: it sorts with the queue.
+  blocked: 3,
   // Parked (issue #213) waits on tokens, not finished: it sorts with the queue, not the dead.
   parked: 3,
   pr_opened: 4,

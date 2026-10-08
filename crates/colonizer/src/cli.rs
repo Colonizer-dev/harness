@@ -8,6 +8,8 @@
 //! Exit codes are part of the interface, so scripts can tell a typo from a refusal: [`EXIT_ERROR`]
 //! and friends are defined once here, shown in `--help`, and returned from [`run`].
 
+mod glossary;
+
 use crate::{Settings, auth, util};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, FixedOffset};
@@ -44,14 +46,20 @@ pub const EXIT_TIMEOUT: i32 = 8;
 /// The port a `--host` that names no port of its own gets: the mothership's default bind.
 const DEFAULT_PORT: u16 = 7878;
 
+// clap's own `help` subcommand is turned off below (`disable_help_subcommand`): `colonizer help`
+// and `colonizer help <command>` still print what they always printed, but `help` is a command of
+// ours now, so it can carry a `glossary` topic (issue #904). The `glossary` module holds it.
+///
 /// `colonizer`, as clap sees it. The global flags work before or after the subcommand, so both
 /// `colonizer --json list` and `colonizer list --json` read the same.
 #[derive(Parser, Debug)]
 #[command(
     name = "colonizer",
-    about = "turn a task into a pull request: coding agents in private microVMs, watched from a cockpit",
+    about = "turn a task into a pull request: a coding agent works in an isolated sandbox, \
+             watched from a cockpit",
     version = crate::version::build().line(),
     after_help = AFTER_HELP,
+    disable_help_subcommand = true,
 )]
 pub struct Cli {
     /// Which mothership the client commands talk to: a host name or host:port. The default is the
@@ -72,8 +80,11 @@ pub struct Cli {
     command: Option<Command>,
 }
 
-const AFTER_HELP: &str = "With no subcommand at all, colonizer starts the mothership: it serves the web UI and the API
-on COLONIZER_BIND (default 127.0.0.1:7878) and runs the colonies.
+const AFTER_HELP: &str = "With no subcommand at all, colonizer starts the control plane (the mothership): it serves the web
+UI and the API on COLONIZER_BIND (default 127.0.0.1:7878) and runs the colonies.
+
+New to the words? `colonizer help glossary` says what a colony, a settler and the mothership
+actually are, in ordinary language.
 
 Exit codes:
   0  ok
@@ -98,6 +109,13 @@ enum Command {
     Version,
     /// Print what the venture is built with, each product's status said in words (issue #944)
     About,
+    /// Print this message, or a command's own help; `help glossary` explains this CLI's words in
+    /// ordinary language (issue #904)
+    Help {
+        /// Which command to explain; omit it for this message
+        #[command(subcommand)]
+        command: Option<glossary::HelpCommand>,
+    },
     /// Install the newest release against a running mothership and restart into it
     Update {
         /// Install over a development build, or one newer than the latest release
@@ -109,9 +127,13 @@ enum Command {
     },
     /// Install this version's release over a `cargo install` build, which has no app beside it
     Setup,
+    /// Say whether this host can run colonies — kernel features, `/dev/kvm`, the mesh and microVM
+    /// binaries — and name the fix for whatever is missing
+    Doctor,
     /// Print the cockpit sign-in link and open it in a browser
     Open,
-    /// Start the mothership at login (macOS LaunchAgent, Linux systemd user unit)
+    /// Start the control plane (the mothership) at login (macOS LaunchAgent, Linux systemd user
+    /// unit)
     LoginItem {
         /// enable, disable or status; disable never stops a running one
         #[arg(value_enum)]
@@ -167,7 +189,8 @@ enum Command {
     },
     /// Print this command's man page to stdout
     Man,
-    /// Start a colony: an agent in a microVM, working the repo, or one issue in it
+    /// Start a colony: an isolated sandbox running one coding agent, working the repo or one
+    /// issue in it
     Launch {
         /// The repository to work in, as owner/repo
         #[arg(value_name = "OWNER/REPO")]
@@ -232,7 +255,8 @@ enum Command {
         #[arg(long, conflicts_with = "status")]
         parked: bool,
     },
-    /// Show one colony: where it stands, what it costs, and what it is doing right now
+    /// Show one colony (an isolated sandbox): where it stands, what it costs, and what it is
+    /// doing right now
     Status { id: String },
     /// Print a colony's recent events, or follow them live
     Logs {
@@ -300,10 +324,16 @@ enum Command {
         #[command(subcommand)]
         command: RedteamCommand,
     },
-    /// Manage the mothership's scoped API tokens (the owner token only)
+    /// Manage the control plane's (the mothership's) scoped API tokens (the owner token only)
     Token {
         #[command(subcommand)]
         command: TokenCommand,
+    },
+    /// Manage the public feed's read-only keys (issue #895). Local: it reads and writes the config
+    /// dir, no mothership and no token
+    FeedKey {
+        #[command(subcommand)]
+        command: FeedKeyCommand,
     },
     /// Export this machine's stats, logs and colony history, or import another machine's (issue #687)
     Fleet {
@@ -655,7 +685,8 @@ enum TokenCommand {
     Create {
         /// A name that says who uses it ("ci", "rachel's assistant")
         name: String,
-        /// How much it may do: read (watch), operate (answer, stop, resume), launch (start colonies)
+        /// How much it may do: read (watch), operate (answer, stop, resume),
+        /// launch (start colonies, publish a branch or pull request, file an issue)
         #[arg(long, value_enum)]
         scope: TokenScope,
         /// Limit it to these orgs (repeat the flag); none listed means no limit
@@ -672,6 +703,31 @@ enum TokenCommand {
         budget_usd_per_day: Option<f64>,
     },
     /// Revoke a token. Presentations of it stop authenticating at once.
+    Revoke { id: String },
+}
+
+/// The `feed-key` subcommands. They run locally off the settings — the keys live in the config dir
+/// and are read per request, so a key made here is live without a restart.
+#[derive(Subcommand, Debug)]
+enum FeedKeyCommand {
+    /// List every feed key's metadata. The plaintext is never here; it was shown once, at creation.
+    List,
+    /// Mint a feed key. The plaintext is printed once and cannot be shown again.
+    Create {
+        /// A name that says who uses it ("colony-map.example"). A flag rather than `token create`'s
+        /// positional: this name is a label a site is looked up by later, and it reads better beside
+        /// `--ip` and `--rate` than as a bare word whose position has to be remembered
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        /// Only allow these addresses, as an address or a CIDR block (repeat the flag); none listed
+        /// means any address
+        #[arg(long, value_name = "IP_OR_CIDR")]
+        ip: Vec<String>,
+        /// How many requests a minute the key may make
+        #[arg(long, value_name = "N")]
+        rate: Option<u32>,
+    },
+    /// Revoke a feed key. Presentations of it stop authenticating at once.
     Revoke { id: String },
 }
 
@@ -1335,6 +1391,7 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("update", &["json"]),
     ("setup", &["host", "token_file", "json"]),
+    ("doctor", &["host", "token_file", "json"]),
     ("open", &["host", "token_file", "json"]),
     ("login-item", &["host", "token_file", "json"]),
     ("telemetry", &["host", "token_file", "json"]),
@@ -1343,6 +1400,7 @@ const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("sessions", &["host", "token_file"]),
     ("version", &["host", "token_file", "json"]),
     ("about", &["host", "token_file", "json"]),
+    ("help", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
     ("man", &["host", "token_file", "json"]),
 ];
@@ -1475,8 +1533,10 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             crate::built_with::print();
             EXIT_OK
         }
+        Command::Help { command } => glossary::help_command(command),
         Command::Update { force, check } => await_local(update_command(cli, force, check).await),
         Command::Setup => await_local(crate::setup::command().await),
+        Command::Doctor => await_local(crate::doctor::command().await),
         Command::Open => await_local(open()),
         Command::LoginItem { action } => {
             let cfg = match Settings::from_env() {
@@ -1903,6 +1963,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
         Command::Loop { command } => loop_command(cli, command).await,
         Command::Redteam { command } => redteam_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
+        Command::FeedKey { command } => {
+            let cfg = match Settings::from_env() {
+                Ok(cfg) => cfg,
+                Err(e) => return await_local(Err(e)),
+            };
+            await_local(feed_key_command(&cfg.config_dir, command, cli.json))
+        }
         Command::Fleet {
             command:
                 FleetCommand::Sync {
@@ -2235,6 +2302,76 @@ async fn token_command(cli: &Cli, command: TokenCommand) -> i32 {
         }
     })
     .await
+}
+
+/// `colonizer feed-key`: mint, list and revoke the public feed's read-only keys (issue #895).
+///
+/// Local on purpose. The keys live in `<config_dir>/feed-keys.json` and the feed reads that file
+/// per request, so a key made or revoked here takes effect at once — with no mothership running
+/// and no token held, which is the whole point of a credential an external site can carry.
+fn feed_key_command(config_dir: &std::path::Path, command: FeedKeyCommand, json: bool) -> Result<()> {
+    match command {
+        FeedKeyCommand::List => {
+            let keys = crate::public_feed::keys::list(config_dir);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&keys).map_err(|e| anyhow::anyhow!("could not serialise the feed keys: {e}"))?
+                );
+                return Ok(());
+            }
+            // A person sees a word, a script sees an empty stdout and a 0.
+            if keys.is_empty() {
+                eprintln!("no feed keys");
+                return Ok(());
+            }
+            for key in keys {
+                let created = key.created_at.to_rfc3339().get(..10).unwrap_or("?").to_string();
+                println!(
+                    "{:<14} {:<24} {:<10} {:<28} rate/min {:<5} created {created}",
+                    key.id,
+                    util::truncate(&key.name, 24),
+                    if key.revoked_at.is_some() { "revoked" } else { "live" },
+                    if key.ip_allowlist.is_empty() {
+                        "any address".to_string()
+                    } else {
+                        key.ip_allowlist.join(",")
+                    },
+                    key.rate_limit_per_minute,
+                );
+            }
+            Ok(())
+        }
+        FeedKeyCommand::Create { name, ip, rate } => {
+            let (plaintext, meta) = crate::public_feed::keys::create(
+                config_dir,
+                crate::public_feed::keys::NewKey {
+                    name,
+                    ip_allowlist: ip,
+                    rate_limit_per_minute: rate,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                let created = serde_json::json!({ "key": plaintext, "meta": meta });
+                println!("{}", pretty(&created)?);
+            } else {
+                // The plaintext on stdout (pipe-able), the warning where a person reads.
+                println!("{plaintext}");
+                eprintln!("this is the only time the key is shown; store it now — it cannot be read back");
+            }
+            Ok(())
+        }
+        FeedKeyCommand::Revoke { id } => {
+            if crate::public_feed::keys::revoke(config_dir, &id).is_none() {
+                return Err(anyhow::anyhow!("no feed key {id}"));
+            }
+            if !json {
+                println!("feed key {id} revoked");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// The org/repo limits a `token list` line shows: `*/*` when there are none.
@@ -3241,9 +3378,13 @@ mod tests {
     fn the_documented_commands_parse() {
         for args in [
             &["version"][..],
+            &["help"][..],
+            &["help", "glossary"][..],
+            &["help", "status"][..],
             &["update"][..],
             &["update", "--force"][..],
             &["update", "--check"][..],
+            &["doctor"][..],
             &["open"][..],
             &["login-item", "enable"][..],
             &["login-item", "disable"][..],
@@ -3402,6 +3543,7 @@ mod tests {
             &["man", "--host", "h:1"][..],
             &["update", "--json"][..],
             &["setup", "--token-file", "/tmp/token"][..],
+            &["doctor", "--token-file", "/tmp/token"][..],
         ] {
             let err = parse(args).unwrap_err();
             assert_eq!(err.exit_code(), EXIT_USAGE, "{args:?} should be a usage error");
@@ -3449,6 +3591,7 @@ mod tests {
         for command in [
             "open",
             "setup",
+            "doctor",
             "login-item",
             "telemetry",
             "version",

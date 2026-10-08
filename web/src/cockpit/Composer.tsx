@@ -13,6 +13,8 @@ import { sameOrg, store, stored } from "../components/ui";
 import { isLive } from "../components/ui";
 import type { Issue, Repo, Session, VoiceStatus } from "../types";
 import { canRecord, countdown, startRecording, type Recording } from "../voiceRecorder";
+import { SpotlightPanel } from "./spotlight/Panel";
+import { Key, Tile } from "./spotlight/Parts";
 
 const REPO_KEY = "colonizer.repo";
 /** How many bars the listening waveform draws. */
@@ -364,6 +366,7 @@ export function Composer({
   const repo = chosen && choices.some((r) => r.full_name === chosen) ? chosen : defaultRepo(choices, stored(REPO_KEY));
   const field = useRef<HTMLTextAreaElement>(null);
   const root = useRef<HTMLDivElement>(null);
+  const repoChip = useRef<HTMLButtonElement>(null);
   // The repository's open issues, fetched once per repository while the composer is open.
   const issueCache = useRef(new Map<string, Issue[]>());
   const [issues, setIssues] = useState<Issue[]>([]);
@@ -419,14 +422,14 @@ export function Composer({
   useEffect(() => {
     if (!open) return;
     const onDown = (event: MouseEvent) => {
-      if (root.current && !root.current.contains(event.target as Node) && !text.trim() && !voice.listening) {
+      if (!picking && root.current && !root.current.contains(event.target as Node) && !text.trim() && !voice.listening) {
         setOpen(false);
         setPicking(false);
       }
     };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
-  }, [open, text, voice.listening]);
+  }, [open, text, voice.listening, picking]);
 
   // The prompt grows with what is in it, up to a point.
   useEffect(() => {
@@ -521,7 +524,7 @@ export function Composer({
       <div
         data-open={open}
         data-listening={voice.listening}
-        className={`composer v3-pop pointer-events-auto relative w-full rounded-[22px] border border-border-strong shadow-[0_18px_60px_-12px_rgb(0_0_0/0.55)] transition-[max-width] duration-300 ease-out ${open ? "composer-open max-w-[760px]" : "max-w-[480px]"}`}
+        className={`composer spot-surface pointer-events-auto relative w-full rounded-[22px] transition-[max-width] duration-300 ease-out ${open ? "composer-open max-w-[760px]" : "max-w-[480px]"}`}
       >
         {!open ? (
           <div className="flex h-12 items-center gap-2 pl-4 pr-1.5">
@@ -612,7 +615,7 @@ export function Composer({
                       setPicked(issue);
                       field.current?.focus();
                     }}
-                    className="flex max-w-[260px] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted transition-colors hover:border-border-strong hover:bg-panel-2 hover:text-text"
+                    className="spot-chip max-w-[260px]"
                   >
                     <span className="font-mono text-faint">#{issue.number}</span>
                     <span className="truncate">{issue.title}</span>
@@ -624,7 +627,7 @@ export function Composer({
 
             <div className="mt-2 flex items-center gap-2 px-1">
               {onAsk && (
-                <div role="radiogroup" aria-label="what to do with it" className="flex shrink-0 rounded-full border border-border p-0.5 text-small">
+                <div role="radiogroup" aria-label="what to do with it" className="flex shrink-0 gap-1.5">
                   {(["colony", "ask"] as const).map((m) => (
                     <button
                       key={m}
@@ -632,7 +635,8 @@ export function Composer({
                       role="radio"
                       aria-checked={mode === m}
                       onClick={() => setMode(m)}
-                      className={`cursor-pointer rounded-full border-0 px-2.5 py-0.5 transition-colors ${mode === m ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+                      data-on={mode === m}
+                      className="spot-chip"
                     >
                       {m === "colony" ? "Launch colony" : "Ask"}
                     </button>
@@ -642,12 +646,13 @@ export function Composer({
               {!asking && (
               <div className="relative min-w-0">
                 <button
+                  ref={repoChip}
                   type="button"
-                  aria-haspopup="listbox"
+                  aria-haspopup="dialog"
                   aria-expanded={picking}
                   aria-label={repo ? `repository · ${repo}` : "choose a repository"}
                   onClick={() => setPicking((p) => !p)}
-                  className="flex max-w-[280px] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted transition-colors hover:border-border-strong hover:text-text"
+                  className="spot-chip max-w-[280px]"
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9" />
@@ -655,51 +660,48 @@ export function Composer({
                   <span className="truncate font-mono">{repo ?? "choose a repository"}</span>
                 </button>
                 {picking && (
-                  <div role="listbox" aria-label="repositories" className="v3-pop absolute bottom-full left-0 z-40 mb-2 w-[320px] rounded-xl border border-border-strong p-1.5 shadow-[0_16px_48px_rgb(0_0_0/0.4)]">
-                    <input
-                      autoFocus
-                      value={query}
-                      onChange={(event) => setQuery(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" && filtered[0]) {
-                          event.preventDefault();
-                          setChosen(filtered[0].full_name);
-                          setPicking(false);
-                          setQuery("");
-                          field.current?.focus();
-                        } else if (event.key === "Escape") setPicking(false);
-                      }}
-                      placeholder="Find a repository…"
-                      aria-label="find a repository"
-                      className="bare-field mb-1 w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-body-sm text-text outline-none placeholder:text-faint focus-visible:border-border-strong focus-visible:outline-none"
-                    />
-                    <div className="scroll-thin max-h-[240px] overflow-y-auto">
-                      {filtered.length === 0 && <div className="px-2 py-3 text-body-sm text-faint">No repository matches.</div>}
-                      {filtered.map((r) => (
-                        <button
-                          key={r.full_name}
-                          type="button"
-                          role="option"
-                          aria-selected={r.full_name === repo}
-                          onClick={() => {
+                  <SpotlightPanel
+                    label="repositories"
+                    placement="anchored"
+                    side="above"
+                    anchor={root}
+                    align="start"
+                    width={380}
+                    onClose={() => {
+                      setPicking(false);
+                      setQuery("");
+                      field.current?.focus();
+                    }}
+                    query={query}
+                    onQuery={setQuery}
+                    placeholder="Find a repository…"
+                    sections={[
+                      {
+                        id: "repos",
+                        title: "Repositories",
+                        rows: filtered.map((r) => ({
+                          id: r.full_name,
+                          title: r.full_name,
+                          subtitle: r.private ? "private" : undefined,
+                          leading: <Tile icon="repo" org={r.full_name.split("/")[0]} />,
+                          checked: r.full_name === repo,
+                          verb: "choose",
+                          onPick: () => {
                             setChosen(r.full_name);
                             setPicking(false);
                             setQuery("");
                             field.current?.focus();
-                          }}
-                          className={`flex w-full cursor-pointer items-center gap-2 rounded-md border-0 px-2 py-1.5 text-left font-mono text-small-lg transition-colors hover:bg-panel-2 ${r.full_name === repo ? "bg-panel-2 text-text" : "bg-transparent text-muted"}`}
-                        >
-                          <span className="truncate">{r.full_name}</span>
-                          {r.private && <span className="ml-auto shrink-0 font-sans text-meta text-faint">private</span>}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                          },
+                        })),
+                      },
+                    ]}
+                    empty="No repository matches."
+                  />
                 )}
               </div>
               )}
-              <span className="hidden text-small text-faint md:inline">
-                {asking ? "opens in Chat" : autopilotDefault ? "autopilot on" : "you review the PR"} · <kbd className="font-sans">↵</kbd> {asking ? "ask" : "launch"} · <kbd className="font-sans">⇧↵</kbd> new line
+              <span className="hidden items-center gap-2 text-small text-faint md:inline-flex">
+                {asking ? "opens in Chat" : autopilotDefault ? "autopilot on" : "you review the PR"} · <Key>↵</Key> {asking ? "ask" : "launch"} · <Key>⇧↵</Key> new line
               </span>
               <div className="flex-1" />
               {voice.supported && <MicButton listening={voice.listening} busy={voice.transcribing} label={voice.label} onClick={toggleVoice} />}

@@ -126,6 +126,22 @@ pub fn marks(text: &str) -> Vec<(String, usize)> {
     out
 }
 
+/// Where redaction would change `text`: the 1-based line and the kind of each secret found, in
+/// order. Never carries a value, so it is safe to put in a message to the agent that wrote it (the
+/// pr.md rewrite nudge, issue #1175). A secret that spans lines (a PEM block) is reported on the
+/// line it starts at when that line alone shows it, and otherwise not at all.
+pub fn findings(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if let Cow::Owned(redacted) = redact_text(line) {
+            for (kind, n) in marks(&redacted) {
+                out.extend(std::iter::repeat_n((i + 1, kind), n));
+            }
+        }
+    }
+    out
+}
+
 /// The operator-facing line for a file that redaction changed, e.g. `pr.md contained 1 secret
 /// (github token), redacted before publishing`; `None` when `text` carries no mark.
 pub fn redaction_note(file: &str, text: &str, before: &str) -> Option<String> {
@@ -313,6 +329,7 @@ fn redact_text_with(input: &str, entropy: bool) -> Cow<'_, str> {
 /// char boundaries; one that somehow is not is dropped rather than split a character.
 fn apply(input: &str, mut spans: Vec<Span>) -> Cow<'_, str> {
     spans.retain(|s| s.start < s.end && input.is_char_boundary(s.start) && input.is_char_boundary(s.end));
+    spans.retain(|s| !is_documentation_example(s.kind, &input[s.start..s.end]));
     if spans.is_empty() {
         return Cow::Borrowed(input);
     }
@@ -340,6 +357,20 @@ fn apply(input: &str, mut spans: Vec<Span>) -> Cow<'_, str> {
     }
     out.push_str(&input[at..]);
     Cow::Owned(out)
+}
+
+// ── Published documentation examples ──
+
+/// The credentials AWS publishes in its own documentation. They are public and grant nothing, and
+/// agents quote them constantly (a redaction crate's tests, a README), so a span whose text is
+/// exactly one of these is not a secret (issue #1175). Matched whole and exactly, the way Gitleaks
+/// and trufflehog allowlist them: a real key next to one, or one with anything glued on, still goes.
+const DOCUMENTATION_EXAMPLES: &[&str] = &["AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"];
+
+/// Whether `text`, a span of `kind`, is a documentation example: one of [`DOCUMENTATION_EXAMPLES`],
+/// or an AWS access key id (20 characters) ending in `EXAMPLE`, the shape AWS's other samples take.
+fn is_documentation_example(kind: &str, text: &str) -> bool {
+    DOCUMENTATION_EXAMPLES.contains(&text) || (kind == "aws_access_key" && text.len() == 20 && text.ends_with("EXAMPLE"))
 }
 
 // ── Byte classes ──
@@ -830,6 +861,18 @@ fn is_secret_value(value: &str, quoted: bool) -> bool {
         if identifier_path {
             return false;
         }
+        // A comparison between two identifiers (`session>=read`, `repo>=launch`): code, not a value.
+        if v.split_once(">=").is_some_and(|(a, b)| {
+            let operand = |p: &str| {
+                !p.is_empty()
+                    && p.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                    && p.bytes()
+                        .all(|c| c.is_ascii_alphabetic() || matches!(c, b'_' | b'-' | b'?' | b'!' | b'>'))
+            };
+            operand(a) && operand(b)
+        }) {
+            return false;
+        }
     }
     true
 }
@@ -1037,6 +1080,50 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Issue #1175: AWS's documented examples are public, so quoting them is not a leak.
+    #[test]
+    fn the_aws_documentation_examples_are_not_secrets() {
+        for text in [
+            "the id is AKIAIOSFODNN7EXAMPLE",
+            "key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+            "an id ending EXAMPLE: AKIAI44QH8DHBEXAMPLE",
+            "temporary ASIAIOSFODNN7EXAMPLE",
+        ] {
+            assert_eq!(redact_text(text), text, "{text}");
+        }
+        assert_eq!(
+            redaction_note("pr.md", &redact_text("AKIAIOSFODNN7EXAMPLE"), "publishing"),
+            None
+        );
+    }
+
+    /// The allowlist is exact: a lookalike, a longer token, or a real key beside an example still goes.
+    #[test]
+    fn the_allowlist_is_exact_and_a_real_key_beside_an_example_still_goes() {
+        let real = concat!("AKIA", "Y34FZKBOKMUTVV7A");
+        assert_eq!(redact_text(real), "[REDACTED:aws_access_key]");
+        // One character off, or glued to a longer run: not the example.
+        assert_eq!(redact_text(concat!("AKIA", "IOSFODNN7EXAMPLF")), "[REDACTED:aws_access_key]");
+        // An example id does not excuse the secret key that follows it.
+        let pair = concat!("AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEZ");
+        assert_eq!(redact_text(pair), "AKIAIOSFODNN7EXAMPLE [REDACTED:aws_secret_key]");
+        let both = format!("{real} and AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(redact_text(&both), "[REDACTED:aws_access_key] and AKIAIOSFODNN7EXAMPLE");
+    }
+
+    #[test]
+    fn findings_name_the_line_and_kind_never_the_value() {
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let text = format!("# Title\n\nfine\nthe token was {secret}\nAKIAIOSFODNN7EXAMPLE");
+        let found = findings(&text);
+        assert_eq!(found, vec![(4, "github_token".to_string())]);
+        assert!(!format!("{found:?}").contains(secret));
+        assert!(findings("nothing here").is_empty());
+    }
+
     #[test]
     fn a_redaction_note_names_the_count_and_the_kinds() {
         let text = "a [REDACTED:github_token] b [REDACTED:aws_access_key] c [REDACTED:github_token]";
@@ -1105,15 +1192,19 @@ mod tests {
                 "sk-Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56",
                 "openai_key",
             ),
-            ("id AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE", "aws_access_key"),
+            (
+                concat!("id AKIA", "IOSFODNN7EXAMPLF here"),
+                concat!("AKIA", "IOSFODNN7EXAMPLF"),
+                "aws_access_key",
+            ),
             (
                 concat!("sts ASIA", "Y34FZKBOKMUTVV7A"),
                 concat!("ASIA", "Y34FZKBOKMUTVV7A"),
                 "aws_access_key",
             ),
             (
-                "AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                concat!("AKIA", "IOSFODNN7EXAMPLF wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEZ"),
+                concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEZ"),
                 "aws_secret_key",
             ),
             (
@@ -1287,6 +1378,10 @@ mod tests {
             r#"label={auth === "bearer" ? "Token" : "API key"} and the token is a secret: owner-only"#,
             "const B64: &[u8] = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";",
             "tailscale up --auth-key=file:/colonizer/mesh-authkey",
+            "/api/sessions/{id}/publish  POST  unauth=401  token=session>=launch  activity=colony.publish",
+            "token=session>=read unauth=401 activity=sessions.read",
+            "token=session>=operate token=response>=read",
+            "token=repo>=launch token=colony>=operate",
         ];
         for line in untouched {
             assert_eq!(r(line), line, "left alone");
@@ -1301,6 +1396,17 @@ mod tests {
             !redact_value(&mut ids),
             "identifier and signature fields skip the entropy layer: {ids}"
         );
+    }
+
+    #[test]
+    fn a_comparison_suffix_does_not_exempt_a_credential() {
+        check(&[
+            ("token=abcdefghabcdefghabcdefgh==", "abcdefghabcdefghabcdefgh==", "token"),
+            ("token=hunter22>=read", "hunter22>=read", "token"),
+            // The key rule wins over the AWS prefix here, and it takes `>=read` with it.
+            ("token=AKIAIOSFODNN7EXAMPLF>=read", "AKIAIOSFODNN7EXAMPLF>=read", "token"),
+            ("token=dXNlcjpwYXNzd29yZA==>=read", "dXNlcjpwYXNzd29yZA==>=read", "token"),
+        ]);
     }
 
     #[test]
@@ -1371,7 +1477,7 @@ mod tests {
 
     #[test]
     fn a_random_value_is_kept_only_under_an_identifier_key() {
-        let random = "Xk9pL2mQ8vR4tY7wZ1aB3cD5eF6gH0jKq7W2e9R4";
+        let random = concat!("Xk9pL2mQ8vR4tY7wZ1aB3cD5", "eF6gH0jKq7W2e9R4");
         assert_eq!(random.len(), 40);
         for key in ["did", "paid", "api_key_id", "session_cookie_id"] {
             let mut field = json!({ key: random });

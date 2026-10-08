@@ -940,6 +940,7 @@ plugins/                      vendored skill packs (vendor/vendor.lock)
 modules/agents/<id>/          every agent module: runner + production node_modules
 web/                          built UI
 scripts/install-release.sh    the release installer, for upgrades
+scripts/build-dmg.sh            builds Colonizer-arm64.dmg (the unsigned macOS app) from the darwin tarball
 claude-code.lock              guest Claude Code pin: version + sha256 per platform, read at install
 node.lock                     guest Node.js pin, read at install
 images.lock                   each preset's colony image pinned by OCI digest (also compiled in)

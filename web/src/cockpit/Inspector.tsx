@@ -19,9 +19,11 @@ import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { CommitLink, FindingRecord, HarnessStatus, Question, Session, SessionDiffFile, UpdateStatus } from "../types";
+import type { CommitLink, FindingRecord, HarnessStatus, Question, RedTeamRun, Session, SessionDiffFile, UpdateStatus } from "../types";
 import { bootMedians, bootView } from "./bootTiming";
 import { CommitLinks } from "./CommitLinks";
+import { CancelRunButton } from "./RedTeamCancel";
+import { useAsk } from "./spotlight/Ask";
 import { chains, type FindingChain } from "./findings";
 import { autoRetrying, expectsAnswer, gatewayHeld, needsYouLine, retryLine } from "./questions";
 
@@ -277,6 +279,8 @@ export function Inspector({
   onClose,
   onOpenColony,
   onStop,
+  hunterRun = null,
+  onCancelRun,
   onResume,
   onRetry,
   onLaunch,
@@ -305,6 +309,9 @@ export function Inspector({
   onClose: () => void;
   onOpenColony: (id: string) => void;
   onStop: (id: string) => void;
+  /** The active red-team run this colony hunts for, if any (#1145): its Cancel run button shows. */
+  hunterRun?: RedTeamRun | null;
+  onCancelRun?: (id: string) => Promise<void>;
   onResume: (id: string) => void;
   /**
    * Retry a colony stopped on a model gateway error (issue #1093): resume it now when an automatic
@@ -315,6 +322,7 @@ export function Inspector({
   onLaunch: () => void;
   onOpenSettings: (section: SectionId) => void;
 }): ReactElement {
+  const ask = useAsk();
   if (!target) {
     return (
       <aside
@@ -367,6 +375,8 @@ export function Inspector({
   const statusText =
     session?.status === "queued" && queuedBehind
       ? `Queued behind ${queuedBehind}${position}`
+      : session?.status === "blocked" && session.blocked_reason
+        ? `Blocked: ${session.blocked_reason}`
       : (session
         ? [statusLabel(session), inRestore ? `${ordinal(inRestore)} in line` : ""].filter(Boolean).join(" · ")
         : "");
@@ -873,6 +883,17 @@ export function Inspector({
               >
                 open colony
               </button>
+              {ask && (
+                <button
+                  type="button"
+                  onClick={() => ask.open({ colony: session })}
+                  title="Ask Colonizer about this colony · ⌘J"
+                  aria-label="Ask about this colony"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm text-muted transition-colors hover:border-border-strong hover:text-text"
+                >
+                  ask
+                </button>
+              )}
               {isLive(session.status) && (
                 <button
                   type="button"
@@ -883,6 +904,7 @@ export function Inspector({
                   stop
                 </button>
               )}
+              {hunterRun && onCancelRun && <CancelRunButton run={hunterRun} onCancel={onCancelRun} size="md" label="cancel run" className="border border-border" />}
               {/* The same condition the colony view's Resume button uses, so the two cannot disagree
                   about whether a colony can be picked back up. */}
               {!isLive(session.status) && !session.cleaned_up && (session.status === "stopped" || session.status === "failed") && (

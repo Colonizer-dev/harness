@@ -142,6 +142,12 @@ global switch. Names are plain directory names, at most 64. An empty map is stor
 for the whole install (§7.2); `null` inherits. It must name an installed module. The pick is read at
 create and recorded on the colony, so a later change moves new colonies only.
 
+`queue_priority` is where the org's queued colonies stand in the start queue (issue #1156): any whole
+number from -1000000 to 1000000, higher first, `null` meaning 0. The queue orders by `(priority desc,
+created_at asc)`; a colony's own `priority` (below, `POST /api/sessions/{id}/priority`) overrides its
+org's. `max_wait_hours` (`null` or 0 is off, at most 8760) is the starvation guard: a colony queued
+that long counts as 10 whatever its priority. Neither lifts any limit below.
+
 `max_parallel` is the org's own parallel limit and `repo_max_parallel` its own per-repository one
 (`null` inherits the sandbox module's `repo_max_parallel`, default 3); both are 1 to 32. The limits
 layer rather than replace each other: a colony starts only while the global `max_parallel`, the org's
@@ -185,6 +191,30 @@ irreversible write: a list of this org's repositories, full `owner/name`, whose 
 colony in a GitHub loop may ask the mothership to merge (`pr_merge`, §6.12). Empty — the default —
 refuses every merge, so a repository merges only once the operator lists it here. Each entry is
 validated as a repository name, and the compare is case-insensitive like `close_superseded_prs`.
+
+**Repository lists: `owner/name`, `owner` and `*` (issue #1212).** Every setting that takes a list of
+repositories reads the same three entry shapes, validated by `repo_scope::valid_entry`: `owner/name`
+for one repository, `owner` for every repository of that org, and `*` for every repository of every
+org the operator shows. The cockpit edits all of them with one multi-select (`RepoMultiSelect`).
+
+| Setting | `owner/name` | `owner` | `*` |
+|---|---|---|---|
+| Org `merge_prs`, `close_superseded_prs` | yes | yes | yes |
+| Merge train loop `allow`, `local_checks` | yes | yes | yes |
+| Merge train loop `never` | yes | yes | no (`400`; leave a repository out of `allow` instead) |
+| Docs & README loop `allow` | yes | yes | yes |
+| Supply-chain loop `allow`, TypeScript any loop `allow` | yes | yes | yes |
+| Push device `scope` (empty means all) | yes | yes | not used: empty is "all" |
+
+**Hiding an org (issue #1213).** `hidden: true` in an org's settings (default `false`, kept by a save
+that does not name it) takes the org out of sight without touching it: it leaves the workspace
+switcher, `GET /api/repos`, the repository multi-select, the backlog counts and the merge steward, and
+a `*` entry never reaches into it. `*` is resolved at use time by one helper (`repo_scope`,
+`App::resolve_scope`) against the shown workspaces, so hiding or un-hiding takes effect for every loop
+and setting on its next use. An entry that names the org or the repository outright is still the
+operator's explicit choice and still applies. Hiding is not `enabled: false`: colonies already running
+in a hidden org keep running, its settings are kept, and `GET /api/orgs` still lists it (with
+`settings.hidden: true`) so Settings → Workspaces can switch it back on.
 
 `agent.claude_account` names the Claude account the org's colonies run on (Connections, §4).
 `egress` is `{mode, allow, block}` on top of the sandbox module's egress policy: an org can widen its
@@ -292,7 +322,7 @@ on by default; setting `require_review` = true; off lets only `repo` notes skip 
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|idle_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -334,7 +364,12 @@ signatures"): set when the colony's `boundary` events complete a control-defeat 
 replaces it, and only a person's own `user_message` (or the colony stopping) clears it. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `parked` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
-announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
+announce here either. A colony that is `idle`, held or flagged with no open question and no publish in flight parks after
+the watchdog module's `idle_park_minutes` (default 15, 1 to 1440; issue #1140): `status` `parked`,
+`attention.reason` `idle_timeout`, worktree kept, resumable, and not counted as needing a person.
+A colony stacked on a stopped or parked colony has `status` `blocked` with `blocked_reason` naming
+what it waits on; it holds no slot, is neither live nor terminal, and returns to `queued` when its
+parent runs again (or re-bases on the default branch when the parent is gone for good). A hold that waits longer than the sandbox module's `hold_timeout_minutes`
 (default 30) parks the same way ([#213]): an `idle` colony with `attention.reason` `autopilot_held`
 past the timeout parks with `attention.reason` `hold_timeout`, so its microVM slot
 frees for queued colonies (one org's held colonies cannot block every other org past the timeout)
@@ -423,10 +458,11 @@ schema are in [Webhooks](webhooks.md).
 `id` is the event's stable id (issue #896): the same event always carries the same one, so a
 receiver can dedupe on it, and it also travels in the `X-Colonizer-Event-Id` header. How it is
 derived, and how to verify a request, is in [Webhooks](webhooks.md).
-Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
-(`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
-`X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
-and without one it is sent unsigned. Transport errors and non-2xx answers are logged and retried
+Every request carries `X-Colonizer-Timestamp` (unix seconds) and
+`X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"`,
+with the signing secret (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`). A
+webhook URL cannot be saved without one and is never delivered to without it (issue #900;
+[Upgrading](webhooks.md#upgrading)). Transport errors and non-2xx answers are logged and retried
 with exponential backoff and jitter, at most 6 attempts in all, then kept in a persistent dead
 letter the owner can list, replay or discard (issue #898; [Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)).
 
@@ -559,3 +595,11 @@ Independently of the kill-switch, a publish refuses to open (or reuse) a pull re
 branch's local head moved after the push step, and logs the SHA-256 of the exact PR body it sends
 (`opening the pull request; body sha256 <hex>`). The hash is only logged; nothing yet checks it
 against an approval (issue #98).
+
+A question can also end without an answer (issue #1189): an exec-policy ask holds a tool call, and
+when that call gets its `tool_result` (the ask timed out or was refused), or the turn ends while the
+call is held, the Mothership closes the question and writes a host-generated
+`question_closed {question_id, reason}` event, `reason` one of `tool_resolved`, `timeout` or
+`turn_end`. It is a §6.6 host chain event, cut out of the agentd reconnect cursor. A restart replays
+the log with the same rules, so a question whose call already has its result never comes back open.
+Autopilot waits only on a question the colony's record shows as `waiting_for_answer`.

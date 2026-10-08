@@ -21,6 +21,16 @@ export const DEFAULT_TIMEOUT = 600;
 const DEFAULT_LIMITS: ProviderLimits = { timeout_secs: DEFAULT_TIMEOUT, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
 
 const PRESETS: Record<ProviderPreset, ProviderDraft> = {
+  // Anthropic's own API with a key, billed per token: a provider beside the built-in Claude subscription.
+  "anthropic-api": {
+    id: "anthropic-api",
+    name: "Anthropic API",
+    base_url: "https://api.anthropic.com",
+    auth: "x-api-key",
+    wire: "anthropic",
+    models: ["claude-sonnet-5", "claude-haiku-4-5"],
+    ...DEFAULT_LIMITS,
+  },
   deepseek: {
     id: "deepseek",
     name: "DeepSeek",
@@ -140,6 +150,7 @@ export function limitLabels(limits: Partial<ProviderLimits>): string[] {
 }
 
 const PRESET_LABEL: Record<ProviderPreset, string> = {
+  "anthropic-api": "Anthropic API",
   deepseek: "DeepSeek",
   openai: "OpenAI",
   zai: "Z.AI",
@@ -151,6 +162,7 @@ const PRESET_LABEL: Record<ProviderPreset, string> = {
 
 /** Shown while adding a provider, where the base URL is the thing people get wrong. */
 export const PRESET_HINT: Partial<Record<ProviderPreset, string>> = {
+  "anthropic-api": "An Anthropic API key, billed per token. Your Claude subscription is already the built-in default.",
   zai: "Uses your Z.AI coding plan key as a bearer token.",
   alibaba: "This is the token plan's host. A coding plan key needs coding-intl.dashscope.aliyuncs.com instead — the two are not interchangeable.",
 };
@@ -197,16 +209,63 @@ export function uniqueDraft(preset: ProviderPreset, takenIds: string[]): Provide
   return { ...base, id: `${base.id}-${n}`, name: `${base.name} (${n})` };
 }
 
+/**
+ * `scheme://host[:port]/path` with the scheme and host lowercased, a default port and trailing
+ * slashes dropped; null for anything that is not a plain http(s) URL. The Mothership's
+ * `normalize_base_url` (providers.rs) does the same, so both sides agree on what a URL names.
+ */
+export function normalizeBaseUrl(url: string): string | null {
+  try {
+    const u = new URL(url.trim());
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || u.search || u.hash) return null;
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalised base URL → preset id: the built-in presets first, then catalogue entries; a URL two catalogue entries share names neither. */
+const PRESET_BY_URL: Map<string, string> = (() => {
+  const byUrl = new Map<string, string>();
+  for (const [id, draft] of Object.entries(PRESETS)) {
+    const url = id === "local" || id === "custom" ? null : normalizeBaseUrl(draft.base_url);
+    if (url && !byUrl.has(url)) byUrl.set(url, id);
+  }
+  const claimed = new Set(byUrl.keys());
+  const seen = new Map<string, string | null>();
+  for (const entry of PROVIDER_CATALOG) {
+    const url = entry.base_url.includes("${") ? null : normalizeBaseUrl(entry.base_url);
+    if (!url || claimed.has(url)) continue;
+    seen.set(url, seen.has(url) ? null : entry.id);
+  }
+  for (const [url, id] of seen) if (id) byUrl.set(url, id);
+  return byUrl;
+})();
+
+/**
+ * The vendor a provider really is. One saved as `custom` (or with no preset) at a known vendor's
+ * base URL is that vendor, so a script-added DeepSeek wears DeepSeek's mark (#1166); anything with
+ * a chosen preset, or an unknown URL, keeps what it has. Mirrors `resolved_preset` in providers.rs.
+ */
+export function effectivePreset(preset: string | undefined, baseUrl: string | undefined): string | undefined {
+  if (preset && preset !== "custom") return preset;
+  const url = baseUrl ? normalizeBaseUrl(baseUrl) : null;
+  return (url && PRESET_BY_URL.get(url)) || preset || (baseUrl ? "custom" : undefined);
+}
+
 /** A catalogue entry's label, for the form header and the mark's fallback initials. */
 export function presetLabel(preset: ProviderPreset): string {
   return PRESET_LABEL[preset] ?? CATALOG_BY_ID.get(preset)?.name ?? "Provider";
 }
 
 export const ADD_PRESETS: { preset: ProviderPreset; label: string }[] = [
+  { preset: "anthropic-api", label: "Anthropic API" },
+  { preset: "openrouter", label: "OpenRouter" },
   { preset: "deepseek", label: "DeepSeek" },
-  { preset: "openai", label: "OpenAI" },
+  { preset: "minimax", label: "MiniMax" },
   { preset: "zai", label: "Z.AI" },
   { preset: "alibaba", label: "Alibaba" },
+  { preset: "openai", label: "OpenAI" },
   { preset: "local", label: "Local server" },
   { preset: "custom", label: "Custom" },
 ];
@@ -254,7 +313,7 @@ export interface ProviderSaveInput {
   preset: ProviderPreset;
   api_key?: string;
   pricing?: ProviderPricing;
-  quota: { url: string; pointer: string };
+  quota: { url: string; pointer: string; reset_pointer?: string };
   timeout_secs: number | null;
   max_concurrent: number | null;
   queue_timeout_secs: number | null;
@@ -284,7 +343,7 @@ export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest 
     preset: input.preset,
     api_key: input.api_key,
     pricing: input.pricing,
-    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim() },
+    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim(), reset_pointer: input.quota.reset_pointer?.trim() || undefined },
     timeout_secs: input.timeout_secs,
     max_concurrent: input.max_concurrent,
     queue_timeout_secs: input.queue_timeout_secs,
@@ -298,4 +357,18 @@ export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest 
     ),
     disabled_tools: input.disabled_tools,
   };
+}
+
+/**
+ * Whether a provider wants a key at all: not when it takes no auth, and not a local one (a model
+ * served from this machine). The provider row's badge and the settings "Needs you" callout both read
+ * this, so they cannot disagree.
+ */
+export function providerNeedsKey(provider: Pick<ModelProvider, "auth" | "preset">): boolean {
+  return provider.auth !== "none" && provider.preset !== "local";
+}
+
+/** A provider that wants a key and has none saved. */
+export function providerMissingKey(provider: Pick<ModelProvider, "auth" | "preset" | "has_key">): boolean {
+  return providerNeedsKey(provider) && !provider.has_key;
 }

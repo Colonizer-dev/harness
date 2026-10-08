@@ -145,6 +145,8 @@ pub(crate) fn verify_network_held_attention(cause: &str) -> Value {
 }
 
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
+/// A turn that errored after writing a fresh `pr.md` still goes on to verification (issue #1176): the
+/// error may be a late one (a subagent's model, a closing call) and the claim check is the gate.
 fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
     if open_question {
         Autopilot::Wait("a question is open")
@@ -152,10 +154,10 @@ fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_questi
         Autopilot::Wait("the turn was interrupted")
     } else if errored && transient {
         Autopilot::Retry("the agent's turn ended with a transient provider error")
-    } else if errored {
+    } else if errored && !pr_written {
         Autopilot::Hold("the agent's turn ended with an error")
     } else if !pr_written {
-        Autopilot::Wait("the agent didn't write or update its PR description this turn")
+        Autopilot::Wait(crate::idle_park::PR_NOT_WRITTEN)
     } else {
         Autopilot::Publish
     }
@@ -346,6 +348,59 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
         // ambiguous costs no recovery: the last event before the silence is what we read.
         _ => *final_text = None,
     }
+}
+
+/// Why a question closed without an answer (issue #1189), the `reason` of a `question_closed` event.
+pub(crate) const CLOSE_TOOL_RESOLVED: &str = "tool_resolved";
+pub(crate) const CLOSE_TIMEOUT: &str = "timeout";
+pub(crate) const CLOSE_TURN_END: &str = "turn_end";
+
+/// The one place a question closes without an answer (issue #1189). An exec-policy ask whose tool call
+/// got its `tool_result` (the ask timed out, or was refused) or whose turn ended is over, but no
+/// `question_answered` follows it; leaving the slot set made autopilot wait on a question the UI no
+/// longer showed. Closing clears the slot and everything that hangs off it, retires the notification
+/// tokens and records `question_closed {question_id, reason}` on the log, so a restart's replay and the
+/// cockpit read the same state. `only` limits it to that question id (a `tool_result` names one); `None`
+/// closes whichever is open. Returns whether a question was closed.
+pub(crate) async fn close_question(app: &Shared, id: &str, rt: &Arc<Runtime>, only: Option<&str>, reason: &str) -> bool {
+    let closed = {
+        let mut open = rt.open_question.lock().await;
+        match open.as_ref() {
+            Some((open_id, ..)) if only.is_none_or(|want| want == open_id) => open.take().map(|(open_id, ..)| open_id),
+            _ => None,
+        }
+    };
+    let Some(question_id) = closed else { return false };
+    rt.question_holds_tool_call.store(false, Ordering::SeqCst);
+    rt.judged_questions.lock().await.remove(&question_id);
+    {
+        let mut activity = rt.activity.lock().await;
+        activity.question_since = None;
+        activity.judge_failures = 0;
+    }
+    app.answer_tokens.revoke(id).await;
+    crate::validation::emit_chain(
+        app,
+        id,
+        json!({"type": "question_closed", "question_id": question_id, "reason": reason}),
+    )
+    .await;
+    app.session_log(
+        id,
+        "info",
+        format!("question {question_id} closed without an answer ({reason})"),
+    )
+    .await;
+    true
+}
+
+/// How a `tool_result` that resolved a held question closed it: a timed-out ask says so.
+fn tool_result_close_reason(event: &Value) -> &'static str {
+    let timed_out = event["is_error"].as_bool() == Some(true)
+        && event["output"]
+            .as_str()
+            .is_some_and(|o| o.to_ascii_lowercase().contains("time"));
+    if timed_out { CLOSE_TIMEOUT } else { CLOSE_TOOL_RESOLVED }
 }
 
 /// The mothership-log line for a colony's model-router `log` event (issue #983), `None` for any other
@@ -567,6 +622,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // The shape of the turn, read off the raw line for the watchdog's turn-end recovery (issue
     // #878): a tool call in flight, or a final answer whose turn_end never came.
     note_turn_shape(rt, &event).await;
+    // Issue #1189: a question's id is its tool call's id (an exec-policy ask), so that call's result
+    // means the question is over whether or not anyone answered it.
+    if event["type"] == "tool_result"
+        && let Some(call_id) = event["tool_call_id"].as_str()
+    {
+        close_question(app, id, rt, Some(call_id), tool_result_close_reason(&event)).await;
+    }
 
     match deserialised.unwrap_or(AgentEvent::Other) {
         AgentEvent::Status { state, detail } => {
@@ -804,7 +866,8 @@ pub(crate) async fn finish_turn(
         // gateway; checked before autopilot, which must not publish a colony the budget stopped.
         enforce_budget(app, id).await;
         let s = app.session(id).await.unwrap_or(s);
-        let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
+        let out_dir = app.session_dir(id).join("out");
+        let mark = github::pr_description_mark(&out_dir);
         let pr_written = {
             let mut last = rt.pr_mark.lock().await;
             let written = mark.is_some() && *last != mark;
@@ -858,29 +921,37 @@ pub(crate) async fn finish_turn(
         if !errored && s.provider_retries != 0 {
             app.update_session(id, |x| x.provider_retries = 0).await;
         }
+        // Issue #1189: a turn that ended while a question held a tool call in flight is over for that
+        // call too; the lead's own question is not held by a call and its answer is the next message.
+        if rt.question_holds_tool_call.load(Ordering::SeqCst) {
+            close_question(app, id, rt, None, CLOSE_TURN_END).await;
+        }
+        // Autopilot waits only on a question the session shows: the open one, with the record reading
+        // `waiting_for_answer`, which is what the cockpit lists. A tracked question the record does not
+        // show is put on the record here rather than waited on silently.
         let open_question = rt.open_question.lock().await.is_some();
+        if open_question && s.status.is_live() && s.status != SessionStatus::WaitingForAnswer {
+            app.update_session(id, |x| x.status = SessionStatus::WaitingForAnswer).await;
+            app.session_log(
+                id,
+                "warn",
+                "autopilot: a question is open but the colony did not show it; set to waiting_for_answer".into(),
+            )
+            .await;
+        }
         let step = autopilot_step(errored, transient, interrupted, open_question, pr_written);
-        // #761: a description that redaction changed is published only after a person has
-        // looked — the colony had a secret in hand, and the diff is not redacted.
+        // #761, #1175: a description that redaction changed is still published, because the
+        // value is already replaced in what goes out. The note says out loud that the colony had a
+        // secret in hand; only a secret in the diff blocks, and that is the publish path's own check.
         let secret_note = (step == Autopilot::Publish)
             .then(|| github::pr_description_secret_note(&app.session_dir(id).join("out"), &s))
             .flatten();
         if s.autopilot && s.status.is_live() {
+            if let Some(note) = secret_note.as_deref() {
+                app.session_log(id, "warn", format!("autopilot: {note}; publishing the redacted text"))
+                    .await;
+            }
             match step {
-                Autopilot::Publish if secret_note.is_some() => {
-                    let note = secret_note.as_deref().unwrap_or_default();
-                    app.session_log(
-                        id,
-                        "warn",
-                        format!("autopilot: not publishing, {note}; press Create PR when the work is ready"),
-                    )
-                    .await;
-                    app.update_session(id, |x| {
-                        x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
-                    })
-                    .await;
-                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
-                }
                 // Issue #84: the kill-switch holds the publish without flagging the colony.
                 Autopilot::Publish if crate::authority::external_writes_blocked() => {
                     app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
@@ -899,7 +970,31 @@ pub(crate) async fn finish_turn(
                 }
                 Autopilot::Wait(reason) => {
                     app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
-                        .await
+                        .await;
+                    // Issue #1140: the turn ended without a PR description (typically after a
+                    // redaction held the first one), and an idle colony parks soon after: ask the
+                    // agent once to rewrite /harness/out/pr.md before that happens.
+                    if crate::idle_park::wants_pr_rewrite(reason, &s) {
+                        let first = app
+                            .update_session(id, |x| {
+                                let first = !x.pr_rewrite_nudged;
+                                x.pr_rewrite_nudged = true;
+                                first
+                            })
+                            .await
+                            .is_some_and(|(_, first)| first);
+                        if first {
+                            app.session_log(
+                                id,
+                                "info",
+                                "autopilot: asking the agent once to rewrite /harness/out/pr.md".into(),
+                            )
+                            .await;
+                            let draft = github::read_regular_file(&out_dir.join("pr.md"), 256_000).unwrap_or_default();
+                            let message = crate::idle_park::pr_rewrite_message(&crate::redact::findings(&draft));
+                            crate::recovery::send_user_message(rt, "pr-rewrite", &message);
+                        }
+                    }
                 }
                 // Issue #980: a transient provider error is retried automatically instead of held.
                 // Each attempt parks the colony — releasing its parallel slot — until the backoff
@@ -1024,7 +1119,18 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     let providers = app.providers();
     let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
     let names: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
-    let provider = provider_quota::mentioned_provider(text, &ids, &names);
+    let session = app.session(id).await;
+    // The text names no provider: attribute by the colony's routing instead (#1168), so a
+    // MiniMax-only colony's generic usage-limit error marks MiniMax, not the Claude account.
+    let provider = provider_quota::mentioned_provider(text, &ids, &names).or_else(|| {
+        let s = session.as_ref()?;
+        provider_quota::routed_provider(
+            app.gateway.last_route(id).as_deref(),
+            s.allowed_providers.as_deref(),
+            s.model_usage.as_ref(),
+            &ids,
+        )
+    });
     if let Some(pid) = &provider {
         app.gateway.mark_quota_exhausted(pid, hit.reset_at.clone(), hit.reset_unix);
     } else if hit.account_wide {
@@ -1033,7 +1139,7 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
         // providers stay healthy, and the queue pauses on the account record alone.
         app.gateway.mark_account_quota_exhausted(hit.reset_at.clone(), hit.reset_unix);
     }
-    let Some(s) = app.session(id).await else { return };
+    let Some(s) = session else { return };
     if !s.status.is_live() {
         return;
     }
@@ -1042,6 +1148,16 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
         (Some(pid), None) => format!("provider quota exhausted ({pid})"),
         (None, Some(reset)) => format!("provider quota exhausted (resets {reset})"),
         (None, None) => "provider quota exhausted".to_string(),
+    };
+    // The account fallback could not carry this colony's task (#1130): say why, so the card reads
+    // "needs a trusted provider: Claude is out until 19:51; MiniMax is not marked trusted".
+    let error = match app
+        .gateway
+        .account_park_reason(id)
+        .filter(|_| provider.is_none() && hit.account_wide)
+    {
+        Some(reason) => format!("{error}; {reason}"),
+        None => error,
     };
     park_colony(
         app,

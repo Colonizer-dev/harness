@@ -94,7 +94,11 @@ export function describeLoopCadence(cadence: LoopCadence, now = new Date()): str
       return `every ${cadence.days} ${cadence.days === 1 ? "day" : "days"} at ${local.time}`;
     }
     default:
-      return describeCadence(cadence, now).replace(/^Every /, "every ").replace(/^Monthly /, "monthly ");
+      // The shared cadence words use a 12-hour clock; every other loop line says "15:00".
+      return describeCadence(cadence, now)
+        .replace(/^Every /, "every ")
+        .replace(/^Monthly /, "monthly ")
+        .replace(/(\d{1,2}):(\d{2}) (AM|PM)/, (_m, h: string, m: string, ap: string) => `${String(Number(h) % 12 + (ap === "PM" ? 12 : 0)).padStart(2, "0")}:${m}`);
   }
 }
 
@@ -152,10 +156,12 @@ export function parseLoopCommand(text: string, now = new Date()): { cadence: Loo
   return { cadence: { every: "every_days", days, hour: now.getUTCHours(), minute: now.getUTCMinutes() }, prompt, error: null };
 }
 
-/** A short name for a loop from its prompt. */
+/** A short name for a loop from its prompt. Counted and cut in code points, not UTF-16 units: a cut
+ *  through an emoji's surrogate pair leaves a lone surrogate, which the server's JSON parser rejects. */
 export function nameFromPrompt(prompt: string): string {
   const line = prompt.trim().split("\n")[0].replace(/\s+/g, " ");
-  return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || "Loop";
+  const chars = [...line];
+  return chars.length > 60 ? `${chars.slice(0, 57).join("").trimEnd()}…` : line || "Loop";
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;

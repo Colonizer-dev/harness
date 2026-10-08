@@ -1,0 +1,4 @@
+/api/chat/approvals                                  GET    unauth=401    token=owner            activity=-
+/api/chat/approvals                                  POST   unauth=401    token=owner            activity=-
+/api/chat/approvals/{id}                             GET    unauth=401    token=owner            activity=-
+/api/chat/approvals/{id}                             POST   unauth=401    token=owner            activity=-

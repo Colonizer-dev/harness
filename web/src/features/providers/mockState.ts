@@ -51,15 +51,38 @@ export function installProvidersMockState(ms: MockState): void {
       // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
       pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
       // A prepaid plan with a balance endpoint, so the health line shows "… left in plan" (issue #199).
-      quota: { url: "https://api.deepseek.com/plan", pointer: "/data/remaining_tokens" },
+      quota: { url: "https://api.deepseek.com/plan", pointer: "/data/remaining_tokens", limit_pointer: "/data/total_tokens", reset_pointer: "/data/reset_at" },
+      // A daily plan: 3 h 12 min to its next refill, 62% left (issue #1204).
+      balance: { at: ago(1), remaining: 3_120_000, limit: 5_000_000, reset_unix: Math.floor(Date.now() / 1000) + 3 * 3600 + 12 * 60 },
       ...ms.DEFAULT_LIMITS,
       in_flight: 0,
       queued: 0,
-      // Wired only to the subagent model and the small-task tier, and no colony has ever
-      // delegated: the issue #39 state.
-      usage: ms.zeroUsage(),
-      health: ms.zeroHealth(),
+      usage: { requests: 4_210, failures: 31, fallbacks: 0, duration_ms: 9_683_000, since: "2026-09-02T09:00:00Z", last_request_at: ago(3) },
+      health: { failure_pct: 0.7, avg_latency_ms: 2_300, rated: true, degraded: false },
       used_by: ["subagent_model", "model_low"],
+      // The endpoint lists more than the two enabled (issue #1167).
+      discovered_models: ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-lite", "deepseek-reasoner", "deepseek-coder-v3"],
+    },
+    {
+      id: "byteplus",
+      name: "BytePlus",
+      base_url: "https://ark.ap-southeast.bytepluses.com/api/coding",
+      auth: "bearer",
+      wire: "anthropic",
+      has_key: true,
+      models: ["seed-code-1", "glm-4.7", "kimi-k2.5", "deepseek-v3.2", "gpt-oss-120b", "qwen3-coder", "minimax-m2.1", "seed-1.8"],
+      preset: "byteplus",
+      trusted: false,
+      quota: { url: "https://ark.ap-southeast.bytepluses.com/api/coding/usage", pointer: "/remaining", limit_pointer: "/total", reset_pointer: "/resets_at" },
+      // A weekly plan, nearly spent, refilling in 1 d 4 h.
+      balance: { at: ago(2), remaining: 800_000, limit: 5_000_000, reset_unix: Math.floor(Date.now() / 1000) + 28 * 3600 },
+      ...ms.DEFAULT_LIMITS,
+      in_flight: 0,
+      queued: 0,
+      usage: { requests: 18_904, failures: 2_460, fallbacks: 40, duration_ms: 118_000_000, since: "2026-08-14T09:00:00Z", last_request_at: ago(1) },
+      health: { failure_pct: 13, avg_latency_ms: 6_200, rated: true, degraded: true },
+      used_by: ["model"],
+      discovered_models: ["seed-code-1", "glm-4.7", "kimi-k2.5", "deepseek-v3.2", "gpt-oss-120b", "qwen3-coder", "minimax-m2.1", "seed-1.8", "seed-1.6-flash", "doubao-pro-32k", "glm-4.6", "kimi-k2", "qwen3-235b"],
     },
     {
       id: "strix",
@@ -109,6 +132,8 @@ export function installProvidersMockState(ms: MockState): void {
       usage: ms.zeroUsage(),
       health: ms.zeroHealth(),
       used_by: [],
+      // Its plan ran out; the Mothership knows when it refills.
+      quota_exhausted: { reset_at: "10-07 14:10 UTC", reset_unix: Math.floor(Date.now() / 1000) + 2 * 3600 + 10 * 60 },
     },
   ];
   ms.LIMIT_RANGES = [

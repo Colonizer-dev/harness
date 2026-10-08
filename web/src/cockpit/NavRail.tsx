@@ -3,7 +3,7 @@
 // item carries its label and count. One accent does the talking: the Colonize button, and the bar
 // beside wherever you are. The workspace switcher sits at the top and is the cockpit's scope: every
 // view reads it, and Overview shows the chosen org's dashboard, or every workspace when none is.
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 
 import { Avatar } from "../components/Avatar";
 import { sameOrg, store, stored } from "../components/ui";
@@ -12,6 +12,7 @@ import type { UpdateStatus } from "../types";
 import { AntGlyph } from "./chat/PersonaAnt";
 import { useColonize } from "./Colonize";
 import { needFor } from "./feed";
+import { AllMark, WorkspacePanel } from "./WorkspaceMenu";
 
 export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "loops" | "settings" | "memory" | "host" | "secrets" | "code" | "chat";
 
@@ -220,6 +221,8 @@ export function NavRail(props: {
   /** Switched-off orgs: not a choice, but listed so their settings (and the switch back on) stay reachable. */
   hiddenOrgs: OrgEntry[];
   onOpenOrgSettings: (org: string) => void;
+  /** "Manage orgs…": Settings → Workspaces → Show or hide orgs, where hidden orgs are listed (issue #1213). */
+  onManageOrgs?: () => void;
   selectedOrg: string | null;
   /** null is "every workspace". */
   onSelectOrg: (org: string | null) => void;
@@ -336,6 +339,7 @@ export function NavRail(props: {
         selectedOrg={selectedOrg}
         onSelectOrg={onSelectOrg}
         onOpenOrgSettings={onOpenOrgSettings}
+        onManageOrgs={props.onManageOrgs}
         needByOrg={needByOrg}
         expanded={expanded}
       />
@@ -431,23 +435,11 @@ export function NavRail(props: {
 }
 
 /** The switcher's glyph for "every workspace". */
-function AllMark({ size = 24 }: { size?: number }): ReactElement {
-  return (
-    <span aria-hidden="true" className="grid shrink-0 place-items-center rounded-full bg-text text-bg" style={{ width: size, height: size }}>
-      <Glyph name="all" size={Math.round(size * 0.55)} />
-    </span>
-  );
-}
-
-/** The menu's focusable rows, top to bottom. */
-function menuItems(menu: HTMLElement | null): HTMLElement[] {
-  return menu ? [...menu.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]')] : [];
-}
 
 /**
  * The scope: every workspace, or one org. Expanded it is a full-width row (mark, name, what waits,
- * chevron); collapsed, the mark alone. Either way it opens one menu, placed fixed beside the trigger
- * so the sidebar's own overflow never clips it.
+ * chevron); collapsed, the mark alone. Either way it opens the workspace menu, a Spotlight panel
+ * (issue #1228) with a search box and Pinned, Recent and All workspaces.
  */
 function ScopeSwitcher({
   orgs,
@@ -455,6 +447,7 @@ function ScopeSwitcher({
   selectedOrg,
   onSelectOrg,
   onOpenOrgSettings,
+  onManageOrgs,
   needByOrg,
   expanded,
 }: {
@@ -463,92 +456,16 @@ function ScopeSwitcher({
   selectedOrg: string | null;
   onSelectOrg: (org: string | null) => void;
   onOpenOrgSettings: (org: string) => void;
+  onManageOrgs?: () => void;
   needByOrg: Record<string, number>;
   expanded: boolean;
 }): ReactElement {
-  const [at, setAt] = useState<{ left: number; top: number } | null>(null);
-  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
-  const menu = useRef<HTMLDivElement>(null);
-  const search = useRef<HTMLInputElement>(null);
-  const open = at !== null;
-  // A filter box once the list is long enough to hunt through; it takes focus when the menu opens.
-  const searchable = orgs.length + hiddenOrgs.length > 6;
-  const q = query.trim().toLowerCase();
-  const shown = q ? orgs.filter((o) => o.org.toLowerCase().includes(q)) : orgs;
-  const shownHidden = q ? hiddenOrgs.filter((o) => o.org.toLowerCase().includes(q)) : hiddenOrgs;
-
   const current = orgs.find((o) => sameOrg(o.org, selectedOrg)) ?? null;
   const name = current ? current.org : "All workspaces";
   const needTotal = Object.values(needByOrg).reduce((a, b) => a + b, 0);
   const needHere = current ? needFor(needByOrg, current.org) : needTotal;
-  const settingsOrg = current?.org ?? orgs[0]?.org ?? hiddenOrgs[0]?.org ?? null;
-
-  const show = () => {
-    const box = trigger.current?.getBoundingClientRect();
-    if (!box) return;
-    setAt(expanded ? { left: box.left, top: box.bottom + 6 } : { left: box.right + 10, top: box.top });
-  };
-  const close = (refocus: boolean) => {
-    setAt(null);
-    setQuery("");
-    if (refocus) trigger.current?.focus();
-  };
-
-  // Focus goes into the menu when it opens: the filter box when there is one, else the checked row.
-  useEffect(() => {
-    if (!open) return;
-    if (search.current) {
-      search.current.focus();
-      return;
-    }
-    const items = menuItems(menu.current);
-    (items.find((item) => item.getAttribute("aria-checked") === "true") ?? items[0])?.focus();
-  }, [open]);
-
-  const pick = (org: string | null) => {
-    onSelectOrg(org);
-    close(true);
-  };
-  const settings = (org: string) => {
-    close(false);
-    onOpenOrgSettings(org);
-  };
-
-  // Escape closes; the arrows, Home and End move between the rows, wrapping at the ends.
-  const onMenuKey = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape" || event.key === "Tab") {
-      if (event.key === "Escape") event.preventDefault();
-      close(event.key === "Escape");
-      return;
-    }
-    const items = menuItems(menu.current);
-    if (items.length === 0) return;
-    // In the filter box: Enter takes the first match, the arrows step into the list.
-    if (document.activeElement === search.current) {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        (items.find((item) => item.dataset.match === "1") ?? items[0]).click();
-        return;
-      }
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        (event.key === "ArrowDown" ? items[0] : items[items.length - 1]).focus();
-      }
-      return;
-    }
-    const i = items.indexOf(document.activeElement as HTMLElement);
-    const next =
-      event.key === "ArrowDown" ? (i + 1) % items.length
-      : event.key === "ArrowUp" ? (i <= 0 ? items.length - 1 : i - 1)
-      : event.key === "Home" ? 0
-      : event.key === "End" ? items.length - 1
-      : null;
-    if (next === null) return;
-    event.preventDefault();
-    items[next].focus();
-  };
-
   const mark = current ? <Avatar name={current.org} src={current.avatar ?? undefined} size={24} rounded="full" /> : <AllMark />;
 
   return (
@@ -559,13 +476,13 @@ function ScopeSwitcher({
           type="button"
           title={expanded ? undefined : "switch workspace"}
           aria-label="switch workspace"
-          aria-haspopup="menu"
+          aria-haspopup="dialog"
           aria-expanded={open}
-          onClick={() => (open ? close(false) : show())}
+          onClick={() => setOpen((o) => !o)}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown" && !open) {
               event.preventDefault();
-              show();
+              setOpen(true);
             }
           }}
           className={`relative flex h-11 w-full cursor-pointer items-center gap-2.5 rounded-[10px] border border-border bg-transparent text-left transition-colors hover:border-border-strong hover:bg-panel-2 ${expanded ? "px-2" : "justify-center border-transparent px-0"} ${open ? "bg-panel-2" : ""}`}
@@ -589,130 +506,19 @@ function ScopeSwitcher({
           )}
         </button>
       </Tip>
-
       {open && (
-        <>
-          {/* Click-catcher beneath the menu: any click outside the options lands here and closes it. */}
-          <div aria-hidden="true" className="fixed inset-0 z-40" onClick={() => close(false)} />
-          <div
-            ref={menu}
-            role="menu"
-            aria-label="workspaces"
-            onKeyDown={onMenuKey}
-            style={{ left: at.left, top: at.top }}
-            className="v3-pop scroll-thin fixed z-50 max-h-[min(520px,calc(100vh-40px))] w-[280px] animate-[ck-in_160ms_ease-out_both] overflow-y-auto rounded-xl border border-border-strong p-1.5 shadow-[0_16px_48px_rgb(0_0_0/0.4)]"
-          >
-            {searchable && (
-              <div className="mb-1 flex items-center gap-2 rounded-md border border-border px-2 py-1.5 focus-within:border-border-strong">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true" className="shrink-0 text-faint">
-                  <circle cx="11" cy="11" r="6.5" />
-                  <path d="m16 16 4 4" />
-                </svg>
-                <input
-                  ref={search}
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Find a workspace…"
-                  aria-label="find a workspace"
-                  className="bare-field min-w-0 flex-1 border-0 bg-transparent p-0 text-body-sm text-text outline-none placeholder:text-faint focus-visible:outline-none"
-                />
-              </div>
-            )}
-            {!q && <ScopeRow label="All workspaces" sub={scopeStats(orgs.reduce((a, o) => a + o.live, 0), orgs.reduce((a, o) => a + o.queued, 0), orgs.reduce((a, o) => a + o.total, 0), `${orgs.length} workspaces`)} note={needTotal > 0 ? `${needTotal} need you` : ""} urgent={needTotal > 0} active={selectedOrg === null} icon={<AllMark size={28} />} onClick={() => pick(null)} />}
-            {!q && orgs.length > 0 && <div role="separator" className="my-1 h-px bg-border" />}
-            {q && shown.length === 0 && shownHidden.length === 0 && <div className="px-2 py-3 text-body-sm text-faint">No workspace matches “{query.trim()}”.</div>}
-            {shown.map((o) => {
-              const need = needFor(needByOrg, o.org);
-              return (
-                <ScopeRow
-                  key={o.org}
-                  label={o.org}
-                  sub={scopeStats(o.live, o.queued, o.total)}
-                  note={need > 0 ? `${need} need you` : ""}
-                  urgent={need > 0}
-                  active={sameOrg(o.org, selectedOrg)}
-                  icon={<Avatar name={o.org} src={o.avatar ?? undefined} size={28} rounded="full" />}
-                  match
-                  onClick={() => pick(o.org)}
-                />
-              );
-            })}
-            {shownHidden.length > 0 && (
-              // Switched off in their settings, so not a choice; this is the way back to switching one on.
-              <div role="group" aria-label="switched off" className="mt-1 border-t border-border pt-1">
-                <div aria-hidden="true" className="px-2 pb-0.5 pt-1 text-meta-lg text-faint">Switched off · open settings to turn on</div>
-                {shownHidden.map((o) => (
-                  <button
-                    key={o.org}
-                    type="button"
-                    role="menuitem"
-                    tabIndex={-1}
-                    aria-label={`settings for ${o.org} (switched off)`}
-                    onClick={() => settings(o.org)}
-                    className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent px-2 py-1.5 text-left opacity-70 transition-colors hover:bg-panel-2 hover:opacity-100 focus-visible:bg-panel-2 focus-visible:outline-none"
-                  >
-                    <Avatar name={o.org} src={o.avatar ?? undefined} size={22} rounded="full" />
-                    <span className="min-w-0 flex-1 truncate text-body-sm text-muted">{o.org}</span>
-                    <Glyph name="settings" size={14} />
-                  </button>
-                ))}
-              </div>
-            )}
-            {settingsOrg && (
-              <>
-                <div role="separator" className="my-1 h-px bg-border" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  tabIndex={-1}
-                  onClick={() => settings(settingsOrg)}
-                  className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent p-2 text-left text-body-sm text-muted transition-colors hover:bg-panel-2 hover:text-text focus-visible:bg-panel-2 focus-visible:outline-none"
-                >
-                  <Glyph name="settings" size={15} />
-                  {current ? `${current.org} settings` : "Manage workspaces"}
-                </button>
-              </>
-            )}
-          </div>
-        </>
+        <WorkspacePanel
+          anchor={trigger}
+          orgs={orgs}
+          hiddenOrgs={hiddenOrgs}
+          selectedOrg={selectedOrg}
+          needByOrg={needByOrg}
+          onSelect={onSelectOrg}
+          onOpenOrgSettings={onOpenOrgSettings}
+          onManageOrgs={onManageOrgs}
+          onClose={() => setOpen(false)}
+        />
       )}
     </div>
-  );
-}
-
-/** One choice in the switcher. */
-/** A workspace's second line in the switcher: what runs, what waits, how many in all. */
-function scopeStats(live: number, queued: number, total: number, lead?: string): string {
-  const parts = [lead, live > 0 ? `${live} live` : null, queued > 0 ? `${queued} queued` : null, `${total} ${total === 1 ? "colony" : "colonies"}`];
-  return parts.filter(Boolean).join(" · ");
-}
-
-/** One choice in the switcher: the name, and its colony counts beneath. */
-function ScopeRow({ label, sub, note, urgent, active, icon, match = false, onClick }: { label: string; sub: string; note: string; urgent: boolean; active: boolean; icon: ReactElement; match?: boolean; onClick: () => void }): ReactElement {
-  return (
-    <button
-      type="button"
-      data-match={match ? "1" : undefined}
-      role="menuitemradio"
-      aria-checked={active}
-      // Roving focus: the arrows move between rows, so Tab leaves the menu instead of walking it.
-      tabIndex={-1}
-      onClick={onClick}
-      className={`grid w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto_14px] items-center gap-2.5 rounded-md border-0 px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${active ? "bg-panel-2" : "bg-transparent hover:bg-panel-2 focus-visible:bg-panel-2"}`}
-    >
-      {icon}
-      <span className="min-w-0">
-        <span className="block truncate text-body text-text">{label}</span>
-        <span className="block truncate text-meta-lg tabular-nums text-faint">{sub}</span>
-      </span>
-      <span className={`text-small tabular-nums ${urgent ? "text-warn" : "text-faint"}`}>{note}</span>
-      <span aria-hidden="true" className="text-accent">
-        {active && (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="m5 12.5 4.5 4.5L19 7.5" />
-          </svg>
-        )}
-      </span>
-    </button>
   );
 }

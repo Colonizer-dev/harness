@@ -131,12 +131,27 @@ is out of quota. Click it, or type `/model` in ⌘K, to open the switcher:
   the models on offer grouped by provider, with the provider's failure rate, and a model whose
   provider is out of quota is shown disabled with its reset time. A role whose current model is
   on an exhausted plan has a red badge beside its name, e.g. "BytePlus out · 2 h 10 min".
+- **If Claude runs out, use**: the Claude Code module's `account_fallback_model`, install-wide.
+  Pick a model on another provider (Claude's own models are not offered) and, while the Claude
+  subscription is out, every role that uses Claude runs on it until the reset, then goes back to
+  Claude by itself; nothing you saved changes. **Off** (the default) keeps today's behaviour: the
+  queue pauses on the limit. While it is carrying the work, the Claude plan row says "Claude out,
+  running on MiniMax (…) until the reset", and a banner above every view says "Claude out, running on
+  MiniMax until 19:51 · in 2 h 10 min" (the queue is not paused, so there is no Resume all).
+  Restricted-sensitivity tasks use it only when its provider is marked trusted; otherwise they park
+  and their card says why (see [providers.md](providers.md#plans-quotas-and-trust)).
 - **Apply to**: **New colonies only** (the default) saves the settings, as Settings would. **Also
   switch running colonies** first says how many running, parked or queued colonies in the scope
   would restart, then, once you confirm, restarts them on the new models the way the [provider out of
   quota card](#inbox-and-the-bell) does.
 - **Recent**: the main models you switched between, for switching back in one click. The list is kept
   in this browser.
+
+When a switch moves a role to another provider, the answer also lists the Claude model names it
+leaves behind: per-colony launch overrides (`opus`, `claude-sonnet-5`) on colonies in the scope, and
+org overrides. They still route to the Claude account, so the popover names them under the roles with
+**Clear these too** (removes those overrides; the colonies pick up the install's models on their next
+start) and **Leave them**. Colonies the switch itself repoints are not listed.
 
 Nothing is saved unless the whole switch is valid: a model out of quota, not on offer, or not usable
 for a role refuses the switch with the reason, and nothing changes. Scoped API tokens cannot switch
@@ -777,7 +792,11 @@ turns it off again.
 "Needs you" counts colonies with an open question (one answered while the colony was suspended no
 longer waits on you — it is queued for a slot), live colonies the watchdog has flagged (stalled or
 out of nudges; a model error only once the turn has stopped), and failed colonies nobody has opened
-yet. Answering a question clears its colony everywhere at once: the mothership pushes a silent
+yet. The list is one entry per issue (the newest colony), so a failed or stopped colony that a newer
+queued, running or merged colony for the same issue has overtaken leaves it, a failure that only
+exists because the colony it was stacked on stopped never enters it, and questions abandoned more
+than 72 hours ago fold into one "N old questions" row with Dismiss all. A colony parked for sitting
+idle does not count: it only waits to be resumed. Answering a question clears its colony everywhere at once: the mothership pushes a silent
 "resolved" note to every enrolled device that could have been told about that colony (while the
 notify module is on; with it off nothing was announced), each of which closes that colony's notification and lowers its badge. The same happens when you open a failed colony nobody has looked at yet. Nothing else
 closes a notification: the cockpit reports a colony seen only while the page is in front, and only

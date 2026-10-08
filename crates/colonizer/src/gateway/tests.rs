@@ -2514,6 +2514,7 @@ async fn a_quota_probe_rides_along_on_the_health_answer_without_changing_it() {
             url: format!("{base_url}{path}"),
             pointer: pointer.into(),
             limit_pointer: None,
+            reset_pointer: None,
         })
     };
     // A prepaid plan usually renames Claude's models to its own (#295's model_map); the probe
@@ -2540,6 +2541,7 @@ async fn a_quota_probe_rides_along_on_the_health_answer_without_changing_it() {
                 url: format!("{base_url}/plan"),
                 pointer: "/data/remaining".into(),
                 limit_pointer: Some("/data/total".into()),
+                reset_pointer: None,
             }),
             ..provider("x", None)
         },

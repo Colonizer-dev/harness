@@ -550,4 +550,21 @@ expect_no_leftovers "checksum mismatch over a working install"
 expect_one_slot "checksum mismatch over a working install"
 note "ok: a corrupted download over a working install left that install exactly as it was"
 
+# The macOS app (scripts/build-dmg.sh) installs from the archive it carries: COLONIZER_LOCAL_ARCHIVE
+# replaces the download and the checks that go with it, and nothing else. The release URL points at
+# nothing, so any fetch of the archive or SHA256SUMS would fail the install.
+fresh_home
+fake_release 7 "$versions/local-archive"
+HOME="$home" COLONIZER_LOCAL_ARCHIVE="$versions/local-archive/colonizer-linux-x86_64.tar.gz" \
+  COLONIZER_RELEASE_URL="file://$scratch/nowhere" sh "$installer" > "$log" 2>&1 ||
+  bad "a local archive install exited non-zero: $(cat "$log")"
+expect_colonizer "after a local archive install" "colonizer 7"
+expect_symlink_app "a local archive install"
+expect_no_leftovers "a local archive install"
+if HOME="$home" COLONIZER_LOCAL_ARCHIVE="$scratch/missing.tar.gz" sh "$installer" > "$log" 2>&1; then
+  bad "a missing COLONIZER_LOCAL_ARCHIVE was accepted"
+fi
+grep -q "is not a file" "$log" || bad "a missing local archive was not reported: $(cat "$log")"
+note "ok: COLONIZER_LOCAL_ARCHIVE installs without a download, and a missing file is refused"
+
 note "all checks passed"

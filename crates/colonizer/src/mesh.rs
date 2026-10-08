@@ -4,6 +4,7 @@
 //! This network is completely separate from any tailnet the host is on: its own control server,
 //! its own state directory, its own socket, and `--no-logs-no-support`.
 
+use crate::doctor::{self, Component};
 use crate::util::{exec_within, write_private};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -33,6 +34,8 @@ const FLEET_USER: &str = "fleet";
 /// on a slow-but-healthy CLI would fail a boot or a teardown for nothing. `/api/status` gets its
 /// tighter guarantee from `MESH_STATUS_LIMIT` instead.
 const CLI_LIMIT: Duration = Duration::from_secs(10);
+/// The most a mesh warm-up ping may take; it is best effort and a boot never waits longer for it.
+const WARM_LIMIT: Duration = Duration::from_secs(2);
 /// `tailscale up` bounds its own wait with `--timeout=60s`, but that covers only the wait for the
 /// node to come up, not a CLI stuck before it gets there; this backstop leaves it room to report
 /// its own timeout first.
@@ -174,15 +177,23 @@ impl Mesh {
             .stderr(log_file(&self.state_dir.join("headscale.log"))?)
             .kill_on_drop(true)
             .spawn()
-            .context("failed to start headscale")?;
+            .map_err(|e| doctor::failed(Component::MeshControl, "failed to start headscale", &e))?;
         write_pid(&self.runtime_dir.join("headscale.pid"), headscale.id());
+        // A readiness wait that runs out is the failure an operator sees as a bare ENOSYS on a
+        // kernel without KVM, so it is reported with the check that settles it.
         wait_for(Duration::from_secs(30), || async {
             exec_within(CLI_LIMIT, self.headscale().args(["users", "list", "-o", "json"]))
                 .await
                 .is_ok()
         })
         .await
-        .context("headscale did not become ready (see mesh/headscale.log)")?;
+        .map_err(|e| {
+            doctor::failed_anyhow(
+                Component::MeshControl,
+                "headscale did not become ready (see mesh/headscale.log)",
+                &e,
+            )
+        })?;
         let harness_user = self.ensure_user(COLONIZER_USER).await?;
         let vms_user = self.ensure_user(VMS_USER).await?;
         self.ensure_user(FLEET_USER).await?;
@@ -206,11 +217,17 @@ impl Mesh {
             .stderr(log_file(&self.state_dir.join("tailscaled.log"))?)
             .kill_on_drop(true)
             .spawn()
-            .context("failed to start the harness tailscaled")?;
+            .map_err(|e| doctor::failed(Component::MeshNode, "failed to start the harness tailscaled", &e))?;
         write_pid(&self.runtime_dir.join("tailscaled.pid"), tailscaled.id());
         wait_for(Duration::from_secs(20), || async { self.backend_state().await.is_ok() })
             .await
-            .context("harness tailscaled did not start (see mesh/tailscaled.log)")?;
+            .map_err(|e| {
+                doctor::failed_anyhow(
+                    Component::MeshNode,
+                    "harness tailscaled did not start (see mesh/tailscaled.log)",
+                    &e,
+                )
+            })?;
 
         if self.backend_state().await? != "Running" {
             let key = self.create_key(harness_user).await?;
@@ -227,7 +244,9 @@ impl Mesh {
             )
             .await;
             let _ = std::fs::remove_file(&key_file);
-            result.context("harness node could not join the mesh")?;
+            // `exec` folds the CLI's own stderr into this error, so an ENOSYS from the daemon
+            // reaches here as text; the diagnosis reads it either way.
+            result.map_err(|e| doctor::failed_anyhow(Component::MeshNode, "harness node could not join the mesh", &e))?;
         }
         *running = Some(Running {
             headscale,
@@ -327,7 +346,7 @@ taildrop:
         let policy = match serde_json::to_vec_pretty(&policy_json(members)) {
             Ok(policy) => policy,
             Err(e) => {
-                eprintln!("mesh: could not serialize the fleet policy: {e}");
+                tracing::error!( error = %e, "mesh: could not serialize the fleet policy: {e}" );
                 return;
             }
         };
@@ -335,14 +354,14 @@ taildrop:
         if let Err(e) =
             std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).and_then(|()| std::fs::write(&path, &policy))
         {
-            eprintln!("mesh: could not write {}: {e}", path.display());
+            tracing::error!( path = %path.display(), error = %e, "mesh: could not write {}: {e}", path.display() );
             return;
         }
         let pid = self.running.lock().await.as_ref().and_then(|r| r.headscale.id());
         if let Some(pid) = pid
             && let Err(e) = std::process::Command::new("kill").args(["-HUP", &pid.to_string()]).status()
         {
-            eprintln!("mesh: could not signal headscale ({pid}) to reload the policy: {e}");
+            tracing::warn!( pid = %pid, error = %e, "mesh: could not signal headscale ({pid}) to reload the policy: {e}" );
         }
     }
 
@@ -462,6 +481,25 @@ taildrop:
         tokio_socks::tcp::Socks5Stream::connect(("127.0.0.1", self.ports.socks), (ip, port))
             .await
             .with_context(|| format!("mesh connection to {ip}:{port} failed"))
+    }
+
+    /// Warms the WireGuard path to a node that just joined: one `tailscale ping`, through the harness
+    /// node's LocalAPI, so the handshake happens now instead of under the first real request, whose
+    /// SOCKS dial otherwise stalls ~5 s (issue #1143). Best effort and bounded: it never fails a
+    /// boot, and the result is a short description for the debug log.
+    pub async fn warm(&self, ip: &str) -> String {
+        let started = tokio::time::Instant::now();
+        let result = exec_within(
+            WARM_LIMIT,
+            self.tailscale()
+                .args(["ping", "-c", "1", "--until-direct=false", "--timeout", "1500ms", ip]),
+        )
+        .await;
+        let took = started.elapsed();
+        match result {
+            Ok(_) => format!("answered in {took:?}"),
+            Err(e) => format!("no answer after {took:?} ({e:#})"),
+        }
     }
 
     /// Network rules that let a VM send WireGuard UDP straight to the harness node, so traffic
@@ -744,7 +782,7 @@ pub(crate) async fn start_tasks(app: &crate::Shared) {
                         break;
                     }
                     Err(e) => {
-                        eprintln!("mesh: attempt {attempt} failed: {e:#}");
+                        tracing::warn!( attempt = attempt, error = %format!("{e:#}"), "mesh: attempt {attempt} failed: {e:#}" );
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(60));
                     }

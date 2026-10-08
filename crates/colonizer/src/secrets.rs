@@ -175,6 +175,10 @@ impl Store {
         (!parts.is_empty()).then(|| parts.join("/"))
     }
 
+    pub fn config_dir(&self) -> &FsPath {
+        &self.config_dir
+    }
+
     pub fn health(&self) -> Health {
         lock(&self.health).clone()
     }
@@ -557,11 +561,12 @@ fn catalog(app: &App) -> Vec<Item> {
         id: "jev".into(),
         label: "TypeSafe (Jev)".into(),
         group: "integrations",
-        used_by: "Jev compaction".into(),
+        used_by: "Jev compaction, routing and recovery".into(),
         icon: "spark",
-        path: None,
+        // Saved here wins over `JEV_API_KEY`; `jev::api_key` reads it on every call (#1179).
+        path: Some(crate::jev::key_file(dir)),
         env: Some("JEV_API_KEY"),
-        editable: false,
+        editable: true,
         colonies: Access::Injected(vec!["api.typesafe.ai".into()]),
     });
     for secret in crate::colony_secrets::load(dir).unwrap_or_default() {
@@ -790,6 +795,33 @@ mod tests {
         let store = Store::new(&dir, Some(Box::new(fake.clone())));
         store.probe();
         (store, fake, dir)
+    }
+
+    #[test]
+    fn the_jev_key_is_an_editable_row_that_never_carries_its_value() {
+        let (store, _, dir) = setup(false);
+        let app = crate::app::tests::test_app(&dir);
+        let item = catalog(&app).into_iter().find(|i| i.id == "jev").expect("a jev row");
+        assert!(item.editable);
+        let path = editable_path(&item).expect("the jev key is editable");
+        assert_eq!(path, crate::jev::key_file(&app.cfg.config_dir));
+        assert!(row(&store, &item)["editable"].as_bool().unwrap());
+        assert_eq!(row(&store, &item)["location"], json!(Location::Unset));
+        assert!(store.write(&path, "ts-super-secret").unwrap());
+        let shown = row(&store, &item);
+        assert_eq!(shown["location"], json!(Location::Keychain));
+        assert!(shown["updated_at"].is_string());
+        assert!(
+            !shown.to_string().contains("ts-super-secret"),
+            "the API never echoes the value"
+        );
+        assert_eq!(
+            crate::jev::resolve_key(store.read(&path).flatten(), Some("env".into())).as_deref(),
+            Some("ts-super-secret")
+        );
+        store.forget(&path);
+        assert_eq!(row(&store, &item)["location"], json!(Location::Unset));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

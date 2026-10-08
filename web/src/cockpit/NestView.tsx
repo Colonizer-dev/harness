@@ -28,6 +28,7 @@ import { RedAnts } from "./RedAnts";
 import { useOpenQuestions } from "./questions";
 import {
   chamberCount,
+  chamberSessions,
   SURFACE_Y,
   branchPaths,
   normalizeBox,
@@ -38,6 +39,7 @@ import {
   type NestBox,
 } from "./nest";
 import { taskLine, taskTooltip } from "../summary";
+import { nextUp, shortName } from "../queueOrder";
 
 /** The nest by colony, or the architecture map (NestMapView). */
 export type NestMode = "nest" | "map";
@@ -246,12 +248,14 @@ function useCostRises(sessions: readonly Session[]): Readonly<Record<string, { d
 export function NestView({
   sessions,
   capacity = null,
+  capacityNote = null,
   selectedId,
   mothershipSelected,
   redRuns = [],
   settlers,
   liveDetail = null,
   backlogCount,
+  backlogTitle,
   avatarFor,
   onSelect,
   onOpen,
@@ -265,6 +269,8 @@ export function NestView({
   sessions: Session[];
   /** What the machine runs at once (`sandbox.max_parallel`); unknown reads as the default 5. */
   capacity?: number | null;
+  /** Auto mode's ceiling in words (`auto: N now (cap M)`), shown in place of `capacity`. */
+  capacityNote?: string | null;
   selectedId: string | null;
   mothershipSelected: boolean;
   /** Red-team runs (issue #212): a live one targeting this nest's org marches ants over the plot. */
@@ -277,8 +283,10 @@ export function NestView({
    * the colony-level feed line as the fallback.
    */
   liveDetail?: string | null;
-  /** Open issues across the workspace's repositories; the frontier's badge. */
-  backlogCount: number;
+  /** Open issues across the workspace's repositories; the frontier's badge. Null while uncounted. */
+  backlogCount: number | null;
+  /** The frontier's tooltip: what the count covers and when it was taken. */
+  backlogTitle?: string;
   /** The org's avatar, for the chamber's own badge; null when nothing knows one. */
   avatarFor: (org: string) => string | null;
   onSelect: (id: string) => void;
@@ -324,8 +332,10 @@ export function NestView({
   const costRises = useCostRises(sessions);
   const now = Date.now();
 
-  const count = chamberCount(capacity);
-  const chambers = sessions.slice(0, count);
+  // One chamber per live colony, never fewer, whatever the capacity reads (issue #1177).
+  const liveCount = sessions.filter((s) => isLive(s.status)).length;
+  const count = chamberCount(capacity, liveCount);
+  const chambers = chamberSessions(sessions, count, isLive).slice(0, count);
 
   // A chamber click selects the colony AND zooms into it. An outside move drops the zoom —
   // the reducer ignores a selection naming the zoomed colony, so the opening click stays open.
@@ -352,20 +362,24 @@ export function NestView({
   // Side tunnels are the work a colony has done, and steps are only known for the open colony.
   const selectedSteps = settlers.reduce((total, settler) => total + settler.steps, 0);
   const mothershipX = Math.round(box.width / 2);
-  const returned = sessions.filter((s) => s.status === "pr_opened").slice(0, 3);
-  const queued = sessions.filter((s) => s.status === "queued").slice(0, 2);
+  // Surface ants belong to colonies with a chamber: one whose chamber is not drawn gets no ant
+  // standing free of every tunnel (issue #1177).
+  const chamberIds = new Set(chambers.map((s) => s.id));
+  const returned = sessions.filter((s) => s.status === "pr_opened" && chamberIds.has(s.id)).slice(0, 3);
+  const queued = sessions.filter((s) => s.status === "queued" && chamberIds.has(s.id)).slice(0, 2);
   const waiting = sessions.filter(needsYou);
   // What each waiting colony is asking, for its balloon and the needs-you rows.
   const questions = useOpenQuestions(sessions);
   const freeSlot = chambers.length < count ? slotAt(chambers.length, box, count) : null;
-  const liveCount = sessions.filter((s) => isLive(s.status)).length;
   const queuedCount = sessions.filter((s) => s.status === "queued").length;
+  const next = nextUp(sessions);
   const known = new Set(sessions.map((s) => s.id));
   const meta = [
     `${waiting.length} need you`,
     `${liveCount} live`,
     `${queuedCount} queued`,
-    capacity != null ? `capacity ${liveCount}/${capacity}` : null,
+    next ? `next up: ${shortName(next)}` : null,
+    capacityNote ?? (capacity != null ? `capacity ${liveCount}/${capacity}` : null),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -486,8 +500,8 @@ export function NestView({
             <button
               type="button"
               onClick={onLaunch}
-              title={`frontier · ${backlogCount} open issues`}
-              aria-label={`frontier: ${backlogCount} open issues, launch a colony`}
+              title={backlogTitle ?? `frontier · ${backlogCount ?? "…"} open issues`}
+              aria-label={`frontier: ${backlogTitle ?? `${backlogCount ?? "…"} open issues`}, launch a colony`}
               className="absolute flex -translate-x-1/2 -translate-y-full cursor-pointer flex-col items-center transition-transform hover:scale-105"
               style={{ left: Math.round(box.width * 0.86), top: SURFACE_Y }}
             >
@@ -496,7 +510,7 @@ export function NestView({
                 <span className="absolute left-[30px] top-5 h-[38px] w-10 rounded-full bg-ok opacity-[0.32]" />
                 <span className="absolute left-[14px] top-0 h-[42px] w-11 rounded-full bg-ok opacity-[0.42]" />
                 <span className="absolute -right-1 -top-1 min-w-5 rounded-[10px] border border-ok bg-panel px-1.5 text-center font-mono text-micro-lg font-semibold leading-[18px] text-ok tabular-nums">
-                  {backlogCount}
+                  {backlogCount ?? "…"}
                 </span>
               </span>
               <span aria-hidden="true" className="-mt-2 h-5 w-1.5 rounded-sm bg-border-strong" />
@@ -593,6 +607,7 @@ export function NestView({
                   return (
                     <div
                       key={`carry-${session.id}-${settler?.agent.id ?? "solo"}`}
+                      data-ride={ride}
                       className="absolute left-0 top-0 z-[3]"
                       style={{
                         offsetPath: `path("${ride}")`,
@@ -638,6 +653,7 @@ export function NestView({
             ].map(({ session, left, i, state }) => (
               <div
                 key={`walk-${session.id}`}
+                data-ride="surface"
                 className="absolute z-[3]"
                 style={{
                   left: Math.round(left),

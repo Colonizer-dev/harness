@@ -559,6 +559,43 @@ pub fn mentioned_provider(text: &str, ids: &[String], names: &[String]) -> Optio
         .cloned()
 }
 
+/// The provider a colony's traffic went to, for a quota error that names none (#1168): attribute
+/// by routing, not text. First the gateway's record of its last routed request, then its single
+/// `allowed_providers` entry, then the one provider prefix its `model_usage` models share
+/// (`minimax/MiniMax-M3` -> `minimax`). `None` when the colony's traffic is Anthropic's (no routed
+/// provider, or models with no provider prefix) or the routing is ambiguous.
+pub fn routed_provider(
+    last_route: Option<&str>,
+    allowed: Option<&[String]>,
+    model_usage: Option<&serde_json::Value>,
+    ids: &[String],
+) -> Option<String> {
+    let known = |p: &str| ids.iter().any(|id| id == p);
+    if let Some(p) = last_route.filter(|p| known(p)) {
+        return Some(p.to_string());
+    }
+    if let Some([only]) = allowed
+        && known(only)
+    {
+        return Some(only.clone());
+    }
+    let mut prefixes: Vec<&str> = model_usage
+        .and_then(|u| u.as_object())
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.split_once('/').map(|(p, _)| p))
+                .filter(|p| known(p))
+                .collect()
+        })
+        .unwrap_or_default();
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    match prefixes.as_slice() {
+        [only] => Some((*only).to_string()),
+        _ => None,
+    }
+}
+
 /// Whether `needle` occurs in already-lowercased `haystack` delimited by non-alphanumerics (or the
 /// string edges) on both sides. Byte-wise over `as_bytes`, so multibyte prose can never panic it.
 fn contains_word(haystack: &str, needle: &str) -> bool {
@@ -677,6 +714,28 @@ pub fn quota_pause(states: &[ProviderQuota], waiting: usize) -> Option<QuotaPaus
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn routed_provider_follows_routing_not_text() {
+        let ids: Vec<String> = vec!["minimax".into(), "zai".into()];
+        let one = vec!["minimax".to_string()];
+        let two = vec!["minimax".to_string(), "zai".to_string()];
+        let usage = serde_json::json!({"minimax/MiniMax-M3": {"input_tokens": 1}});
+        let claude = serde_json::json!({"claude-opus-5": {"input_tokens": 1}});
+        // The gateway's record wins over everything else.
+        assert_eq!(
+            routed_provider(Some("zai"), Some(&one), Some(&usage), &ids).as_deref(),
+            Some("zai")
+        );
+        // A single allowed provider, then the model prefix.
+        assert_eq!(routed_provider(None, Some(&one), None, &ids).as_deref(), Some("minimax"));
+        assert_eq!(routed_provider(None, None, Some(&usage), &ids).as_deref(), Some("minimax"));
+        // Anthropic traffic, an ambiguous set or an unknown provider attribute to none.
+        assert_eq!(routed_provider(None, None, Some(&claude), &ids), None);
+        assert_eq!(routed_provider(None, Some(&two), Some(&claude), &ids), None);
+        assert_eq!(routed_provider(Some("gone"), None, None, &ids), None);
+        assert_eq!(routed_provider(None, Some(&[]), None, &ids), None);
+    }
+
     use super::*;
 
     fn now() -> DateTime<Utc> {

@@ -9,6 +9,10 @@ import { ContinueLocally } from "../features/handoff/ContinueLocally";
 import type { Session } from "../types";
 import { BoundaryRow } from "./BoundaryRow";
 import { ChatPanel } from "./ChatPanel";
+import { parseRoute } from "../routes";
+import { currentLocation, navigate, routerBase, subscribe } from "../router";
+import { DEMO } from "../demo";
+import { useAsk } from "../cockpit/spotlight/Ask";
 import {
   IconAlert,
   IconBranch,
@@ -23,7 +27,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle } from "./ui";
+import { AttentionBadge, Badge, autoFixLine, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -33,7 +37,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up";
+type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up" | "move";
 
 export function SessionView({
   sessionId,
@@ -67,8 +71,31 @@ export function SessionView({
 }) {
   const api = useApi();
   const toast = useToast();
+  const ask = useAsk();
   const { stream, state } = useSessionStream(api, sessionId);
-  const [tab, setTab] = useState<"chat" | "terminal">("chat");
+  // The tab is part of the address (`/colonies/<id>/terminal`, issue #1180): a link opens on it,
+  // and back and forward move between tabs.
+  const tabFromAddress = useCallback((): "chat" | "terminal" => {
+    const here = currentLocation();
+    const route = parseRoute(here.pathname, here.search, routerBase());
+    return route?.view === "colony" && route.colony === sessionId && route.colonyTab ? route.colonyTab : "chat";
+  }, [sessionId]);
+  const [tab, setTabState] = useState<"chat" | "terminal">(() => (DEMO ? "chat" : tabFromAddress()));
+  const setTab = useCallback(
+    (next: "chat" | "terminal") => {
+      setTabState(next);
+      if (DEMO) return;
+      const here = currentLocation();
+      const route = parseRoute(here.pathname, here.search, routerBase());
+      // Only rewrite an address that is this colony's own; `silent`, since this is the state talking.
+      if (route?.view === "colony" && route.colony === sessionId) {
+        const base = `/colonies/${encodeURIComponent(sessionId)}${next === "terminal" ? "/terminal" : ""}`;
+        navigate(base + here.search + here.hash, { silent: true });
+      }
+    },
+    [sessionId],
+  );
+  useEffect(() => (DEMO ? undefined : subscribe(() => setTabState(tabFromAddress()))), [tabFromAddress]);
   const [busy, setBusy] = useState<Action | null>(null);
 
   // The stream sees session changes immediately; keep the sidebar list in step instead of waiting for its poll.
@@ -119,7 +146,7 @@ export function SessionView({
   const superseded = session.superseded ?? null;
   // Parked counts too: a quota-parked colony stays parked until Keep — the recovery tick holds it.
   const supersededHeld =
-    superseded != null && !superseded.kept && (live || session.status === "queued" || session.status === "pr_opened" || session.status === "parked");
+    superseded != null && !superseded.kept && (live || session.status === "queued" || session.status === "blocked" || session.status === "pr_opened" || session.status === "parked");
   /** A publish that already got somewhere is finished, not started over. */
   const finishing = session.publish_stage != null || session.status === "failed" || session.status === "no_changes";
   /** How far the last publish got, when it never reached a pull request. */
@@ -143,7 +170,7 @@ export function SessionView({
 
   /** What deleting this colony takes with it, in the words the confirmation uses. The logs are no longer gone: they land in the log archive (issue #496). */
   const deleteWarning =
-    session.status === "queued"
+    session.status === "queued" || session.status === "blocked"
       ? "Remove this colony from the queue and the list? It never started, so nothing else is lost."
       : ["pr_opened", "merged", "closed"].includes(session.status)
         ? "Delete this colony? Its chat and local worktree are removed; its logs are kept in the log archive (Storage). The pull request and its pushed branch stay on GitHub."
@@ -155,7 +182,7 @@ export function SessionView({
     if (!window.confirm(deleteWarning)) return;
     // Only a colony that ran has logs to archive, so only there is the follow-up worth asking;
     // accepting it purges the archived bundle too, declining (the default) keeps it (issue #496).
-    const purgeLogs = session.status !== "queued" && window.confirm("Also delete this colony's archived logs? Cancel keeps them in the log archive.");
+    const purgeLogs = session.status !== "queued" && session.status !== "blocked" && window.confirm("Also delete this colony's archived logs? Cancel keeps them in the log archive.");
     setBusy("delete");
     try {
       const result = (await api.deleteSession(session.id, { purgeLogs })) as { leftover?: string | null; purge_error?: string | null } | null;
@@ -312,9 +339,18 @@ export function SessionView({
               <CostSummary session={session} />
               <HostDiskSummary session={session} />
               {live && session.last_activity_at && !attention && <span>Last activity {minutesAgo(session.last_activity_at)}</span>}
+              {autoFixLine(session) && (
+                <span title={(session.auto_fixes ?? []).map((fix) => `${fix.signature}: ${fix.detail}`).join("\n")}>{autoFixLine(session)}</span>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Opens the Ask panel (issue #1228) with this colony attached. Absent outside the cockpit. */}
+            {ask && (
+              <Button variant="secondary" onClick={() => ask.open({ colony: session })} title="Ask Colonizer about this colony · ⌘J" aria-label="Ask about this colony">
+                <IconChat size={15} /> Ask about this colony
+              </Button>
+            )}
             {session.pr_url && (
               <a href={session.pr_url} target="_blank" rel="noopener noreferrer" className={buttonClass("secondary")}>
                 <IconGitPR size={15} /> View PR <IconExternal size={12} />
@@ -362,17 +398,35 @@ export function SessionView({
                 {busy === "resume" ? <Spinner /> : <IconPower size={15} />} Resume
               </Button>
             )}
+            {session.status === "queued" && (
+              <>
+                <Button
+                  disabled={busy !== null}
+                  onClick={() => act("move", (a, id) => a.moveSession(id, "front"))}
+                  title="Start this colony before every other queued one, as soon as a slot is free"
+                >
+                  {busy === "move" ? <Spinner /> : null} Move to front
+                </Button>
+                <Button
+                  disabled={busy !== null}
+                  onClick={() => act("move", (a, id) => a.moveSession(id, "back"))}
+                  title="Start this colony after every other queued one"
+                >
+                  Move to back
+                </Button>
+              </>
+            )}
             <Button
-              disabled={(!live && session.status !== "queued") || busy !== null}
+              disabled={(!live && session.status !== "queued" && session.status !== "blocked") || busy !== null}
               onClick={() =>
                 act(
                   "stop",
                   (a, id) => a.stopSession(id),
-                  session.status === "queued" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.",
+                  session.status === "queued" || session.status === "blocked" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.",
                 )
               }
             >
-              {busy === "stop" ? <Spinner /> : <IconPower size={15} />} {session.status === "queued" ? "Leave the queue" : "Stop"}
+              {busy === "stop" ? <Spinner /> : <IconPower size={15} />} {session.status === "queued" || session.status === "blocked" ? "Leave the queue" : "Stop"}
             </Button>
             <Button
               variant="danger"
@@ -497,12 +551,12 @@ export function SessionView({
                 >
                   {busy === "keep" ? <Spinner /> : null} Keep
                 </Button>
-                {(live || session.status === "queued") && (
+                {(live || session.status === "queued" || session.status === "blocked") && (
                   <Button
                     size="sm"
                     disabled={busy !== null}
                     onClick={() =>
-                      act("stop", (a, id) => a.stopSession(id), session.status === "queued" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.")
+                      act("stop", (a, id) => a.stopSession(id), session.status === "queued" || session.status === "blocked" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.")
                     }
                   >
                     {busy === "stop" ? <Spinner /> : <IconPower size={13} />} Stop

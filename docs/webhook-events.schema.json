@@ -69,7 +69,7 @@
             "issue": { "type": ["integer", "null"] },
             "status": {
               "type": "string",
-              "enum": ["queued", "starting", "running", "waiting_for_answer", "idle", "publishing", "pr_opened", "merged", "closed", "no_changes", "parked", "stopped", "failed"]
+              "enum": ["queued", "blocked", "starting", "running", "waiting_for_answer", "idle", "publishing", "pr_opened", "merged", "closed", "no_changes", "parked", "stopped", "failed"]
             }
           }
         }

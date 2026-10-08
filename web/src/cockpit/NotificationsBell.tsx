@@ -1,15 +1,18 @@
 // The inbox as the header's notifications: a bell at the top right whose badge counts the colonies
-// waiting on a person, and a panel under it with what the inbox view shows — who needs you, then
-// what the colonies have said — each line a way into the colony. The full inbox stays one click away.
-import { useEffect, useRef, useState, type ReactElement, type Ref } from "react";
+// waiting on a person, and a Spotlight panel under it (issue #1228): a search box, then who needs you,
+// what the colonies have said, and what is done, each line a way into the colony. The full inbox stays
+// one click away in the footer.
+import { useEffect, useMemo, useRef, useState, type ReactElement, type RefObject } from "react";
 
 import { store, stored } from "../components/ui";
-import { needsYou } from "../notifications";
+import { needsYouFeed } from "../notifications";
+import { OldQuestionsRow } from "./OldQuestionsRow";
 import type { Session } from "../types";
 import { feedEntries } from "./feed";
 import { KIND_DOT, READ_AT, relative } from "./InboxView";
 import { expectsAnswer, needsYouLine, useOpenQuestions } from "./questions";
 import { taskLine, taskTooltip } from "../summary";
+import { DotTile, SpotlightPanel, type PanelRow, type PanelSection } from "./spotlight/Panel";
 
 /** How many notification lines the panel lists before "Open inbox" takes over. */
 const PANEL_LINES = 20;
@@ -27,38 +30,13 @@ export interface InboxActions {
 export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenNotificationSettings, decisionCount = 0 }: InboxActions): ReactElement {
   const [open, setOpen] = useState(false);
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
-  const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
-  const panel = useRef<HTMLDivElement>(null);
 
-  const waiting = sessions.filter(needsYou).length + decisionCount;
+  const feed = needsYouFeed(sessions);
+  const waiting = feed.rows.length + (feed.oldQuestions.length > 0 ? 1 : 0) + decisionCount;
   const unread = feedEntries(sessions).filter((e) => Date.parse(e.at) > readAt).length;
 
-  const close = (refocus: boolean) => {
-    setOpen(false);
-    if (refocus) button.current?.focus();
-  };
-
-  // Click outside closes; Escape closes and hands focus back to the bell. Opening moves focus in.
-  useEffect(() => {
-    if (!open) return;
-    panel.current?.focus();
-    const onDown = (event: MouseEvent) => {
-      if (root.current && !root.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        close(true);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const close = (_refocus: boolean) => setOpen(false);
 
   // ⌘I / Ctrl+I opens and closes the panel from anywhere but a text field.
   useEffect(() => {
@@ -76,7 +54,7 @@ export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenN
   const label = `notifications${waiting > 0 ? ` · ${waiting} need you` : ""}${unread > 0 ? ` · ${unread} unread` : ""}`;
 
   return (
-    <div ref={root} className="relative shrink-0">
+    <div className="relative shrink-0">
       <button
         ref={button}
         type="button"
@@ -104,7 +82,8 @@ export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenN
       </button>
       {open && (
         <InboxPanel
-          ref={panel}
+          anchor={button}
+          onClose={() => close(true)}
           sessions={sessions}
           readAt={readAt}
           onMarkAllRead={() => {
@@ -130,9 +109,13 @@ export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenN
   );
 }
 
+/** The kinds that are news about a colony still going, and the ones that have ended. */
+const DONE_KINDS = new Set(["returned", "failed", "stopped"]);
+
 /** The panel itself; mounted only while open, so the waiting colonies' questions are fetched then. */
-function InboxPanel({
-  ref,
+export function InboxPanel({
+  anchor,
+  onClose,
   sessions,
   readAt,
   onMarkAllRead,
@@ -140,7 +123,8 @@ function InboxPanel({
   onOpenInbox,
   onOpenNotificationSettings,
 }: {
-  ref: Ref<HTMLDivElement>;
+  anchor: RefObject<HTMLElement | null>;
+  onClose: () => void;
   sessions: Session[];
   readAt: number;
   onMarkAllRead: () => void;
@@ -148,94 +132,82 @@ function InboxPanel({
   onOpenInbox: () => void;
   onOpenNotificationSettings: () => void;
 }): ReactElement {
-  const waiting = sessions.filter(needsYou);
+  const [query, setQuery] = useState("");
+  const feed = needsYouFeed(sessions);
+  const waiting = feed.rows;
+  const oldQuestions = feed.oldQuestions;
   const questions = useOpenQuestions(sessions);
   const entries = feedEntries(sessions);
   const shown = entries.slice(0, PANEL_LINES);
+  const q = query.trim().toLowerCase();
+  const fits = (...parts: (string | null | undefined)[]) => q === "" || parts.some((p) => p?.toLowerCase().includes(q));
 
+  const sections = useMemo<PanelSection[]>(() => {
+    const need: PanelRow[] = waiting
+      .filter((s) => fits(s.repo, taskLine(s, ""), questions[s.id], needsYouLine(s)))
+      .map((session) => ({
+        id: `need:${session.id}`,
+        title: questions[session.id] ?? needsYouLine(session),
+        subtitle: (
+          <span title={taskTooltip(session)}>
+            {session.repo}
+            {session.issue != null ? `#${session.issue}` : ""} · {taskLine(session, "no title yet")}
+          </span>
+        ),
+        leading: <DotTile color="var(--warn)" />,
+        trailing: <span className="rounded-full bg-warn-soft px-2 py-0.5 text-meta-lg font-medium text-warn">{questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}</span>,
+        verb: questions[session.id] || expectsAnswer(session) ? "answer" : "open",
+        onPick: () => onOpenColony(session.id),
+      }));
+    const row = (entry: (typeof shown)[number]): PanelRow => {
+      const unread = Date.parse(entry.at) > readAt;
+      return {
+        id: `feed:${entry.id}:${entry.at}`,
+        title: <span className={unread ? "font-semibold" : "font-normal opacity-75"}>{entry.text}</span>,
+        subtitle: <span className="font-mono text-meta">{entry.label}</span>,
+        leading: <DotTile color={KIND_DOT[entry.kind]} />,
+        trailing: <span className="whitespace-nowrap font-mono text-meta tabular-nums">{relative(entry.at)}</span>,
+        verb: "open colony",
+        onPick: () => onOpenColony(entry.id),
+      };
+    };
+    const matched = shown.filter((e) => fits(e.text, e.label));
+    return [
+      { id: "need", title: "Needs you", aside: waiting.length > 0 ? `${waiting.length} waiting` : undefined, rows: need },
+      { id: "updates", title: "Updates", rows: matched.filter((e) => !DONE_KINDS.has(e.kind)).map(row) },
+      { id: "done", title: "Done", rows: matched.filter((e) => DONE_KINDS.has(e.kind)).map(row) },
+    ];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waiting, shown, questions, readAt, q, onOpenColony]);
+
+  const nothing = waiting.length === 0 && oldQuestions.length === 0 && shown.length === 0;
   return (
-    <div
-      ref={ref}
-      role="dialog"
-      aria-label="notifications"
-      tabIndex={-1}
-      className="absolute right-0 top-full z-50 mt-2 flex max-h-[min(560px,calc(100dvh-80px))] w-[min(420px,calc(100vw-24px))] animate-[ck-in_160ms_ease-out_both] flex-col overflow-hidden rounded-xl border border-border-strong bg-panel text-text shadow-[0_16px_48px_rgb(0_0_0/0.4)] focus-visible:outline-none"
-    >
-      <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
-        <h2 className="m-0 text-body-lg font-semibold">Notifications</h2>
-        <span className={`text-small-lg tabular-nums ${waiting.length > 0 ? "text-warn" : "text-faint"}`}>{waiting.length} need you</span>
-        <div className="flex-1" />
-        <button type="button" onClick={onMarkAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-small-lg text-muted hover:text-text">
-          mark all read
-        </button>
-      </div>
-
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-        {waiting.length > 0 && (
-          <section aria-label="needs you" className="border-b border-border">
-            {waiting.map((session) => (
-              <div key={session.id} className="border-t border-border px-4 py-3 first:border-t-0">
-                <div className="flex items-center gap-2 font-mono text-meta text-muted">
-                  <span aria-hidden="true" className="h-[7px] w-[7px] shrink-0 rounded-full bg-warn" />
-                  <span className="min-w-0 truncate">
-                    {session.repo}
-                    {session.issue != null ? `#${session.issue}` : ""}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onOpenColony(session.id)}
-                    className="ml-auto shrink-0 cursor-pointer rounded-md border-0 bg-text px-2.5 py-1 font-sans text-small-lg font-medium text-bg hover:opacity-85"
-                  >
-                    {questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}
-                  </button>
-                </div>
-                <div className="mt-1.5 text-body font-semibold [text-wrap:pretty]">
-                  {questions[session.id] ?? needsYouLine(session)}
-                </div>
-                <div className="mt-0.5 truncate text-small-lg text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}</div>
-              </div>
-            ))}
-          </section>
-        )}
-
-        {shown.length === 0 ? (
-          <div className="px-4 py-6 text-center text-body-sm text-muted">{waiting.length === 0 ? "nothing waits on you, and nothing new" : "nothing else new"}</div>
-        ) : (
-          <ul aria-label="recent" className="m-0 list-none p-0">
-            {shown.map((entry) => {
-              const unread = Date.parse(entry.at) > readAt;
-              return (
-                <li key={entry.id}>
-                  <button
-                    type="button"
-                    onClick={() => onOpenColony(entry.id)}
-                    className={`grid w-full cursor-pointer grid-cols-[10px_minmax(0,1fr)_auto] items-center gap-3 border-0 border-t border-solid border-border bg-transparent px-4 py-2.5 text-left text-text first:border-t-0 hover:bg-panel-2 focus-visible:bg-panel-2 focus-visible:outline-none ${
-                      unread ? "" : "opacity-60"
-                    }`}
-                  >
-                    <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: KIND_DOT[entry.kind] }} />
-                    <span className="min-w-0">
-                      <span className={`block truncate text-body-sm ${unread ? "font-semibold" : "font-normal"}`}>{entry.text}</span>
-                      <span className="mt-0.5 block truncate font-mono text-meta text-faint">{entry.label}</span>
-                    </span>
-                    <span className="whitespace-nowrap font-mono text-meta text-faint">{relative(entry.at)}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-
-      <div className="flex shrink-0 items-center gap-3 border-t border-border px-4 py-2.5 text-small-lg">
-        <button type="button" onClick={onOpenInbox} className="cursor-pointer border-0 bg-transparent p-0 font-medium text-text hover:text-accent">
-          Open inbox{entries.length > shown.length ? ` · ${entries.length - shown.length} more` : ""} ›
-        </button>
-        <div className="flex-1" />
-        <button type="button" onClick={onOpenNotificationSettings} className="cursor-pointer border-0 bg-transparent p-0 text-muted hover:text-text">
-          settings
-        </button>
-      </div>
-    </div>
+    <SpotlightPanel
+      label="notifications"
+      placement="anchored"
+      anchor={anchor}
+      align="end"
+      width={460}
+      onClose={onClose}
+      query={query}
+      onQuery={setQuery}
+      placeholder="Search notifications…"
+      sections={sections}
+      empty={q ? `Nothing matches “${query.trim()}”.` : nothing ? "Nothing waits on you, and nothing new." : "Nothing else new."}
+      below={oldQuestions.length > 0 && q === "" ? <OldQuestionsRow sessions={oldQuestions} compact /> : undefined}
+      footerEnd={
+        <>
+          <button type="button" onClick={onMarkAllRead} className="cursor-pointer border-0 bg-transparent p-0 text-small text-muted hover:text-text">
+            mark all read
+          </button>
+          <button type="button" onClick={onOpenNotificationSettings} className="cursor-pointer border-0 bg-transparent p-0 text-small text-muted hover:text-text">
+            settings
+          </button>
+          <button type="button" onClick={onOpenInbox} className="cursor-pointer border-0 bg-transparent p-0 text-small font-medium text-text hover:text-accent">
+            Open inbox{entries.length > shown.length ? ` · ${entries.length - shown.length} more` : ""} ›
+          </button>
+        </>
+      }
+    />
   );
 }

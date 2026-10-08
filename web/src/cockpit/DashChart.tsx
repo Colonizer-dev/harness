@@ -723,6 +723,7 @@ export function RangePicker({
   compare,
   onCompare,
   emptyPrevious = false,
+  hideCompare = false,
 }: {
   range: RangeDays;
   onRange: (range: RangeDays) => void;
@@ -730,6 +731,8 @@ export function RangePicker({
   onCompare: () => void;
   /** Nothing happened in the previous period, so comparing shows flat zeros; the switch says so. */
   emptyPrevious?: boolean;
+  /** For a chart with no previous period to compare to (a loop's history is kept for 90 days only). */
+  hideCompare?: boolean;
 }): ReactElement {
   return (
     <div className="flex items-center gap-2">
@@ -746,6 +749,7 @@ export function RangePicker({
           </button>
         ))}
       </div>
+      {!hideCompare && (
       <button
         type="button"
         role="switch"
@@ -757,6 +761,7 @@ export function RangePicker({
         <Switch on={compare} />
         Compare
       </button>
+      )}
     </div>
   );
 }
@@ -799,6 +804,7 @@ export function ColonyRow({
   bumped,
   onOpen,
   onResume,
+  onMove,
   showOrg = true,
   orgAvatar,
 }: {
@@ -809,6 +815,8 @@ export function ColonyRow({
   onOpen?: (id: string) => void;
   /** Resumes a parked colony; the caller owns error surfacing (Cockpit's `act` toasts it). Absent renders no action. */
   onResume?: (id: string) => Promise<unknown> | void;
+  /** Moves a queued colony to the front or back of the start queue (issue #1156); absent renders no action. */
+  onMove?: (id: string, to: "front" | "back") => Promise<unknown> | void;
   showOrg?: boolean;
   /** The org's logo from /api/orgs; the lettermark tile stands in without one. */
   orgAvatar?: string | null;
@@ -816,6 +824,7 @@ export function ColonyRow({
   const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone };
   const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
   const [resuming, setResuming] = useState(false);
+  const [moving, setMoving] = useState(false);
   const parkLine = session.status === "parked" ? parkedLabel(session.parked) : null;
   return (
     <div
@@ -876,6 +885,27 @@ export function ColonyRow({
           >
             {resuming ? "Resuming…" : "Resume"}
           </button>
+        )}
+        {session.status === "queued" && onMove && (
+          <span className="flex gap-1.5">
+            {(["front", "back"] as const).map((to) => (
+              <button
+                key={to}
+                type="button"
+                disabled={moving}
+                title={to === "front" ? "Start this colony before every other queued one" : "Start this colony after every other queued one"}
+                onClick={(e) => {
+                  // A row action, not a row open.
+                  e.stopPropagation();
+                  setMoving(true);
+                  void Promise.resolve(onMove(session.id, to)).finally(() => setMoving(false));
+                }}
+                className="cursor-pointer rounded-md border border-border bg-panel px-2 py-0.5 text-meta-lg font-medium text-text hover:border-border-strong hover:bg-panel-2 disabled:cursor-default disabled:opacity-50"
+              >
+                {to === "front" ? "Move to front" : "Move to back"}
+              </button>
+            ))}
+          </span>
         )}
       </span>
       <span className="text-right text-small-lg text-faint">{age}</span>

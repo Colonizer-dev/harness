@@ -10,7 +10,8 @@ import { Page } from "./Page";
 
 import { ApiContext } from "../context";
 import { store, stored } from "../components/ui";
-import { needsYou } from "../notifications";
+import { needsYouFeed } from "../notifications";
+import { OldQuestionsRow } from "./OldQuestionsRow";
 import type { ActivityEntry, DecisionAnswerRequest, DecisionsView, PrAction, PrCard, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
 import { ProviderQuotaCard, QuotaChangeSummary, isQuotaReply, quotaCardColonyIds } from "./ProviderQuotaCard";
 import { expectsAnswer, needsYouLine, useOpenQuestions } from "./questions";
@@ -77,10 +78,14 @@ export function InboxView({
   // A colony a pull-request card covers (a policy hold) is listed there, with why, not twice.
   const onCards = quotaCardColonyIds(quotaCards);
   const onPrCards = prCardColonyIds(decisions);
-  const needing = sessions.filter(needsYou);
+  const feed = needsYouFeed(sessions);
+  const needing = feed.rows;
   const waiting = needing.filter((session) => !onCards.has(session.id) && !onPrCards.has(session.id));
   const decisionCards = (decisions?.decisions.length ?? 0) + (decisions?.prs.length ?? 0);
-  const needCount = new Set([...needing.map((session) => session.id), ...onCards]).size + decisionsCount(decisions, sessions);
+  const needCount =
+    new Set([...needing.map((session) => session.id), ...onCards]).size +
+    (feed.oldQuestions.length > 0 ? 1 : 0) +
+    decisionsCount(decisions, sessions);
   const questions = useOpenQuestions(sessions);
 
   // The activity log, one line per event at its own time. Read through the context directly, not
@@ -143,7 +148,7 @@ export function InboxView({
             <ProviderQuotaCard key={card.provider} card={card} onOpenColony={onOpenColony} onAction={quotaAction} />
           ))}
 
-          {waiting.length === 0 && (quotaCards.length > 0 || decisionCards > 0) ? null : waiting.length === 0 ? (
+          {waiting.length === 0 && (quotaCards.length > 0 || decisionCards > 0 || feed.oldQuestions.length > 0) ? null : waiting.length === 0 ? (
             <div className="flex items-center gap-3 border-y border-border py-3.5 text-body-sm text-muted">
               <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" className="text-ok">
                 <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
@@ -179,6 +184,8 @@ export function InboxView({
               </div>
             ))
           )}
+
+          <OldQuestionsRow sessions={feed.oldQuestions} />
 
           <DecisionsSection
             view={decisions}

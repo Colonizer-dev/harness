@@ -43,6 +43,21 @@ describe("mock secrets", () => {
     vi.useRealTimers();
   });
 
+  it("lets the TypeSafe (Jev) key be set here, never returns it, and falls back to env when cleared", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const api = createMockApi();
+    const before = (await api.secrets()).secrets.find((r) => r.id === "jev");
+    expect(before?.editable).toBe(true);
+    expect(before?.location).toBe("unset");
+    const saved = await api.saveSecret("jev", "ts-secret-value");
+    expect(saved.location).toBe("keychain");
+    expect(saved.updated_at).not.toBeNull();
+    expect(JSON.stringify(saved)).not.toContain("ts-secret-value");
+    const cleared = await api.deleteSecret("jev");
+    expect("location" in cleared && cleared.location).toBe("unset");
+    vi.useRealTimers();
+  });
+
   it("adds a colony secret as an injected row, and removing it drops the row", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const api = createMockApi();

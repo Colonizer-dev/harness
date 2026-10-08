@@ -10,17 +10,24 @@ import { describe, expect, it } from "vitest";
 import type { Api } from "../api";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
-import type { ModelAssignments, ModelProfile, ModelSwitchReply, SwitchableModel } from "../types";
+import type { AutonomyStatus, ModelAssignments, ModelProvider, ModuleInfo, ModelProfile, ModelSwitchReply, SwitchableModel } from "../types";
 import { ColonizePane, DRAFT_START } from "./Colonize";
 import { Header } from "./Header";
+import { judgeAlternative, judgeOptions, judgeSaveBody, judgeTone } from "./JudgeModel";
 import {
+  ACCOUNT_FALLBACK_NOTE,
   EMPTY_DRAFT,
   INHERIT,
   INSTALL_SCOPE,
   ModelSwitcher,
+  clearLeftoversRequest,
   confirmLine,
   draftDirty,
   groupModels,
+  groupsForRole,
+  hasLeftovers,
+  inheritOptionLabel,
+  leftoverLine,
   isModelCommand,
   modelHealth,
   modelOptionLabel,
@@ -156,13 +163,16 @@ describe("the popover", () => {
   it("lists every role of the install's module with where its value comes from", () => {
     const html = render({ initialOpen: true });
     expect(html).toContain('role="dialog"');
-    expect(html).toContain("All orgs (install default)");
-    expect(html).toContain('<option value="org:acme">acme · overrides</option>');
+    expect(html).toContain('placeholder="Switch model…"');
+    expect(html).toContain('aria-label="scope · All orgs"');
+    expect(html).toContain('aria-label="agent · Claude Code"');
     for (const title of ["Orchestrator model", "Subagent model", "Background model", "Summary model", "Model for small tasks", "Model for large tasks"]) {
-      expect(html).toContain(`aria-label="${title} model"`);
+      expect(html).toContain(`>${title}</span>`);
     }
-    expect(html).toContain("set install-wide");
-    expect(html).toContain("module default");
+    expect(html).toContain("Opus 5.5 · set install-wide");
+    expect(html).toContain("Module default");
+    // The scope list names the orgs and which of them override.
+    expect(render({ initialOpen: true, initialView: { kind: "scope" } })).toContain("has overrides");
   });
 
   it("switches scope to an org: its overrides, the install's inherited values, and install-only roles locked", () => {
@@ -174,10 +184,11 @@ describe("the popover", () => {
     expect(sourceLabel("org", { kind: "org", org: "acme" })).toBe("org override");
 
     const html = render({ initialOpen: true, initialScope: { kind: "org", org: "acme" } });
-    expect(html).toContain("Use install default (Claude Code)");
+    expect(html).toContain('aria-label="scope · acme"');
     expect(html).toContain("org override");
     expect(html).toContain("install-wide only");
-    expect(html).toContain("Use install default (Sonnet)");
+    expect(render({ initialOpen: true, initialScope: { kind: "org", org: "acme" }, initialView: { kind: "module" } })).toContain("Use install default (Claude Code)");
+    expect(render({ initialOpen: true, initialScope: { kind: "org", org: "acme" }, initialView: { kind: "role", role: "background_model" } })).toContain("Use install default (Sonnet)");
   });
 
   it("shows only the roles the selected agent module declares, and marks a module that can't launch", () => {
@@ -185,8 +196,10 @@ describe("the popover", () => {
     expect(beta.module).toBe("opencode");
     expect(beta.rows.map((r) => r.role)).toEqual(["model", "small_model"]);
     expect(scopeView(ASSIGNMENTS, INSTALL_SCOPE, "pi").rows.map((r) => r.role)).toEqual(["model"]);
-    const html = render({ initialOpen: true });
-    expect(html).toMatch(/<option value="acp" disabled="" title="agent module `acp` needs the `grok` binary">ACP — can&#x27;t launch here<\/option>/);
+    const html = render({ initialOpen: true, initialView: { kind: "module" } });
+    expect(html).toContain("agent module `acp` needs the `grok` binary");
+    expect(html).toContain("can&#x27;t launch here");
+    expect(html).toMatch(/aria-disabled="true"[^>]*>.*ACP/);
   });
 
   it("groups models by provider, Claude first, and disables the out-of-quota ones with their reset", () => {
@@ -195,9 +208,9 @@ describe("the popover", () => {
     expect(modelOptionLabel(out)).toBe("qwen3.8-max · Bailian — out of quota until Oct 6, 09:00 UTC");
     expect(modelOptionLabel(MODELS[3])).toBe("ds4-flash · Strix Halo — degraded, 29.4% failing");
     expect(modelOptionLabel(MODELS[0])).toBe("glm-5 · Z.AI — 1.5% failing");
-    const html = render({ initialOpen: true });
-    expect(html).toContain('<optgroup label="Anthropic">');
-    expect(html).toContain('<option value="bailian/qwen3.8-max" disabled="">qwen3.8-max · Bailian — out of quota until Oct 6, 09:00 UTC</option>');
+    const html = render({ initialOpen: true, initialView: { kind: "role", role: "model" } });
+    expect(html.indexOf('aria-label="Anthropic"')).toBeLessThan(html.indexOf('aria-label="Z.AI"'));
+    expect(html).toMatch(/aria-disabled="true"[^>]*>.*qwen3.8-max.*out of quota until Oct 6, 09:00 UTC/);
   });
 });
 
@@ -236,9 +249,12 @@ describe("editing and applying", () => {
   });
 
   it("shows the counted confirm before a running switch, and Apply only once something changed", () => {
-    expect(render({ initialOpen: true })).toMatch(/<button type="button" disabled=""[^>]*>Apply<\/button>/);
+    // Nothing to apply until something changed: no apply card at all.
+    expect(render({ initialOpen: true })).not.toContain("data-apply-card");
     const dirty = render({ initialOpen: true, initialDraft: { roles: { model: "sonnet" } } });
-    expect(dirty).toMatch(/<button type="button"[^>]*>Apply<\/button>/);
+    expect(dirty).toContain("data-apply-card");
+    expect(dirty).toContain("Orchestrator model → Sonnet");
+    expect(dirty).toMatch(/<button type="button"[^>]*>Apply/);
     expect(dirty).not.toMatch(/disabled=""[^>]*>Apply</);
     expect(dirty).toContain(">changed<");
     const confirm = render({ initialOpen: true, initialDraft: { roles: { model: "sonnet" } }, initialApply: "running", initialStage: { step: "confirm", affected: ["c1", "c2"] } });
@@ -274,8 +290,8 @@ describe("recent", () => {
     expect(recentChoices(["claude-opus-5-5", "sonnet"], "claude-opus-5-5")).toEqual(["sonnet"]);
     const html = render({ initialOpen: true, initialRecent: ["sonnet", "claude-opus-5-5", "bailian/qwen3.8-max"] });
     expect(html).toContain("Recent · main model, new colonies");
-    expect(html).toMatch(/title="Switch the main model to sonnet"[^>]*>.*Sonnet<\/button>/);
-    expect(html).toMatch(/disabled="" title="out of quota until Oct 6, 09:00 UTC"/);
+    expect(html).toContain("Switch the main model to sonnet");
+    expect(html).toMatch(/aria-disabled="true"[^>]*>.*out of quota until Oct 6, 09:00 UTC/);
   });
 });
 
@@ -306,8 +322,9 @@ describe("the ⌘K command", () => {
         </ApiContext.Provider>,
       );
     expect(pane("/model")).toContain(">Switch model…</span>");
+    expect(pane("/model")).not.toContain("Draft issues from this text");
     expect(pane("fix the build")).not.toContain("Switch model…");
-    expect(pane("")).toContain("switches models");
+    expect(pane("fix the build")).toContain("Draft issues from this text");
   });
 });
 
@@ -334,8 +351,9 @@ describe("plan usage and quota badges", () => {
         },
       ],
     });
-    expect(html).toContain('aria-label="plan usage"');
-    expect(html).toContain('data-plan="bailian" data-tone="err"');
+    expect(html).toContain('aria-label="Providers"');
+    expect(html).toContain('data-plan="bailian"');
+    expect(html).toContain(">Out<");
     const withBadge = render({ initialOpen: true, initialDraft: { roles: { model: "bailian/qwen3.8-max" } } });
     expect(withBadge).toContain("data-quota-badge");
     expect(withBadge).toContain("Bailian out");
@@ -386,10 +404,18 @@ describe("profiles", () => {
       initialOpen: true,
       initialProfiles: [profile({ model: "sonnet" }), profile({ model: "opus" }, { id: "starter-claude", name: "Claude only", builtin: true })],
     });
-    expect(html).toContain('aria-label="model profiles"');
-    expect(html).toContain('<optgroup label="Saved"><option value="p-1" title="orchestrator sonnet">Night shift</option></optgroup>');
-    expect(html).toContain('<optgroup label="Starters"><option value="starter-claude" title="orchestrator opus">Claude only</option></optgroup>');
-    expect(html).toContain("Save as profile…");
+    // The root offers them; the profiles list says which are starters and offers rename and delete only on saved ones.
+    expect(html).toContain("Night shift");
+    expect(html).toContain("orchestrator sonnet");
+    const list = render({
+      initialOpen: true,
+      initialView: { kind: "profiles" },
+      initialProfiles: [profile({ model: "sonnet" }), profile({ model: "opus" }, { id: "starter-claude", name: "Claude only", builtin: true })],
+    });
+    expect(list).toContain("Save the current selection…");
+    expect(list).toContain("starter");
+    expect(list.match(/>Rename</g)?.length).toBe(1);
+    expect(list.match(/>Delete</g)?.length).toBe(1);
   });
 
   it("saves, renames and deletes profiles on the mock install, which the demo shows", async () => {
@@ -416,7 +442,7 @@ describe("the demo", () => {
     const api = createMockApi();
     const a = await api.modelAssignments();
     expect(shortModelName(a.install.roles.find((r) => r.role === "model")!.value, a.models)).toBe("Opus 5.5");
-    expect(a.install.roles.map((r) => r.role)).toEqual(["model", "subagent_model", "background_model", "summary_model", "model_low", "model_high"]);
+    expect(a.install.roles.map((r) => r.role)).toEqual(["model", "subagent_model", "background_model", "summary_model", "model_low", "model_high", "account_fallback_model"]);
     const acme = a.orgs.find((o) => o.org === "acme")!;
     expect(acme.roles.find((r) => r.role === "model")).toMatchObject({ value: "strix/ds4-flash", source: "org" });
     expect(a.models.some((m) => m.out_of_quota), "a disabled model to show").toBe(true);
@@ -443,5 +469,119 @@ describe("the demo", () => {
     );
     expect(html).toContain('aria-label="Models · main model Sonnet"');
     expect(html).toContain('role="dialog"');
+  });
+});
+
+describe("the account fallback role and the leftover Claude report (issue #1130)", () => {
+  const withFallback: ModelAssignments = {
+    ...ASSIGNMENTS,
+    install: { ...ASSIGNMENTS.install, roles: [...ASSIGNMENTS.install.roles, row("account_fallback_model", "If Claude runs out, use", "zai/glm-5", "install", false)] },
+  };
+
+  it("offers only models on other providers, with an Off choice and a plain note", () => {
+    const providers = groupsForRole("account_fallback_model", groupModels(MODELS)).map((g) => g.provider);
+    expect(providers).toEqual(["zai", "strix", "bailian"]);
+    expect(groupsForRole("model", groupModels(MODELS)).map((g) => g.provider)).toContain("anthropic");
+    expect(inheritOptionLabel("account_fallback_model", "Module default")).toBe("Off — wait for the reset");
+    expect(inheritOptionLabel("model", "Module default")).toBe("Module default");
+
+    const html = render({ initialAssignments: withFallback, initialOpen: true, initialView: { kind: "role", role: "account_fallback_model" } });
+    expect(html).toContain(ACCOUNT_FALLBACK_NOTE);
+    expect(html).toContain("Off — wait for the reset");
+    expect(html).not.toContain('aria-label="Anthropic"');
+  });
+
+  const left = {
+    colonies: [{ id: "c1", role: "model", model: "opus" }],
+    orgs: [{ org: "acme", role: "subagent_model", model: "sonnet" }],
+    cleared: false,
+  };
+
+  it("words the leftovers and clears them with a request for the same scope", () => {
+    expect(hasLeftovers(left)).toBe(true);
+    expect(hasLeftovers({ ...left, cleared: true })).toBe(false);
+    expect(hasLeftovers({ colonies: [], orgs: [], cleared: false })).toBe(false);
+    expect(hasLeftovers(undefined)).toBe(false);
+    expect(leftoverLine(left)).toBe("1 colony and 1 org override still name a Claude model (opus, sonnet), which uses the Claude plan.");
+    expect(clearLeftoversRequest(INSTALL_SCOPE)).toEqual({ scope: "install", roles: {}, apply: "new", clear_leftovers: true });
+    expect(clearLeftoversRequest({ kind: "org", org: "acme" })).toEqual({ scope: "org", org: "acme", roles: {}, apply: "new", clear_leftovers: true });
+  });
+
+  it("lists them in the popover with the clear option", () => {
+    const html = render({ initialOpen: true, initialLeftovers: left });
+    expect(html).toContain("data-leftovers");
+    expect(html).toContain("colony c1 · model opus");
+    expect(html).toContain("org acme · subagent_model sonnet");
+    expect(html).toContain("Clear these too");
+    expect(render({ initialOpen: true })).not.toContain("Clear these too");
+  });
+});
+
+describe("the judge row (issue #1201)", () => {
+  const provider = (over: Partial<ModelProvider> & Pick<ModelProvider, "id" | "name">): ModelProvider =>
+    ({ base_url: "https://example.test/v1", has_key: true, models: [], ...over }) as ModelProvider;
+  const PROVIDERS = [provider({ id: "zai", name: "Z.AI", models: ["glm-5"] }), provider({ id: "strix", name: "Strix Halo", models: ["ds4-flash"] })];
+  const ANTHROPIC_API = provider({ id: "claude-api", name: "Claude API", base_url: "https://api.anthropic.com", models: ["claude-x"] });
+  const AUTONOMY = {
+    kind: "autonomy",
+    provider: "judge",
+    providers: [],
+    enabled: true,
+    settings: { model: "zai/glm-5", fallback_models: "strix/ds4-flash", answer_limit: 5 },
+    schema: null,
+  } as ModuleInfo;
+  const status = (over: Partial<AutonomyStatus> = {}): AutonomyStatus => ({
+    enabled: true,
+    model: "zai/glm-5",
+    fallback_models: [],
+    last_success: null,
+    last_error: null,
+    consecutive_failures: 0,
+    alerted: false,
+    ...over,
+  });
+  const open = (extra: Partial<ModelSwitcherProps> = {}) =>
+    render({ initialOpen: true, initialAutonomy: AUTONOMY, initialProviders: PROVIDERS, ...extra });
+
+  it("renders the current model and its health in its own section", () => {
+    const html = open({ judge: status() });
+    expect(html).toContain(">Judge</span>");
+    expect(html).toContain("glm-5 · answers colonies&#x27; questions for you");
+    expect(html).toContain('data-health="ok"');
+    expect(html).toContain("answering");
+    expect(html).not.toContain("data-judge-warning");
+  });
+
+  it("shows amber after a failure and red with a chip warning once it is failing", () => {
+    expect(judgeTone(status({ consecutive_failures: 1 }))).toBe("warn");
+    expect(judgeTone(status({ consecutive_failures: 3 }))).toBe("err");
+    expect(judgeTone(null)).toBe("unknown");
+    const html = open({ judge: status({ consecutive_failures: 4 }) });
+    expect(html).toContain("data-judge-warning");
+    expect(html).toContain("judge failing");
+  });
+
+  it("suggests a healthy alternative while failing", () => {
+    const options = judgeOptions(PROVIDERS);
+    expect(judgeAlternative(options, "strix/ds4-flash", MODELS)?.id).toBe("zai/glm-5");
+    expect(judgeAlternative(options, "zai/glm-5", MODELS)).toBeNull();
+  });
+
+  it("choosing a model saves only the model and keeps the other autonomy settings", () => {
+    expect(judgeSaveBody(AUTONOMY, "strix/ds4-flash")).toEqual({
+      provider: "judge",
+      enabled: true,
+      settings: { model: "strix/ds4-flash", fallback_models: "strix/ds4-flash", answer_limit: 5 },
+    });
+    expect(AUTONOMY.settings.model).toBe("zai/glm-5");
+  });
+
+  it("offers fable and opus only with an api.anthropic.com provider that has a key", () => {
+    expect(judgeOptions(PROVIDERS).map((o) => o.id)).toEqual(["zai/glm-5", "strix/ds4-flash"]);
+    expect(judgeOptions([...PROVIDERS, ANTHROPIC_API]).map((o) => o.id)).toEqual(["fable", "opus", "zai/glm-5", "strix/ds4-flash", "claude-api/claude-x"]);
+    expect(judgeOptions([...PROVIDERS, { ...ANTHROPIC_API, has_key: false }]).map((o) => o.id)).not.toContain("opus");
+    const picker = (providers: ModelProvider[]) => open({ judge: status(), initialView: { kind: "judge" }, initialProviders: providers });
+    expect(picker(PROVIDERS)).not.toContain(">opus</span>");
+    expect(picker([...PROVIDERS, ANTHROPIC_API])).toContain(">opus</span>");
   });
 });

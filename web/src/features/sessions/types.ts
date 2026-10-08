@@ -2,6 +2,8 @@ import type { BoundaryRecord } from "../events/types";
 
 export type SessionStatus =
   | "queued"
+  /** Waiting on the colony it is stacked on, which is stopped or parked (issue #1140): no slot, not failed. */
+  | "blocked"
   | "starting"
   | "running"
   | "waiting_for_answer"
@@ -23,13 +25,28 @@ export type AttentionReason =
   | "autopilot_held"
   | "provider_quota_exhausted"
   | "hold_timeout"
+  /** Parked for sitting idle past the watchdog's `idle_park_minutes` (issue #1140): nobody has to act, Resume brings it back. */
+  | "idle_timeout"
   /** Parked because the repo's daily PR cap was reached (issue #910); the worktree is kept and the colony resumes at the next UTC day. */
   | "repo_pr_rate_limit"
   | "model_error"
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
   | "control_defeat"
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
-  | "provider_retry";
+  | "provider_retry"
+  /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
+  | "looping";
+
+/** One thing the watchdog's remediation playbook fixed on a colony by itself (issue #1191). */
+export interface AutoFix {
+  /** The signature that matched, e.g. `pr_md_write`, `toolchain_installer`, `idle_verified`; `looping` for a stop. */
+  signature: string;
+  /** `send_message`, `publish`, `switch_fallback_and_resume` or `stop_looping`. */
+  action: string;
+  at: string;
+  /** One line for a person. */
+  detail: string;
+}
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
@@ -211,6 +228,8 @@ export interface Session {
   queued_behind?: string | null;
   /** True while this colony waits in its issue's successor queue: it starts when the holder releases the issue (`queued_behind` names the holder). Absent in older payloads. */
   claim_wait?: boolean;
+  /** This colony's own place in the start queue (issue #1156), overriding its org's `queue_priority`: higher starts first, ties go to the older. Absent follows the org. */
+  priority?: number | null;
   /** True when the colony branch has diverged from origin/{base} and needs a rebase. Absent in older payloads. */
   needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
@@ -271,12 +290,16 @@ export interface Session {
   updated_at: string;
   last_activity_at?: string | null;
   attention?: Attention | null;
+  /** What the watchdog playbook fixed here by itself (issue #1191), oldest first; absent when nothing. */
+  auto_fixes?: AutoFix[];
   /**
    * True while the colony is `failed` and nobody has opened it since (issue #744): the badge and
    * the mothership's attention count include it until POST /api/sessions/{id}/seen marks it looked
    * at, which also pushes "resolved" to every other device. Older mothership builds omit the field.
    */
   unseen_failure?: boolean;
+  /** Why a `blocked` colony waits: "waiting on #5 (`c8a6d23c`, stopped)" (issue #1140). */
+  blocked_reason?: string | null;
   /**
    * Set while the colony is paused with its question outstanding (issue #562): the microVM is
    * stopped and it holds no parallelism slot, but `status` stays `waiting_for_answer` and the
@@ -430,7 +453,7 @@ export interface NewSessionRequest {
   serialize?: boolean;
   /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
-  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#298). */
+  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#1252). */
   host?: string;
 }
 

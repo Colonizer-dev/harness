@@ -134,6 +134,10 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You changed whether ${s} keeps its worktree`;
     case "colony.answer":
       return `You answered ${s}`;
+    case "chat.approve":
+      return `You approved a change proposed in chat${entry.target ? ` (${entry.target.replace(/_/g, " ")})` : ""}`;
+    case "chat.reject":
+      return `You rejected a change proposed in chat${entry.target ? ` (${entry.target.replace(/_/g, " ")})` : ""}`;
     case "chat.issue":
       return "You filed an issue from a chat";
     case "colonize.issue":
@@ -162,6 +166,8 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You started a red-team run on ${subjectOf(entry.repo, null) ?? "a repository"}`;
     case "redteam.stop":
       return "You stopped a red-team run";
+    case "redteam.cancel":
+      return "You cancelled a red-team run";
     case "redteam.schedule":
       return "You saved a red-team schedule";
     case "redteam.unschedule":

@@ -287,6 +287,7 @@ export function mockUpdateView(ms: MockState, update: UpdateStatus): UpdateStatu
   return base;
 }
 
+const mockDismissed = new Set<string>();
 export let mockTelemetry: TelemetryStatus = {
   enabled: null,
   blocked_by: null,
@@ -340,7 +341,7 @@ export function hostMock(ms: MockState): HostApi {
     return {
       github: { connected: true, login: "octocat", name: "The Octocat", avatar_url: "https://avatars.githubusercontent.com/u/583231?v=4&s=64", source: ms.githubSource },
       claude: ms.claude,
-      sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
+      sandbox: { msb_version: "msb 0.6.18", image: "node:24-bookworm@sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0", cpus: 4, memory: "8G", max_parallel: 3, mode: "auto", size: { cpus: 3, memory_gb: 11, slots: 10, reserve_gb: 12, reserve_cpus: 2 }, running: live, room_for: Math.max(0, 8 - live), waiting_reason: live >= 8 ? "memory" : null, auto_max_parallel: 32, free_bytes: 19_327_352_832, load: 0.4, cpu_cores: 8, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
       mesh: mockMesh(live + 1),
       // ?runtime=mac models the Mac end to end: no KVM, and a mesh that is unavailable
       // by design, which Setup must keep green (#128, #129). ?runtime=old sends no
@@ -349,6 +350,8 @@ export function hostMock(ms: MockState): HostApi {
       // The host strip's numbers (issue #205); ?runtime=kvm shows a host whose KVM the
       // user cannot use, so the strip reads "no KVM".
       host: mockHost(live),
+      // The Nest frontier badge (issue #1144): issues only, the demo's own orgs.
+      backlog: { issues: 17, repos: 2, as_of: new Date().toISOString(), by_org: { acme: { issues: 17, repos: 2 } } },
       // Reclamation counts for the sidebar's Storage dot (issue #223).
       reclaim: { reclaimable: 2, unpushed: 1 },
       // The drain flag (issue #880): off by default; ?draining=1 could model an update in flight.
@@ -467,6 +470,12 @@ export function hostMock(ms: MockState): HostApi {
       return clone(mockUpdateView(ms, mockUpdate));
     },
     telemetry: async () => clone(mockTelemetry),
+    setupState: async () => ({ dismissed: [...mockDismissed] }),
+    setSetupDismissed: async (id, dismissed) => {
+      if (dismissed) mockDismissed.add(id);
+      else mockDismissed.delete(id);
+      return { dismissed: [...mockDismissed] };
+    },
     setTelemetry: async (enabled) => {
       await sleep(250);
       const install_id = enabled ? (mockTelemetry.heartbeat.install_id ?? crypto.randomUUID()) : null;

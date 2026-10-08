@@ -465,6 +465,11 @@ async fn check_all(app: &Shared) {
     // sit in `starting` with no flag at all.
     let blocked = crate::quota_cards::flag_blocked(app).await;
     let sessions = app.sessions.read().await.clone();
+    // The playbook's provider rows (issue #1191) see every colony in play, quota-blocked and parked
+    // ones included: a healthy fallback is what gets them going again.
+    for s in &sessions {
+        crate::playbook::tick_providers(app, s, Utc::now()).await;
+    }
     let modules = app.modules.read().await.clone();
     let now = Utc::now();
     // A suspended colony is skipped (issue #562): its microVM was removed on purpose and its link
@@ -548,10 +553,16 @@ async fn check_all(app: &Shared) {
                 continue;
             }
         }
+        // The playbook's idle-verified row (issue #1191), before the colony is read as stalled.
+        let claimed = crate::playbook::tick_idle(app, &s, &rt, now).await;
         let activity = rt.activity.lock().await.clone();
         match decide(&settings, now, state, &activity, attention.as_deref()) {
             Decision::Nothing => {}
             Decision::Nudge => {
+                // A stall no playbook row claimed: the hook the operator agent (#1192) plugs into.
+                if !claimed {
+                    crate::playbook::on_unmatched_stall(app, &s).await;
+                }
                 // The recovery point (issue #586): nudging is the rule, and when the point is on Jev
                 // may answer with another option. Off leaves this branch exactly as it was.
                 let (action, did) = crate::recovery::handle(app, &s, crate::recovery::Failure::Stall, "nudge_agent", false).await;

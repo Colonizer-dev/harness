@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { prReclaimable, retentionSummary, StoragePanelView } from "./StoragePanel";
+import { keepInDays, prReclaimable, retentionSummary, StoragePanelView } from "./StoragePanel";
 import type { ArchiveListing, StorageSummary } from "../types";
 
 const SUMMARY: StorageSummary = {
@@ -120,5 +120,13 @@ describe("StoragePanel", () => {
     expect(retentionSummary(plan(2, 3 * 1024 ** 2, 0))).toBe("This would remove 2 bundles, 3M");
     expect(retentionSummary(plan(0, 0, 1))).toBe(`Nothing would be removed: 1 bundle is the only copy (tick "Allow deleting the only copy")`);
     expect(retentionSummary(plan(0, 0, 2))).toBe(`Nothing would be removed: 2 bundles are the only copy (tick "Allow deleting the only copy")`);
+  });
+});
+
+describe("keepInDays", () => {
+  it("converts hours to the fractional days the request carries, and leaves days and blanks alone", () => {
+    expect(keepInDays(12, "hours")).toBe(0.5);
+    expect(keepInDays(3, "days")).toBe(3);
+    expect(keepInDays(null, "hours")).toBeNull();
   });
 });

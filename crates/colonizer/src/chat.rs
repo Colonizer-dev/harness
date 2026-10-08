@@ -144,7 +144,7 @@ pub async fn models(State(app): State<Shared>) -> Json<Value> {
                     "id": p.id,
                     "name": p.name,
                     "models": p.models,
-                    "preset": p.preset,
+                    "preset": crate::providers::resolved_preset(&p.preset, &p.base_url),
                     "wire": p.wire,
                     "has_key": p.auth == "none" || app.provider_key(&p.id).is_some(),
                     "pricing": p.pricing.map(|r| json!({"input_per_mtok": r.input_per_mtok, "output_per_mtok": r.output_per_mtok})),
@@ -269,6 +269,10 @@ pub struct ChatMessage {
     /// Which side of a compare it came from (0 or 1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lane: Option<u8>,
+    /// The tool calls this reply made, with what became of each (#1217). A held write carries its
+    /// approval id; the approval's decision updates the note.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<crate::chat_tools::ToolNote>,
 }
 
 /// A conversation id is ours: short lowercase hex/alphanumerics, nothing that could be a path.
@@ -310,7 +314,7 @@ async fn write_meta(app: &App, meta: &ChatMeta) -> Result<()> {
     write_atomic(&meta_path(app, &meta.id), &serde_json::to_vec_pretty(meta)?).await
 }
 
-async fn read_messages(app: &App, id: &str) -> Vec<ChatMessage> {
+pub(crate) async fn read_messages(app: &App, id: &str) -> Vec<ChatMessage> {
     tokio::fs::read_to_string(messages_path(app, id))
         .await
         .map(|t| parse_messages(&t))
@@ -330,7 +334,7 @@ async fn append_message(app: &App, id: &str, message: &ChatMessage) -> Result<()
     append_line(&messages_path(app, id), &message_line(message)?).await
 }
 
-async fn rewrite_messages(app: &App, id: &str, messages: &[ChatMessage]) -> Result<()> {
+pub(crate) async fn rewrite_messages(app: &App, id: &str, messages: &[ChatMessage]) -> Result<()> {
     let mut text = String::new();
     for m in messages {
         text.push_str(&message_line(m)?);
@@ -623,6 +627,9 @@ pub struct Send {
     /// Older clients' context: a colony and/or a repository file. New clients send `attachments`.
     pub context: Option<ChatContext>,
     pub attachments: Vec<Attachment>,
+    /// Whether the model may use the Colonizer tools (#1217). On unless `false`; only models on the
+    /// Anthropic wire have them.
+    pub tools: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1064,7 +1071,10 @@ fn kept_for_model(messages: &[ChatMessage]) -> Vec<&ChatMessage> {
     let usable: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| {
-            (m.role == "user" || m.role == "assistant") && m.error.is_none() && !m.candidate && !m.content.trim().is_empty()
+            (m.role == "user" || m.role == "assistant")
+                && m.error.is_none()
+                && !m.candidate
+                && (!m.content.trim().is_empty() || !m.tools.is_empty())
         })
         .collect();
     let mut kept = Vec::new();
@@ -1161,10 +1171,17 @@ pub fn history_with_images(messages: &[ChatMessage], images: &ImageBlocks) -> Ve
                 None => omitted.push(format!("[image omitted: not sent — {}]", note.label)),
             }
         }
-        let text = if omitted.is_empty() {
+        let said = if m.tools.is_empty() {
             m.content.clone()
         } else {
-            format!("{}\n\n{}", omitted.join("\n"), m.content)
+            format!("{}\n\n{}", m.content, crate::chat_tools::trailer(&m.tools))
+                .trim()
+                .to_string()
+        };
+        let text = if omitted.is_empty() {
+            said
+        } else {
+            format!("{}\n\n{}", omitted.join("\n"), said)
         };
         let content = if blocks.is_empty() {
             json!(text)
@@ -1200,16 +1217,18 @@ pub fn history_with_images(messages: &[ChatMessage], images: &ImageBlocks) -> Ve
 /// each complete event's `data` payload.
 #[derive(Default)]
 pub struct SseDecoder {
-    buf: String,
+    buf: Vec<u8>,
     data: Vec<String>,
 }
 
 impl SseDecoder {
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
+        // Lines are split on bytes, so a chunk boundary inside a UTF-8 character waits for the rest.
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
             let line = line.trim_end_matches(['\n', '\r']);
             if line.is_empty() {
                 if !self.data.is_empty() {
@@ -1439,8 +1458,19 @@ pub async fn send(State(app): State<Shared>, Path(id): Path<String>, Json(req): 
     };
 
     let images = load_images(&app, &messages, vision).await;
-    let body = request_body(&meta, history_with_images(&messages, &images), &built.system);
-    let prepared = prepare(&app, &route, &reach, body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
+    // The Colonizer tools (#1217) ride on the Anthropic wire's streamed tool_use blocks.
+    let use_tools = req.tools != Some(false) && anthropic_wire(&app, &route);
+    let system = if use_tools {
+        format!("{}{}", built.system, crate::chat_tools::SYSTEM_NOTE)
+    } else {
+        built.system.clone()
+    };
+    let mut body = request_body(&meta, history_with_images(&messages, &images), &system);
+    if use_tools {
+        body["tools"] = crate::chat_tools::anthropic_tools();
+    }
+    let prepared =
+        prepare(&app, &route, &reach, body.clone()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")))?;
     meta.updated_at = now();
     write_meta(&app, &meta).await?;
 
@@ -1449,6 +1479,11 @@ pub async fn send(State(app): State<Shared>, Path(id): Path<String>, Json(req): 
         parent_id: Some(parent),
         lane: None,
         candidate: false,
+        agent: use_tools.then(|| AgentLoop {
+            route: route.clone(),
+            reach,
+            body,
+        }),
     };
     tokio::spawn(run_reply(
         app.clone(),
@@ -1504,6 +1539,7 @@ pub async fn compare(
             parent_id: Some(user.id.clone()),
             lane: Some(lane as u8),
             candidate: true,
+            agent: None,
         };
         tokio::spawn(run_reply(
             app.clone(),
@@ -1997,6 +2033,16 @@ struct ReplyOpts {
     parent_id: Option<String>,
     lane: Option<u8>,
     candidate: bool,
+    /// Set when the model has the Colonizer tools: what a later round needs to ask again.
+    agent: Option<AgentLoop>,
+}
+
+/// The state a tool round needs to continue the conversation with the model.
+struct AgentLoop {
+    route: Route,
+    reach: Reach,
+    /// The request so far; each round appends the model's tool calls and their results.
+    body: Value,
 }
 
 async fn run_reply(
@@ -2020,79 +2066,151 @@ async fn run_reply(
     let (mut input, mut output) = (0u64, 0u64);
     let mut stopped = false;
     let mut error: Option<String> = None;
+    let reply_id = short_id();
+    let mut prepared = prepared;
+    let mut agent = opts.agent;
+    let mut tool_notes: Vec<crate::chat_tools::ToolNote> = Vec::new();
+    let mut rounds = 0usize;
 
-    match prepared.request.send().await {
-        Err(e) => error = Some(format!("{model} is unreachable: {e}")),
-        Ok(response) if !response.status().is_success() => {
-            let status = response.status();
-            let bytes = response.bytes().await.unwrap_or_default();
-            let message = if prepared.openai.is_some() {
-                crate::openai::translate_error(status, &bytes, &model).2
-            } else {
-                serde_json::from_slice::<Value>(&bytes)
-                    .ok()
-                    .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                    .unwrap_or_else(|| crate::util::truncate(&String::from_utf8_lossy(&bytes), 300).to_string())
-            };
-            error = Some(format!("{model} answered {status}: {message}"));
-        }
-        Ok(response) if prepared.streaming => {
-            let mut decoder = SseDecoder::default();
-            let mut chunks = response.bytes_stream();
-            'read: while let Some(chunk) = chunks.next().await {
-                let Ok(chunk) = chunk else {
-                    error = Some("the model's stream broke off".into());
-                    break;
+    // One pass per model request: a reply that only reads runs its tools and asks again; one that
+    // proposes a write stops and waits for the user's approval (#1217).
+    loop {
+        let mut uses = crate::chat_tools::ToolUses::default();
+        let (in0, out0) = (input, output);
+        let round_from = text.len();
+        match prepared.request.send().await {
+            Err(e) => error = Some(format!("{model} is unreachable: {e}")),
+            Ok(response) if !response.status().is_success() => {
+                let status = response.status();
+                let bytes = response.bytes().await.unwrap_or_default();
+                let message = if prepared.openai.is_some() {
+                    crate::openai::translate_error(status, &bytes, &model).2
+                } else {
+                    serde_json::from_slice::<Value>(&bytes)
+                        .ok()
+                        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| crate::util::truncate(&String::from_utf8_lossy(&bytes), 300).to_string())
                 };
-                for data in decoder.feed(&chunk) {
-                    let step = stream_step(&data);
-                    if let Some(n) = step.input_tokens {
-                        input = n;
-                    }
-                    if let Some(n) = step.output_tokens {
-                        output = n;
-                    }
-                    if let Some(e) = step.error {
-                        error = Some(e);
-                        break 'read;
-                    }
-                    if let Some(t) = step.text {
-                        first_token.get_or_insert(started.elapsed().as_millis() as u64);
-                        text.push_str(&t);
-                        if tx.send(tag(json!({"type": "delta", "text": t}))).await.is_err() {
-                            stopped = true;
+                error = Some(format!("{model} answered {status}: {message}"));
+            }
+            Ok(response) if prepared.streaming => {
+                let mut decoder = SseDecoder::default();
+                let mut chunks = response.bytes_stream();
+                'read: while let Some(chunk) = chunks.next().await {
+                    let Ok(chunk) = chunk else {
+                        error = Some("the model's stream broke off".into());
+                        break;
+                    };
+                    for data in decoder.feed(&chunk) {
+                        let step = stream_step(&data);
+                        if agent.is_some() {
+                            uses.feed(&data);
+                        }
+                        if let Some(n) = step.input_tokens {
+                            input = in0 + n;
+                        }
+                        if let Some(n) = step.output_tokens {
+                            output = out0 + n;
+                        }
+                        if let Some(e) = step.error {
+                            error = Some(e);
                             break 'read;
+                        }
+                        if let Some(t) = step.text {
+                            first_token.get_or_insert(started.elapsed().as_millis() as u64);
+                            text.push_str(&t);
+                            if tx.send(tag(json!({"type": "delta", "text": t}))).await.is_err() {
+                                stopped = true;
+                                break 'read;
+                            }
                         }
                     }
                 }
             }
-        }
-        Ok(response) => {
-            // The openai wire: one whole reply, translated back to the Anthropic shape.
-            let bytes = response.bytes().await.unwrap_or_default();
-            let translated = match &prepared.openai {
-                Some(info) => crate::openai::translate_response(&bytes, info)
-                    .map(|(v, _)| v)
-                    .map_err(|e| e.to_string()),
-                None => serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string()),
-            };
-            match translated {
-                Ok(v) => {
-                    text = v["content"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|b| b["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("");
-                    input = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                    output = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
-                    first_token = Some(started.elapsed().as_millis() as u64);
-                    if tx.send(tag(json!({"type": "delta", "text": text}))).await.is_err() {
-                        stopped = true;
+            Ok(response) => {
+                // The openai wire: one whole reply, translated back to the Anthropic shape.
+                let bytes = response.bytes().await.unwrap_or_default();
+                let translated = match &prepared.openai {
+                    Some(info) => crate::openai::translate_response(&bytes, info)
+                        .map(|(v, _)| v)
+                        .map_err(|e| e.to_string()),
+                    None => serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string()),
+                };
+                match translated {
+                    Ok(v) => {
+                        text = v["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|b| b["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("");
+                        input = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                        output = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                        first_token = Some(started.elapsed().as_millis() as u64);
+                        if tx.send(tag(json!({"type": "delta", "text": text}))).await.is_err() {
+                            stopped = true;
+                        }
                     }
+                    Err(e) => error = Some(format!("the reply did not translate: {e}")),
                 }
-                Err(e) => error = Some(format!("the reply did not translate: {e}")),
+            }
+        }
+
+        let Some(ag) = agent.as_mut() else { break };
+        if error.is_some() || stopped || uses.done.is_empty() {
+            break;
+        }
+        rounds += 1;
+        let mut results: Vec<crate::chat_tools::Done> = Vec::new();
+        let mut pending = false;
+        for call in &uses.done {
+            let done = crate::chat_tools::run_call(&app, &meta.id, &reply_id, meta.workspace.as_deref(), call).await;
+            let mut event = json!({"type": "tool", "note": done.note});
+            if let Some(approval) = &done.approval {
+                event["approval"] = json!(approval);
+                pending = true;
+            }
+            if tx.send(tag(event)).await.is_err() {
+                stopped = true;
+            }
+            tool_notes.push(done.note.clone());
+            results.push(done);
+        }
+        if stopped || pending || rounds >= crate::chat_tools::MAX_ROUNDS {
+            break;
+        }
+        // Every call only read: hand the results back and ask again.
+        let said = text[round_from..].trim().to_string();
+        let mut blocks: Vec<Value> = Vec::new();
+        if !said.is_empty() {
+            blocks.push(json!({"type": "text", "text": said}));
+        }
+        blocks.extend(
+            uses.done
+                .iter()
+                .map(|c| json!({"type": "tool_use", "id": c.id, "name": c.name, "input": c.input})),
+        );
+        let answers: Vec<Value> = results
+            .iter()
+            .map(|d| json!({"type": "tool_result", "tool_use_id": d.id, "content": d.content, "is_error": d.is_error}))
+            .collect();
+        if let Some(messages) = ag.body["messages"].as_array_mut() {
+            messages.push(json!({"role": "assistant", "content": blocks}));
+            messages.push(json!({"role": "user", "content": answers}));
+        }
+        match prepare(&app, &ag.route, &ag.reach, ag.body.clone()) {
+            Ok(next) => prepared = next,
+            Err(e) => {
+                error = Some(format!("{e:#}"));
+                break;
+            }
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+            if tx.send(tag(json!({"type": "delta", "text": "\n\n"}))).await.is_err() {
+                stopped = true;
+                break;
             }
         }
     }
@@ -2105,7 +2223,7 @@ async fn run_reply(
         })
     });
     let reply = ChatMessage {
-        id: short_id(),
+        id: reply_id,
         role: "assistant".into(),
         content: text,
         ts: now(),
@@ -2121,6 +2239,7 @@ async fn run_reply(
         attachments: Vec::new(),
         candidate: opts.candidate,
         lane: opts.lane,
+        tools: tool_notes,
     };
     if let Err(e) = append_message(&app, &meta.id, &reply).await {
         eprintln!("chat: could not store a reply in {}: {e:#}", meta.id);
@@ -2183,6 +2302,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/chat/{id}/title", routing::post(retitle))
         .route("/api/chat/{id}/export", routing::get(export))
         .route("/api/chat/{id}/issue", routing::post(file_issue))
+        .merge(crate::chat_tools::routes())
 }
 
 #[cfg(test)]
@@ -2273,6 +2393,16 @@ mod tests {
             Some("Overloaded")
         );
         assert_eq!(stream_step("not json"), StreamStep::default());
+    }
+
+    #[test]
+    fn the_sse_decoder_keeps_a_character_split_across_chunks() {
+        let mut d = SseDecoder::default();
+        let stream = "data: {\"text\":\"héllo 日本\"}\n\n".as_bytes();
+        let mid = stream.iter().position(|&b| b == 0xc3).unwrap() + 1;
+        let mut events = d.feed(&stream[..mid]);
+        events.extend(d.feed(&stream[mid..]));
+        assert_eq!(events, vec![r#"{"text":"héllo 日本"}"#.to_string()]);
     }
 
     #[test]
@@ -2965,6 +3095,158 @@ mod tests {
         assert!(
             !text.contains(&crate::util::b64_encode(&stored)),
             "no image bytes over the openai wire"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stub Anthropic-wire model: each request is answered by the next script entry, a text reply or
+    /// one tool call. Returns the stub's address and what it was asked.
+    async fn scripted_model(
+        script: Vec<Option<(&'static str, Value)>>,
+    ) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let captured = seen.clone();
+        let step = Arc::new(AtomicUsize::new(0));
+        let script = Arc::new(script);
+        let router = axum::Router::new().fallback(move |body: Bytes| {
+            let captured = captured.clone();
+            let n = step.fetch_add(1, Ordering::SeqCst);
+            let script = script.clone();
+            async move {
+                captured.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let start = r#"{"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}"#;
+                let events = match script.get(n).cloned().flatten() {
+                    Some((name, input)) => {
+                        let block = json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": format!("toolu_{n}"), "name": name, "input": {}}});
+                        let delta = json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}});
+                        let text = json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "On it."}});
+                        [start.to_string(), text.to_string(), block.to_string(), delta.to_string(), json!({"type": "content_block_stop", "index": 1}).to_string(),
+                         json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}}).to_string()]
+                            .to_vec()
+                    }
+                    None => vec![
+                        start.to_string(),
+                        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Done reading."}}).to_string(),
+                        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}).to_string(),
+                    ],
+                };
+                let sse: String = events
+                    .iter()
+                    .map(|e| format!("data: {e}\n\n"))
+                    .collect();
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from(sse))
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (addr, seen)
+    }
+
+    async fn ask_with_tools(app: &Shared, meta: &ChatMeta, text: &str) -> Vec<Value> {
+        let response = send(
+            State(app.clone()),
+            Path(meta.id.clone()),
+            Json(Send {
+                content: text.into(),
+                ..Send::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    fn with_stub(root: &std::path::Path, addr: std::net::SocketAddr) {
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(&[json!({"id": "stub", "name": "Stub", "base_url": format!("http://{addr}"), "auth": "none"})])
+                .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// #1217: a read tool runs at once and its result goes back to the model, which then answers in
+    /// words; the stream carries the tool note and the stored reply keeps it.
+    #[tokio::test]
+    async fn a_read_tool_runs_and_the_model_answers_from_its_result() {
+        let (addr, seen) = scripted_model(vec![Some(("list_colonies", json!({}))), None]).await;
+        let root = std::env::temp_dir().join(format!("colonizer-chat-read-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        with_stub(&root, addr);
+        let meta = seed(&app, "tools", &[]).await;
+        let events = ask_with_tools(&app, &meta, "what is running?").await;
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "tool" && e["note"]["status"] == "ran" && e["note"]["tool"] == "list_colonies"),
+            "{events:?}"
+        );
+        let done = events.iter().find(|e| e["type"] == "done").expect("the reply ends");
+        assert_eq!(done["message"]["content"], "On it.\n\nDone reading.");
+        let asked = seen.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2, "the model was asked again with the tool's result");
+        assert!(
+            asked[0]["tools"]
+                .as_array()
+                .is_some_and(|t| t.iter().any(|x| x["name"] == "stop_colony"))
+        );
+        let last = asked[1]["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["content"][0]["type"], "tool_result");
+        assert_eq!(last["content"][0]["content"], "[]");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #1217: a write tool is held. The reply ends with a pending approval, the model is not asked
+    /// again, and nothing ran: the colony it named is still there until `approve` is posted.
+    #[tokio::test]
+    async fn a_write_tool_stops_the_reply_at_an_approval() {
+        let (addr, seen) = scripted_model(vec![Some(("stop_colony", json!({"id": "c0ffee"}))), None]).await;
+        let root = std::env::temp_dir().join(format!("colonizer-chat-write-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        with_stub(&root, addr);
+        let meta = seed(&app, "tools", &[]).await;
+        let events = ask_with_tools(&app, &meta, "stop c0ffee").await;
+        let tool = events.iter().find(|e| e["type"] == "tool").expect("a tool event");
+        assert_eq!(tool["note"]["status"], "pending");
+        assert_eq!(tool["approval"]["tool"], "stop_colony");
+        assert_eq!(tool["approval"]["status"], "pending");
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model waits for the approval");
+        let stored = read_messages(&app, &meta.id).await;
+        let reply = stored.last().unwrap();
+        assert_eq!(reply.tools.len(), 1);
+        assert_eq!(reply.tools[0].approval.as_deref(), tool["approval"]["id"].as_str());
+        // Deciding settles the note on the stored message.
+        let id = tool["approval"]["id"].as_str().unwrap().to_string();
+        let _ = crate::chat_tools::decide(
+            State(app.clone()),
+            Path(id),
+            Json(crate::chat_tools::Decision {
+                decision: "reject".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let stored = read_messages(&app, &meta.id).await;
+        assert_eq!(stored.last().unwrap().tools[0].status, "rejected");
+        // The next turn tells the model what happened.
+        let history = history_for_model(&stored);
+        assert!(
+            history.last().unwrap()["content"].as_str().unwrap().contains("rejected"),
+            "{history:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

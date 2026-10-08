@@ -840,7 +840,8 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, format!("MARKER-{name}\n")).unwrap();
         }
-        let aws = "AKIAIOSFODNN7EXAMPLE";
+        // Not AWS's documented example: that one is no longer a secret to the redactor (#1175).
+        let aws = concat!("AKIA", "Y34FZKBOKMUTVV7A");
         let logs = [
             ("events.jsonl", "{\"seq\":1}\n".to_string()),
             ("harness.jsonl", "{\"msg\":\"booted\"}\n".to_string()),

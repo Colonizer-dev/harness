@@ -119,6 +119,24 @@ Server → client:
   in the new run — and `since` when `epoch` is absent (legacy clients), `0` ("unknown"), or current,
   so a tab left open across a resume replays the new run from the start instead of dropping its
   first events.
+- With `&limit=N` (issue #1210) the first paint is only the newest page of this run, when the cursor is
+  `0`: a `{"type":"history","has_more":bool,"oldest_seq":N,"epoch":E,"offset":B,"baseline_usage":{…}|null,"summary":{…}}`
+  frame, then the page's events (at least `N`, extended back to the `user_message` that opens the turn
+  it would cut, at most `4N`), then `replay_done`. `has_more` says older events are on record behind
+  the cursor `(epoch, oldest_seq, offset)`. `baseline_usage` is the cumulative `model_usage` of the last
+  `turn_end` before the page, which the first `turn_end` on it is diffed against. `summary` is what the
+  cockpit derives from the whole run so it need not replay it: `turns`, the latest `cost_usd`, the
+  `brief` (the `user_message` with id `initial`), the last `model` and `agent_state`, and the
+  `settlers` in order of first appearance with `steps`, `errors` and `last_tool`. A reconnect
+  (`since` above 0) replays only what it missed, and a socket without `limit` replays the whole run.
+- The same path without an upgrade is a page of the log: `GET /api/sessions/{id}/events?limit=200`
+  is the newest page, `…?before=<seq>&epoch=<E>&offset=<B>&limit=200` the page before the event at
+  `(E, seq)`. It reads from the end of `events.jsonl`, then the rotated `events-N.jsonl`, newest
+  first, so its cost does not grow with the history behind it; `offset`, from the previous page, lets
+  the read seek straight there (a stale one falls back to a read by `seq`). It answers
+  `{"events":[…oldest first],"has_more":bool,"oldest_seq":N,"epoch":E,"offset":B,"baseline_usage":…,"run_epoch":N}`;
+  `E` names the run the oldest event belongs to, and `seq` restarts at 1 in each run. A scoped token
+  needs `read` on the colony, as for the socket.
 - Whenever the session changes: `{"type":"session","session":Session}`.
 - When the colony resumes, pre-existing sockets are closed so they reconnect into the new epoch. A
   socket that falls behind is closed too, so the client reconnects with its `since`. A line of

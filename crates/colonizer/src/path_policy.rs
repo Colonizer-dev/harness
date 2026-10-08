@@ -16,6 +16,14 @@ pub(crate) const POLICY_FILE: &str = "path-policy";
 /// before staging.
 pub(crate) const PLACEHOLDERS_FILE: &str = "path-policy.placeholders";
 
+/// Sibling of [`POLICY_FILE`]: a gitignore-syntax list of the placeholders, which the guest's git
+/// reads as `core.excludesFile` (boot.rs), so `git status` never lists them as untracked (#1169).
+/// Per colony and guest-side only: no shared `info/exclude` to clean up, and nothing tracked is
+/// affected, since an exclude never applies to a file git already tracks.
+pub(crate) const EXCLUDE_FILE: &str = "path-policy.exclude";
+/// Where the guest sees [`EXCLUDE_FILE`]: the colony's vm dir is mounted at `/colonizer`.
+pub(crate) const GUEST_EXCLUDE_FILE: &str = "/colonizer/path-policy.exclude";
+
 /// The worktree files that carry credentials by long convention, hidden from the colony outright.
 pub(crate) const DEFAULT_MASKED: &[(&str, &str)] = &[
     (".env", "dotenv secrets"),
@@ -435,6 +443,42 @@ fn plan_one(worktree: &Path, root: &Path, rel: &str) -> io::Result<Planned> {
             placeholder: None,
         }),
     }
+}
+
+/// The gitignore-syntax lines that hide the planned placeholders from `git status`: each path
+/// anchored to the worktree root (`/name`; a directory as `/name/`), with the pattern characters
+/// a path could carry escaped. Only placeholders, never a masked file that has content.
+pub(crate) fn exclude_lines(planned: &Materialized) -> Vec<String> {
+    planned
+        .placeholders
+        .iter()
+        .map(|(rel, dir)| {
+            let mut line = String::from("/");
+            for ch in rel.trim_end_matches('/').chars() {
+                if matches!(ch, '*' | '?' | '[' | ']' | '\\' | '!' | '#') {
+                    line.push('\\');
+                }
+                line.push(ch);
+            }
+            if *dir {
+                line.push('/');
+            }
+            line
+        })
+        .collect()
+}
+
+/// The directories the understand-anything skillset writes into the repository it analyses, as
+/// gitignore-syntax lines. Its knowledge graph is generated data about the checkout, not a change
+/// anyone wants staged, so it is hidden from the colony's `git status` like the placeholders —
+/// but only for a colony that actually has the skillset switched on, since an exclude is the
+/// colony's own view of its worktree and a skillset it does not have never writes these.
+pub(crate) fn ua_exclude_lines(skillsets: &[String]) -> Vec<String> {
+    if !skillsets.iter().any(|name| name == crate::understand_anything::NAME) {
+        return Vec::new();
+    }
+    // `.understand-anything/` is the name upstream used before it renamed the directory.
+    ["/.ua/", "/.understand-anything/"].map(String::from).to_vec()
 }
 
 /// Creates what [`plan`] decided on — and only after the boot has written the intended placeholder
@@ -1095,6 +1139,96 @@ mod tests {
         assert_eq!(std::fs::read(wt.path.join(".cache")).unwrap(), b"keepme");
         let again = plan(&wt.path, &p, &[]).unwrap();
         assert!(again.placeholders.is_empty(), "a second plan re-reports nothing: {again:?}");
+        wt.close();
+    }
+
+    /// Issue #1169: the placeholders are listed in a gitignore-syntax file the guest's git reads as
+    /// `core.excludesFile`, so `git status` stays empty — while a tracked file at a placeholder
+    /// name, and a file at an unrelated path, still show.
+    #[test]
+    fn the_excludes_hide_the_placeholders_from_git_status_and_nothing_else() {
+        use crate::verify::tests::{git, git_commit};
+        let p = policy(&[".env", ".gitmodules", "secrets/keys.json", ".cache/"], &[], &[]);
+        let wt = tempfile("excludes");
+        git(&wt.path, &["init", "-q", "-b", "main"]);
+        std::fs::write(wt.path.join("README.md"), "x").unwrap();
+        std::fs::write(wt.path.join(".gitmodules"), "[submodule]\n").unwrap();
+        git(&wt.path, &["add", "-A"]);
+        git_commit(&wt.path, "base");
+        let planned = plan(&wt.path, &p, &[]).unwrap();
+        apply(&wt.path, &planned).unwrap();
+        let lines = exclude_lines(&planned);
+        assert_eq!(
+            lines,
+            vec!["/.env", "/secrets/keys.json", "/.cache/"],
+            "tracked .gitmodules is no placeholder"
+        );
+        let file = wt.path.join("exclude.list");
+        write_list(&file, &lines).unwrap();
+        let excludes = format!("core.excludesFile={}", file.display());
+        let status = |dir: &Path| git(dir, &["-c", &excludes, "status", "--porcelain", "-uall"]);
+        assert!(
+            git(&wt.path, &["status", "--porcelain", "-uall"]).contains(".env"),
+            "without it they show"
+        );
+        assert_eq!(status(&wt.path).replace("?? exclude.list", "").trim(), "");
+        // The agent's own new files still show, whatever their neighbours.
+        std::fs::write(wt.path.join("secrets/other.json"), "{}").unwrap();
+        std::fs::write(wt.path.join("src.rs"), "").unwrap();
+        let after = status(&wt.path);
+        assert!(
+            after.contains("?? secrets/other.json") && after.contains("?? src.rs"),
+            "{after}"
+        );
+        assert!(
+            !after.contains(".env") && !after.contains("keys.json") && !after.contains(".cache"),
+            "{after}"
+        );
+        // Pattern characters in a name are escaped, not interpreted.
+        let odd = Materialized {
+            placeholders: vec![("a*b#c".into(), false)],
+            ..Default::default()
+        };
+        assert_eq!(exclude_lines(&odd), vec!["/a\\*b\\#c"]);
+        wt.close();
+    }
+
+    /// Issue #1014: the understand-anything skillset writes a knowledge graph into `.ua/` of the
+    /// repository it analyses (`.understand-anything/` before upstream renamed it). It is generated
+    /// data about the checkout, so the colony's `git status` must not offer to commit it — but only
+    /// for a colony that has the skillset switched on.
+    #[test]
+    fn the_skillset_knowledges_dirs_are_hidden_only_where_the_skillset_is_on() {
+        use crate::verify::tests::{git, git_commit};
+        assert_eq!(ua_exclude_lines(&[]), Vec::<String>::new(), "off: nothing to hide");
+        assert_eq!(
+            ua_exclude_lines(&["archify".into()]),
+            Vec::<String>::new(),
+            "another skillset does not write these"
+        );
+        let on = ua_exclude_lines(&["archify".into(), "understand-anything".into()]);
+        assert_eq!(on, vec!["/.ua/", "/.understand-anything/"]);
+
+        let wt = tempfile("ua-excludes");
+        git(&wt.path, &["init", "-q", "-b", "main"]);
+        std::fs::write(wt.path.join("README.md"), "x").unwrap();
+        git(&wt.path, &["add", "-A"]);
+        git_commit(&wt.path, "base");
+        std::fs::create_dir_all(wt.path.join(".ua")).unwrap();
+        std::fs::write(wt.path.join(".ua/knowledge-graph.json"), "{}").unwrap();
+        std::fs::create_dir_all(wt.path.join(".understand-anything")).unwrap();
+        std::fs::write(wt.path.join(".understand-anything/graph.json"), "{}").unwrap();
+        std::fs::write(wt.path.join("src.rs"), "").unwrap();
+
+        let file = wt.path.join("exclude.list");
+        write_list(&file, &on).unwrap();
+        let excludes = format!("core.excludesFile={}", file.display());
+        let status = git(&wt.path, &["-c", &excludes, "status", "--porcelain", "-uall"]);
+        assert!(
+            git(&wt.path, &["status", "--porcelain", "-uall"]).contains(".ua/knowledge-graph.json"),
+            "without the excludes the graph reads as a new file"
+        );
+        assert_eq!(status.replace("?? exclude.list", "").trim(), "?? src.rs");
         wt.close();
     }
 

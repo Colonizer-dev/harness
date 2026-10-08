@@ -230,9 +230,24 @@ fn valid_key(raw: Option<String>) -> Option<String> {
     raw.filter(|key| !key.trim().is_empty())
 }
 
-/// The mothership's own TypeSafe key, shared by the Jev features that call TypeSafe from a colony.
+/// Where the saved TypeSafe key lives under the config dir, beside the mem0 and voice keys. The
+/// Secrets page (`secrets.rs`) edits this file or its keychain entry.
+pub(crate) fn key_file(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir.join("jev-keys").join("typesafe")
+}
+
+/// The one resolver: the saved key first, then `JEV_API_KEY`. Blank counts as unset. Takes both
+/// sources so tests cover the order without touching the process environment.
+pub(crate) fn resolve_key(saved: Option<String>, env: Option<String>) -> Option<String> {
+    valid_key(saved).or_else(|| valid_key(env))
+}
+
+/// The mothership's own TypeSafe key, shared by every Jev feature (routing and recovery asks,
+/// brief picks, compaction injection). It reads the store on each call, so a key saved or cleared
+/// on the Secrets page takes effect for the next turn with no restart.
 pub fn api_key() -> Option<String> {
-    valid_key(std::env::var("JEV_API_KEY").ok())
+    let saved = crate::secrets::global().and_then(|store| crate::util::read_secret(&key_file(store.config_dir())));
+    resolve_key(saved, std::env::var("JEV_API_KEY").ok())
 }
 
 /// The routing point's ask, returned to the boot path: the opinion (when the answer parsed to a tier)
@@ -443,6 +458,32 @@ mod tests {
         assert_eq!(valid_key(Some(String::new())), None);
         assert_eq!(valid_key(Some("   ".to_string())), None);
         assert_eq!(valid_key(Some("real-key".to_string())), Some("real-key".to_string()));
+    }
+
+    #[test]
+    fn the_saved_key_wins_over_the_environment_and_clearing_it_falls_back() {
+        let env = Some("env-key".to_string());
+        assert_eq!(
+            resolve_key(Some("saved-key".into()), env.clone()).as_deref(),
+            Some("saved-key")
+        );
+        assert_eq!(resolve_key(None, env.clone()).as_deref(), Some("env-key"));
+        assert_eq!(resolve_key(Some("  ".into()), env).as_deref(), Some("env-key"));
+        assert_eq!(resolve_key(None, None), None);
+    }
+
+    #[test]
+    fn a_key_saved_to_disk_is_seen_on_the_next_read_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("colonizer-jev-key-{}", crate::util::short_id()));
+        let file = key_file(&dir);
+        let read = |env: Option<&str>| resolve_key(crate::util::read_secret(&file), env.map(str::to_string));
+        assert_eq!(read(Some("env-key")).as_deref(), Some("env-key"));
+        crate::util::write_secret(&file, "ts-saved").unwrap();
+        assert_eq!(read(Some("env-key")).as_deref(), Some("ts-saved"));
+        crate::util::delete_secret(&file);
+        assert_eq!(read(Some("env-key")).as_deref(), Some("env-key"));
+        assert_eq!(read(None), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
