@@ -1281,6 +1281,23 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
     let _config = app.config_write.lock().await;
     let mut all: BTreeMap<String, OrgSettings> =
         crate::util::read_json_or_default(&app.orgs_file()).map_err(|e| config_unreadable(&app.orgs_file(), &e))?;
+    // An org's webhook URL is an address outside this machine, so it needs the mothership's signing
+    // secret like the owner's does (issue #900) — one secret signs both. An unchanged URL is let
+    // through, so an org that upgraded with one can still save its other settings and clear it.
+    if crate::notify::secret(&app).is_none()
+        && let Some(url) = req.settings.notify.as_ref().and_then(|notify| notify.webhook_url.as_deref())
+        && !url.is_empty()
+        && Some(url)
+            != all
+                .get(&org)
+                .and_then(|saved| saved.notify.as_ref())
+                .and_then(|notify| notify.webhook_url.as_deref())
+    {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "this org's webhook URL needs the mothership's signing secret (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET): a webhook delivery is never sent unsigned",
+        ));
+    }
     // A skillset switched on must exist, or boot fails. One switched off must exist only when this save
     // adds the switch, which catches a misspelt disable; an off override already saved for a skillset
     // since uninstalled is harmless and the org dialog sends it back on every save.
@@ -2687,6 +2704,64 @@ mod tests {
     fn org_app() -> (Shared, PathBuf) {
         let root = std::env::temp_dir().join(format!("colonizer-orgs-{}", crate::util::short_id()));
         (crate::tests::test_app(&root), root)
+    }
+
+    /// One save of an org, as `PUT /api/orgs/{org}` makes it: the handler is called directly with
+    /// the JSON a Settings dialog sends, so the refusal runs exactly where a request would.
+    async fn save_org(app: &Shared, org: &str, settings: Value) -> Result<Json<Value>, crate::AppError> {
+        put(State(app.clone()), Path(org.into()), Json(json!({ "settings": settings }))).await
+    }
+
+    /// An org's `notify.webhook_url` is an address outside this machine, so it needs the signing
+    /// secret the owner's does — one secret signs both (issue #900). A new or changed URL is
+    /// refused without one; an override that is already stored and unchanged still saves, which is
+    /// what keeps an install that upgraded with one editable rather than bricked.
+    #[tokio::test]
+    async fn an_org_webhook_url_is_only_saved_with_a_signing_secret() {
+        let (app, root) = org_app();
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let secret = app.cfg.config_dir.join("notify-secret");
+        assert!(
+            crate::notify::secret(&app).is_none(),
+            "this App starts with no signing secret"
+        );
+        let url = |value: &str| json!({ "notify": { "webhook_url": value } });
+
+        // A brand-new URL has nothing stored to be grandfathered from.
+        let err = save_org(&app, "acme", url("https://hooks.example.com/hook"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("needs the mothership's signing secret"),
+            "and it says what to do: {}",
+            err.message()
+        );
+        assert!(
+            save_org(&app, "acme", url("")).await.is_ok(),
+            "an empty URL is nothing to sign"
+        );
+
+        // With a secret, the same URL saves.
+        crate::util::write_secret(&secret, "whsec-test").unwrap();
+        assert!(save_org(&app, "acme", url("https://hooks.example.com/hook")).await.is_ok());
+
+        // The secret goes away again — an install that upgraded, exactly.
+        crate::util::delete_secret(&secret);
+        assert!(crate::notify::secret(&app).is_none());
+        assert!(
+            save_org(&app, "acme", url("https://hooks.example.com/hook")).await.is_ok(),
+            "an unchanged URL stays editable, so the other org settings can still be saved"
+        );
+        let err = save_org(&app, "acme", url("https://elsewhere.example.com/hook"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST, "changing it needs a secret");
+        assert!(
+            save_org(&app, "acme", url("")).await.is_ok(),
+            "and clearing it is always allowed"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

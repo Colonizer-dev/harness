@@ -12,7 +12,9 @@
 //! only the owner's subscriptions get them.
 //!
 //! A scoped token sees and deletes only its own subscriptions; the owner sees and deletes all of
-//! them. The secret is write-only: it is stored on the mothership (mode 0600) and never answered.
+//! them. The secret is write-only — it is stored on the mothership (mode 0600) and never answered —
+//! and it is required (issue #900): every delivery carries a signature, so a subscription without
+//! one is refused at the API rather than left to fail on every attempt.
 
 use super::{EVENT_NAMES, LIFECYCLE_EVENTS, outbox, webhook_valid};
 use crate::{
@@ -92,6 +94,8 @@ pub struct Subscription {
     /// The event names it wants; empty means every event in its scope.
     #[serde(default)]
     pub events: Vec<String>,
+    /// Required (issue #900), but read as an option: a subscription stored before that requirement
+    /// has none, and the outbox refuses to send to it rather than sending it unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     secret: Option<String>,
     /// The scoped token that made it, or `None` for the owner.
@@ -206,6 +210,13 @@ pub(super) async fn fan_out(app: &App, client: &reqwest::Client, payload: &Value
     let Ok(body) = serde_json::to_string(payload) else { return 0 };
     let mut delivered = 0;
     for subscription in subscriptions.iter().filter(|s| s.wants(event)) {
+        // A subscription stored before a secret was required is never delivered to (issue #900):
+        // `outbox::attempt` would refuse it, and the failure below would promise a retry that the
+        // outbox's own sweep cancels. Skipped here, like the owner's URL is skipped in
+        // `post_webhook`, so nothing is queued that cannot be signed.
+        if subscription.secret.is_none() {
+            continue;
+        }
         if let Some(token_id) = &subscription.token {
             let token = app.api_tokens.scoped(token_id).await;
             if !in_scope(token.as_ref(), colony) {
@@ -297,11 +308,9 @@ fn bad(message: &str) -> crate::AppError {
 }
 
 /// Checks a new subscription: the address, the events and the secret. `scoped` is the token making
-/// it, when one is.
-fn validate(
-    req: &NewSubscription,
-    scoped: Option<&ScopedToken>,
-) -> Result<(String, Vec<String>, Option<String>), crate::AppError> {
+/// it, when one is. The secret comes back as a plain `String`: every subscription has one (issue
+/// #900), so a caller never has to hold the option.
+fn validate(req: &NewSubscription, scoped: Option<&ScopedToken>) -> Result<(String, Vec<String>, String), crate::AppError> {
     let url = req.url.trim().to_string();
     if url.len() > MAX_URL || !webhook_valid(&url) {
         return Err(bad("url must be an http:// or https:// address"));
@@ -331,11 +340,18 @@ fn validate(
         }
     }
     let secret = match req.secret.as_deref().map(str::trim) {
-        None | Some("") => None,
+        // A subscription with no secret is one this module would have to deliver to unsigned, and
+        // it does not do that (issue #900), so it is refused here rather than accepted and then
+        // dropped on every attempt.
+        None | Some("") => {
+            return Err(bad(
+                "every webhook subscription needs a signing secret: a delivery is never sent unsigned",
+            ));
+        }
         Some(value) if value.len() > 512 || !value.chars().all(|c| c.is_ascii_graphic()) => {
             return Err(bad("that doesn't look like a signing secret"));
         }
-        Some(value) => Some(value.to_string()),
+        Some(value) => value.to_string(),
     };
     Ok((url, events, secret))
 }
@@ -362,7 +378,7 @@ pub async fn create(
         id: format!("whs_{}", short_id()),
         url,
         events,
-        secret,
+        secret: Some(secret),
         token,
         created_at: Utc::now(),
     };

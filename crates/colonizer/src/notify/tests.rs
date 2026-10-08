@@ -1192,6 +1192,8 @@ async fn run_colony(settings: &NotifySettings, steps: &[(SessionStatus, bool)]) 
     let root = std::env::temp_dir().join(format!("colonizer-notify-lifecycle-{}", crate::util::short_id()));
     std::fs::create_dir_all(&root).unwrap();
     let app = crate::tests::test_app(&root);
+    std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+    write_secret(&secret_file(&app), "whsec-test").unwrap();
     let client = reqwest::Client::new();
     let settings = NotifySettings {
         webhook_url: url,
@@ -1521,7 +1523,14 @@ async fn a_scoped_token_only_receives_events_within_its_scope() {
     let acme = token(&app, "acme ci", "operate", &["acme"]).await;
     let globex = token(&app, "globex ci", "launch", &["globex"]).await;
     let revoked = token(&app, "old ci", "operate", &[]).await;
-    subscriptions::insert(&app, &receiver(owner_rx.clone(), Vec::new()).await, &[], None, None).await;
+    subscriptions::insert(
+        &app,
+        &receiver(owner_rx.clone(), Vec::new()).await,
+        &[],
+        Some("owner-secret"),
+        None,
+    )
+    .await;
     subscriptions::insert(
         &app,
         &receiver(acme_rx.clone(), Vec::new()).await,
@@ -1534,7 +1543,7 @@ async fn a_scoped_token_only_receives_events_within_its_scope() {
         &app,
         &receiver(globex_rx.clone(), Vec::new()).await,
         &[],
-        None,
+        Some("globex-secret"),
         Some(&globex.id),
     )
     .await;
@@ -1542,7 +1551,7 @@ async fn a_scoped_token_only_receives_events_within_its_scope() {
         &app,
         &receiver(revoked_rx.clone(), Vec::new()).await,
         &[],
-        None,
+        Some("revoked-secret"),
         Some(&revoked.id),
     )
     .await;
@@ -1550,7 +1559,7 @@ async fn a_scoped_token_only_receives_events_within_its_scope() {
         &app,
         &receiver(merged_only_rx.clone(), Vec::new()).await,
         &["merged"],
-        None,
+        Some("merged-only-secret"),
         Some(&acme.id),
     )
     .await;
@@ -1632,7 +1641,7 @@ async fn a_scoped_token_only_receives_events_within_its_scope() {
 async fn a_subscription_gets_each_transition_once() {
     let rx: Received = Default::default();
     let (app, root, client) = outbox_app("subs-once");
-    subscriptions::insert(&app, &receiver(rx.clone(), Vec::new()).await, &[], None, None).await;
+    subscriptions::insert(&app, &receiver(rx.clone(), Vec::new()).await, &[], Some("sub-secret"), None).await;
     let session = colony("c1", SessionStatus::Failed);
     for event in [Event::Failed, Event::Lifecycle("failed"), Event::Attention("stalled")] {
         dispatch(&app, Some(&client), &session, event, &settings(), &mut Reasons::default()).await;
@@ -1658,7 +1667,7 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
     let create = |scoped, body| subscriptions::create(State(app.clone()), scoped, Json(body));
 
     // Refused to a scoped token: this machine or its network, an event outside every token's
-    // scope, an unknown event, credentials in the address, a bad secret.
+    // scope, an unknown event, credentials in the address, a bad secret — and no secret at all.
     for (url, events, secret) in [
         ("http://127.0.0.1:7878/hook", vec![], None),
         ("http://localhost/hook", vec![], None),
@@ -1671,15 +1680,19 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
         ("https://hooks.example.com/hook", vec!["no_such_event"], None),
         ("https://user:pw@hooks.example.com/hook", vec![], None),
         ("https://hooks.example.com/hook", vec![], Some("has a space")),
+        ("https://hooks.example.com/hook", vec![], Some("")),
     ] {
         let refused = create(as_acme(), new(url, &events, secret)).await;
         assert!(refused.is_err(), "{url} {events:?} {secret:?} should be refused");
     }
     // The owner may point one at this machine, and at host-level events.
-    let owner_sub = create(None, new("http://127.0.0.1:9/hook", &["provider_degraded"], None))
-        .await
-        .unwrap()
-        .0;
+    let owner_sub = create(
+        None,
+        new("http://127.0.0.1:9/hook", &["provider_degraded"], Some("owner-secret")),
+    )
+    .await
+    .unwrap()
+    .0;
 
     let made = create(
         as_acme(),
@@ -1694,7 +1707,7 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
     assert!(made.get("secret").is_none() && !made.to_string().contains("s3cret"), "{made}");
     let theirs = create(
         Some(Extension(other.clone())),
-        new("https://hooks.example.com/other", &[], None),
+        new("https://hooks.example.com/other", &[], Some("other-secret")),
     )
     .await
     .unwrap()
@@ -1745,7 +1758,7 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
 async fn a_deleted_subscription_drops_its_pending_retries() {
     let rx: Received = Default::default();
     let (app, root, client) = outbox_app("subs-gone");
-    let id = subscriptions::insert(&app, &receiver(rx.clone(), vec![500]).await, &[], None, None).await;
+    let id = subscriptions::insert(&app, &receiver(rx.clone(), vec![500]).await, &[], Some("sub-secret"), None).await;
     let session = colony("c1", SessionStatus::Failed);
     dispatch(
         &app,
@@ -1769,5 +1782,206 @@ async fn a_deleted_subscription_drops_its_pending_retries() {
     let book = outbox::load(&app);
     assert!(book.pending.is_empty() && book.dead.is_empty(), "{book:?}");
     assert_eq!(rx.lock().unwrap().len(), 1, "no retry went out");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---------------------------------------------------------------------------
+// A webhook URL needs a signing secret (issue #900)
+// ---------------------------------------------------------------------------
+
+/// A test App with no signing secret saved anywhere — the state an install that never set one is
+/// in, and the one the refusal below exists for.
+fn no_secret_app(name: &str) -> (Shared, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("colonizer-notify-{name}-{}", crate::util::short_id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let app = crate::tests::test_app(&root);
+    std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+    assert!(secret(&app).is_none(), "this App must start with no signing secret");
+    (app, root)
+}
+
+/// End to end: a webhook URL with nothing to sign it is not sent at all — the receiver sees
+/// nothing, and the outbox keeps nothing either, because the event was refused before it was
+/// queued (issue #900).
+#[tokio::test]
+async fn a_webhook_url_without_a_secret_is_never_delivered() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), Vec::new()).await;
+    let (app, root) = no_secret_app("nosecret");
+    let client = reqwest::Client::new();
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings()
+    };
+    let body = payload(Event::Failed, Utc::now(), &colony("c1", SessionStatus::Failed));
+    let mut reasons = Reasons::default();
+    assert!(
+        !post_webhook(&app, &client, &body, None, &settings, &mut reasons).await,
+        "nothing went out"
+    );
+    // Again, so the de-dupe is exercised too: still nothing, and still nothing queued.
+    assert!(!post_webhook(&app, &client, &body, None, &settings, &mut reasons).await);
+    assert_eq!(received.lock().unwrap().len(), 0, "the receiver was never reached");
+    let book = outbox::load(&app);
+    assert!(book.pending.is_empty() && book.dead.is_empty(), "{book:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The same URL, the same event and the same receiver, one secret later: it delivers, signed. So it
+/// was the missing secret that held it back, not the address.
+#[tokio::test]
+async fn the_same_webhook_url_delivers_once_a_secret_is_saved() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), Vec::new()).await;
+    let (app, root) = no_secret_app("later-secret");
+    let client = reqwest::Client::new();
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings()
+    };
+    let body = payload(Event::Failed, Utc::now(), &colony("c1", SessionStatus::Failed));
+    assert!(!post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await);
+
+    let saved = put_secret(
+        State(app.clone()),
+        Json(NotifySecret {
+            secret: Some("whsec-test".into()),
+        }),
+    )
+    .await
+    .expect("a signing secret the API accepts")
+    .0;
+    assert_eq!(saved["has_secret"], true, "and the API says it is now set");
+    assert!(
+        post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await,
+        "the secret is the only thing that was missing"
+    );
+    let got = received.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    let (headers, sent) = &got[0];
+    let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
+    assert_eq!(
+        headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
+        format!("sha256={}", signature("whsec-test", timestamp, sent)),
+        "signed with the secret saved between the two attempts"
+    );
+    assert_eq!(sent, &serde_json::to_string(&body).unwrap(), "the same body");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The API refuses a subscription with no signing secret — for the owner as much as for a scoped
+/// token — and takes one with a secret.
+#[tokio::test]
+async fn a_subscription_needs_a_signing_secret() {
+    let (app, root) = no_secret_app("subs-secret");
+    let new = |secret: Value| {
+        serde_json::from_value::<subscriptions::NewSubscription>(json!({
+            "url": "https://hooks.example.com/hook", "secret": secret,
+        }))
+        .unwrap()
+    };
+    for secret in [Value::Null, json!("")] {
+        let refused = subscriptions::create(State(app.clone()), None, Json(new(secret.clone()))).await;
+        let message = format!("{:?}", refused.expect_err("no secret is refused"));
+        assert!(message.contains("never sent unsigned"), "{message}");
+    }
+    let made = subscriptions::create(State(app.clone()), None, Json(new(json!("whsec-test"))))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(made["has_secret"], true);
+    assert_eq!(subscriptions::list(State(app.clone()), None).await.0.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The outbox is the backstop: a delivery queued while the secret existed, replayed after the
+/// secret was removed, is dropped rather than sent unsigned — and never becomes a dead letter that
+/// can never succeed.
+#[tokio::test]
+async fn a_delivery_whose_secret_was_removed_is_dropped_never_sent_unsigned() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), vec![500]).await;
+    let (app, root, client) = outbox_app("secret-gone");
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings()
+    };
+    let body = payload(Event::Failed, Utc::now(), &colony("c1", SessionStatus::Failed));
+    assert!(!post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await);
+    assert_eq!(outbox::load(&app).pending.len(), 1, "waiting for its retry");
+
+    // The owner clears the secret; the delivery is still waiting.
+    delete_secret(&secret_file(&app));
+    assert!(secret(&app).is_none());
+    let later = Utc::now() + chrono::Duration::hours(1);
+    assert_eq!(outbox::retry_due(&app, &client, later).await, 0);
+    let book = outbox::load(&app);
+    assert!(book.pending.is_empty() && book.dead.is_empty(), "{book:?}");
+    assert_eq!(received.lock().unwrap().len(), 1, "only the first, signed, attempt went out");
+
+    // And nothing is left to send unsigned: the owner's URL is still set.
+    assert!(!post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await);
+    assert_eq!(received.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// One save of the notify module, as `PUT /api/modules/notify` makes it. `save_anyway` is a
+/// parameter because this check must not be skippable with it.
+async fn save_notify(app: &Shared, webhook_url: &str, save_anyway: bool) -> Result<Value, crate::AppError> {
+    let settings = Map::from_iter([("webhook_url".to_string(), json!(webhook_url))]);
+    crate::modules::update(
+        State(app.clone()),
+        axum::extract::Path("notify".to_string()),
+        Json(crate::modules::UpdateModule {
+            provider: "default".into(),
+            enabled: true,
+            settings,
+            save_anyway,
+            confirm_content: false,
+        }),
+    )
+    .await
+    .map(|Json(value)| value)
+}
+
+/// End to end: the webhook URL is refused at save time without a signing secret — and `save_anyway`
+/// does not get past it. An unchanged URL, or clearing it, is still let through, which is what keeps
+/// an install that upgraded with an unsigned webhook editable instead of bricked (issue #900).
+#[tokio::test]
+async fn a_webhook_url_is_only_saved_with_a_signing_secret() {
+    let (app, root) = no_secret_app("save-refusal");
+    let message = |err: crate::AppError| format!("{:?}", err);
+    for save_anyway in [false, true] {
+        let refused = save_notify(&app, "https://hooks.example.com/hook", save_anyway).await;
+        assert!(
+            refused.is_err(),
+            "no secret, no URL (save_anyway: {save_anyway}) — an unsigned URL is not settings to fix up later"
+        );
+        assert!(
+            message(refused.err().unwrap()).contains("needs a signing secret"),
+            "and it says what to do"
+        );
+    }
+    // Nothing was stored, so there is still no URL to be grandfathered.
+    assert!(save_notify(&app, "", false).await.is_ok(), "no URL is nothing to sign");
+
+    // With a secret, the same URL saves.
+    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    assert!(save_notify(&app, "https://hooks.example.com/hook", false).await.is_ok());
+
+    // The secret goes away again — an install that upgraded, exactly.
+    delete_secret(&secret_file(&app));
+    assert!(
+        save_notify(&app, "https://hooks.example.com/hook", false).await.is_ok(),
+        "an unchanged URL stays editable, so the other notify settings can still be saved"
+    );
+    assert!(
+        save_notify(&app, "https://elsewhere.example.com/hook", false).await.is_err(),
+        "changing it needs a secret"
+    );
+    assert!(
+        save_notify(&app, "", false).await.is_ok(),
+        "and clearing it is always allowed"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
