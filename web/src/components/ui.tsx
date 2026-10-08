@@ -151,6 +151,7 @@ const PARK_REASONS: Record<string, string> = {
   idle_timeout: "idle too long",
   provider_retry: "gateway error, retrying automatically",
   repo_pr_rate_limit: "repo's daily PR cap reached",
+  no_push_access: "host can't push to this repo yet",
 };
 
 /** The short local date/time a parked colony can resume at, e.g. "27 Sep, 14:05"; "" for a timestamp that will not parse. */
@@ -414,6 +415,8 @@ export function attentionText(attention: Attention): string {
       return "Idle with nothing to do — parked to free its slot, resume to continue";
     case "repo_pr_rate_limit":
       return "Repo's daily PR cap reached — parked, resume to continue";
+    case "no_push_access":
+      return "Done, but this host can't publish to the repo — your work is saved";
     case "control_defeat":
       return "A control may have been bypassed";
     case "looping":

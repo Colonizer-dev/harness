@@ -124,6 +124,7 @@ mod providers;
 mod public_feed;
 mod publish;
 mod push;
+mod push_access;
 mod push_guard;
 mod push_prefs;
 mod queue;

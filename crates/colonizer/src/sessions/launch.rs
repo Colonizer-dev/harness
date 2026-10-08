@@ -405,6 +405,24 @@ pub async fn create(
             &format!("the {owner} workspace is switched off; turn it back on in its org settings to start a colony there"),
         ));
     }
+    // Issue #1134: a colony launched by an identity that cannot push to this repository does all
+    // its work and then loses it — the agent clones, edits, commits and reviews for hours, and
+    // `git push` answers 403, stranding every commit in the worktree and ending the colony in the
+    // terminal `Failed` state. The fix is to refuse before anything exists: no microVM has booted,
+    // no worktree has been made, no claim has been spent.
+    //
+    // Here, and not on the route, because `create` is the single in-process entry point for
+    // `POST /api/sessions`, the queue, the colony loops, the decisions-inbox redo, burn-down and
+    // the merge loop — one check covers every way a colony starts. It sits after the switched-off
+    // workspace refusal above, which is the cheaper answer and therefore the one that wins.
+    // A GitHub that could not be asked is `Verdict::Unknown` and passes: a blip must not block a
+    // launch, and the publish path still catches a push that cannot land (issue #1134, part two).
+    if let crate::push_access::Verdict::CannotPush { login } = crate::push_access::check(&app, &repo).await {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            &crate::push_access::refusal(&login, &repo),
+        ));
+    }
     let modules = app.modules.read().await.clone();
     // Which agent module the colony launches on: this org's pick, else the install's (issue #201).
     // Recorded on the session, so boot re-resolves from that and a later change moves new colonies only.
