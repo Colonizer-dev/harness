@@ -676,14 +676,47 @@ pub(crate) async fn submit_answer(
     // A send into a dead runner (the colony stopping between the checks above and here) delivers
     // nothing: the HTTP twin answers the not-accepting 409 instead of a 204 for a lost answer,
     // while the socket path drops the error as it always has.
+    // The question bodies the decision is read from (issue #1247): what the host has open, or —
+    // the socket path, where the host may not have opened the question — what the answerer saw.
+    let decided = (
+        answer.question_id.clone(),
+        open.as_ref()
+            .map(|(_, questions, _)| questions.clone())
+            .or_else(|| answer.questions.clone())
+            .unwrap_or_default(),
+        answer.answers.clone(),
+        match external {
+            Some(name) => external_text(name, answer.response.as_str().unwrap_or_default()),
+            None => answer.response.as_str().unwrap_or_default().to_string(),
+        },
+    );
     if rt.commands.send(answer.forward(external)).is_err() {
         return Err(AnswerError::NotAccepting(s.status));
     }
+    let (question_id, questions, answers, response) = decided;
+    record_decision(app, id, &question_id, &questions, &answers, Some(&response)).await;
     crate::activity::record_answer(app, &s, via).await;
     // The question is answered as far as the person is concerned (issue #744): every other
     // device closes its notification and drops the colony from its badge.
     spawn_resolved(app, id);
     Ok(())
+}
+
+/// Puts an operator's decision on the colony's record (issue #1247): the question, the choice and
+/// the free-text note, so a restart's resume hands them back to the agent and a re-asked question
+/// is answered from the record instead of the person. Every operator answer path records here —
+/// the judge's answers in `autonomy.rs` never do. Best effort: a colony that vanished between the
+/// answer and this write loses only the reuse of the answer, never the answer itself.
+async fn record_decision(
+    app: &Shared,
+    id: &str,
+    question_id: &str,
+    questions: &[Value],
+    answers: &Value,
+    response: Option<&str>,
+) {
+    app.update_session(id, |x| x.record_answered_question(question_id, questions, answers, response))
+        .await;
 }
 
 /// The user message a resumed runner receives for a suspended colony's answer (issue #562): the
@@ -796,6 +829,7 @@ async fn hold_answer(
             *rt.open_question.lock().await = None;
             rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
             rt.activity.lock().await.question_since = None;
+            record_decision(app, id, &answer.question_id, &questions, &answer.answers, Some(&response)).await;
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via).await;
             }
@@ -904,6 +938,7 @@ async fn answer_parked(
             *rt.open_question.lock().await = None;
             rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
             rt.activity.lock().await.question_since = None;
+            record_decision(app, id, &answer.question_id, &questions, &answer.answers, Some(&response)).await;
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via.clone()).await;
             }
