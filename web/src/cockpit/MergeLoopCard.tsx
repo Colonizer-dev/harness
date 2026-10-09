@@ -11,7 +11,7 @@ import { IconMerge } from "./loopIcons";
 import { BUILTIN_HISTORY_ID, plural, type DetailGroupDef, type DetailItem } from "./loopHistory";
 import type { MergeLoopAction, MergeLoopReport, MergeLoopSettings, MergeLoopView, Repo } from "../types";
 import { intervalWords, relative } from "./loops";
-import { actionLabel, parseNames, reportRows, repoOptIn, setRepoCap, setRepoNever, setRepoOptIn, toggleRepos } from "./mergeLoop";
+import { actionLabel, isNotOptedIn, parseNames, reportRows, repoOptIn, repoWantsLocalChecks, setRepoCap, setRepoLocalChecks, setRepoNever, setRepoOptIn, toggleRepos } from "./mergeLoop";
 
 const TONE: Record<MergeLoopAction, Tone> = {
   merged: "ok",
@@ -28,25 +28,54 @@ const TONE: Record<MergeLoopAction, Tone> = {
 
 const field = "rounded-md border border-border bg-panel px-2 py-1 text-small-lg text-text outline-none focus:border-accent";
 
-/** The groups a merge run's pull requests file under, one per action, in the order that matters. */
+/** The groups a merge run's pull requests file under, one per action, in the order that matters. The
+ * attention groups are the ones that need a person, so their sections start open. */
 function mergeGroups(dry: boolean): DetailGroupDef[] {
   const order: MergeLoopAction[] = ["merged", "updated", "rebased", "resolving", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
   return order.map((a) => {
     const label = actionLabel(a, dry);
-    return { key: a, label: label.charAt(0).toUpperCase() + label.slice(1), tone: TONE[a] === "neutral" ? "neutral" : TONE[a] };
+    return {
+      key: a,
+      label: label.charAt(0).toUpperCase() + label.slice(1),
+      tone: TONE[a] === "neutral" ? "neutral" : TONE[a],
+      attention: a === "resolving" || a === "red" || a === "needs_redo",
+    };
   });
 }
 
-/** A run's report: the counts line, why it stopped if it did, then its pull requests grouped by what happened, identical reasons on one line. */
-export function MergeLoopReportView({ report, now }: { report: MergeLoopReport; now?: number }): ReactElement {
+/** A run's report: the counts as chips over the groups, why it stopped if it did, then its pull
+ * requests grouped by what happened, identical reasons on one line. */
+export function MergeLoopReportView({
+  report,
+  now,
+  onOpenColony,
+  onLocalChecks,
+  settings,
+  onSettings,
+  busy,
+}: {
+  report: MergeLoopReport;
+  now?: number;
+  /** Opens the colony behind a pull request. */
+  onOpenColony?: (id: string) => void;
+  /** Puts a blocked-billing line's repository onto local checks (issue #969); saving it is the caller's job. */
+  onLocalChecks?: (repo: string) => void;
+  /** The unsaved settings draft: the not-opted-in line's opt-in and the fixes' Saved state read it. */
+  settings?: MergeLoopSettings;
+  onSettings?: (next: MergeLoopSettings) => void;
+  busy?: boolean;
+}): ReactElement {
   const rows = reportRows(report);
-  const items: DetailItem[] = rows.map((r) => ({ group: r.action, repo: r.repo, ref: { text: r.pr, url: r.pr_url }, title: r.title, reason: r.reason }));
+  const hidden = rows.filter(isNotOptedIn);
+  const items: DetailItem[] = rows
+    .filter((r) => !isNotOptedIn(r))
+    .map((r) => ({ group: r.action, repo: r.repo, ref: { text: r.pr, url: r.pr_url }, title: r.title, reason: r.reason, colony: r.session || undefined, attempt: r.attempt }));
+  const hiddenRepos = [...new Set(hidden.map((r) => r.repo))];
   return (
     <div>
       <p className="m-0 flex flex-wrap items-center gap-x-2 gap-y-1 text-small-lg text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Last dry run" : "Last run"}</span>
         {report.finished_at && <span>{relative(report.finished_at, now)}</span>}
-        <span>· {report.summary}</span>
       </p>
       {report.forced_dry_run && <p className="m-0 mt-2 text-small-lg text-warn">External writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS), so the run only looked.</p>}
       {report.repos
@@ -58,7 +87,38 @@ export function MergeLoopReportView({ report, now }: { report: MergeLoopReport; 
         ))}
       {rows.length > 0 && (
         <div className="mt-3">
-          <GroupedDetails items={items} defs={mergeGroups(report.dry_run)} unit={{ one: "PR", many: "PRs" }} />
+          <GroupedDetails
+            items={items}
+            defs={mergeGroups(report.dry_run)}
+            unit={{ one: "PR", many: "PRs" }}
+            chips={{ always: ["merged"] }}
+            onOpenColony={onOpenColony}
+            onFixAction={onLocalChecks ? (action, line) => action === "local_checks" && onLocalChecks(line.repo) : undefined}
+            fixDone={settings ? (action, line) => action === "local_checks" && repoWantsLocalChecks(settings, line.repo) : undefined}
+          />
+        </div>
+      )}
+      {hiddenRepos.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-small-lg text-muted">
+          <details className="min-w-0 group/hidden">
+            <summary className="flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden">
+              {plural(hiddenRepos.length, "repo", "repos")} not in the merge train
+              <span aria-hidden="true" className="text-faint transition-transform group-open/hidden:rotate-90">
+                ›
+              </span>
+            </summary>
+            <ul className="m-0 mt-1 list-none space-y-0.5 p-0 font-mono text-small text-muted">
+              {hiddenRepos.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          </details>
+          {settings && onSettings && (
+            <div className="w-64 max-w-full">
+              {/* The same draft the settings section edits: a repository added here is in the train from the next save. */}
+              <RepoMultiSelect label="merge train repositories" value={settings.allow} onChange={(allow) => onSettings({ ...settings, allow })} disabled={busy} placeholder="Add a repository…" />
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -87,6 +147,8 @@ export function MergeLoopPanel({
   onSave,
   onRun,
   open,
+  onOpenColony,
+  onLocalChecks,
 }: {
   view: MergeLoopView;
   draft: MergeLoopSettings;
@@ -99,6 +161,10 @@ export function MergeLoopPanel({
   onRun: (dryRun: boolean) => void;
   /** Start with the detail drawer open (tests, links). */
   open?: boolean;
+  /** Opens the colony a pull request's work ran in. */
+  onOpenColony?: (id: string) => void;
+  /** Puts a report line's repository onto local checks; the report's button reads "Saved" from the draft. */
+  onLocalChecks?: (repo: string) => void;
 }): ReactElement {
   const minutes = draft.cadence.every === "interval" ? draft.cadence.minutes : 60;
   const opted = toggleRepos(draft, repoNames).filter((r) => repoOptIn(draft, r) === "on" || repoOptIn(draft, r) === "org").length;
@@ -117,6 +183,7 @@ export function MergeLoopPanel({
       scope={{ text: ready ? plural(opted, "repository", "repositories") : "Not set up: add a repository", ready }}
       attention={attention}
       defaultOpen={open}
+      onOpenColony={onOpenColony}
       refreshKey={view.last_report?.finished_at}
       actions={
         <>
@@ -135,7 +202,11 @@ export function MergeLoopPanel({
       }
     >
       <DetailSection title="Last run">
-        {view.last_report ? <MergeLoopReportView report={view.last_report} now={now} /> : <p className="m-0 text-body-sm text-faint">Not run yet. A dry run lists what it would merge, update, rebase and skip, and why.</p>}
+        {view.last_report ? (
+          <MergeLoopReportView report={view.last_report} now={now} onOpenColony={onOpenColony} onLocalChecks={onLocalChecks} settings={draft} onSettings={onChange} busy={busy} />
+        ) : (
+          <p className="m-0 text-body-sm text-faint">Not run yet. A dry run lists what it would merge, update, rebase and skip, and why.</p>
+        )}
       </DetailSection>
       <DetailSection title="Settings">
         <div className="space-y-3">
@@ -240,7 +311,7 @@ export function MergeLoopPanel({
 }
 
 /** Fetches the loop, keeps an unsaved draft of its settings, and runs it. */
-export function MergeLoopCard({ repos }: { repos: readonly Repo[] }): ReactElement | null {
+export function MergeLoopCard({ repos, onOpenColony }: { repos: readonly Repo[]; onOpenColony?: (id: string) => void }): ReactElement | null {
   const api = useApi();
   const toast = useToast();
   const [view, setView] = useState<MergeLoopView | null>(null);
@@ -279,6 +350,27 @@ export function MergeLoopCard({ repos }: { repos: readonly Repo[] }): ReactEleme
     }
   };
 
+  // "Use local checks" on a blocked-billing line: onto the draft and straight to the server — the
+  // owner-only PUT to /api/merge-train/loop is the approval. One PUT at a time: while a save or a
+  // run is in flight the click is dropped, or whichever response lands last would reset the draft
+  // over the local_checks write.
+  const useLocalChecks = async (repo: string) => {
+    if (busy || !repo || repoWantsLocalChecks(draft, repo)) return;
+    const next = setRepoLocalChecks(draft, repo, true);
+    setDraft(next);
+    setBusy(true);
+    try {
+      const saved = await api.saveMergeLoop(next);
+      setView(saved);
+      setDraft(saved.settings);
+      toast(`${repo}: local checks run when its CI cannot`);
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const run = async (dryRun: boolean) => {
     setBusy(true);
     try {
@@ -308,6 +400,8 @@ export function MergeLoopCard({ repos }: { repos: readonly Repo[] }): ReactEleme
       onChange={setDraft}
       onSave={() => void save()}
       onRun={(dry) => void run(dry)}
+      onOpenColony={onOpenColony}
+      onLocalChecks={(repo) => void useLocalChecks(repo)}
     />
   );
 }
