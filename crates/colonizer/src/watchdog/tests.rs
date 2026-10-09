@@ -1229,6 +1229,13 @@ fn a_call_naming_only_an_ancestor_of_the_refused_path_is_not_a_reach() {
         "/harness/out/pr.md"
     ));
     assert!(!reaches(r#"{"command":"ls /harness/out"}"#, "/harness/out"));
+    // #1153: the output dir is the colony's to write, so a path under it is never a reached
+    // target, and writing there does not reach a target refused elsewhere.
+    assert!(!reaches(
+        r#"{"file_path":"/harness/out/verify/log","content":"x"}"#,
+        "/harness/out/verify/log"
+    ));
+    assert!(!reaches(r#"{"command":"cat > /harness/out/verify/log"}"#, "/etc/foo"));
 }
 
 #[test]
@@ -1285,6 +1292,42 @@ fn deny_then_reach_skips_the_workspace_root_and_fires_on_the_file() {
     );
     note_reach_call(&mut trail, "ls", &json!({"command": "ls /workspace"}), at(1));
     assert_eq!(note_reach_result(&mut trail, "ls", false), None);
+}
+
+/// #1153: `/harness/out` is the colony's own output directory — the harness itself tells the agent
+/// to write `pr.md` and the verify logs there — so a refusal on a host path followed by a
+/// successful write into the output dir is the brief being followed, not a defeat. A call that
+/// reaches the refused path itself still is one.
+#[test]
+fn a_write_into_the_output_dir_after_a_refusal_is_not_a_deny_then_reach() {
+    let mut trail = BoundaryTrail::default();
+    note_boundary(
+        &mut trail,
+        denial("exec_policy_deny", "exec_policy:writes-outside-repo", Some("/etc/foo")),
+        at(0),
+    );
+    note_reach_call(&mut trail, "pr", &json!({"command": "cat > /harness/out/pr.md"}), at(1));
+    assert_eq!(
+        note_reach_result(&mut trail, "pr", false),
+        None,
+        "the pull request description is the colony's to write"
+    );
+    note_reach_call(
+        &mut trail,
+        "log",
+        &json!({"file_path": "/harness/out/verify/log", "content": "ok"}),
+        at(2),
+    );
+    assert_eq!(
+        note_reach_result(&mut trail, "log", false),
+        None,
+        "a path under the output dir is the colony's too"
+    );
+
+    note_reach_call(&mut trail, "etc", &json!({"file_path": "/etc/foo"}), at(3));
+    let defeat = note_reach_result(&mut trail, "etc", false).expect("the refused file written another way");
+    assert_eq!(defeat.signature, "deny_then_reach");
+    assert_eq!(defeat.evidence[0].target.as_deref(), Some("/etc/foo"));
 }
 
 /// The flag is the attention item with the evidence, and the log says why; the watchdog's own

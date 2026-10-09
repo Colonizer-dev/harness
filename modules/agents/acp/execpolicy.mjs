@@ -47,7 +47,14 @@ const SYNTAX_ONLY = new Map([
 const WRITE_WORDS = new Set(['cp', 'mv', 'rm', 'touch', 'mkdir', 'tee', 'truncate', 'install']);
 const WRITE_TARGET_FLAGS = /^(-|--|[a-zA-Z]=)/;
 // Write targets that are never "outside the repository": scratch space and the kernel's own sinks.
-const NEVER_OUTSIDE = [/^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/, /^\/dev\/(?:null|stdout|stderr|fd)\b/, /^\/run\/user\//];
+// /harness/out is the colony's own output directory — pr.md, the verify logs — and the harness
+// itself tells the agent to write there, so a write at or under it is the brief being followed,
+// not an escape (#1153). Matched on the normalized target, so /harness/out/../x, the /harness the
+// directory sits in, still reads as outside, and /harness/outthing never matches.
+const NEVER_OUTSIDE = [
+  /^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/, /^\/dev\/(?:null|stdout|stderr|fd)\b/, /^\/run\/user\//,
+  /^\/harness\/out(\/|$)/,
+];
 
 // Some of the guest's read-only host mounts (boot.rs): the mothership's vm_dir at `/colonizer` and
 // the agent's binaries, runner and plugins at `/opt/colonizer`. A write onto one is still the

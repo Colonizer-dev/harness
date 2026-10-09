@@ -130,7 +130,9 @@ test('the ask names why: a read-only mount, or a host-backed path (#750)', () =>
   assert.match(question('echo x > /opt/colonizer/agent/runner.mjs'), /writes to a read-only mount \(\/opt\/colonizer\)/);
   assert.match(question('echo x > /colonizer/memory/repo/notes.json'), /read-only mount \(\/colonizer\)/);
   assert.match(question('echo x > /opt/node/bin/node'), /read-only mount \(\/opt\/node\/bin\/node\)/);
-  assert.match(question('cp a /harness/out/z'), /to a host-backed path outside the repository/);
+  assert.match(question('cp a /root/.claude/projects/x'), /to a host-backed path outside the repository/);
+  // The colony's own output dir is not one of them (#1153).
+  assert.equal(decide(policy, 'cp a /harness/out/z', vmWrites.cwd), null);
   // A nested writable bind of the read-only /colonizer is host-backed, not read-only.
   assert.match(question('echo x > /colonizer/services/s.json'), /host-backed path outside the repository/);
 });
@@ -186,12 +188,14 @@ test('an org-layer `"writes_outside": "strict"` rule restores the pre-#877 asks 
   assert.equal(local.rule, 'strict-writes');
   assert.equal(local.reason, 'this org asks about every write outside the repository');
   // A host-backed write still asks, but the default layer names it first (and more precisely).
-  const host = decide(strict, 'echo x > /harness/out/z', vmWrites.cwd);
+  const host = decide(strict, 'echo x > /var/cache/colonizer-shared/x', vmWrites.cwd);
   assert.equal(host.decision, 'ask');
   assert.equal(host.layer, 'default');
   assert.match(host.reason, /host-backed path outside the repository/);
-  // /tmp and a write inside the repository never ask, even strict.
+  // /tmp, a write inside the repository and the colony's own output dir never ask, even strict
+  // (#1153: the harness itself tells the agent to write /harness/out).
   assert.equal(decide(strict, 'echo x > /tmp/x', vmWrites.cwd), null);
+  assert.equal(decide(strict, 'echo x > /harness/out/pr.md', vmWrites.cwd), null);
   assert.equal(decide(strict, 'echo x > inside.txt', vmWrites.cwd), null);
   // Without the strict rule, the same VM-local write is the default: allowed.
   assert.equal(decide(org([]), 'mkdir -p /root/tmp/x', vmWrites.cwd), null);

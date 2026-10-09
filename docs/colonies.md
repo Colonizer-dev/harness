@@ -450,12 +450,15 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   `writes-outside-repo` now asks only for a write to a host-backed path outside the repository: a
   write to `/root`, `/usr`, a `CARGO_TARGET_DIR` such as `/root/colonizer-target`, or the rest of the
   microVM's own root filesystem — discarded with the VM — no longer asks, while a write to a host
-  mount outside the repository, such as `/harness/out` or the agent's transcript directory, still
-  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) asks too, and the card
+  mount outside the repository, such as the agent's transcript directory, still does — with one
+  carve-out: `/harness/out`, the colony's own output directory (`pr.md`, the verify logs), never
+  counts as outside, since the harness itself tells the agent to write there (#1153). A write onto a
+  read-only host mount (`/colonizer`, `/opt/colonizer`) asks too, and the card
   says why; a write into the checkout's own `.git`, or a `git add`/`git commit`/`git stash`, is
   denied outright by the `git-read-only` rule (#1258). An org can restore the older, stricter
   behaviour — any absolute write outside the repository asks, the microVM's root filesystem
-  included — with a policy rule whose predicate is `"writes_outside": "strict"`. The `secret-paths`
+  included — with a policy rule whose predicate is `"writes_outside": "strict"`; the output dir is
+  carved out of that too. The `secret-paths`
   and `script-egress` denies are unchanged.
 
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
@@ -818,12 +821,11 @@ The watchdog used to send a generic "no progress" nudge, and a person (or an out
 `harness.jsonl`) did the rest: recognise a known stall, send the colony the exact fix, publish,
 switch model. The playbook is that step done by the mothership. It is a table of **signature,
 action, tries**; each fix is logged as `auto-fixed: <signature>` in the colony's `harness.jsonl`,
-listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: pr_md_write").
+listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: toolchain_installer").
 
 | Signature | Matches | Action | Tries |
 |---|---|---|---|
 | `placeholder_dotfiles` | a `secret-paths` denial whose target is a harness placeholder (`.env`, `.netrc`, ...) in the worktree and names no real credential path | message: the placeholders are harness mounts, leave them, continue the issue | 1 |
-| `pr_md_write` | a `writes-outside-repo` denial on `/harness/out/pr.md` | message: write `pr.md` with the file tool | 1 |
 | `toolchain_installer` | a `script-egress` denial on a toolchain installer (rustup, swift, ghcup, ...) | message: no toolchains, say in `pr.md` what was not compiled | 1 |
 | `git_read_only_ask` | an `exec_policy` question whose subject is a git write — the runner's `.git internals` reason, or a `git add`/`git commit`/`git stash` command in the ask | `answer_deny`: the question is answered Deny with the `.git`-is-read-only explanation | 1 |
 | `provider_unavailable` | a turn-error hold on `unrecognized_model`, or a provider quota flag, where the provider's `fallback_model` is a `<provider>/<model>` on a configured provider that is not itself out of quota | `switch_fallback_and_resume` | 2 |
