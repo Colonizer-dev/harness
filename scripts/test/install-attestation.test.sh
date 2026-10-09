@@ -2,7 +2,9 @@
 # Checks verify_provenance() in scripts/install-release.sh, the provenance step of every install: a gh
 # that fails because it is not logged in must be a skip — a note, and fatal only under
 # COLONIZER_REQUIRE_ATTESTATION=1, with a message naming the auth problem — while a logged-in gh that
-# rejects the attestation is the "wrong" failure. The function is lifted out of the installer verbatim
+# rejects the attestation is the "wrong" failure, and a transient failure (an HTTP 5xx or a rate limit
+# from the attestation API, like the network errors) is retried, then refused as "service
+# unavailable", never as "wrong" (issue #1235). The function is lifted out of the installer verbatim
 # (the awk trick scripts/test/install-release.test.sh uses for slot_pids) and driven against a stub gh
 # first on PATH, so this runs anywhere, offline, without the installer's Linux + /dev/kvm gate.
 set -eu
@@ -56,6 +58,21 @@ if [ "$1" = attestation ] && [ "$2" = verify ]; then
     tuf_timeout)
       printf 'Error: failed to refresh TUF metadata: Get "https://tuf-repo-cdn.sigstore.dev/timestamp.json": context deadline exceeded\n' >&2
       exit 1 ;;
+    gh503)
+      printf 'gh: failed to fetch attestations from Colonizer-dev/harness: HTTP 503: trust-metadata-api service unavailable\n' >&2
+      exit 1 ;;
+    ratelimit)
+      printf 'gh: API rate limit exceeded for installation ID 1234567: HTTP 403: You have exceeded a secondary rate limit\n' >&2
+      exit 1 ;;
+    flaky_503)
+      # The same 503 on the first two verify attempts, then the verified answer: the transient error
+      # cleared. The count includes this call, so <= 2 means "this is one of the first two".
+      if [ "$(grep -c '^attestation verify [^-]' "$GH_STUB_LOG")" -le 2 ]; then
+        printf 'gh: failed to fetch attestations from Colonizer-dev/harness: HTTP 503: trust-metadata-api service unavailable\n' >&2
+        exit 1
+      fi
+      printf 'The following attestation verified\n'
+      exit 0 ;;
     noatt)
       printf 'Error: no attestations found for artifact\n' >&2
       exit 1 ;;
@@ -174,20 +191,22 @@ out=$(run_verify "$file") && rc=0 || rc=$?
 contains "verified" "$out" "provenance verified"
 note "ok: a verified attestation says so"
 
-# 5. A Sigstore/TUF network failure is retried, then reported as unreachable, never as "wrong".
-note "== a TUF timeout is retried, then reported as a network failure"
+# 5. A Sigstore/TUF network failure is retried, then reported as the service being unavailable,
+#    never as "wrong".
+note "== a TUF timeout is retried, then reported as a service-unavailable failure"
 GH_STUB_TAG=tuf_timeout
 : > "$gh_log"
 out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
 [ "$rc" -ne 0 ] || bad "tuf_timeout: expected a non-zero exit, got 0: $out"
-contains "tuf_timeout" "$out" "could not reach Sigstore to verify the build"
+contains "tuf_timeout" "$out" "unavailable"
+contains "tuf_timeout" "$out" "retry later"
 contains "tuf_timeout" "$out" "context deadline exceeded"
 contains "tuf_timeout" "$out" "nothing was installed"
 lacks "tuf_timeout" "$out" "it is wrong"
 lacks "tuf_timeout" "$out" "COLONIZER_SKIP_ATTESTATION"
 [ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 3 ] ||
   bad "tuf_timeout: expected 3 verify attempts"
-note "ok: retried 3 times, then the network message"
+note "ok: retried 3 times, then the service-unavailable message"
 
 note "== a real mismatch is not retried"
 GH_STUB_TAG=mismatch
@@ -195,8 +214,58 @@ GH_STUB_TAG=mismatch
 out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
 [ "$rc" -ne 0 ] || bad "mismatch: expected a non-zero exit"
 contains "mismatch" "$out" "it is wrong"
-lacks "mismatch" "$out" "could not reach Sigstore"
+lacks "mismatch" "$out" "service is unavailable"
+lacks "mismatch" "$out" "retry later"
 [ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 1 ] || bad "mismatch: expected a single verify attempt"
 note "ok: no retry for a real mismatch"
+
+# 6. An HTTP 5xx from the attestation API is verification that could not run, not a verification that
+#    failed (issue #1235): retried with the same backoff, then refused as "service unavailable",
+#    never with the wrong-checksum message.
+note "== an HTTP 503 is retried, then reported as the service being unavailable"
+GH_STUB_TAG=gh503
+: > "$gh_log"
+out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
+[ "$rc" -ne 0 ] || bad "gh503: expected a non-zero exit, got 0: $out"
+contains "gh503" "$out" "unavailable"
+contains "gh503" "$out" "retry later"
+contains "gh503" "$out" "nothing was installed"
+contains "gh503" "$out" "HTTP 503" # gh's own output is echoed above the refusal, for diagnosis
+lacks "gh503" "$out" "does not verify"
+lacks "gh503" "$out" "it is wrong"
+lacks "gh503" "$out" "checksums are not what"
+[ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 3 ] ||
+  bad "gh503: expected 3 verify attempts"
+# A fatal `fail` either way, but under COLONIZER_REQUIRE_ATTESTATION=1 too.
+out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file" 1) && rc=0 || rc=$?
+[ "$rc" -ne 0 ] || bad "gh503 require: expected a non-zero exit, got 0: $out"
+contains "gh503 require" "$out" "unavailable"
+note "ok: retried 3 times, then the service-unavailable message"
+
+note "== a rate-limited attestation API is the same unavailable refusal"
+GH_STUB_TAG=ratelimit
+: > "$gh_log"
+out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
+[ "$rc" -ne 0 ] || bad "ratelimit: expected a non-zero exit, got 0: $out"
+contains "ratelimit" "$out" "unavailable"
+contains "ratelimit" "$out" "retry later"
+contains "ratelimit" "$out" "nothing was installed"
+lacks "ratelimit" "$out" "does not verify"
+lacks "ratelimit" "$out" "it is wrong"
+[ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 3 ] ||
+  bad "ratelimit: expected 3 verify attempts"
+note "ok: a rate limit is unavailable, not wrong"
+
+note "== a transient 503 that clears verifies on a retry"
+GH_STUB_TAG=flaky_503
+: > "$gh_log"
+out=$(COLONIZER_ATTESTATION_BACKOFF=0 run_verify "$file") && rc=0 || rc=$?
+[ "$rc" -eq 0 ] || bad "flaky_503: expected exit 0 once the retries got through, got $rc: $out"
+contains "flaky_503" "$out" "provenance verified"
+lacks "flaky_503" "$out" "unavailable"
+lacks "flaky_503" "$out" "it is wrong"
+[ "$(grep -c '^attestation verify [^-]' "$gh_log")" -eq 3 ] ||
+  bad "flaky_503: expected 3 verify attempts (two 503s, then success)"
+note "ok: two 503s, then verified on the third attempt"
 
 note "all checks passed"
