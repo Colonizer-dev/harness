@@ -1,1 +1,0 @@
-**Chat replies no longer show `�` where an accented letter, CJK character or emoji landed on a network chunk boundary.** The streaming decoder now buffers raw bytes and decodes a line only once it is complete, so a character split across two chunks arrives whole.

@@ -1,1 +1,0 @@
-**Fresh-checkout verification finds bun's own test files in a package at the repository root.** A root bun package with `*.test.ts` files and no `test` script now gets `bun test`, as a package in a subdirectory already did; before, the root's files were never matched and the claim had no test check.
