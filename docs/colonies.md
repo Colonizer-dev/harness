@@ -253,6 +253,14 @@ GitHub itself calls mergeable. `GET /api/merge-steward` serves the list; `/api/s
 blocked orgs as `merge_steward.ci_blocked`. A pull request needs at least one check to report before
 the steward merges it.
 
+A blocked org is not silent: the steward announces one newly blocked org once, through the notify
+settings (desktop, webhook or Web Push), and keeps rebasing its pull requests in `green+rebase` — a
+billing block is not an excuse to let a branch go stale. An org that wants to keep merging through
+the block can opt into **Verify locally when CI is blocked** (`verify_locally_when_ci_blocked`): the
+steward then runs the repository's `.colonizer/merge.toml` merge gates in a build VM, one pull
+request at a time, comments the result on the pull request, and merges on a pass. A billing block is
+still never treated as green, and a repository that declares no gates just waits.
+
 ## Epics are refused
 
 An epic is a planning issue whose work lives in its sub-issues. A colony on the epic itself would

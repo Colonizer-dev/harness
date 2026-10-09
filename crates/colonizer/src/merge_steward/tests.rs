@@ -210,6 +210,24 @@ fn the_decision_table() {
             "update_branch",
         ),
         (
+            "billing-blocked checks still rebase a conflicting branch under green+rebase",
+            |f, c| {
+                f.checks = vec![dead("build"), dead("test")];
+                f.mergeability = Conflicted;
+                f.merge_state = "DIRTY".into();
+                c.mode = GreenRebase;
+            },
+            "update_branch",
+        ),
+        (
+            "billing-blocked checks still wait on a clean branch",
+            |f, c| {
+                f.checks = vec![dead("build"), dead("test")];
+                c.mode = GreenRebase;
+            },
+            "ci_blocked",
+        ),
+        (
             "a mode of green+rebase still merges a clean green pull request",
             |_, c| c.mode = GreenRebase,
             "merge",
@@ -377,6 +395,100 @@ fn checks_sum_up_to_one_verdict() {
         matches!(judge_checks(&failed_while_running), ChecksVerdict::Failed(_)),
         "a failure does not wait"
     );
+}
+
+// --- Local verification while blocked (issue #1245) ----------------------------------------------
+
+fn verify(state: LocalVerifyState, mins_ago: i64) -> LocalVerify {
+    LocalVerify {
+        head: "abc123".into(),
+        at: Utc::now() - chrono::Duration::minutes(mins_ago),
+        state,
+        summary: "s".into(),
+    }
+}
+
+#[test]
+fn the_newer_local_verification_wins_whatever_wrote_it() {
+    // A worker wrote its terminal result while the cycle that started the run was still deciding.
+    let running = verify(LocalVerifyState::Running, 10);
+    let passed = verify(LocalVerifyState::Passed, 2);
+    assert_eq!(
+        newer_verify(Some(running.clone()), Some(passed.clone())).map(|v| v.state),
+        Some(LocalVerifyState::Passed)
+    );
+    assert_eq!(
+        newer_verify(Some(passed.clone()), Some(running.clone())).map(|v| v.state),
+        Some(LocalVerifyState::Passed),
+        "the rule is purely by `at`, not by who wrote it"
+    );
+    // A run started after a failure replaces it, and keeps its own entry either way round.
+    let failed = verify(LocalVerifyState::Failed, 30);
+    let fresh = verify(LocalVerifyState::Running, 1);
+    assert_eq!(
+        newer_verify(Some(fresh.clone()), Some(failed.clone())).map(|v| v.state),
+        Some(LocalVerifyState::Running)
+    );
+    assert_eq!(
+        newer_verify(Some(failed), Some(fresh)).map(|v| v.state),
+        Some(LocalVerifyState::Running)
+    );
+    // A side that is not there is simply the other side.
+    assert_eq!(newer_verify(None, Some(passed.clone())), Some(passed.clone()));
+    assert_eq!(newer_verify(Some(running.clone()), None), Some(running));
+    assert_eq!(newer_verify(None, None), None);
+}
+
+#[test]
+fn a_verification_is_in_flight_only_while_it_is_running_and_fresh() {
+    assert!(verify_in_flight(&verify(LocalVerifyState::Running, 5)));
+    assert!(
+        !verify_in_flight(&verify(LocalVerifyState::Running, 50)),
+        "past the stale mark a worker hung"
+    );
+    assert!(!verify_in_flight(&verify(LocalVerifyState::Passed, 0)));
+    assert!(!verify_in_flight(&verify(LocalVerifyState::Failed, 0)));
+}
+
+#[test]
+fn the_verify_report_says_what_ran_and_what_it_decided() {
+    let commands = vec!["cargo fmt --all --check".to_string(), "cargo test --workspace".to_string()];
+    let pass = verify(LocalVerifyState::Passed, 0);
+    let body = verify_report("acme/api", "abc123", &pass, &commands, None);
+    assert!(body.contains("GitHub Actions is blocked for acme/api"), "{body}");
+    assert!(body.contains("`verify_locally_when_ci_blocked`"), "{body}");
+    assert!(
+        body.contains("- `cargo fmt --all --check`: pass") && body.contains("- `cargo test --workspace`: pass"),
+        "{body}"
+    );
+    assert!(
+        body.contains("Local verification: passed.") && body.contains("Head `abc123`."),
+        "{body}"
+    );
+
+    let failed = LocalVerify {
+        state: LocalVerifyState::Failed,
+        summary: "`cargo test --workspace` failed in a build VM; a new commit runs the gates again".into(),
+        ..pass.clone()
+    };
+    let body = verify_report("acme/api", "abc123", &failed, &commands, Some("cargo test --workspace"));
+    assert!(body.contains("- `cargo fmt --all --check`: pass"), "{body}");
+    assert!(body.contains("- `cargo test --workspace`: fail"), "{body}");
+    assert!(body.contains("Local verification: failed —"), "{body}");
+    assert!(body.contains("a new commit runs the gates again"), "{body}");
+
+    // Without declared gates there is nothing to list: the note says what to add.
+    let gates = LocalVerify {
+        state: LocalVerifyState::Failed,
+        summary: "acme/api declares no `.colonizer/merge.toml` merge gates; add them to opt in".into(),
+        ..pass
+    };
+    let body = verify_report("acme/api", "abc123", &gates, &[], None);
+    assert!(
+        body.contains("declares no `.colonizer/merge.toml` merge gates; add them to opt in"),
+        "{body}"
+    );
+    assert!(!body.contains(": pass"), "{body}");
 }
 
 // --- Reading GitHub ---------------------------------------------------------------------------
