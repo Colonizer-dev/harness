@@ -1490,6 +1490,11 @@ pub(crate) mod tests {
             "the VM-written out/pr.md, and finding-body.md handed to `gh --body-file` by path",
         ),
         (
+            "findings_queue.rs",
+            3,
+            "the findings queue is host-side bookkeeping under out/, read and rewritten in place",
+        ),
+        (
             "fleet_export.rs",
             2,
             "`colonizer fleet export` runs with no mothership and reads the local working copy",

@@ -761,6 +761,7 @@ export function Cockpit({
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
             quotaCards={status?.quota_cards ?? []}
+            findingsCards={status?.findings_cards ?? []}
             onQuotaAction={(provider, body) =>
               runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
             }
