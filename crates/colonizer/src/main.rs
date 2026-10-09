@@ -123,6 +123,7 @@ mod provider_quota;
 mod providers;
 mod public_feed;
 mod publish;
+mod publish_checks;
 mod push;
 mod push_access;
 mod push_guard;
