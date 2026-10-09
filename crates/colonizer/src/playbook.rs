@@ -465,6 +465,20 @@ pub fn is_security_hold(attention: Option<&Value>) -> bool {
             .any(|word| reason.contains(word))
 }
 
+/// The failing provider behind a colony's quota flag or turn-error hold, and a healthy fallback
+/// model for it (issue #1192): the `provider_unavailable` row's own match, read without a table
+/// entry, so the operator's `switch_model` offers exactly the switch the playbook would make and
+/// never a model of the asking model's choosing. `None` when nothing is failing, or the fallback
+/// is missing, unknown or itself out of quota.
+pub(crate) async fn fallback_switch_target(app: &Shared, s: &Session) -> Option<(String, String)> {
+    let entry = defaults().into_iter().find(|e| e.signature == "provider_unavailable")?;
+    let providers = app.providers();
+    let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
+    let provider = failing_provider(&entry, s, &ids)?;
+    let model = healthy_fallback(&provider, &providers, &|p| app.gateway.is_quota_exhausted(p))?;
+    Some((provider, model))
+}
+
 /// What the table says to do about a signature that matched now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -708,9 +722,13 @@ pub(crate) async fn tick_idle(app: &Shared, s: &Session, rt: &Arc<Runtime>, now:
 }
 
 /// Where a stall nobody matched goes (issue #1192): the watchdog calls this when it is about to
-/// send its generic nudge and no playbook row claimed the colony. Today it does nothing, so the
-/// generic nudge and the flag run as they always have; the operator agent plugs in here.
-pub(crate) async fn on_unmatched_stall(_app: &Shared, _session: &Session) {}
+/// send its generic nudge and no playbook row claimed the colony, and again when it raises the
+/// final `nudges_exhausted` flag. The operator turn (operator.rs) decides what such a stall needs,
+/// behind its own guardrails; with no judge model configured it does nothing and the nudge and the
+/// flag run as they always have.
+pub(crate) async fn on_unmatched_stall(app: &Shared, session: &Session) {
+    crate::operator::on_stall(app, session).await;
+}
 
 async fn perform(app: &Shared, s: &Session, rt: &Arc<Runtime>, entry: &Entry, attempt: u32) {
     match entry.action {
@@ -760,7 +778,8 @@ async fn perform(app: &Shared, s: &Session, rt: &Arc<Runtime>, entry: &Entry, at
 /// Publishes a colony whose verification confirmed its claim, the way autopilot's own confirmed
 /// verdict does: the host verifier approves, bound to the tree it would commit now. Refuses when
 /// the tree is no longer the one that was verified, or the kill-switch or GitHub's breaker is up.
-async fn publish_verified(app: &Shared, s: &Session) -> Result<(), String> {
+/// The operator's `publish` (issue #1192) goes through here too, so its guards cannot drift.
+pub(crate) async fn publish_verified(app: &Shared, s: &Session) -> Result<(), String> {
     if crate::authority::external_writes_blocked() {
         return Err("external writes are blocked".into());
     }
