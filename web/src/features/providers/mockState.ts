@@ -60,8 +60,10 @@ export function installProvidersMockState(ms: MockState): void {
       usage: { requests: 4_210, failures: 31, fallbacks: 0, duration_ms: 9_683_000, since: "2026-09-02T09:00:00Z", last_request_at: ago(3) },
       health: { failure_pct: 0.7, avg_latency_ms: 2_300, rated: true, degraded: false },
       used_by: ["subagent_model", "model_low"],
-      // The endpoint lists more than the two enabled (issue #1167).
+      // The endpoint lists more than the two enabled (issue #1167); one of them is new since the last look.
       discovered_models: ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-lite", "deepseek-reasoner", "deepseek-coder-v3"],
+      new_models: ["deepseek-coder-v3"],
+      discovered_at: ago(90),
     },
     {
       id: "byteplus",

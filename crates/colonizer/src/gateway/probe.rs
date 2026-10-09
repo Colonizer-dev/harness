@@ -60,7 +60,12 @@ pub async fn probe(app: &App, provider: &Provider) -> Value {
     health
 }
 
-/// The reachability half of [`probe`].
+/// The reachability half of [`probe`], and the recording half of model discovery (issue #1167):
+/// every caller's fresh probe flows through here, so a real answer is recorded at the one place
+/// the parsed `data` list is in hand. Only a real answer records — a parsed list, or the
+/// published-nothing 404 below as an empty list; a refused (401), throttled (429) or failed (5xx)
+/// status, a 200 whose body carries no list, and every unreachable probe leave the stored entry
+/// alone, so a blip never wipes it.
 async fn models_probe(app: &App, provider: &Provider) -> Value {
     let started = Instant::now();
     let mut request = app
@@ -76,13 +81,19 @@ async fn models_probe(app: &App, provider: &Provider) -> Value {
         Ok(response) => {
             let status = response.status().as_u16();
             let body: Value = response.json().await.unwrap_or(Value::Null);
-            let models: Vec<Value> = body["data"]
+            let models: Vec<String> = body["data"]
                 .as_array()
-                .map(|data| data.iter().filter_map(|m| m["id"].as_str()).map(|id| json!(id)).collect())
+                .map(|data| data.iter().filter_map(|m| m["id"].as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             // An Anthropic-compatible endpoint need not serve /v1/models (Alibaba's /apps/anthropic
             // doesn't): a 404 there means reachable with no published list, not a broken provider.
             let note = (provider.wire == crate::providers::Wire::Anthropic && status == 404).then_some("no model list");
+            // A save's spawned probe can still be in flight when a concurrent delete has dropped the
+            // provider and its entry; recording only a provider still on file keeps that late answer
+            // from re-inserting an orphan.
+            if (body["data"].is_array() || note.is_some()) && app.providers().iter().any(|p| p.id == provider.id) {
+                app.provider_models.record(provider, &models);
+            }
             json!({
                 "reachable": true,
                 "status": status,
@@ -307,6 +318,8 @@ pub async fn provider_test(State(app): State<Shared>, Path(id): Path<String>) ->
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
 pub(crate) fn start_tasks(app: &crate::Shared) {
     tokio::spawn(flush_loop(app.clone()));
+    // The daily model-list sweep (issue #1167) keeps its own cadence; see `discover::refresh_loop`.
+    tokio::spawn(discover::refresh_loop(app.clone()));
 }
 
 /// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,

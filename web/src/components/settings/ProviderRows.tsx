@@ -16,7 +16,7 @@ import { BalanceChart } from "./BalanceChart";
 import { KeyBadge } from "./ProviderForm";
 import { HealthStatus, type HealthView } from "./HealthStatus";
 import { WIRE_LABEL, limitLabels } from "./providerCatalog";
-import { claudePlanText, dailySeries, gaugeOf, modelsSummary, providerStatus, resetText, resetUnixOf, type StatusTone } from "./providerOverview";
+import { claudePlanText, dailySeries, gaugeOf, modelsSummary, offeredModels, providerStatus, resetText, resetUnixOf, type StatusTone } from "./providerOverview";
 
 const DOT: Record<StatusTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", idle: "bg-faint" };
 const FILL: Record<StatusTone, string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", idle: "bg-faint" };
@@ -294,7 +294,7 @@ export function ProviderListRow({
   const running = provider.in_flight ?? 0;
   const queued = provider.queued ?? 0;
   const usedBy = provider.used_by ?? [];
-  const extra = (provider.discovered_models ?? []).filter((m) => !provider.models.includes(m));
+  const extra = offeredModels(provider).filter((m) => !provider.models.includes(m));
   return (
     <Shell
       id={provider.id}
