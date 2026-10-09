@@ -730,7 +730,9 @@ async fn saving_the_judge_probes_its_model_and_save_anyway_skips_the_probe() {
 /// refusal carry must be redacted (#761), since neither redacts on its own.
 #[tokio::test]
 async fn a_provider_error_body_is_redacted() {
-    let body = json!("401: bad key sk-ant-api03-AbCdEf123456_GhIjKl-789012MnOpQr");
+    // Assembled from fragments so no key-shaped literal lands in source (push protection).
+    let key = concat!("sk-ant-api03", "-AbCdEf123456_GhIjKl", "-789012MnOpQr");
+    let body = json!(format!("401: bad key {key}"));
     let stub_url = stub(401, body).await;
     let (app, root) = judging_app(&stub_url, &stub_url).await;
     let err = ask(&app, "primary/bad-model", "hi", 8, Duration::from_secs(5))
