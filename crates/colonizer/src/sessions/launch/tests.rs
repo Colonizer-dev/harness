@@ -1384,3 +1384,92 @@ async fn a_caller_reference_is_trimmed_and_kept() {
     assert_eq!(plain.idempotency_key, None);
     let _ = std::fs::remove_dir_all(root);
 }
+
+// -- the push-access refusal (issue #1134) ---------------------------------------------------
+
+/// A fake `gh` that answers `GET /user` with `login` and `GET /repos/<repo>` with a `permissions`
+/// block, the way GitHub reports an identity's right to write to a repository.
+///
+/// The app is given a GitHub token of its own first, so the identity the push-access cache is
+/// keyed on is this test's and no other launch test's answer can be served from it.
+fn fake_github_with_push_access(app: &Shared, root: &std::path::Path, repo: &str, login: &str, push: bool) -> impl Drop + use<> {
+    crate::util::write_secret(&app.github_token_file(), &format!("token-{login}-{}", short_id())).unwrap();
+    let dir = root.join("fake-gh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("gh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+             *repos/{repo}*)\n\
+               printf 'HTTP/2.0 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{{\"id\":1,\"full_name\":\"{repo}\",\"permissions\":{{\"admin\":false,\"push\":{push},\"pull\":true}}}}'\n\
+               ;;\n\
+             *)\n\
+               printf '{{\"login\":\"{login}\",\"id\":42}}'\n\
+               ;;\n\
+             esac\n"
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::github_breaker::test_fake_gh(script)
+}
+
+/// A colony launched by an account that cannot push would clone, edit, commit and review for hours
+/// and then lose all of it to a 403 at the push (issue #1134). The launch refuses instead — and it
+/// refuses with nothing created: no worktree, no microVM, no claim.
+#[tokio::test]
+async fn a_launch_is_refused_when_this_mothership_cannot_push_to_the_repository() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+    let _gh = fake_github_with_push_access(&app, &root, "acme/app", "EarthCollectivExchange", false);
+
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/app", None, false),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+    let message = err.1.to_string();
+    assert!(
+        message.contains("EarthCollectivExchange") && message.contains("acme/app"),
+        "the refusal names who cannot push and where: {message}"
+    );
+    assert!(
+        app.sessions.read().await.is_empty(),
+        "the colony was refused before anything was created"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The same launch, on an account that can push, is untouched: the check refuses a broken launch,
+/// it does not stand in front of a working one. A different repository as well as a different
+/// account, because the answer is cached per `(identity, repository)` and these two tests ask
+/// opposite questions of GitHub.
+#[tokio::test]
+async fn a_launch_proceeds_when_this_mothership_can_push_to_the_repository() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+    let _gh = fake_github_with_push_access(&app, &root, "acme/writable", "octo", true);
+
+    let created = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        stack_request("acme/writable", None, false),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create refused a colony that could push: {:#}", e.1));
+    assert_eq!(created.repo, "acme/writable");
+    assert_eq!(
+        app.sessions.read().await.len(),
+        1,
+        "the colony exists; its boot is a spawned task the one-thread runtime drops before polling"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -665,6 +665,42 @@ closes, the queue moves on its next tick, and the held publishes go out one at a
 first. Reconnecting GitHub with another token is a new identity, so the breaker closes at once.
 The breaker lives in memory: after a restart, the first refused call opens it again.
 
+### A mothership that cannot push is refused before it launches
+
+Not every refusal is a temporary one. A mothership whose GitHub identity has no write access to a
+repository can read everything and sign every request, and nothing GitHub says up front tells it so:
+it used to launch the colony, let it work for hours, and lose all of it at `git push` with a 403.
+So `sessions::create` — the one in-process entry point behind `POST /api/sessions`, the queue, loops,
+the decisions-inbox redo, burn-down and the merge loop — asks GitHub `GET /repos/{owner}/{repo}` for
+the signed-in identity's `permissions.push` first, and refuses the launch with a 403 when it is
+false: "this mothership signs in to GitHub as `<login>`, which can't push to `<repo>`; launch it on
+a mothership that can, or give `<login>` write access". No microVM is booted, no worktree is made,
+and the refusal names the two things that would fix it.
+
+Two deliberate limits. The answer is cached per (GitHub identity, repo) for ten minutes, so a burst
+of launches into one repository costs one call rather than one per colony — and a permission granted
+or revoked mid-window is picked up within ten minutes, which is nothing against a launch that takes
+hours anyway. And a lookup that fails *for its own reasons* — the breaker open above, the network
+down, a rate limit — is not a refusal. The check is best effort in that direction on purpose: it is
+far better to launch a colony that may fail at push than to refuse one because the answer could not
+be fetched. Only a definite `false` refuses.
+
+### A push the identity may not make parks the colony, not fails it
+
+The preflight above cannot cover everything: permission can be revoked while a colony runs, a
+credential can expire between the launch and the publish, and a colony launched before this check
+existed has already done its work. So when a publish fails because GitHub refused the identity's
+right to write — a 403, or a revoked or expired credential — the colony is **parked** with the park
+reason `no_push_access` instead of being marked `Failed`. `Parked` is neither live nor terminal: the
+branch stays in the local repository, the worktree is kept, and both **Resume** and **Retry
+publish** work once the host's GitHub account can push.
+
+The line is drawn at whose problem the failure is. A conflict, a rejected secret or a missing branch
+still fails the colony as before, because those are the colony's own to fix and nothing outside it
+will fix them. A refusal of the *identity's* right to write is the host's to fix — a permission to
+grant, an account to move — and failing a colony with a finished, correct branch behind it throws
+away hours over a settings page. Parking keeps every one of those hours, and the retry is a button.
+
 ## Budgets and plan balance
 
 Two Sandbox settings cap what one colony may spend. Both default to `0`, which means unlimited.

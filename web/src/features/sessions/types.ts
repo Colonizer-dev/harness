@@ -29,6 +29,8 @@ export type AttentionReason =
   | "idle_timeout"
   /** Parked because the repo's daily PR cap was reached (issue #910); the worktree is kept and the colony resumes at the next UTC day. */
   | "repo_pr_rate_limit"
+  /** Parked because the host's GitHub account may not write to the repo (issue #1134): the work is saved and Retry publish goes out once that account can push. */
+  | "no_push_access"
   | "model_error"
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
   | "control_defeat"
