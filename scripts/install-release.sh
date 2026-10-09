@@ -140,13 +140,25 @@ main() {
   restore_app
   rm -rf "$app.new" "$app.old"
 
-  # Unpack beside the app that is running, into whichever of the two slots it is not using.
+  # Unpack beside the app that is running, into the first slot nothing runs from: the other of the
+  # usual two, or — when colonies still run msb out of the spare one (issue #1162) — the next one
+  # over, so a long-lived colony cannot hold an update hostage. The mothership's start sweep takes
+  # away any slot nothing references, so the letters do not accumulate.
   previous=$(readlink "$app" || true)
-  slot=$name-a
-  [ "$previous" != "$name-a" ] || slot=$name-b
-  inuse=$(slot_pids "$dir/$slot")
-  [ -z "$inuse" ] ||
-    fail "$dir/$slot is in use by pid(s) $inuse; restart colonizer (or wait for 'colonizer update') then install again"
+  slot=
+  busy=
+  for letter in a b c d e f g h i j k l m n o p q r s t u v w x y z; do
+    [ "$name-$letter" != "$previous" ] || continue
+    inuse=$(slot_pids "$dir/$name-$letter")
+    if [ -n "$inuse" ]; then
+      busy="$busy $name-$letter:$inuse"
+      continue
+    fi
+    slot=$name-$letter
+    break
+  done
+  [ -n "$slot" ] ||
+    fail "every app slot is in use by a pid ($busy ); restart colonizer (or wait for 'colonizer update') then install again"
   rm -rf "${dir:?}/$slot"
   mv "$tmp/unpack/colonizer" "$dir/$slot"
 
@@ -205,10 +217,10 @@ main() {
   # except that a slot a process is still running from is never removed either:
   # the mothership's own sweep knows when colonies have let go of it.
   if [ "${COLONIZER_KEEP_PREVIOUS:-0}" = 1 ]; then
-    case "$previous" in "$name-a" | "$name-b") say "keeping the previous version at $dir/$previous" ;; esac
+    case "$previous" in "$name-"[a-z]) say "keeping the previous version at $dir/$previous" ;; esac
   else
     case "$previous" in
-      "$name-a" | "$name-b")
+      "$name-"[a-z])
         prev_inuse=$(slot_pids "$dir/$previous")
         if [ -n "$prev_inuse" ]; then
           say "keeping the previous version at $dir/$previous: pid(s) $prev_inuse still run from it (swept on the next start)"
