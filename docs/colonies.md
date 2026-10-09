@@ -450,12 +450,15 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   `writes-outside-repo` now asks only for a write to a host-backed path outside the repository: a
   write to `/root`, `/usr`, a `CARGO_TARGET_DIR` such as `/root/colonizer-target`, or the rest of the
   microVM's own root filesystem — discarded with the VM — no longer asks, while a write to a host
-  mount outside the repository, such as `/harness/out` or the agent's transcript directory, still
-  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) asks too, and the card
+  mount outside the repository, such as the agent's transcript directory, still does — with one
+  carve-out: `/harness/out`, the colony's own output directory (`pr.md`, the verify logs), never
+  counts as outside, since the harness itself tells the agent to write there (#1153). A write onto a
+  read-only host mount (`/colonizer`, `/opt/colonizer`) asks too, and the card
   says why; a write into the checkout's own `.git`, or a `git add`/`git commit`/`git stash`, is
   denied outright by the `git-read-only` rule (#1258). An org can restore the older, stricter
   behaviour — any absolute write outside the repository asks, the microVM's root filesystem
-  included — with a policy rule whose predicate is `"writes_outside": "strict"`. The `secret-paths`
+  included — with a policy rule whose predicate is `"writes_outside": "strict"`; the output dir is
+  carved out of that too. The `secret-paths`
   and `script-egress` denies are unchanged.
 
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
@@ -803,6 +806,20 @@ owning most of the changed files — and whether it would have caught the failur
 that check first and stops at its failure. `off` records nothing. A confirmed verdict always needs
 every check to pass.
 
+**Before publishing.** When autopilot is about to open the pull request, the repository's own fast
+checks run first, each in a fresh checkout like the rest: what the [merge train's local
+checks](loops/merge-train.md#when-github-ci-cannot-run) detect — `cargo fmt --check`, `clippy -D
+warnings`, a package's `typecheck` and `lint` — plus any `scripts/ci/check-*.sh` a
+`.github/workflows` file actually runs. Tests are the claim checks' job above, and builds and e2e
+runs are left to CI. The repository steers the pass from its **base branch's**
+`.colonizer/checks.toml` (never the colony's branch, so a colony cannot weaken its own gate):
+`pre_publish = ["cargo fmt --all --check", …]` lists exactly what runs, and `pre_publish = []`
+switches the pass off. A check that fails the way the base branch fails too is not the colony's:
+the pull request still opens, as a **draft** naming the failing checks. A check the base passes is
+the change's own: the colony gets its normal fix rounds, and nothing publishes until the checks
+are green. What ran is recorded in the pull request body — "Checks run before publishing: fmt ✓,
+clippy ✓ …".
+
 **Limits.** If the colony image lacks the tool a check needs, that check is unverifiable — every
 image carries a small toolbox and a repository can add its own with a `.colonizer/setup.sh` hook
 (see [Tools in the colony image and the setup hook](#tools-in-the-colony-image-and-the-setup-hook)).
@@ -818,12 +835,11 @@ The watchdog used to send a generic "no progress" nudge, and a person (or an out
 `harness.jsonl`) did the rest: recognise a known stall, send the colony the exact fix, publish,
 switch model. The playbook is that step done by the mothership. It is a table of **signature,
 action, tries**; each fix is logged as `auto-fixed: <signature>` in the colony's `harness.jsonl`,
-listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: pr_md_write").
+listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: toolchain_installer").
 
 | Signature | Matches | Action | Tries |
 |---|---|---|---|
 | `placeholder_dotfiles` | a `secret-paths` denial whose target is a harness placeholder (`.env`, `.netrc`, ...) in the worktree and names no real credential path | message: the placeholders are harness mounts, leave them, continue the issue | 1 |
-| `pr_md_write` | a `writes-outside-repo` denial on `/harness/out/pr.md` | message: write `pr.md` with the file tool | 1 |
 | `toolchain_installer` | a `script-egress` denial on a toolchain installer (rustup, swift, ghcup, ...) | message: no toolchains, say in `pr.md` what was not compiled | 1 |
 | `git_read_only_ask` | an `exec_policy` question whose subject is a git write — the runner's `.git internals` reason, or a `git add`/`git commit`/`git stash` command in the ask | `answer_deny`: the question is answered Deny with the `.git`-is-read-only explanation | 1 |
 | `provider_unavailable` | a turn-error hold on `unrecognized_model`, or a provider quota flag, where the provider's `fallback_model` is a `<provider>/<model>` on a configured provider that is not itself out of quota | `switch_fallback_and_resume` | 2 |

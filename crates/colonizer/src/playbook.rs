@@ -8,7 +8,6 @@
 //! | Signature | Trigger | Action |
 //! |---|---|---|
 //! | `placeholder_dotfiles` | `secret-paths` denial naming only a harness placeholder | message |
-//! | `pr_md_write` | `writes-outside-repo` denial on `/harness/out/pr.md` | message |
 //! | `toolchain_installer` | `script-egress` denial on a toolchain installer | message |
 //! | `git_read_only_ask` | an `exec_policy` ask whose subject is a git write | answer Deny |
 //! | `provider_unavailable` | `unrecognized_model` hold, or a quota flag, with a healthy fallback | switch and resume |
@@ -176,8 +175,6 @@ struct File {
 const PLACEHOLDER_MESSAGE: &str = "Playbook: the empty `.env`-style files in your worktree are placeholders the harness \
     mounts on purpose, so the real secrets stay out of reach. Leave them alone (do not read, write or delete them) and \
     continue with the issue.";
-const PR_MD_MESSAGE: &str = "Playbook: writing /harness/out/pr.md through the shell was refused. Write that file with \
-    your file-write tool instead (not a redirect, cp or tee), then continue.";
 const TOOLCHAIN_MESSAGE: &str = "Playbook: installing a toolchain (rustup, swift and the like) is refused here and will \
     stay refused. Do not install toolchains. Finish what you can without them, and say in /harness/out/pr.md which \
     checks you could not compile or run.";
@@ -242,15 +239,6 @@ pub fn defaults() -> Vec<Entry> {
                     "~/",
                     "$home",
                 ]),
-                ..Matcher::default()
-            },
-        ),
-        denial(
-            "pr_md_write",
-            "writes-outside-repo",
-            PR_MD_MESSAGE,
-            Matcher {
-                text_any: strings(&["/harness/out/pr.md"]),
                 ..Matcher::default()
             },
         ),

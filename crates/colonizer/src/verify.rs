@@ -29,7 +29,7 @@
 //! are shown with the verdict and in the published pull request, and never change the verdict.
 
 use crate::{
-    App, Shared,
+    App, Shared, publish_checks,
     sessions::Session,
     util::{exec_within, short_id},
 };
@@ -81,6 +81,14 @@ pub struct Verification {
     /// predates the change, so it is not attributed to it. Never changes the verdict to a hold.
     #[serde(default)]
     pub inconclusive: Vec<String>,
+    /// The repository's own fast checks that ran green before the pull request was published
+    /// (issue #1055), by short name — `fmt`, `clippy`, `check-exec-bits`.
+    #[serde(default)]
+    pub pre_publish_ok: Vec<String>,
+    /// The fast checks that fail on the base branch as well: not the colony's to fix, but a pull
+    /// request that would open red opens as a draft instead, naming these.
+    #[serde(default)]
+    pub pre_publish_red: Vec<String>,
     /// Why the checks never got to run, when the network is why and the retries ran out (issue
     /// #1117): "rustup toolchain download, connection reset". Set only on an unverifiable verdict,
     /// and autopilot then holds the colony with this cause on its card instead of publishing.
@@ -133,6 +141,8 @@ impl Verification {
             contradictions: Vec::new(),
             advisories: Vec::new(),
             inconclusive: Vec::new(),
+            pre_publish_ok: Vec::new(),
+            pre_publish_red: Vec::new(),
             network: None,
             command: None,
             command_source: None,
@@ -218,8 +228,8 @@ static YARN_BERRY: Needs = needs(
 );
 /// Runs the exact pnpm or yarn a `packageManager` field pins, downloading it on first use.
 static COREPACK: Needs = needs("corepack", "command -v corepack >/dev/null 2>&1");
-static CARGO: Needs = needs("cargo", "command -v cargo >/dev/null 2>&1");
-static MAKE: Needs = needs("make", "command -v make >/dev/null 2>&1");
+pub(crate) static CARGO: Needs = needs("cargo", "command -v cargo >/dev/null 2>&1");
+pub(crate) static MAKE: Needs = needs("make", "command -v make >/dev/null 2>&1");
 
 /// The command a repository declares for its tests, where it came from, and what it needs.
 #[derive(Debug, PartialEq, Eq)]
@@ -631,19 +641,42 @@ fn names_a_changed_file(claim: &str, changed: &[String]) -> bool {
     })
 }
 
-/// The published pull request's verification notes: the inconclusive checks and the advisories,
-/// when there are any, as a quoted block a reviewer reads before merging. `None` when there is
-/// nothing to note.
+/// The published pull request's verification notes: the inconclusive checks, the advisories, and
+/// the pre-publish checks (issue #1055), as a quoted block a reviewer reads before merging.
+/// `None` when there is nothing to note.
 pub(crate) fn pr_notes(verification: Option<&Verification>) -> Option<String> {
-    let v = verification.filter(|v| !v.advisories.is_empty() || !v.inconclusive.is_empty())?;
-    let mut out = String::from("> **Verification notes** (advisory; they did not change the verdict):");
-    for note in &v.inconclusive {
-        out.push_str(&format!(
-            "\n> - Verification was inconclusive: {note}, so the failure is not attributed to this change."
-        ));
+    let v = verification.filter(|v| {
+        !v.advisories.is_empty() || !v.inconclusive.is_empty() || !v.pre_publish_ok.is_empty() || !v.pre_publish_red.is_empty()
+    })?;
+    let mut out = String::new();
+    if !v.inconclusive.is_empty() || !v.advisories.is_empty() {
+        out.push_str("> **Verification notes** (advisory; they did not change the verdict):");
+        for note in &v.inconclusive {
+            out.push_str(&format!(
+                "\n> - Verification was inconclusive: {note}, so the failure is not attributed to this change."
+            ));
+        }
+        for note in &v.advisories {
+            out.push_str(&format!("\n> - {note}"));
+        }
     }
-    for note in &v.advisories {
-        out.push_str(&format!("\n> - {note}"));
+    if !v.pre_publish_ok.is_empty() || !v.pre_publish_red.is_empty() {
+        let mut checked: Vec<String> = v.pre_publish_ok.iter().map(|n| format!("{n} ✓")).collect();
+        checked.extend(v.pre_publish_red.iter().map(|n| format!("{n} ✗")));
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "> **Checks run before publishing:** {} (tests, build and e2e are left to CI)",
+            checked.join(", ")
+        ));
+        if !v.pre_publish_red.is_empty() {
+            out.push_str(&format!(
+                "\n> - {} {} on the base branch as well, so the pull request opens as a draft.",
+                v.pre_publish_red.join(", "),
+                if v.pre_publish_red.len() == 1 { "fails" } else { "fail" }
+            ));
+        }
     }
     Some(out)
 }
@@ -750,8 +783,10 @@ async fn clean_up(dirs: &[&Path]) {
 
 /// Runs the verification for one completion claim and answers the record. Every failure is part
 /// of the verdict: git that cannot be read, a missing command or broken infra make the claim
-/// unverifiable with the reason; only real disagreements contradict it.
-async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Duration]) -> Verification {
+/// unverifiable with the reason; only real disagreements contradict it. `pre_publish` marks the
+/// autopilot path that would publish a confirmed claim: the repository's own fast checks then run
+/// as a pass after the claim loop (issue #1055).
+async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Duration], pre_publish: bool) -> Verification {
     let started = Instant::now();
     let mut record = Verification::blank();
     macro_rules! unverifiable {
@@ -1040,6 +1075,96 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
         Verdict::Inconclusive => format!("inconclusive: {}", record.inconclusive.join("; ")),
         Verdict::Unverifiable => "the tests could not be judged".into(),
     });
+    // Issue #1055: the repository's own fast checks, a separate pass after the claim loop — never
+    // on the check list above, which verify_focus would reorder — and only when the autopilot path
+    // got this far with a claim the checks confirmed. Every input is read from the base ref, never
+    // the colony's branch. A check failing the way the base fails too leaves the verdict green
+    // enough to publish, as a draft; a failure of the change's own contradicts, for the fix loop.
+    if pre_publish && record.verdict == Verdict::Confirmed {
+        let base_files = dir_files(&tree, "");
+        let mut scripts: Vec<String> = tree
+            .files
+            .iter()
+            .filter(|p| publish_checks::is_ci_check_script(p))
+            .cloned()
+            .collect();
+        scripts.sort();
+        let mut workflows: Vec<String> = tree
+            .files
+            .iter()
+            .filter(|p| publish_checks::is_workflow_path(p))
+            .cloned()
+            .collect();
+        workflows.sort();
+        workflows.truncate(publish_checks::WORKFLOW_READS);
+        let mut texts = Vec::new();
+        for workflow in &workflows {
+            if let Some(text) = file_at(app, admin, &cwd, &base_ref, workflow).await {
+                texts.push(text);
+            }
+        }
+        let checks_toml = file_at(app, admin, &cwd, &base_ref, publish_checks::CHECKS_TOML).await;
+        if let Some(text) = checks_toml.as_deref()
+            && let Err(why) = publish_checks::parse_checks_toml(text)
+        {
+            app.session_log(
+                &s.id,
+                "warn",
+                format!(
+                    "verification: {} does not parse ({why}); the pre-publish checks are the detected ones",
+                    publish_checks::CHECKS_TOML
+                ),
+            )
+            .await;
+        }
+        let merge_toml = file_at(app, admin, &cwd, &base_ref, crate::merge_loop::local_checks::MERGE_TOML).await;
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let commands = publish_checks::select(checks_toml.as_deref(), merge_toml.as_deref(), &base_files, &scripts, &texts);
+        let checks = publish_checks::as_checks(&commands, &base_files);
+        let outcome = publish_checks::run(
+            app,
+            s,
+            admin,
+            &cwd,
+            &snapshot,
+            &merge_base,
+            &checks,
+            runner,
+            delays,
+            &mut record,
+        )
+        .await;
+        match outcome {
+            publish_checks::PrePublish::Green(ok) => record.pre_publish_ok = ok,
+            publish_checks::PrePublish::Red(red) => {
+                record.pre_publish_red = red;
+                record.verdict = decide(&record.contradictions, !record.inconclusive.is_empty(), Some(true));
+                record.summary = format!("inconclusive: {}", record.inconclusive.join("; "));
+            }
+            publish_checks::PrePublish::Contradicted => {
+                record.verdict = Verdict::Contradicted;
+                record.summary = format!(
+                    "contradicted: {}{}",
+                    record.contradictions[0],
+                    match record.contradictions.len() {
+                        1 => String::new(),
+                        more => format!(" (and {} more)", more - 1),
+                    }
+                );
+            }
+            publish_checks::PrePublish::Infra(why) => {
+                record.verdict = Verdict::Unverifiable;
+                record.summary = why;
+            }
+            publish_checks::PrePublish::Network => {
+                record.verdict = Verdict::Unverifiable;
+                record.summary = format!(
+                    "verification could not run (network: {})",
+                    record.network.clone().unwrap_or_default()
+                );
+            }
+        }
+    }
     let record = record.finished(started);
     if focus != crate::verify_focus::Mode::Off && !runs.is_empty() {
         crate::verify_focus::record(app, &s.id, focus, &candidates, chosen, &runs, record.verdict, record.ms).await;
@@ -1056,7 +1181,7 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
 /// What one fresh-checkout run said — the same reading for the head and the base: the guest's own
 /// report decides, and everything but a green or red command is the image's or the sandbox's
 /// trouble, not the colony's.
-enum Outcome {
+pub(crate) enum Outcome {
     Green,
     Failed(i32),
     /// Exit 127 with the missing-tool marker: the package manager is not in the image.
@@ -1067,7 +1192,7 @@ enum Outcome {
     Sandbox(i32),
 }
 
-fn classify(ran: &Ran) -> Outcome {
+pub(crate) fn classify(ran: &Ran) -> Outcome {
     match ran.reported {
         None => Outcome::NoReport,
         Some(127) if ran.missing_tool => Outcome::MissingTool,
@@ -1080,7 +1205,7 @@ fn classify(ran: &Ran) -> Outcome {
 
 /// What the same check answered on the merge-base commit, separating a failure this change
 /// introduced from one it inherited.
-enum BaseOut {
+pub(crate) enum BaseOut {
     /// Green on the base: the failure is new, and contradicts the claim.
     Passes,
     /// Red on the base too, with the failing tests its output names (empty when it names none):
@@ -1098,7 +1223,7 @@ static BASE_RESULTS: LazyLock<Mutex<HashMap<String, BaseAnswer>>> = LazyLock::ne
 
 /// How a head failure compares with the base's, test by test (issue #1231).
 #[derive(Debug, PartialEq)]
-enum Compared {
+pub(crate) enum Compared {
     /// Tests that fail on the head and not on the base: the change's own, sent for a fix round.
     New { new: Vec<String>, shared: Vec<String> },
     /// Every test failing on the head fails on the base as well: preexisting.
@@ -1108,7 +1233,7 @@ enum Compared {
     Unnamed,
 }
 
-fn compare_failures(head: &[String], base: &[String]) -> Compared {
+pub(crate) fn compare_failures(head: &[String], base: &[String]) -> Compared {
     if head.is_empty() || base.is_empty() {
         return Compared::Unnamed;
     }
@@ -1130,7 +1255,7 @@ fn capped_names(names: &[String]) -> String {
 }
 
 /// What running one check came to once network failures were retried (issue #1117).
-enum Checked {
+pub(crate) enum Checked {
     /// The run reached an answer — green, red, or the image's or sandbox's trouble.
     Ran(Ran),
     /// Every attempt failed before the tests for the network; the cause, for the card.
@@ -1142,7 +1267,7 @@ enum Checked {
 /// after each of `delays`, so a blip never reads as failing tests (issue #1117). A real failure, and
 /// every other outcome, is answered at once.
 #[allow(clippy::too_many_arguments)]
-async fn run_check(
+pub(crate) async fn run_check(
     app: &App,
     s: &Session,
     admin: &Path,
@@ -1180,7 +1305,7 @@ async fn run_check(
 /// Runs one check on the merge-base's own fresh checkout (`git archive` of it), answering whether
 /// the head failure is the base's too. Never contradicts; at worst it could not be checked.
 #[allow(clippy::too_many_arguments)]
-async fn base_run(
+pub(crate) async fn base_run(
     app: &App,
     s: &Session,
     admin: &Path,
@@ -1247,7 +1372,7 @@ fn check_slug(check: &Check) -> String {
 
 /// The contradiction a failing head check earns, with its evidence: the failing tests the output
 /// names, and where the last lines of the run live (written to the session's `out` directory).
-async fn head_failure(cwd: &Path, check: &Check, code: i32, tail: Option<String>) -> String {
+pub(crate) async fn head_failure(cwd: &Path, check: &Check, code: i32, tail: Option<String>) -> String {
     let mut msg = format!("`{}` exited {code} in a fresh checkout", check.command);
     let Some(tail) = tail.filter(|t| !t.trim().is_empty()) else {
         return msg;
@@ -1271,7 +1396,7 @@ async fn head_failure(cwd: &Path, check: &Check, code: i32, tail: Option<String>
     msg
 }
 
-fn failure_of(check: &Check, tail: Option<String>) -> Failure {
+pub(crate) fn failure_of(check: &Check, tail: Option<String>) -> Failure {
     let tail = tail.unwrap_or_default();
     Failure {
         command: check.command.clone(),
@@ -1435,7 +1560,7 @@ fn failing_tests(output: &str) -> (Vec<String>, usize) {
 /// FAILED` lines and its closing `failures:` list, vitest/jest's `FAIL  file > suite` and
 /// `×`/`✕`/`✗` marks, and node --test's `✖` marks. A trailing duration (`12ms`, `(1.5ms)`) is
 /// dropped, so the same test reads the same on the head and the base.
-fn failing_test_names(output: &str) -> Vec<String> {
+pub(crate) fn failing_test_names(output: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut in_failures = false;
     for raw in strip_ansi(output).lines() {
@@ -1509,7 +1634,7 @@ async fn tail_lines(path: &Path, lines: usize) -> Option<String> {
 }
 
 /// What one fresh-checkout run answered.
-struct Ran {
+pub(crate) struct Ran {
     /// The sandbox's own exit code: corroboration only.
     sandbox: i32,
     /// The number the guest reported, the one the verdict trusts.
@@ -1517,7 +1642,7 @@ struct Ran {
     /// The guest found the tool the command needs missing, and ran nothing.
     missing_tool: bool,
     /// The last lines of the command's combined output, when it failed — the evidence.
-    tail: Option<String>,
+    pub(crate) tail: Option<String>,
     ms: u64,
 }
 
@@ -1723,7 +1848,10 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
     let _serial = rt.verify_lock.lock().await;
     let Some(s) = app.session(&id).await else { return };
     let runner = microsandbox_runner(app.cfg.msb.clone());
-    let verification = verify_claim(&app, &s, &runner, &crate::retry::VERIFY_RETRY_DELAYS).await;
+    // `gate_publish` is what makes this the path that may publish, so it is what buys the
+    // repository's pre-publish checks (issue #1055); a turn recorded without publishing pays for
+    // none of them.
+    let verification = verify_claim(&app, &s, &runner, &crate::retry::VERIFY_RETRY_DELAYS, gate_publish).await;
     let verdict = verification.verdict;
     let network = verification.network.clone().filter(|_| verdict == Verdict::Unverifiable);
     let detail = verification.contradictions.join("; ");
@@ -1936,6 +2064,176 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // Issue #1055: the repository's own fast checks, run before a publishing verification.
+    // -----------------------------------------------------------------------------------------
+
+    /// A Cargo repository whose base commit declares the package (so the pass detects `fmt` and
+    /// `clippy`, while `cargo test` stays with the claim checks) and whose colony branch carries
+    /// a change under `src/` — the claim, `true`, passes.
+    async fn prepublish_fixture(app: &crate::Shared) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("colonizer-prepublish-{}", short_id()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\nversion = \"0.0.0\"\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "declare cargo");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "-b", "colonizer/work"]);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/real.txt"), "on the branch\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "work");
+        let out = app.session_dir("abc").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("pr.md"), "did the work").unwrap();
+        app.update_session("abc", |x| {
+            x.worktree = repo.display().to_string();
+            x.git_admin_dir = Some(repo.join(".git").display().to_string());
+            x.base = Some("main".into());
+            x.branch = "colonizer/work".into();
+            x.verify = Some("true".into());
+        })
+        .await;
+        repo
+    }
+
+    /// Green for the claim's `true`; the cargo checks answer `head` on the head checkout (the only
+    /// one carrying `src/`) and `base` on the base's, with `output` as the failing run's evidence.
+    fn prepublish_runner(head: i32, base: i32, output: &'static str) -> VmRunner {
+        Arc::new(move |spec| {
+            Box::pin(async move {
+                let script = spec.command.iter().map(String::as_str).collect::<Vec<_>>().join(" ");
+                let report = spec
+                    .mounts
+                    .iter()
+                    .find(|m| m.target == "/colonizer-verify")
+                    .expect("the report mount")
+                    .source
+                    .clone();
+                if script.contains("cargo fmt") || script.contains("cargo clippy") {
+                    let workspace = spec
+                        .mounts
+                        .iter()
+                        .find(|m| m.target == "/workspace")
+                        .expect("the workspace mount")
+                        .source
+                        .clone();
+                    let on_head = tokio::fs::try_exists(workspace.join("src")).await.unwrap_or(false);
+                    let code = if on_head { head } else { base };
+                    if code != 0 {
+                        tokio::fs::write(report.join("output"), output).await?;
+                    }
+                    tokio::fs::write(report.join("exit"), code.to_string()).await?;
+                    return Ok(code);
+                }
+                tokio::fs::write(report.join("exit"), "0").await?;
+                Ok(0)
+            })
+        })
+    }
+
+    /// All green: the detected fast checks ran on the head and are named for the pull request.
+    #[tokio::test]
+    async fn a_publishing_verification_runs_the_repositorys_fast_checks_first() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        prepublish_fixture(&app).await;
+        let v = verify(&app, &prepublish_runner(0, 1, "")).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert_eq!(v.pre_publish_ok, vec!["fmt".to_string(), "clippy".to_string()]);
+        assert!(v.pre_publish_red.is_empty());
+        assert_eq!(
+            pr_notes(Some(&v)).as_deref(),
+            Some("> **Checks run before publishing:** fmt ✓, clippy ✓ (tests, build and e2e are left to CI)")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A fast check the base passes is the change's own: contradicted, its evidence in `failures`
+    /// for the bounded fix loop, nothing published.
+    #[tokio::test]
+    async fn a_fast_check_the_base_passes_contradicts_and_sends_a_fix_round() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        prepublish_fixture(&app).await;
+        let v = verify(&app, &prepublish_runner(1, 0, "Diff in src/lib.rs:1\n")).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert!(v.pre_publish_ok.is_empty() && v.pre_publish_red.is_empty(), "{v:?}");
+        assert_eq!(v.failures.len(), 1);
+        assert_eq!(v.failures[0].command, "cargo fmt --all --check");
+        assert!(
+            v.contradictions[0].starts_with("pre-publish check: `cargo fmt --all --check` exited 1 in a fresh checkout"),
+            "{:?}",
+            v.contradictions
+        );
+        assert_eq!(fix_step(&v, 0), FixStep::Send(1), "the fix loop takes it, bounded");
+        let message = fix_message(&v.failures, 1);
+        assert!(message.contains("`cargo fmt --all --check`"), "{message}");
+        assert!(message.contains("Diff in src/lib.rs:1"), "{message}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A fast check that fails on the base branch too is not the colony's: the verdict is
+    /// inconclusive, the pull request still opens — as a draft, with the failing checks named.
+    #[tokio::test]
+    async fn a_fast_check_the_base_fails_too_publishes_as_a_draft() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        prepublish_fixture(&app).await;
+        let v = verify(&app, &prepublish_runner(1, 1, "error: this check failed\n")).await;
+        assert_eq!(v.verdict, Verdict::Inconclusive, "{v:?}");
+        assert!(v.contradictions.is_empty() && v.failures.is_empty(), "{v:?}");
+        assert_eq!(v.pre_publish_red, vec!["fmt".to_string(), "clippy".to_string()]);
+        assert!(
+            v.inconclusive.iter().all(|n| n.contains("fails on the base commit as well")),
+            "{v:?}"
+        );
+        assert_eq!(
+            crate::events::verdict_step(&v.verdict),
+            crate::events::Autopilot::Publish,
+            "it still publishes — github.rs opens it as a draft"
+        );
+        let note = pr_notes(Some(&v)).unwrap();
+        assert!(
+            note.contains("> **Checks run before publishing:** fmt ✗, clippy ✗ (tests, build and e2e are left to CI)"),
+            "{note}"
+        );
+        assert!(
+            note.contains("> - fmt, clippy fail on the base branch as well, so the pull request opens as a draft."),
+            "{note}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Only the path that may publish pays for the pass: off it, no fast-check VM is ever booted.
+    #[tokio::test]
+    async fn the_pre_publish_pass_only_runs_from_the_publishing_path() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        prepublish_fixture(&app).await;
+        let runner: VmRunner = Arc::new(|spec| {
+            Box::pin(async move {
+                let script = spec.command.iter().map(String::as_str).collect::<Vec<_>>().join(" ");
+                assert!(
+                    !script.contains("cargo fmt") && !script.contains("cargo clippy"),
+                    "the pre-publish pass must not run outside the publish path: {script}"
+                );
+                let report = spec
+                    .mounts
+                    .iter()
+                    .find(|m| m.target == "/colonizer-verify")
+                    .expect("the report mount")
+                    .source
+                    .clone();
+                tokio::fs::write(report.join("exit"), "0").await?;
+                Ok(0)
+            })
+        });
+        let s = app.session("abc").await.expect("the colony exists");
+        let v = verify_claim(&app, &s, &runner, &[Duration::ZERO; 3], false).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert!(v.pre_publish_ok.is_empty() && v.pre_publish_red.is_empty(), "{v:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn the_verdict_never_confirms_without_a_green_run() {
         let contradiction = vec!["described `src/absent.rs` is not on the branch".to_string()];
@@ -1956,12 +2254,16 @@ pub(crate) mod tests {
         assert_eq!(event["type"], "verification");
         assert_eq!(event["advisories"], json!([]));
         assert_eq!(event["inconclusive"], json!([]));
-        assert_eq!(event.as_object().unwrap().len(), 16);
+        assert_eq!(event["pre_publish_ok"], json!([]));
+        assert_eq!(event["pre_publish_red"], json!([]));
+        assert_eq!(event.as_object().unwrap().len(), 18);
         // A record persisted before advisories or inconclusive checks existed still loads.
         let mut old = serde_json::to_value(Verification::blank()).unwrap();
         old.as_object_mut().unwrap().remove("advisories");
         old.as_object_mut().unwrap().remove("inconclusive");
         old.as_object_mut().unwrap().remove("network");
+        old.as_object_mut().unwrap().remove("pre_publish_ok");
+        old.as_object_mut().unwrap().remove("pre_publish_red");
         assert_eq!(serde_json::from_value::<Verification>(old).unwrap(), Verification::blank());
     }
 
@@ -2372,6 +2674,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// Issue #1055: the pre-publish checks are noted with their marks, green or red, and the red
+    /// ones say why the pull request opens as a draft.
+    #[test]
+    fn the_pull_request_notes_the_checks_that_ran_before_publishing() {
+        let mut v = Verification::blank();
+        v.pre_publish_ok = vec!["fmt".into(), "clippy".into(), "check-exec-bits".into()];
+        assert_eq!(
+            pr_notes(Some(&v)).as_deref(),
+            Some("> **Checks run before publishing:** fmt ✓, clippy ✓, check-exec-bits ✓ (tests, build and e2e are left to CI)")
+        );
+        v.pre_publish_ok = vec!["fmt".into(), "check-exec-bits".into()];
+        v.pre_publish_red = vec!["clippy".into()];
+        assert_eq!(
+            pr_notes(Some(&v)).as_deref(),
+            Some(
+                "> **Checks run before publishing:** fmt ✓, check-exec-bits ✓, clippy ✗ (tests, build and e2e are left to CI)\n\
+                 > - clippy fails on the base branch as well, so the pull request opens as a draft."
+            )
+        );
+        v.pre_publish_red = vec!["clippy".into(), "check-exec-bits".into()];
+        assert!(
+            pr_notes(Some(&v))
+                .unwrap()
+                .contains("> - clippy, check-exec-bits fail on the base branch as well, so the pull request opens as a draft.")
+        );
+        // Beside the verdict notes, the checks line follows them.
+        v.advisories = vec!["described `docs/a.md` is not on the branch".into()];
+        let note = pr_notes(Some(&v)).unwrap();
+        assert!(note.starts_with("> **Verification notes**"), "{note}");
+        assert!(note.contains("**Checks run before publishing:**"), "{note}");
+    }
+
     /// Runs `git` synchronously against a fixture repo — setup and inspection, not the code
     /// under test. The `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` a colony sandbox exports for
     /// its own worktree are dropped, so the fixture is the only repo git sees.
@@ -2440,7 +2774,7 @@ pub(crate) mod tests {
 
     async fn verify(app: &crate::Shared, runner: &VmRunner) -> Verification {
         let s = app.session("abc").await.expect("the colony exists");
-        verify_claim(app, &s, runner, &[Duration::ZERO; 3]).await
+        verify_claim(app, &s, runner, &[Duration::ZERO; 3], true).await
     }
 
     /// The heart of it: the snapshot captures the colony's uncommitted work, the agent's

@@ -144,6 +144,7 @@ interface FindingStage {
 
 /** The order a finding's stages read in; lines the ledger lacks are simply skipped. */
 const STAGE_ORDER: FindingRecord["state"][] = [
+  "queued",
   "validated",
   "filed",
   "fix_colony",
@@ -157,6 +158,7 @@ const STAGE_ORDER: FindingRecord["state"][] = [
 
 /** The chip a record line earns on its own; the fix colony and the verdict read off the fold. */
 const STAGE_LABEL: Record<FindingRecord["state"], string> = {
+  queued: "queued",
   validated: "validated",
   filed: "filed",
   fix_colony: "fix",
@@ -182,6 +184,7 @@ function trail(chain: FindingChain): FindingStage[] {
       tone = chain.verdict === "fail" ? "err" : "neutral";
     }
     if (state === "merged") tone = "ok";
+    if (state === "queued") tone = "warn";
     if (state === "blocked" || state === "duplicate" || state === "rejected") tone = "warn";
     if (state === "error") tone = "err";
     stages.push({ label, tone });

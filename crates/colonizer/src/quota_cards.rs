@@ -281,9 +281,13 @@ pub(crate) fn quota_notify_cards(
 }
 
 /// `GET /api/attention`: what needs the maintainer beyond a colony's own question. Today that is
-/// the provider-out-of-quota cards (issue #767).
+/// the provider-out-of-quota cards (issue #767) and the findings-off card (issue #1154) — findings
+/// waiting with no model to judge them ride the same answer, so the cockpit needs no second poll.
 pub async fn list(State(app): State<Shared>) -> Json<Value> {
-    Json(json!({ "quota_cards": cards(&app).await }))
+    Json(json!({
+        "quota_cards": cards(&app).await,
+        "findings_cards": crate::findings_queue::cards(&app).await,
+    }))
 }
 
 /// Whether a quota-parked colony is due back at `now_unix` (the resume scheduler, issue #767): the
