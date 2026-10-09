@@ -28,6 +28,7 @@ type FieldKey =
   | "auto_colonize"
   | "merge_method"
   | "delete_branch"
+  | "verify_locally_when_ci_blocked"
   | "budget_usd"
   | "host_disk"
   | "stack"
@@ -65,6 +66,7 @@ const FIELDS: FieldSpec[] = [
   { key: "auto_merge", group: "Pull requests", label: "Auto-merge", hint: "Let Colonizer merge this org's colonies' pull requests once every check is green and GitHub calls them clean. Green+rebase also brings a stale branch up to date, and resumes the colony when it conflicts. A failing check resumes the colony twice at most; a PR that never got to run is marked CI blocked", kind: "choice" },
   { key: "merge_method", group: "Pull requests", label: "Merge method", hint: "How the steward merges", kind: "choice" },
   { key: "delete_branch", group: "Pull requests", label: "Delete branch", hint: "Remove the branch after the merge; one another pull request is stacked on is always kept", kind: "boolean" },
+  { key: "verify_locally_when_ci_blocked", group: "Pull requests", label: "Verify locally when CI is blocked", hint: "While GitHub Actions is blocked (billing), run the repository's merge gates in a build VM and merge a pull request that passes, one at a time, with a report comment. Off unless set", kind: "boolean" },
   { key: "auto_colonize", group: "Colonies", label: "Auto-colonize", hint: "Start a colony on a new issue by itself, but only when an org member, a collaborator with write access or an allowlisted login wrote it and nobody outside the org edited it. Strangers' issues wait in review; an issue labelled no-colonize or needs-human is left to a person. Only issues filed after you turn it on are taken", kind: "choice" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
@@ -100,6 +102,7 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "auto_colonize":
     case "merge_method":
     case "delete_branch":
+    case "verify_locally_when_ci_blocked":
       return settings[key];
     case "budget_usd":
       return settings.budget_usd;
@@ -163,6 +166,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "merge_method":
       return "squash";
     case "delete_branch":
+      return false;
+    case "verify_locally_when_ci_blocked":
+      // Org-only: a billing block is never treated as green until the org opts in.
       return false;
     case "budget_usd":
       return setting("sandbox", "budget_usd");
@@ -320,6 +326,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     auto_colonize: pick("auto_colonize") as OrgSettings["auto_colonize"],
     merge_method: pick("merge_method") as OrgSettings["merge_method"],
     delete_branch: pick("delete_branch") as boolean | null,
+    verify_locally_when_ci_blocked: pick("verify_locally_when_ci_blocked") as boolean | null,
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,

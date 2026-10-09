@@ -23,7 +23,12 @@
 //!   [`MAX_ROUNDS`] times, and never twice for the same head;
 //! - every failed job ended in under [`FAST_FAIL_SECS`] seconds with no steps, or GitHub's annotation
 //!   names billing or a spending limit: the pull request is marked `ci_blocked` and no colony is
-//!   spent on it. One banner per org says GitHub Actions is blocked there (`/api/status`).
+//!   spent on it. One banner per org says GitHub Actions is blocked there (`/api/status`), a newly
+//!   blocked org is announced once (`merge-steward:ci`), and the branch still comes up to date in
+//!   `green+rebase` — a block is never an excuse to let a pull request go stale. An org that opts
+//!   into `verify_locally_when_ci_blocked` (issue #1245) has the first waiting pull request verified
+//!   locally — the repository's `.colonizer/merge.toml` merge gates in a build VM, one pull request
+//!   at a time, the report posted on the pull request, a merge on a pass.
 //!
 //! The steward waits out an open GitHub circuit breaker (`github_breaker.rs`), merges at most one pull
 //! request per repository per cycle, and leaves a repository the merge train or its loop drives to
@@ -33,6 +38,7 @@
 use crate::{
     ApiResult, App, Shared, authority, client_error,
     github::{self, Mergeability},
+    merge_loop::local_checks::{self, LocalChecks, LocalRun},
     orgs::{self, AutoMerge},
     sessions::{Session, SessionStatus},
     util::{exec_capture, exec_within, truncate, valid_repo, write_atomic},
@@ -67,6 +73,10 @@ const LOG_TAIL: usize = 3000;
 const GH_LIMIT: Duration = Duration::from_secs(60);
 /// Labels that keep the steward's hands off a pull request, compared case-insensitively.
 const HOLD_LABELS: &[&str] = &["hold", "do-not-merge", "do not merge", "needs-human"];
+/// How long a `Running` local verification counts as in flight (issue #1245). A check run may hold
+/// its build VM for tens of minutes, so a fresh entry is waited out; past this the worker that wrote
+/// it is presumed hung, and the next cycle starts another.
+const LOCAL_VERIFY_STALE: Duration = Duration::from_secs(45 * 60);
 
 // ---------------------------------------------------------------------------------------------
 // The facts, and the pure decision.
@@ -539,6 +549,46 @@ pub(crate) struct PrMemory {
     /// The head update-branch was last tried on.
     #[serde(default)]
     pub update_tried_head: Option<String>,
+    /// A local verification the steward ran while Actions was blocked (issue #1245).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_verify: Option<LocalVerify>,
+}
+
+/// One local verification of a pull request whose checks GitHub refuses to run (issue #1245).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LocalVerify {
+    /// The head the verification ran on.
+    pub head: String,
+    pub at: DateTime<Utc>,
+    pub state: LocalVerifyState,
+    /// One line about what ran or why it could not.
+    pub summary: String,
+}
+
+/// Where a local verification stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalVerifyState {
+    Running,
+    Passed,
+    Failed,
+}
+
+/// The local verification to keep, by `at` alone (issue #1245): a worker can finish and write its
+/// terminal result while the cycle that started it is still deciding, and the cycle must not clobber
+/// that with its older `Running` entry — nor the worker roll a newer entry back.
+fn newer_verify(incoming: Option<LocalVerify>, saved: Option<LocalVerify>) -> Option<LocalVerify> {
+    match (incoming, saved) {
+        (Some(a), Some(b)) => Some(if a.at >= b.at { a } else { b }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Whether a local verification counts as in flight: `Running`, and newer than
+/// [`LOCAL_VERIFY_STALE`] ago. Anything else is finished, or belongs to a worker that hung.
+fn verify_in_flight(v: &LocalVerify) -> bool {
+    v.state == LocalVerifyState::Running
+        && (Utc::now() - v.at) < chrono::Duration::from_std(LOCAL_VERIFY_STALE).unwrap_or_else(|_| chrono::Duration::minutes(45))
 }
 
 /// The bounded rounds spent on one colony.
@@ -748,6 +798,79 @@ pub(crate) fn rebase_note(url: &str, base: &str, round: u32) -> String {
     )
 }
 
+/// The report a finished local verification leaves on the pull request (issue #1245): what ran, what
+/// it decided, and the head it ran on. `failed` names the command that failed, when one did — the
+/// run stops at the first failing command, so the ones before it passed and the rest never ran.
+fn verify_report(repo: &str, head: &str, outcome: &LocalVerify, commands: &[String], failed: Option<&str>) -> String {
+    let mut body = format!(
+        "GitHub Actions is blocked for {repo} (billing or spending limit), so the merge steward verified this \
+         pull request locally on its head merged with the current base, per the org's \
+         `verify_locally_when_ci_blocked` setting.\n"
+    );
+    if commands.is_empty() {
+        body.push_str(&format!("\n{}\n", outcome.summary));
+    } else {
+        let reached = failed.map_or_else(
+            || usize::from(outcome.state == LocalVerifyState::Passed) * commands.len(),
+            |f| commands.iter().position(|c| c == f).map_or(0, |i| i + 1),
+        );
+        body.push('\n');
+        for (i, c) in commands.iter().enumerate() {
+            let mark = if outcome.state == LocalVerifyState::Passed || i + 1 < reached {
+                "pass"
+            } else if i + 1 == reached {
+                "fail"
+            } else {
+                "not run"
+            };
+            body.push_str(&format!("- `{c}`: {mark}\n"));
+        }
+    }
+    let verdict = match outcome.state {
+        LocalVerifyState::Passed => "passed".to_string(),
+        LocalVerifyState::Failed => format!("failed — {}", outcome.summary),
+        LocalVerifyState::Running => "is still running".to_string(),
+    };
+    body.push_str(&format!("\nLocal verification: {verdict}.\n"));
+    body.push_str(&format!("Head `{head}`.\n"));
+    body
+}
+
+/// Posts a comment on a pull request, the way a decision records one (issue #1245).
+async fn post_comment(app: &App, repo: &str, number: u64, body: &str) -> Result<()> {
+    let mut cmd = app.gh([
+        "api".to_string(),
+        "-X".into(),
+        "POST".into(),
+        format!("repos/{repo}/issues/{number}/comments"),
+        "-f".into(),
+        format!("body={body}"),
+    ]);
+    exec_within(GH_LIMIT, &mut cmd).await.map(|_| ())
+}
+
+/// Posts the local-verification report; a refusal to comment is a log line, never a failed merge.
+async fn post_quietly(app: &App, repo: &str, number: u64, body: &str) {
+    if let Err(e) = post_comment(app, repo, number, body).await {
+        eprintln!("merge steward: could not post the local-verification report on {repo}#{number}: {e:#}");
+    }
+}
+
+/// Writes a local verification into a pull request's memory, keeping whichever entry is newer
+/// (issue #1245): the worker can finish while the cycle that started it is still writing its own.
+async fn save_local_verify(dir: &Path, url: &str, v: LocalVerify) {
+    let url = url.to_string();
+    let wrote = update(dir, move |m| {
+        if let Some(p) = m.prs.get_mut(&url) {
+            p.local_verify = newer_verify(Some(v), p.local_verify.take());
+        }
+    })
+    .await;
+    if let Err(e) = wrote {
+        eprintln!("merge steward: could not save a local verification: {e:#}");
+    }
+}
+
 /// Resumes a finished colony with a one-shot note, the way the merge-train loop resolves a conflict:
 /// `pr_opened` becomes `stopped` (the resumable shape) with the note on its record and its autopilot
 /// on, so the run publishes to the same pull request itself; a refused resume puts the status back.
@@ -827,6 +950,180 @@ async fn update_branch(app: &App, repo: &str, number: u64, head: &str) -> Result
     exec_within(GH_LIMIT, &mut cmd).await.map(|_| ())
 }
 
+/// The one merge attempt a cycle makes for a pull request, shared by `Action::Merge` and a local
+/// verification that passed while Actions was blocked (issue #1245): one per repository per cycle,
+/// never while external writes are blocked, and its result is the phase and reason to remember.
+async fn attempt_merge(
+    app: &Shared,
+    sessions: &[Session],
+    merged_repos: &mut HashSet<String>,
+    s: &Session,
+    f: &Facts,
+    settings: &orgs::OrgSettings,
+) -> (Phase, String) {
+    if merged_repos.contains(&s.repo) {
+        (
+            Phase::Waiting,
+            "another pull request of this repository merged this cycle".into(),
+        )
+    } else if authority::external_writes_blocked() {
+        (Phase::Waiting, crate::publish::BLOCKED.to_string())
+    } else {
+        let keep = crate::merge_train::has_stacked_child(sessions, s);
+        match merge(app, s, f, settings, keep).await {
+            Ok(done) => {
+                merged_repos.insert(s.repo.clone());
+                let what = match done {
+                    Merged::Yes => "merged by the merge steward",
+                    Merged::Queued => "queued for auto-merge by the merge steward",
+                };
+                app.session_log(&s.id, "info", format!("{what} ({})", f.head)).await;
+                record(app, s, what).await;
+                (Phase::Merging, what.to_string())
+            }
+            Err(e) => {
+                let reason = format!("the merge was refused: {}", truncate(&format!("{e:#}"), 200));
+                app.session_log(&s.id, "warn", format!("merge steward: {reason}")).await;
+                (Phase::Waiting, reason)
+            }
+        }
+    }
+}
+
+/// The local verification of one billing-blocked pull request (issue #1245), outside the cycle: the
+/// repository's declared merge gates in a one-shot build VM, the verdict written to memory and posted
+/// as a report comment, and — only on a pass, and only while external writes are allowed — the merge
+/// itself. Every path ends in a terminal [`LocalVerify`]; an error becomes one too, and a hang is
+/// recovered by [`LOCAL_VERIFY_STALE`]. Nothing here may take the steward down with it.
+fn spawn_local_verify(app: Shared, sessions: Vec<Session>, settings: orgs::OrgSettings, s: Session, f: Facts, url: String) {
+    let dir = app.cfg.config_dir.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_local_verify(&app, &sessions, &settings, &s, &f, &url).await {
+            let failed = LocalVerify {
+                head: f.head.clone(),
+                at: Utc::now(),
+                state: LocalVerifyState::Failed,
+                summary: truncate(&format!("{e:#}"), 300),
+            };
+            save_local_verify(&dir, &url, failed.clone()).await;
+            let number = parse_pr_url(&url).map(|(_, n)| n).unwrap_or_default();
+            post_quietly(&app, &s.repo, number, &verify_report(&s.repo, &f.head, &failed, &[], None)).await;
+        }
+    });
+}
+
+/// The body of [`spawn_local_verify`]; `Err` is turned into a `Failed` [`LocalVerify`] by the caller.
+async fn run_local_verify(
+    app: &Shared,
+    sessions: &[Session],
+    settings: &orgs::OrgSettings,
+    s: &Session,
+    f: &Facts,
+    url: &str,
+) -> Result<()> {
+    let dir = app.cfg.config_dir.clone();
+    let base = s.base.clone().unwrap_or_else(|| "main".into());
+    let number = parse_pr_url(url).map(|(_, n)| n).unwrap_or_default();
+    // Only the repository's own declared gates count, so `opted_in` is false: the steward does not
+    // invent commands the way the merge-train loop's stack detection does (issue #1245).
+    let commands = match local_checks::config(app, &s.repo, &base, false).await {
+        Ok(LocalChecks::On { commands, .. }) => commands,
+        Ok(LocalChecks::Off(_)) => {
+            let failed = LocalVerify {
+                head: f.head.clone(),
+                at: Utc::now(),
+                state: LocalVerifyState::Failed,
+                summary: format!(
+                    "{} declares no `.colonizer/merge.toml` merge gates; add them to opt in",
+                    s.repo
+                ),
+            };
+            save_local_verify(&dir, url, failed.clone()).await;
+            post_quietly(app, &s.repo, number, &verify_report(&s.repo, &f.head, &failed, &[], None)).await;
+            return Ok(());
+        }
+        Err(e) => return Err(anyhow!("{}'s `.colonizer/merge.toml` could not be read: {e}", s.repo)),
+    };
+    let outcome = local_checks::run(app, &s.repo, number, &f.head, &base, &commands).await;
+    let (failed_command, terminal) = match outcome {
+        LocalRun::Passed { .. } => (
+            None,
+            LocalVerify {
+                head: f.head.clone(),
+                at: Utc::now(),
+                state: LocalVerifyState::Passed,
+                summary: format!("all {} merge gates passed in a build VM", commands.len()),
+            },
+        ),
+        LocalRun::Failed { command, .. } => {
+            let summary = format!("`{command}` failed in a build VM; a new commit runs the gates again");
+            (
+                Some(command),
+                LocalVerify {
+                    head: f.head.clone(),
+                    at: Utc::now(),
+                    state: LocalVerifyState::Failed,
+                    summary,
+                },
+            )
+        }
+        LocalRun::Unrunnable(why) => (
+            None,
+            LocalVerify {
+                head: f.head.clone(),
+                at: Utc::now(),
+                state: LocalVerifyState::Failed,
+                summary: why,
+            },
+        ),
+    };
+    save_local_verify(&dir, url, terminal.clone()).await;
+    post_quietly(
+        app,
+        &s.repo,
+        number,
+        &verify_report(&s.repo, &f.head, &terminal, &commands, failed_command.as_deref()),
+    )
+    .await;
+    // A pass is a verdict about the code, not a licence: the merge goes through the same gate as
+    // `Action::Merge`, and a refusal leaves the pass recorded for the next cycle to retry once.
+    if terminal.state == LocalVerifyState::Passed && !authority::external_writes_blocked() {
+        // The cycle checked the release freeze before it started this worker, and a verification
+        // runs for minutes: a release pull request can open in between (issue #1245). Leaving the
+        // pass recorded means the next cycle's passed-head path retries the merge once it lifts.
+        if f.adds_fragment && release_pr_open(app, &s.repo).await {
+            app.session_log(
+                &s.id,
+                "warn",
+                "merge steward: a release pull request is open; merge deferred".into(),
+            )
+            .await;
+            return Ok(());
+        }
+        let keep = crate::merge_train::has_stacked_child(sessions, s);
+        match merge(app, s, f, settings, keep).await {
+            Ok(done) => {
+                let what = match done {
+                    Merged::Yes => "merged by the merge steward after a local verification",
+                    Merged::Queued => "queued for auto-merge by the merge steward after a local verification",
+                };
+                app.session_log(&s.id, "info", format!("merge steward: {what} ({})", f.head))
+                    .await;
+                record(app, s, "merged after a local verification").await;
+            }
+            Err(e) => {
+                app.session_log(
+                    &s.id,
+                    "warn",
+                    format!("merge steward: the merge after a local verification was refused: {e:#}"),
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The activity line for something the steward did to a colony's pull request.
 async fn record(app: &App, s: &Session, what: &str) {
     let mut entry = crate::activity::Entry::new("publish.merge_steward", "colony").colony(s);
@@ -834,7 +1131,14 @@ async fn record(app: &App, s: &Session, what: &str) {
     crate::activity::record(app, entry).await;
 }
 
-fn pr_memory(s: &Session, f: &Facts, state: Phase, reason: String, update_tried: Option<String>) -> PrMemory {
+fn pr_memory(
+    s: &Session,
+    f: &Facts,
+    state: Phase,
+    reason: String,
+    update_tried: Option<String>,
+    local_verify: Option<LocalVerify>,
+) -> PrMemory {
     PrMemory {
         session: s.id.clone(),
         org: s.org.clone(),
@@ -845,6 +1149,7 @@ fn pr_memory(s: &Session, f: &Facts, state: Phase, reason: String, update_tried:
         head: f.head.clone(),
         at: Utc::now(),
         update_tried_head: update_tried,
+        local_verify,
     }
 }
 
@@ -866,6 +1171,13 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
     let mut release_open: HashMap<String, bool> = HashMap::new();
     let mut results: Vec<(String, PrMemory)> = Vec::new();
     let mut bumped: Vec<(String, Rounds)> = Vec::new();
+    // At most one local verification of this org runs at a time (issue #1245). `memory` was read
+    // once at the top of the cycle, so a start this loop makes would be invisible to the next
+    // candidate's scan; the flag carries it instead.
+    let mut verify_running = memory
+        .prs
+        .iter()
+        .any(|(_, p)| p.org == org && p.local_verify.as_ref().is_some_and(verify_in_flight));
     for s in &candidates {
         let Some(url) = s.pr_url.clone() else { continue };
         let Some(f) = facts.get(&url) else { continue };
@@ -887,6 +1199,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
             update_tried_head: saved.and_then(|m| m.update_tried_head.clone()),
         };
         let mut update_tried = ctx.update_tried_head.clone();
+        let mut local_verify = saved.and_then(|m| m.local_verify.clone());
         let mut updated_rounds = rounds.clone();
         let mut action = decide(f, &ctx);
         // Update-branch is tried inline, and a conflict decides again with that fact in hand.
@@ -905,6 +1218,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
                             Phase::Rebasing,
                             "GitHub is updating the branch from its base".into(),
                             update_tried,
+                            local_verify,
                         ),
                     ));
                     continue;
@@ -923,6 +1237,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
                             Phase::Waiting,
                             "update-branch failed; will try again".into(),
                             saved.and_then(|m| m.update_tried_head.clone()),
+                            local_verify,
                         ),
                     ));
                     continue;
@@ -935,37 +1250,73 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
             Action::CiBlocked(why) => {
                 app.session_log(&s.id, "warn", format!("merge steward: GitHub Actions looks blocked: {why}"))
                     .await;
-                (Phase::CiBlocked, why)
-            }
-            Action::Merge => {
-                if merged_repos.contains(&s.repo) {
-                    (
-                        Phase::Waiting,
-                        "another pull request of this repository merged this cycle".into(),
-                    )
-                } else if authority::external_writes_blocked() {
-                    (Phase::Waiting, crate::publish::BLOCKED.to_string())
-                } else {
-                    let keep = crate::merge_train::has_stacked_child(sessions, s);
-                    match merge(app, s, f, settings, keep).await {
-                        Ok(done) => {
-                            merged_repos.insert(s.repo.clone());
-                            let what = match done {
-                                Merged::Yes => "merged by the merge steward",
-                                Merged::Queued => "queued for auto-merge by the merge steward",
-                            };
-                            app.session_log(&s.id, "info", format!("{what} ({})", f.head)).await;
-                            record(app, s, what).await;
-                            (Phase::Merging, what.to_string())
+                // Issue #1245: an org that opted in gets its pull request verified locally while
+                // Actions is blocked, one pull request at a time; the block itself never merges.
+                if orgs::verifies_locally_when_ci_blocked(settings) && !authority::external_writes_blocked() {
+                    match saved.and_then(|m| m.local_verify.clone()) {
+                        // The pass is already recorded: the merge it asked for did not happen last
+                        // cycle, so try once more, the same way a green pull request is merged.
+                        Some(v) if v.head == f.head && v.state == LocalVerifyState::Passed => {
+                            let (m_state, m_reason) = attempt_merge(app, sessions, &mut merged_repos, s, f, settings).await;
+                            if m_state == Phase::Merging {
+                                (m_state, m_reason)
+                            } else {
+                                (Phase::CiBlocked, format!("{why}; local verification passed; {m_reason}"))
+                            }
                         }
-                        Err(e) => {
-                            let reason = format!("the merge was refused: {}", truncate(&format!("{e:#}"), 200));
-                            app.session_log(&s.id, "warn", format!("merge steward: {reason}")).await;
-                            (Phase::Waiting, reason)
+                        // In flight, on this head: the worker reports when it is done.
+                        Some(v) if v.head == f.head && verify_in_flight(&v) => {
+                            (Phase::CiBlocked, format!("{why}; a local verification is running"))
+                        }
+                        // One attempt per head: a new commit starts the next one.
+                        Some(v) if v.head == f.head && v.state == LocalVerifyState::Failed => (
+                            Phase::CiBlocked,
+                            format!("{why}; local verification failed; a new commit runs it again"),
+                        ),
+                        // No verdict for this head yet, or the run that was started went stale: start
+                        // one, unless another pull request of this org is verifying right now.
+                        _ if verify_running => (
+                            Phase::CiBlocked,
+                            format!("{why}; a local verification of another pull request is running"),
+                        ),
+                        _ => {
+                            let v = LocalVerify {
+                                head: f.head.clone(),
+                                at: Utc::now(),
+                                state: LocalVerifyState::Running,
+                                summary: "running the repository's merge gates in a build VM".into(),
+                            };
+                            local_verify = Some(v.clone());
+                            app.session_log(
+                                &s.id,
+                                "info",
+                                format!(
+                                    "merge steward: GitHub Actions is blocked; running the repository's merge \
+                                     gates in a build VM ({})",
+                                    f.head
+                                ),
+                            )
+                            .await;
+                            spawn_local_verify(
+                                app.clone(),
+                                sessions.to_vec(),
+                                settings.clone(),
+                                s.clone(),
+                                f.clone(),
+                                url.clone(),
+                            );
+                            verify_running = true;
+                            (
+                                Phase::CiBlocked,
+                                format!("{why}; a local verification is starting in a build VM"),
+                            )
                         }
                     }
+                } else {
+                    (Phase::CiBlocked, why)
                 }
             }
+            Action::Merge => attempt_merge(app, sessions, &mut merged_repos, s, f, settings).await,
             Action::ResumeFix(failed) => {
                 if authority::external_writes_blocked() {
                     (Phase::Waiting, crate::publish::BLOCKED.to_string())
@@ -1020,20 +1371,27 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
         if updated_rounds.fix != rounds.fix || updated_rounds.rebase != rounds.rebase {
             bumped.push((s.id.clone(), updated_rounds));
         }
-        results.push((url, pr_memory(s, f, state, reason, update_tried)));
+        results.push((url, pr_memory(s, f, state, reason, update_tried, local_verify)));
     }
     let blocked: Vec<String> = results
         .iter()
         .filter(|(_, m)| m.state == Phase::CiBlocked)
         .map(|(u, _)| u.clone())
         .collect();
+    let blocked_count = blocked.len();
     let blocked_reason = results
         .iter()
         .find(|(_, m)| m.state == Phase::CiBlocked)
         .map(|(_, m)| m.reason.clone());
     let org = org.to_string();
+    let org_name = org.clone();
+    // The closure answers whether this is a NEW block (issue #1245): an entry that was already there
+    // keeps its `since` and announces nothing, a removal is no edge, and a later re-block is one.
     let wrote = update(&dir, move |m| {
-        for (url, mem) in results {
+        for (url, mut mem) in results {
+            // A worker can finish while this cycle is still deciding: the newer verification wins.
+            let saved_verify = m.prs.get(&url).and_then(|p| p.local_verify.clone());
+            mem.local_verify = newer_verify(mem.local_verify.take(), saved_verify);
             m.prs.insert(url, mem);
         }
         for (id, r) in bumped {
@@ -1041,6 +1399,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
         }
         match blocked_reason {
             Some(reason) => {
+                let fresh = !m.ci_blocked.contains_key(&org);
                 let since = m.ci_blocked.get(&org).map_or_else(Utc::now, |b| b.since);
                 m.ci_blocked.insert(
                     org,
@@ -1050,15 +1409,23 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
                         prs: blocked,
                     },
                 );
+                fresh
             }
             None => {
                 m.ci_blocked.remove(&org);
+                false
             }
         }
     })
     .await;
-    if let Err(e) = wrote {
-        eprintln!("merge steward: could not save its memory: {e:#}");
+    match wrote {
+        Ok(true) => {
+            let plural = if blocked_count == 1 { "" } else { "s" };
+            let line = format!("{} {blocked_count} pull request{plural} waiting.", banner_message(&org_name));
+            crate::notify::announce_line(app, "ci_blocked", "merge-steward:ci".to_string(), &line).await;
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("merge steward: could not save its memory: {e:#}"),
     }
 }
 
@@ -1107,10 +1474,25 @@ pub(crate) async fn tick_once(app: &Shared) {
         .filter(|s| !matches!(s.status, SessionStatus::Merged | SessionStatus::Closed))
         .map(|s| s.id.clone())
         .collect();
+    // A colony between rounds has left `PrOpened` — resumed to fix or to rebase — so its org can go
+    // a cycle with no steward-eligible candidate while its pull requests are still open. Its
+    // blocked entry must survive that round (issue #1245), or the next cycle would announce the
+    // same block again. Hidden and `off` orgs still lose theirs, as they always have.
+    let mut live_pr_orgs: HashSet<String> = sessions
+        .iter()
+        .filter(|s| s.pr_url.is_some() && !s.org.is_empty())
+        .filter(|s| !matches!(s.status, SessionStatus::Merged | SessionStatus::Closed))
+        .map(|s| s.org.clone())
+        .collect();
+    live_pr_orgs.retain(|org| {
+        let settings = app.org_settings(org);
+        !settings.hidden && orgs::auto_merge_mode(&settings) != AutoMerge::Off
+    });
     let _ = update(&app.cfg.config_dir, move |m| {
         m.prs.retain(|_, p| live.contains(&p.session));
         m.rounds.retain(|id, _| live.contains(id));
-        m.ci_blocked.retain(|org, _| on_orgs.contains(org));
+        m.ci_blocked
+            .retain(|org, _| on_orgs.contains(org) || live_pr_orgs.contains(org));
         m.last_cycle = Some(Utc::now());
     })
     .await;
@@ -1183,6 +1565,7 @@ async fn merge_now(State(app): State<Shared>, Json(body): Json<Value>) -> ApiRes
                 head,
                 at: Utc::now(),
                 update_tried_head: None,
+                local_verify: None,
             },
         );
     })

@@ -85,7 +85,7 @@ const AI_ATTRIBUTION: &[&str] = &[
 ];
 const GH_LIMIT: Duration = Duration::from_secs(60);
 
-mod local_checks;
+pub(crate) mod local_checks;
 mod resolve;
 use local_checks::{LocalChecks, LocalRun};
 
