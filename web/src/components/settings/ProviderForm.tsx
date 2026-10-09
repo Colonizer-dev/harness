@@ -128,10 +128,13 @@ export function ProviderForm({
   // same convention as the key: omitted keeps what is saved, so a save never silently rezeros a rate.
   const [pricingDraft, setPricingDraft] = useState<PricingDraft>(() => pricingDraftOf(start.pricing));
   // The quota probe (issue #199) always goes on the save: an empty URL clears it, the way an empty
-  // key string removes the key, so no keep/clear dance is needed for two plain text fields.
-  const [quotaUrl, setQuotaUrl] = useState(initial?.quota?.url ?? "");
-  const [quotaPointer, setQuotaPointer] = useState(initial?.quota?.pointer ?? "");
-  const [quotaReset, setQuotaReset] = useState(initial?.quota?.reset_pointer ?? "");
+  // key string removes the key, so no keep/clear dance is needed for two plain text fields. A
+  // catalogue entry's preset (#1223) prefills these on create — `start` is the saved provider when
+  // editing, so a saved probe always wins.
+  const [quotaUrl, setQuotaUrl] = useState(start.quota?.url ?? "");
+  const [quotaPointer, setQuotaPointer] = useState(start.quota?.pointer ?? "");
+  const [quotaLimit, setQuotaLimit] = useState(start.quota?.limit_pointer ?? "");
+  const [quotaReset, setQuotaReset] = useState(start.quota?.reset_pointer ?? "");
   // The connection policy (#295, #472): all three prefill from GET /api/providers and go on the save
   // as given; the model map's blank rows are dropped by `providerSaveBody`.
   const [trusted, setTrusted] = useState(initial?.trusted ?? false);
@@ -163,6 +166,7 @@ export function ProviderForm({
     fallback: useId(),
     quotaUrl: useId(),
     quotaPointer: useId(),
+    quotaLimit: useId(),
     quotaReset: useId(),
     trusted: useId(),
     modelMap: useId(),
@@ -276,7 +280,7 @@ export function ProviderForm({
                 cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
               }
             : undefined,
-          quota: { url: quotaUrl, pointer: quotaPointer, reset_pointer: quotaReset },
+          quota: { url: quotaUrl, pointer: quotaPointer, limit_pointer: quotaLimit, reset_pointer: quotaReset },
           timeout_secs: limits.timeout_secs.value,
           max_concurrent: limits.max_concurrent.value,
           queue_timeout_secs: limits.queue_timeout_secs.value,
@@ -712,6 +716,17 @@ export function ProviderForm({
                 className={cx(inputClass, "font-mono text-body-sm")}
               />
             </FormField>
+            <FormField id={ids.quotaLimit} label="Limit JSON pointer" hint="Optional: the plan's total, for % used">
+              <input
+                id={ids.quotaLimit}
+                value={quotaLimit}
+                onChange={(e) => setQuotaLimit(e.target.value)}
+                placeholder="/data/total_tokens"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-body-sm")}
+              />
+            </FormField>
             <FormField id={ids.quotaReset} label="Reset JSON pointer" hint="Optional: when the plan refills">
               <input
                 id={ids.quotaReset}
@@ -726,7 +741,8 @@ export function ProviderForm({
             <p className="text-small leading-snug text-faint sm:col-span-2">
               The provider's own credential is sent to that URL, so it must be on the same origin as the base URL —
               scheme, host and port; the Mothership refuses anything else. The pointer picks the remaining-token number
-              out of the answer, shown on the health line, and must start with /. The reset pointer names a time, as unix seconds or an RFC 3339 string, and puts "resets in …" on the provider's row.
+              out of the answer, shown on the health line, and must start with /. The limit pointer names the plan's total
+              in the same answer, and puts the percent used on the model switcher's bar. The reset pointer names a time, as unix seconds or an RFC 3339 string, and puts "resets in …" on the provider's row.
             </p>
           </div>
         </details>

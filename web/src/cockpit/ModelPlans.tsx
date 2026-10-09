@@ -1,8 +1,9 @@
 // Plan usage in the model switcher: one compact row per plan the install's roles route to — the
 // Claude account and each provider in use — with a bar of used against limit, what is left, and the
 // reset. Built only from GET /api/models/plans, which carries what the mothership actually knows: a
-// limit it saw (exhausted, the reset, when it hit), the request count through the gateway, and the
-// plan balance a provider's quota probe answered. Where a plan reports no remaining quota the row
+// limit it saw (exhausted, the reset, when it hit), the request count through the gateway, the plan
+// balance a provider's quota probe answered, and the session and weekly windows the Claude account
+// reports itself (issue #1223). Where a plan reports no remaining quota the row
 // says so, and shows what is known instead; nothing here is estimated.
 //
 // The words and the bar are pure functions (`planView`), so the tests pin them without a DOM.
@@ -13,7 +14,7 @@ export type PlanTone = "ok" | "warn" | "err" | "unknown";
 
 export interface PlanView {
   tone: PlanTone;
-  /** The right-hand figure: "42.8% left", "2.1M left", "Out · 2 h 10 min", "no limit reported". */
+  /** The right-hand figure: "42.8% left", "2.1M left", "Out · 2 h 10 min", "Session: 62% used · resets 18:41", "no limit reported". */
   figure: string;
   /** Percent of the plan used, for the bar; null when the limit is not known (no bar fill). */
   usedPct: number | null;
@@ -42,10 +43,23 @@ export function agoWords(iso: string, nowMs: number): string {
 const shortDate = (iso: string, timeZone?: string) =>
   new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone });
 
+/** A window reading's " · resets …" suffix: " · resets 18:41" within a day, " · resets Thu" further out, "" when none is named. */
+const windowResetWords = (unix: number | null, nowMs: number, timeZone?: string): string => {
+  if (unix == null || !Number.isFinite(unix)) return "";
+  if (unix * 1000 <= nowMs) return " · resetting now";
+  const at = new Date(unix * 1000);
+  const words =
+    at.getTime() - nowMs < 86_400_000
+      ? at.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone })
+      : at.toLocaleDateString("en-GB", { weekday: "short", timeZone });
+  return ` · resets ${words}`;
+};
+
 /**
  * What one plan row says. Exhausted wins (a full red bar and the countdown); then a balance with a
- * known limit (the bar and percent left); a balance alone (what is left, no bar); and otherwise
- * what is known — request counts, the last limit hit — labelled as such.
+ * known limit (the bar and percent left); a balance alone (what is left, no bar); the account's own
+ * window readings (the one nearest its cap as the figure, the rest as details); and otherwise what is known —
+ * request counts, the last limit hit — labelled as such.
  */
 export function planView(plan: PlanUsage, nowMs: number = Date.now(), timeZone?: string): PlanView {
   const details: string[] = [];
@@ -75,6 +89,22 @@ export function planView(plan: PlanUsage, nowMs: number = Date.now(), timeZone?:
       details.push("Plan balance; the plan's total isn't reported");
     }
     if (balance.checked_at) details[details.length - 1] += ` · checked ${agoWords(balance.checked_at, nowMs)}`;
+  } else if (plan.windows?.length) {
+    // The account's own readings (issue #1223): Claude reports its session and weekly usage directly.
+    // The figure names the window nearest its cap (a tie keeps the reading's order); the rest are details.
+    const windows = plan.windows;
+    const lead = windows.reduce((best, w, i) => (w.used_pct > windows[best].used_pct ? i : best), 0);
+    const pct = windows.map((w) => Math.round(w.used_pct));
+    usedPct = Math.max(0, Math.min(100, Math.max(...pct)));
+    tone = usedPct >= 85 ? "warn" : "ok";
+    const leadWindow = windows[lead];
+    figure = `${leadWindow.label}: ${pct[lead]}% used${windowResetWords(leadWindow.reset_unix, nowMs, timeZone)}`;
+    windows.forEach((w, i) => {
+      if (i !== lead) details.push(`${w.label}: ${pct[i]}% used${windowResetWords(w.reset_unix, nowMs, timeZone)}`);
+    });
+    if (plan.windows_checked_at != null) figure += ` · checked ${agoWords(new Date(plan.windows_checked_at * 1000).toISOString(), nowMs)}`;
+    if (usedPct >= 85) details.push("Nearly at the limit");
+    if (balance?.error) details.push(`Balance check failed: ${balance.error}`);
   } else {
     if (balance?.error) details.push(`Balance check failed: ${balance.error}`);
     else if (plan.kind === "claude") details.push("Claude reports its session and weekly limits only once one is hit");
