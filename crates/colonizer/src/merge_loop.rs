@@ -23,7 +23,8 @@
 //! 6. **Self-heals main, only when enabled.** Main red right after the train's own merge pauses the
 //!    repository; with `self_heal` on, the failed jobs are re-run once, then a fix colony is sent;
 //!    with `revert_on_red` it is a revert of the train's own last merge instead. Never anything else.
-//! 7. **Re-runs a red pull request once** when every failing check is on the known-flaky list.
+//! 7. **Re-runs a red pull request once** when every failing check is on the known-flaky list; with
+//!    `fix_red` on, any other red pull request goes back to its own colony to fix (issue #1054).
 //! 8. **Adds no attribution.** Squash merges titled after the pull request, and pull requests whose
 //!    commits carry AI attribution are refused, on top of the train's own author/forbid guards.
 //! 9. **Reports every run** — merged, updated (CI running), red, redo dispatched, skipped, each with
@@ -85,8 +86,10 @@ const AI_ATTRIBUTION: &[&str] = &[
 ];
 const GH_LIMIT: Duration = Duration::from_secs(60);
 
+mod fix;
 pub(crate) mod local_checks;
 mod resolve;
+use fix::Landing;
 use local_checks::{LocalChecks, LocalRun};
 
 // ---------------------------------------------------------------------------------------------
@@ -138,6 +141,11 @@ pub(crate) struct Settings {
     pub resolve_conflicts: bool,
     /// Resolve attempts per pull request before it is left to a person (labelled `needs-human`).
     pub resolve_attempts: u32,
+    /// Issue #1054: a red pull request whose checks ran and failed goes back to its own colony to
+    /// fix them, instead of sitting red for a person.
+    pub fix_red: bool,
+    /// Fix attempts per pull request before it is left to a person (labelled `needs-human`).
+    pub fix_attempts: u32,
 }
 
 impl Default for Settings {
@@ -162,6 +170,8 @@ impl Default for Settings {
             local_checks: Vec::new(),
             resolve_conflicts: false,
             resolve_attempts: 3,
+            fix_red: false,
+            fix_attempts: 2,
         }
     }
 }
@@ -220,6 +230,7 @@ pub(crate) fn normalize(mut s: Settings) -> Result<Settings, String> {
     bound(u64::from(s.max_api_calls), 20, 2000, "max_api_calls")?;
     bound(s.min_call_gap_ms, 200, 10_000, "min_call_gap_ms")?;
     bound(u64::from(s.resolve_attempts), 1, 10, "resolve_attempts")?;
+    bound(u64::from(s.fix_attempts), 1, 10, "fix_attempts")?;
     s.flaky_checks = parse_list(&s.flaky_checks.join(","));
     s.held = parse_list(&s.held.join(","));
     if s.revert_on_red && !s.self_heal {
@@ -310,6 +321,8 @@ pub(crate) struct RepoMemory {
     pub local_failed: BTreeMap<String, String>,
     /// Issue #968: conflicted pull requests a resolve colony was sent for, by URL.
     pub resolving: BTreeMap<String, Resolving>,
+    /// Issue #1054: red pull requests sent back to their own colony to fix, by URL.
+    pub fixing: BTreeMap<String, Fixing>,
     /// Issue #972: why GitHub CI could not run here, from the run that first saw it until main's CI
     /// runs green again; its edges are announced once each.
     pub ci_unavailable: Option<String>,
@@ -353,6 +366,36 @@ pub(crate) struct Resolving {
     pub gave_up: Option<String>,
 }
 
+/// One pull request's fix attempts (issue #1054).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Fixing {
+    /// The colony sent back to fix it: the pull request's own.
+    pub colony: String,
+    pub attempts: u32,
+    /// The head sha the last attempt was sent for: one attempt per head commit.
+    pub head_sha: Option<String>,
+    /// The checks the last attempt was sent to fix, as GitHub names them.
+    pub checks: Vec<String>,
+    pub at: Option<DateTime<Utc>>,
+    /// The pull request carries `needs-human` (a question was asked, or the loop gave up).
+    pub labeled: bool,
+    /// Why the loop stopped trying; a person takes it from there.
+    pub gave_up: Option<String>,
+}
+
+impl Fixing {
+    /// The report line while a fix is out: `fixing checks (attempt n/N): clippy, test`.
+    fn line(&self, max: u32) -> String {
+        let n = format!("attempt {}/{}", self.attempts, max);
+        if self.checks.is_empty() {
+            format!("fixing checks ({n})")
+        } else {
+            format!("fixing checks ({n}): {}", self.checks.join(", "))
+        }
+    }
+}
+
 /// What a run did (or, in a dry run, would do) with one pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -366,6 +409,8 @@ pub(crate) enum Action {
     RedoDispatched,
     /// Issue #968: a resolve colony is merging the base in and resolving the conflicts.
     Resolving,
+    /// Issue #1054: the pull request's own colony is fixing its failing checks.
+    Fixing,
     Waiting,
     Skipped,
 }
@@ -387,6 +432,10 @@ impl Action {
             (Action::RedoDispatched, true) => "would dispatch a redo",
             (Action::Resolving, false) => "resolving conflicts",
             (Action::Resolving, true) => "would resolve conflicts",
+            // The reason already reads `fixing checks (attempt n/N): …`, so the row does not say
+            // "fixing checks" twice.
+            (Action::Fixing, false) => "fix",
+            (Action::Fixing, true) => "would fix checks",
             (Action::Waiting, _) => "waiting",
             (Action::Skipped, _) => "skipped",
         }
@@ -463,6 +512,7 @@ pub(crate) fn summary(r: &Report) -> String {
     for (action, word) in [
         (Action::Rebased, if dry { "would rebase" } else { "rebased" }),
         (Action::Resolving, if dry { "would resolve" } else { "resolving conflicts" }),
+        (Action::Fixing, if dry { "would fix" } else { "fixing checks" }),
         (Action::Rerun, if dry { "would re-run" } else { "re-ran flaky" }),
         (Action::NeedsRedo, "needs redo"),
         (Action::Waiting, "waiting"),
@@ -859,6 +909,14 @@ pub(crate) enum Dispatch {
         detail: String,
         log: String,
     },
+    /// Issue #1054: a red pull request's fix, sent to a fresh redo colony because its own worktree
+    /// was reclaimed.
+    FixRed {
+        session: Box<Session>,
+        pr_url: String,
+        base: String,
+        brief: String,
+    },
     Revert {
         repo: String,
         base: String,
@@ -895,6 +953,10 @@ trait Ops: HeadOps {
     /// Aborts a resolve that ended without publishing and puts the colony back to `pr_opened`.
     async fn reset_resolve(&self, s: &Session) -> Result<(), String>;
     async fn label_needs_human(&self, s: &Session) -> Result<(), String>;
+    /// Issue #1054: resumes the pull request's own colony on its kept worktree with a fix brief.
+    async fn fix(&self, s: &Session, note: String) -> fix::Started;
+    /// Issue #1054: the checks failing on a branch's tip, named as GitHub shows them.
+    async fn branch_failing(&self, repo: &str, branch: &str) -> Result<Vec<String>, String>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1103,17 +1165,31 @@ impl<'a, O: Ops> Engine<'a, O> {
         let mut local: Option<LocalChecks> = None;
         let mut queue: Vec<&Session> = group.to_vec();
         queue.sort_by(|a, b| a.pr_opened_at.cmp(&b.pr_opened_at).then(a.id.cmp(&b.id)));
-        // Resolves whose colony is gone or done with its pull request are forgotten.
+        // Resolves and fixes whose colony is gone or done with its pull request are forgotten.
         mem.resolving.retain(|_, r| {
             self.sessions
                 .iter()
                 .any(|x| x.id == r.colony && !matches!(x.status, SessionStatus::Merged | SessionStatus::Closed))
         });
+        mem.fixing.retain(|_, f| {
+            self.sessions
+                .iter()
+                .any(|x| x.id == f.colony && !matches!(x.status, SessionStatus::Merged | SessionStatus::Closed))
+        });
         let (working, rest): (Vec<&Session>, Vec<&Session>) =
             queue.into_iter().partition(|s| s.status != SessionStatus::PrOpened);
         queue = rest;
         for s in working {
-            let (action, why) = self.resolving(s, &base, mem).await?;
+            // A colony out fixing its red checks (issue #1054) is watched like a resolve colony.
+            let fix = s
+                .pr_url
+                .as_deref()
+                .is_some_and(|url| mem.fixing.get(url).is_some_and(|f| f.colony == s.id));
+            let (action, why) = if fix {
+                self.fixing(s, mem).await?
+            } else {
+                self.resolving(s, &base, mem).await?
+            };
             items.add(s, &s.issue_title, action, why);
         }
         queue.retain(|s| match eligibility(self.sessions, s, self.cfg) {
@@ -1213,7 +1289,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                     Plan::Skip(why) => items.add(s, &title, Action::Skipped, why),
                     Plan::Wait(why) => items.add(s, &title, Action::Waiting, why),
                     Plan::Red(_) => {
-                        let (action, why) = self.red(s, &reading, mem).await?;
+                        let (action, why) = self.red(s, &reading, &base, mem).await?;
                         items.add(s, &title, action, why);
                     }
                     Plan::Rebase => {
@@ -1701,8 +1777,9 @@ impl<'a, O: Ops> Engine<'a, O> {
         Ok(result)
     }
 
-    /// Rule 7: a red pull request is re-run once when everything failing is known-flaky.
-    async fn red(&mut self, s: &Session, reading: &Reading, mem: &mut RepoMemory) -> Result<(Action, String), Stop> {
+    /// Rule 7: a red pull request is re-run once when everything failing is known-flaky; with
+    /// `fix_red` on, any other red pull request goes back to its own colony (issue #1054).
+    async fn red(&mut self, s: &Session, reading: &Reading, base: &str, mem: &mut RepoMemory) -> Result<(Action, String), Stop> {
         let names = reading.failing.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ");
         let failing = if names.is_empty() {
             "its checks are failing".to_string()
@@ -1710,6 +1787,9 @@ impl<'a, O: Ops> Engine<'a, O> {
             format!("failing: {names}")
         };
         let flaky = !reading.failing.is_empty() && reading.failing.iter().all(|c| is_flaky(&c.name, &self.cfg.flaky_checks));
+        if !flaky && self.cfg.fix_red {
+            return self.fix(s, reading, base, mem).await;
+        }
         if !flaky {
             return Ok((Action::Red, failing));
         }
@@ -1944,6 +2024,274 @@ impl<'a, O: Ops> Engine<'a, O> {
         }
     }
 
+    /// Issue #1054: a red pull request whose checks really ran and failed goes back to its own
+    /// colony. The base goes first, CI that never ran is never briefed, one attempt per head, at
+    /// most `fix_attempts`, one fix per repository at a time, and a person past the last one.
+    async fn fix(&mut self, s: &Session, reading: &Reading, base: &str, mem: &mut RepoMemory) -> Result<(Action, String), Stop> {
+        let max = self.cfg.fix_attempts;
+        let names = reading.failing.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ");
+        let failing = if names.is_empty() {
+            "its checks are failing".to_string()
+        } else {
+            format!("failing: {names}")
+        };
+        // Nothing named, nothing to brief.
+        if reading.failing.is_empty() {
+            return Ok((Action::Red, failing));
+        }
+        let url = s.pr_url.clone().unwrap_or_default();
+        let head = reading.facts.info.head_ref_oid.clone().unwrap_or_default();
+        let mut entry = mem.fixing.get(&url).cloned().unwrap_or_else(|| Fixing {
+            colony: s.id.clone(),
+            ..Fixing::default()
+        });
+        if let Some(why) = &entry.gave_up {
+            return Ok((Action::Red, format!("{failing} — needs a person: {why}")));
+        }
+        // The base goes first: a check red on the base branch too is not this pull request's to fix.
+        let pr_base = reading.facts.info.base_ref_name.clone().unwrap_or_else(|| base.to_string());
+        let on_base: BTreeSet<String> = match gh!(self, self.ops.branch_failing(&s.repo, &pr_base)) {
+            Ok(names) => names.into_iter().map(|n| n.to_ascii_lowercase()).collect(),
+            Err(_) => BTreeSet::new(),
+        };
+        let shared: Vec<&str> = reading
+            .failing
+            .iter()
+            .map(|c| c.name.as_str())
+            .filter(|n| on_base.contains(&n.to_ascii_lowercase()))
+            .collect();
+        if !shared.is_empty() {
+            return Ok((
+                Action::Red,
+                format!(
+                    "{failing} — {} failing on {pr_base} too; the base goes first",
+                    shared.join(", ")
+                ),
+            ));
+        }
+        // A job GitHub refused to start is CI unavailable (issue #969), never a failure to fix.
+        if let Some(why) = &reading.unavailable {
+            return Ok((
+                Action::Red,
+                format!("{failing} — GitHub CI could not run ({why}); not a failure to fix"),
+            ));
+        }
+        if entry.attempts >= max {
+            return self
+                .give_up_fix(
+                    s,
+                    &url,
+                    mem,
+                    entry,
+                    &failing,
+                    format!("{max} fix attempts did not turn the checks green"),
+                )
+                .await;
+        }
+        if entry.attempts > 0 && entry.head_sha.as_deref() == Some(head.as_str()) {
+            return Ok((
+                Action::Red,
+                format!(
+                    "{failing} — already sent back for this exact head ({}); a new push gets a new try",
+                    entry.line(max)
+                ),
+            ));
+        }
+        if let Some(other) = mem.fixing.iter().find(|(u, f)| u.as_str() != url && self.working(&f.colony)) {
+            return Ok((
+                Action::Waiting,
+                format!(
+                    "{failing} — colony {} is fixing another pull request here, and fixes go one at a time",
+                    other.1.colony
+                ),
+            ));
+        }
+        let n = format!("attempt {}/{}", entry.attempts + 1, max);
+        if self.dry {
+            return Ok((
+                Action::Fixing,
+                format!("{failing}; would resume the colony to fix them ({n})"),
+            ));
+        }
+        // The tail of each failing job's log, one read per Actions run.
+        let runs: BTreeSet<u64> = reading.failing.iter().filter_map(|c| c.run_id).collect();
+        let mut logs = String::new();
+        if runs.is_empty() {
+            logs.push_str("(no Actions run to read a failing job's log from)\n");
+        }
+        for id in runs {
+            let jobs = reading
+                .failing
+                .iter()
+                .filter(|c| c.run_id == Some(id))
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let tail = match gh!(self, self.ops.failure_log(&s.repo, id)) {
+                Ok(tail) => tail,
+                Err(e) => format!("(the log could not be read: {e})"),
+            };
+            logs.push_str(&format!("### {jobs} (run {id})\n{tail}\n\n"));
+        }
+        let checks: Vec<String> = reading.failing.iter().map(|c| c.name.clone()).collect();
+        let note = fix::brief(&url, &pr_base, &checks, &logs, Landing::SamePullRequest);
+        // The resume boots the colony, and its publish later pushes: it counts against the pace.
+        self.pace().await?;
+        // What this run found, to put back if the fix never starts: a fix that never starts
+        // consumes no attempt and pins no head, so the next run simply tries again — the way a
+        // failed redo dispatch does. (Only real dispatches count towards `fix_attempts`; an entry
+        // past the cap or given up never reaches this dispatch.)
+        let prior = mem.fixing.get(&url).cloned();
+        entry.attempts += 1;
+        entry.head_sha = Some(head);
+        entry.checks = checks.clone();
+        entry.at = Some(self.ops.now());
+        match self.ops.fix(s, note).await {
+            fix::Started::Resumed => {
+                let line = entry.line(max);
+                mem.fixing.insert(url, entry);
+                Ok((Action::Fixing, line))
+            }
+            fix::Started::Gone(why) => {
+                mem.fixing.insert(url.clone(), entry);
+                self.fix_redo(s, &url, &pr_base, mem, &checks, &logs, why, prior).await
+            }
+            fix::Started::Failed(e) => {
+                if let Some(found) = prior {
+                    mem.fixing.insert(url, found);
+                } else {
+                    mem.fixing.remove(&url);
+                }
+                Ok((
+                    Action::Waiting,
+                    format!("{failing} — the fix could not start ({e}); it will try again on the next run"),
+                ))
+            }
+        }
+    }
+
+    /// Issue #1054: the colony's worktree cannot take the fix, so the brief goes to a fresh redo
+    /// colony when redo is on; otherwise the pull request is labelled `needs-human`. `prior` is
+    /// what the run found before it dispatched the fix: put back if the redo itself never starts.
+    #[allow(clippy::too_many_arguments)]
+    async fn fix_redo(
+        &mut self,
+        s: &Session,
+        url: &str,
+        base: &str,
+        mem: &mut RepoMemory,
+        checks: &[String],
+        logs: &str,
+        why: String,
+        prior: Option<Fixing>,
+    ) -> Result<(Action, String), Stop> {
+        let failing = format!("failing: {}", checks.join(", "));
+        if !self.cfg.redo_on_conflict {
+            let entry = mem.fixing.get(url).cloned().unwrap_or_default();
+            return self
+                .give_up_fix(
+                    s,
+                    url,
+                    mem,
+                    entry,
+                    &failing,
+                    format!("its colony's worktree was reclaimed ({why}), and redo colonies are off"),
+                )
+                .await;
+        }
+        let d = Dispatch::FixRed {
+            session: Box::new(s.clone()),
+            pr_url: url.to_string(),
+            base: base.to_string(),
+            brief: fix::brief(url, base, checks, logs, Landing::Redo),
+        };
+        match self.ops.dispatch(d).await {
+            Ok(id) => Ok((
+                Action::RedoDispatched,
+                format!(
+                    "{failing} — its worktree was reclaimed ({why}); dispatched fix colony {id} to redo it and fix the checks"
+                ),
+            )),
+            Err(e) => {
+                // The redo never started either: nothing is consumed and no head is pinned, so
+                // the next run tries again — and an entry already past its cap stays there, to
+                // take the needs-human path on a later pass.
+                if let Some(found) = prior {
+                    mem.fixing.insert(url.to_string(), found);
+                } else {
+                    mem.fixing.remove(url);
+                }
+                Ok((
+                    Action::Waiting,
+                    format!(
+                        "{failing} — its worktree was reclaimed ({why}); dispatching a fix colony failed ({e}); it will try again on the next run"
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// Issue #1054: past the last fix attempt, or with no colony left to take the fix, the pull
+    /// request is labelled `needs-human` and left open with the reason.
+    async fn give_up_fix(
+        &mut self,
+        s: &Session,
+        url: &str,
+        mem: &mut RepoMemory,
+        mut entry: Fixing,
+        failing: &str,
+        why: String,
+    ) -> Result<(Action, String), Stop> {
+        if !entry.labeled && !self.dry && gh!(self, self.ops.label_needs_human(s)).is_ok() {
+            entry.labeled = true;
+        }
+        entry.gave_up = Some(why.clone());
+        mem.fixing.insert(url.to_string(), entry);
+        Ok((
+            Action::Red,
+            format!("{failing} — {why}: labelled {} and left open", resolve::NEEDS_HUMAN),
+        ))
+    }
+
+    /// A colony sent back to fix its red checks, as this run finds it (issue #1054).
+    async fn fixing(&mut self, s: &Session, mem: &mut RepoMemory) -> Result<(Action, String), Stop> {
+        let url = s.pr_url.clone().unwrap_or_default();
+        let mut entry = mem.fixing.get(&url).cloned().unwrap_or_default();
+        let line = entry.line(self.cfg.fix_attempts);
+        match s.status {
+            SessionStatus::WaitingForAnswer => {
+                if !entry.labeled && !self.dry && gh!(self, self.ops.label_needs_human(s)).is_ok() {
+                    entry.labeled = true;
+                    mem.fixing.insert(url, entry);
+                }
+                Ok((
+                    Action::Fixing,
+                    format!(
+                        "{line} — its colony asked a question; labelled {} until it is answered",
+                        resolve::NEEDS_HUMAN
+                    ),
+                ))
+            }
+            SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::NoChanges if !self.dry => {
+                self.pace().await?;
+                let status = s.status.as_str();
+                match self.ops.reset_resolve(s).await {
+                    Ok(()) => Ok((
+                        Action::Waiting,
+                        format!(
+                            "its fix colony ended {status} without publishing; the pull request is back in the train ({line})"
+                        ),
+                    )),
+                    Err(e) => Ok((
+                        Action::Waiting,
+                        format!("its fix colony ended {status}; putting it back failed ({e})"),
+                    )),
+                }
+            }
+            _ => Ok((Action::Fixing, line)),
+        }
+    }
+
     async fn redo(
         &mut self,
         s: &Session,
@@ -2121,16 +2469,19 @@ async fn run_all<O: Ops>(
         ..Report::default()
     };
     let mut by_repo: BTreeMap<String, Vec<&Session>> = BTreeMap::new();
-    // A colony resumed to resolve its conflicts (issue #968) is not `pr_opened` while it works, and
-    // still the loop's to report on.
+    // A colony resumed to resolve its conflicts (issue #968) or to fix its red checks (issue
+    // #1054) is not `pr_opened` while it works, and still the loop's to report on.
     let resolving: HashSet<String> = memory
         .values()
         .flat_map(|m| m.resolving.values().map(|r| r.colony.clone()))
         .collect();
-    for s in sessions
-        .iter()
-        .filter(|s| (s.status == SessionStatus::PrOpened || resolving.contains(&s.id)) && s.pr_url.is_some())
-    {
+    let fixing: HashSet<String> = memory
+        .values()
+        .flat_map(|m| m.fixing.values().map(|f| f.colony.clone()))
+        .collect();
+    for s in sessions.iter().filter(|s| {
+        (s.status == SessionStatus::PrOpened || resolving.contains(&s.id) || fixing.contains(&s.id)) && s.pr_url.is_some()
+    }) {
         by_repo.entry(s.repo.to_ascii_lowercase()).or_default().push(s);
     }
     let mut engine = Engine {
@@ -2461,6 +2812,15 @@ impl Ops for GhOps<'_> {
                         )
                         .await;
                 }
+                if let Dispatch::FixRed { session: old, .. } = &d {
+                    self.app
+                        .session_log(
+                            &old.id,
+                            "warn",
+                            format!("merge-train loop: red checks; fix colony {} dispatched", session.id),
+                        )
+                        .await;
+                }
                 Ok(session.id)
             }
             Err(e) => Err(e.message().to_string()),
@@ -2514,6 +2874,33 @@ impl Ops for GhOps<'_> {
         let n = pr_number(s.pr_url.as_deref().unwrap_or_default()).ok_or("no pull request number")?;
         resolve::label(self.app, &s.repo, n).await
     }
+
+    async fn fix(&self, s: &Session, note: String) -> fix::Started {
+        if authority::external_writes_blocked() {
+            return fix::Started::Failed(crate::publish::BLOCKED.to_string());
+        }
+        let started = fix::start(self.app, &s.id, note).await;
+        let line = match &started {
+            fix::Started::Resumed => "merge-train loop: red checks; resumed to fix them".to_string(),
+            fix::Started::Gone(why) => format!("merge-train loop: its worktree cannot take a fix: {why}"),
+            fix::Started::Failed(e) => format!("merge-train loop: the fix could not start: {e}"),
+        };
+        self.app.session_log(&s.id, "info", line).await;
+        started
+    }
+
+    async fn branch_failing(&self, repo: &str, branch: &str) -> Result<Vec<String>, String> {
+        let tip = self.get_json(&format!("repos/{repo}/commits/{branch}")).await?;
+        let sha = tip["sha"].as_str().ok_or("the branch tip had no sha")?.to_string();
+        // Both sources a pull request's rollup draws from: Actions check runs and commit statuses.
+        let runs = self
+            .get_json(&format!("repos/{repo}/commits/{sha}/check-runs?per_page=100"))
+            .await?;
+        let status = self.get_json(&format!("repos/{repo}/commits/{sha}/status")).await?;
+        let mut names: Vec<String> = failing_checks_from(&runs["check_runs"]).into_iter().map(|c| c.name).collect();
+        names.extend(failing_checks_from(&status["statuses"]).into_iter().map(|c| c.name));
+        Ok(names)
+    }
 }
 
 /// The launch body for a colony the loop sends: autopilot on, so it publishes its pull request.
@@ -2565,6 +2952,26 @@ pub(crate) fn dispatch_body(d: &Dispatch) -> Value {
             "allow_duplicate": true,
             "origin": format!("{ORIGIN_FIX}{repo}"),
         }),
+        Dispatch::FixRed {
+            session,
+            pr_url,
+            base,
+            brief,
+        } => {
+            let n = pr_number(pr_url).unwrap_or_default();
+            json!({
+                "repo": session.repo,
+                "issue": session.issue,
+                "title": format!("Fix #{n}: {}", session.issue_title),
+                "instructions": format!(
+                    "Pull request {pr_url} (#{n}) is red against `{base}` and its own colony can no longer fix it here. {}",
+                    brief.trim()
+                ),
+                "autopilot": true,
+                "allow_duplicate": true,
+                "origin": format!("{ORIGIN_REDO}{}", session.id),
+            })
+        }
         Dispatch::Revert {
             repo,
             base,

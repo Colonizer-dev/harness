@@ -55,6 +55,8 @@ describe("merge-train loop settings", () => {
     expect(d.allow).toEqual([]);
     expect([d.max_merges, d.cooldown_secs, d.ci_wait_minutes]).toEqual([4, 120, 20]);
     expect([d.self_heal, d.revert_on_red, d.redo_on_conflict]).toEqual([false, false, false]);
+    expect([d.resolve_conflicts, d.fix_red]).toEqual([false, false]);
+    expect([d.resolve_attempts, d.fix_attempts]).toEqual([3, 2]);
   });
 
   it("switches a repository in and out, with never beating the allowlist and an org entry covering its repositories", () => {
@@ -153,6 +155,8 @@ describe("MergeLoopPanel", () => {
     expect(out).toContain("paused");
     expect(out).toContain(">Save changes<");
     expect(out).toContain("Fix totals");
+    expect(out).toContain("Fix red pull requests with the colony");
+    expect(out).toContain("Fix attempts");
   });
 
   it("warns when external writes are blocked", () => {

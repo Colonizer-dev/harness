@@ -20,6 +20,7 @@ const TONE: Record<MergeLoopAction, Tone> = {
   rerun: "info",
   redo_dispatched: "accent",
   resolving: "accent",
+  fixing: "accent",
   red: "err",
   needs_redo: "warn",
   waiting: "neutral",
@@ -30,7 +31,7 @@ const field = "rounded-md border border-border bg-panel px-2 py-1 text-small-lg 
 
 /** The groups a merge run's pull requests file under, one per action, in the order that matters. */
 function mergeGroups(dry: boolean): DetailGroupDef[] {
-  const order: MergeLoopAction[] = ["merged", "updated", "rebased", "resolving", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
+  const order: MergeLoopAction[] = ["merged", "updated", "rebased", "resolving", "fixing", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
   return order.map((a) => {
     const label = actionLabel(a, dry);
     return { key: a, label: label.charAt(0).toUpperCase() + label.slice(1), tone: TONE[a] === "neutral" ? "neutral" : TONE[a] };
@@ -196,6 +197,7 @@ export function MergeLoopPanel({
               <NumberField label="Merges per run" value={draft.max_merges} min={1} max={20} onChange={(n) => onChange({ ...draft, max_merges: n })} />
               <NumberField label="Cooldown" value={draft.cooldown_secs} min={30} max={3600} unit="s" onChange={(n) => onChange({ ...draft, cooldown_secs: n })} />
               <NumberField label="Wait for CI" value={draft.ci_wait_minutes} min={1} max={120} unit="min" onChange={(n) => onChange({ ...draft, ci_wait_minutes: n })} />
+              <NumberField label="Fix attempts" value={draft.fix_attempts} min={1} max={10} onChange={(n) => onChange({ ...draft, fix_attempts: n })} />
             </div>
             <label className="mt-3 flex items-center gap-2 text-small-lg text-muted">
               Known-flaky checks
@@ -214,6 +216,7 @@ export function MergeLoopPanel({
                   ["revert_on_red", "…by reverting the train's own merge instead"],
                   ["redo_on_conflict", "Redo colony for a conflicting rebase"],
                   ["resolve_conflicts", "Resolve conflicts with the colony (merge main in, never rebase)"],
+                  ["fix_red", "Fix red pull requests with the colony (resume it on the failing checks)"],
                 ] as const
               ).map(([key, text]) => (
                 <label key={key} className="flex items-center gap-2">
