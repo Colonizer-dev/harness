@@ -138,6 +138,10 @@ export interface PlanUsage {
     error: string | null;
     checked_at: string | null;
   } | null;
+  /** The account's window readings (issue #1223): "Session" and "Week" with percent used; null when nothing reported. */
+  windows?: { label: string; used_pct: number; reset_unix: number | null }[] | null;
+  /** Unix seconds the window reading was taken; null when unknown. */
+  windows_checked_at?: number | null;
 }
 
 export interface ModelPlans {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelProvider, ProviderUsageReport } from "../../types";
-import { claudePlanText, dailySeries, gaugeOf, modelsSummary, projectRunOut, providerStatus, resetText } from "./providerOverview";
+import { claudePlanText, dailySeries, gaugeOf, modelChoices, modelsSummary, offeredModels, projectRunOut, providerStatus, resetText, toggleModel } from "./providerOverview";
 
 const base = {
   id: "deepseek",
@@ -54,10 +54,57 @@ describe("resetText", () => {
 });
 
 describe("modelsSummary", () => {
-  it("counts enabled and the discovered extras", () => {
-    expect(modelsSummary(base)).toBe("3 enabled");
-    expect(modelsSummary({ models: ["a"], discovered_models: ["a", "b", "c"] })).toBe("1 enabled · +2 available");
-    expect(modelsSummary({ models: [] })).toBe("No models enabled");
+  it("counts enabled and the offered extras", () => {
+    // Never discovered, so the deepseek preset's catalogue models are what is on offer.
+    expect(modelsSummary(base)).toBe("3 enabled · +2 available");
+    expect(modelsSummary({ models: ["a"], discovered_models: ["a", "b", "c"], preset: "custom" })).toBe("1 enabled · +2 available");
+    expect(modelsSummary({ models: [], preset: "custom" })).toBe("No models enabled");
+  });
+  it("falls back to the preset's catalogue models while nothing has been discovered", () => {
+    expect(modelsSummary({ models: ["MiniMax-M2"], preset: "minimax" })).toBe("1 enabled");
+    expect(modelsSummary({ models: ["MiniMax-M2"], discovered_models: [], preset: "minimax" })).toBe("1 enabled");
+    expect(modelsSummary({ models: ["a"], discovered_models: ["a", "MiniMax-M2"], preset: "minimax" })).toBe("1 enabled · +1 available");
+  });
+});
+
+describe("offeredModels", () => {
+  it("prefers the discovery, and falls back to the catalogue when it is empty or has not run", () => {
+    expect(offeredModels({ preset: "minimax", discovered_models: ["MiniMax-M2", "MiniMax-M2.5"] })).toEqual(["MiniMax-M2", "MiniMax-M2.5"]);
+    expect(offeredModels({ preset: "minimax", discovered_models: [] })).toEqual(["MiniMax-M2"]);
+    expect(offeredModels({ preset: "minimax" })).toEqual(["MiniMax-M2"]);
+    expect(offeredModels({ preset: "custom", discovered_models: [] })).toEqual([]);
+  });
+});
+
+describe("modelChoices", () => {
+  const endpoint = {
+    discovered_models: ["deepseek-flash", "deepseek-v4-pro"],
+    new_models: ["deepseek-v4-pro"],
+    preset: "deepseek",
+  };
+  it("lists the offered models plus any enabled one they left out, marked new and gone", () => {
+    expect(modelChoices(endpoint, ["deepseek-flash", "deepseek-vintage"])).toEqual([
+      { model: "deepseek-flash", enabled: true, isNew: false, gone: false },
+      { model: "deepseek-v4-pro", enabled: false, isNew: true, gone: false },
+      { model: "deepseek-vintage", enabled: true, isNew: false, gone: true },
+    ]);
+  });
+  it("follows the live selection: a chip removed above unticks here, a typed one ticks, an unticked one leaves", () => {
+    const live = modelChoices(endpoint, ["deepseek-v4-pro"]);
+    expect(live.find((c) => c.model === "deepseek-flash")).toMatchObject({ enabled: false });
+    expect(live.find((c) => c.model === "deepseek-v4-pro")).toMatchObject({ enabled: true, isNew: true });
+    expect(live.some((c) => c.model === "deepseek-vintage")).toBe(false);
+  });
+  it("marks nothing gone while the endpoint serves no list of its own", () => {
+    expect(modelChoices({ ...endpoint, discovered_models: [], new_models: undefined }, ["deepseek-flash"]).every((c) => !c.gone)).toBe(true);
+  });
+});
+
+describe("toggleModel", () => {
+  it("ticks a model on and off without duplicating", () => {
+    expect(toggleModel(["a"], "b", true)).toEqual(["a", "b"]);
+    expect(toggleModel(["a", "b"], "b", true)).toEqual(["a", "b"]);
+    expect(toggleModel(["a", "b"], "a", false)).toEqual(["b"]);
   });
 });
 

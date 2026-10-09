@@ -227,6 +227,13 @@ export interface ModelProvider extends ProviderLimits {
    * the Mothership discovers them; the page then says "N enabled · +M available".
    */
   discovered_models?: string[];
+  /**
+   * The `discovered_models` that were not in the previous discovery (issue #1167). Optional: absent
+   * until a discovery found more than the one before it.
+   */
+  new_models?: string[];
+  /** When the Mothership last discovered models successfully, RFC3339 (issue #1167); absent until then. */
+  discovered_at?: string;
   /** The model settings currently routed here; empty means none are, so it stays idle. */
   used_by?: ModelSetting[];
 }

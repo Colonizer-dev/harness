@@ -347,9 +347,14 @@ slot_pids() {
 # every release published before this check existed, which gh answers with "no attestations found".
 # COLONIZER_REQUIRE_ATTESTATION=1 turns those skips into failures. A check that ran and found
 # something wrong is a different thing and is fatal whatever the variable says: a logged-in gh
-# answered, and its answer is that these checksums are not the ones the workflow signed. The downloads
-# only just succeeded over this network, so any other gh failure the auth probe below does not explain
-# is read as that answer, not as the network being down.
+# answered, and its answer is that these checksums are not the ones the workflow signed. Between skip
+# and wrong sits a third verdict: verification that could not run at all because the attestation
+# service did not answer — a network error, an HTTP 5xx, or a rate limit. That is fatal too (nothing
+# installs without a passing attestation), but its message says the service is unavailable and to
+# retry later, never that the checksums are wrong: a 503 says the check did not happen, not that it
+# failed. These transient failures are retried with the same backoff as the plain network ones before
+# that verdict is reached. Only what the transient and auth wordings do not explain — a logged-in gh
+# that answered and objected — is read as the wrong-signature answer.
 #
 # "No attestations found" is a skip, not that failure: it means gh found no provenance to check, not
 # that the provenance is wrong — the state of every release published before this step existed. Nor
@@ -379,10 +384,14 @@ verify_provenance() {
     case "$gh_help" in
       *--signer-workflow*) set -- "$@" --signer-workflow "$release_workflow" ;;
     esac
-    # gh reaches Sigstore's TUF root and the transparency log; a timeout there says nothing about the
-    # signature, so a network-looking failure is retried with backoff (COLONIZER_ATTESTATION_BACKOFF
-    # seconds, doubled each time) and, if it persists, reported as unreachable, not as "wrong".
+    # gh reaches Sigstore's TUF root and the transparency log, and fetches the attestation over
+    # GitHub's API; a timeout on the way there, or an HTTP 5xx or a rate limit from the API, says
+    # nothing about the signature, so a transient failure (net_re or unavailable_re) is retried with
+    # backoff (COLONIZER_ATTESTATION_BACKOFF seconds, doubled each time) and, if it persists, refused
+    # as the service being unavailable, never as "wrong".
     net_re='tuf|timeout|timed out|deadline exceeded|connection|no such host|dial tcp|network is unreachable|temporary failure'
+    unavailable_re='HTTP 5[0-9][0-9]|HTTP 429|rate limit'
+    transient_re="$net_re|$unavailable_re"
     attempt=1
     while :; do
       if out=$("$@" 2>&1); then
@@ -390,7 +399,7 @@ verify_provenance() {
         return
       fi
       if printf '%s\n' "$out" | grep -qi 'no attestations\|gh auth login' ||
-        ! printf '%s\n' "$out" | grep -qiE "$net_re"; then
+        ! printf '%s\n' "$out" | grep -qiE "$transient_re"; then
         break
       fi
       [ "$attempt" -lt 3 ] || break
@@ -399,9 +408,9 @@ verify_provenance() {
     done
     if printf '%s\n' "$out" | grep -qi 'no attestations\|gh auth login'; then
       :
-    elif printf '%s\n' "$out" | grep -qiE "$net_re"; then
-      line=$(printf '%s\n' "$out" | grep -iE "$net_re" | head -n 1)
-      fail "could not reach Sigstore to verify the build (network: $line); nothing was installed. Try again."
+    elif printf '%s\n' "$out" | grep -qiE "$transient_re"; then
+      printf '%s\n' "$out" >&2
+      fail "could not verify the build attestation over $(basename "$file"): the attestation service is unavailable (network error, HTTP 5xx, or rate limit), retry later; nothing was installed"
     fi
     if printf '%s\n' "$out" | grep -qi 'no attestations'; then
       # An unattested release, not a wrong one — see the comment above the function for why this is

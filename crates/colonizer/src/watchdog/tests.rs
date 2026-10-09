@@ -1369,3 +1369,70 @@ async fn the_control_defeat_flag_carries_its_evidence_and_holds_against_the_tick
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+// ---- The lost-continuation re-drive (issue #1266) ----
+
+/// Acceptance (issue #1266): once the last in-flight subagent's settlement has stood past the
+/// grace, the turn is re-driven — the interrupt first, so the re-drive message starts a fresh
+/// turn instead of queueing behind the wedged one — and the claim is spent on the send.
+#[tokio::test]
+async fn a_turn_lost_after_the_last_subagent_is_redriven() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut commands = rt.commands_rx.lock().await.take().expect("the command channel");
+    let armed = at(0);
+    *rt.turn_lost_since.lock().await = Some(armed);
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(3)).await;
+
+    let interrupt = commands.try_recv().expect("the interrupt went out");
+    assert_eq!(interrupt["type"], "interrupt");
+    let message = commands.try_recv().expect("the re-drive message behind it");
+    assert_eq!(message["type"], "user_message");
+    assert!(
+        message["id"].as_str().is_some_and(|id| id.starts_with("watchdog-")),
+        "a watchdog id, so its echo is not progress: {message}"
+    );
+    assert!(commands.try_recv().is_err(), "and nothing else");
+
+    let attention = app.session("abc").await.unwrap().attention.expect("flagged");
+    assert_eq!(attention["reason"], TURN_LOST_REASON);
+    assert_eq!(since_of(&attention), armed, "dated from the settlement, not the re-drive");
+    assert!(
+        rt.turn_lost_since.lock().await.is_none(),
+        "the claim is spent on the send, so the next tick cannot repeat it"
+    );
+    let logs = rt.logs.lock().await.clone();
+    assert!(
+        logs.iter().any(|l| l["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("the turn never resumed; interrupting the dead turn"))),
+        "{logs:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Inside the grace the window is left to the continuation it waits for, and with the watchdog
+/// off nothing is re-driven at all.
+#[tokio::test]
+async fn a_fresh_subagent_settlement_is_not_redriven_early() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut commands = rt.commands_rx.lock().await.take().expect("the command channel");
+    let armed = at(0);
+    *rt.turn_lost_since.lock().await = Some(armed);
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(0) + Duration::seconds(30)).await;
+    assert!(commands.try_recv().is_err(), "inside the grace nothing is sent");
+    assert_eq!(*rt.turn_lost_since.lock().await, Some(armed), "the window stands");
+    assert!(app.session("abc").await.unwrap().attention.is_none(), "and no flag went up");
+
+    // A disabled watchdog leaves the turn alone whatever the window says.
+    let settings = WatchdogSettings {
+        enabled: false,
+        ..SETTINGS
+    };
+    maybe_redrive_subagent_turn(&app, &s, &rt, &settings, at(30)).await;
+    assert!(commands.try_recv().is_err(), "a disabled watchdog does not re-drive");
+    let _ = std::fs::remove_dir_all(root);
+}

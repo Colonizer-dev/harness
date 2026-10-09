@@ -12,7 +12,7 @@
  * Referral parameters the source carries on some links (`aff=`, `utm_content=`, `from=`) are not
  * reproduced here: a link from this list credits nobody.
  */
-import type { ProviderPricing } from "./types";
+import type { ProviderPricing, ProviderQuotaProbe } from "./types";
 
 export interface CatalogEntry {
   id: string;
@@ -31,6 +31,8 @@ export interface CatalogEntry {
   models?: string[];
   max_concurrent?: number;
   pricing?: ProviderPricing;
+  /** Plan-balance probe preset (#1223), prefilled when adding this provider; set only where the response fields' semantics are verified per region. */
+  quota?: ProviderQuotaProbe;
 }
 
 export interface CatalogVariable {
@@ -85,7 +87,10 @@ export const PROVIDER_CATALOG: CatalogEntry[] = [
   { id: "meta", name: "Meta Model API", base_url: "https://api.meta.ai", auth: "bearer", wire: "anthropic", site: "https://dev.meta.ai/docs", context_tokens: 1_048_576, models: ["muse-spark-1.3-contributor", "muse-spark-1.2-contributor"], max_concurrent: 4 },
   { id: "micu", name: "Micu", base_url: "https://www.micuapi.ai", auth: "bearer", wire: "anthropic", site: "https://www.micuapi.ai" },
   { id: "minimax", name: "MiniMax", base_url: "https://api.minimaxi.com/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.minimaxi.com", models: ["MiniMax-M2"] },
-  { id: "minimax-en", name: "MiniMax en", base_url: "https://api.minimax.io/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.minimax.io" },
+  // MiniMax international (api.minimax.io): `current_interval_usage_count` is what is LEFT in the
+  // interval. The China endpoint (api.minimaxi.com) reads the same field as what was SPENT, so it gets no preset.
+  { id: "minimax-en", name: "MiniMax en", base_url: "https://api.minimax.io/anthropic", auth: "bearer", wire: "anthropic", site: "https://platform.minimax.io",
+    quota: { url: "https://api.minimax.io/v1/api/openplatform/coding_plan/remains", pointer: "/data/model_remains/0/current_interval_usage_count", limit_pointer: "/data/model_remains/0/current_interval_total_count", reset_pointer: "/data/model_remains/0/end_time" } },
   { id: "modelscope", name: "ModelScope", base_url: "https://api-inference.modelscope.cn", auth: "bearer", wire: "anthropic", site: "https://modelscope.cn" },
   { id: "novita-ai", name: "Novita AI", base_url: "https://api.novita.ai/anthropic", auth: "bearer", wire: "anthropic", site: "https://novita.ai" },
   { id: "nvidia", name: "Nvidia", base_url: "https://integrate.api.nvidia.com", auth: "bearer", wire: "openai", site: "https://build.nvidia.com" },

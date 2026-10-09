@@ -292,6 +292,11 @@ function plans(ms: MockState): ModelPlans {
       last_request_at: null,
       since: null,
       balance: null,
+      windows: [
+        { label: "Session", used_pct: 62, reset_unix: Math.floor(Date.now() / 1000) + 42 * 60 },
+        { label: "Week", used_pct: 31, reset_unix: Math.floor(Date.now() / 1000) + 2 * 86_400 },
+      ],
+      windows_checked_at: Math.floor(Date.now() / 1000),
     });
   }
   for (const p of ms.providers) {

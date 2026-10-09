@@ -907,6 +907,7 @@ pub(crate) fn api_error(status: StatusCode, kind: &str, message: impl Into<Strin
 }
 
 mod account_fallback;
+mod discover;
 mod probe;
 mod proxy;
 mod stream;
@@ -920,6 +921,7 @@ use self::{proxy::*, stream::*};
 pub(crate) use self::probe::*;
 pub(crate) use self::{
     account_fallback::{AccountRoute, fallback_usable, route_for},
+    discover::Discover,
     proxy::{MODEL_ERROR_REASON, bearer_token},
     stream::credential_header,
 };

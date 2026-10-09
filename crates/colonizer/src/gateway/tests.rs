@@ -2298,6 +2298,17 @@ fn cache_root() -> PathBuf {
     std::env::temp_dir().join(format!("colonizer-probe-cache-{}", uuid::Uuid::new_v4()))
 }
 
+/// Discovery records only providers still on file, so a probe-driven test plants the row in
+/// `providers.json` for the gate to let through.
+fn on_file(root: &std::path::Path, provider: &Provider) {
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/providers.json"),
+        serde_json::to_string(&[provider]).unwrap(),
+    )
+    .unwrap();
+}
+
 /// The second lookup within the TTL serves the cache: one network hit for two lookups, and the
 /// cached one does no I/O, so it comes back faster than the ~300 ms upstream delay the first
 /// paid. Both durations print for the report (`--nocapture` reproduces the measurement).
@@ -2475,6 +2486,162 @@ async fn other_probe_failures_carry_no_note() {
     assert_eq!(openai.get("note"), Some(&Value::Null));
 }
 
+// -- model discovery (#1167) ------------------------------------------------------------------------
+
+/// A fake provider whose `/v1/models` answers a catalogue of `models`, with the list held in a
+/// handle a test can change between probes.
+async fn catalogue_server(models: &[&str]) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let held = Arc::new(Mutex::new(models.iter().map(|s| s.to_string()).collect::<Vec<_>>()));
+    let served = held.clone();
+    let router = Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let served = served.clone();
+            async move {
+                let list = served.lock().unwrap().clone();
+                let body = json!({"data": list.iter().map(|m| json!({"id": m})).collect::<Vec<_>>()}).to_string();
+                ([(axum::http::header::CONTENT_TYPE, "application/json")], body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (addr, held)
+}
+
+/// A reachable probe persists the endpoint's catalogue to the sidecar, deduped and sorted (#1167).
+#[tokio::test]
+async fn a_reachable_probe_persists_the_discovered_models() {
+    let (addr, _catalogue) = catalogue_server(&["b", "a", "b"]).await;
+    let root = cache_root();
+    let app = crate::tests::test_app(&root);
+    let provider = Provider {
+        base_url: format!("http://{addr}"),
+        ..provider("x", None)
+    };
+    on_file(&root, &provider);
+    assert_eq!(probe(&app, &provider).await["reachable"], true);
+    let found = app.provider_models.entry("x", &provider.base_url).unwrap();
+    assert_eq!(found.models, vec!["a", "b"]);
+    assert!(found.new_models.is_empty(), "a first discovery flags nothing");
+    assert!(root.join("config/provider-models.json").exists(), "the list is persisted");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A model the endpoint gained since the last discovery is flagged in `new_models` — once, because
+/// the next discovery compares against the list that already included it (#1167).
+#[tokio::test]
+async fn a_model_gained_since_the_last_discovery_is_flagged_new() {
+    let (addr, catalogue) = catalogue_server(&["a", "b"]).await;
+    let root = cache_root();
+    let app = crate::tests::test_app(&root);
+    let provider = Provider {
+        base_url: format!("http://{addr}"),
+        ..provider("x", None)
+    };
+    on_file(&root, &provider);
+    probe(&app, &provider).await;
+    catalogue.lock().unwrap().push("c".to_string());
+    probe(&app, &provider).await;
+    let found = app.provider_models.entry("x", &provider.base_url).unwrap();
+    assert_eq!(found.models, vec!["a", "b", "c"]);
+    assert_eq!(found.new_models, vec!["c"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The Anthropic-wire 404 "no model list" is recorded as an empty list: the endpoint answers, it
+/// just publishes nothing (#1167).
+#[tokio::test]
+async fn a_404_records_an_empty_model_list() {
+    let router = Router::new().route("/v1/models", axum::routing::get(|| async { StatusCode::NOT_FOUND }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let root = cache_root();
+    let app = crate::tests::test_app(&root);
+    let provider = Provider {
+        base_url: format!("http://{addr}"),
+        ..provider("x", None)
+    };
+    on_file(&root, &provider);
+    assert_eq!(probe(&app, &provider).await["note"], "no model list");
+    assert!(
+        app.provider_models.entry("x", &provider.base_url).unwrap().models.is_empty(),
+        "reachable with no list is recorded as an empty list"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An unreachable probe records nothing: a blip must not wipe the list a good answer left (#1167).
+#[tokio::test]
+async fn an_unreachable_probe_leaves_the_previous_discovery() {
+    let root = cache_root();
+    let app = crate::tests::test_app(&root);
+    let provider = Provider {
+        base_url: "http://127.0.0.1:9".into(),
+        ..provider("x", None)
+    };
+    app.provider_models.record(&provider, &["kept".to_string()]);
+    assert_eq!(probe(&app, &provider).await["reachable"], false);
+    assert_eq!(
+        app.provider_models.entry("x", &provider.base_url).unwrap().models,
+        vec!["kept"]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A fake `/v1/models` whose status and body a test can switch between probes, for the
+/// discovery-gate test below.
+async fn switching_server() -> (std::net::SocketAddr, Arc<Mutex<(StatusCode, Value)>>) {
+    let held = Arc::new(Mutex::new((StatusCode::OK, json!({"data": [{"id": "kept"}]}))));
+    let served = held.clone();
+    let router = Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let served = served.clone();
+            async move {
+                let (status, body) = served.lock().unwrap().clone();
+                (status, axum::Json(body))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (addr, held)
+}
+
+/// Only a real answer rewrites the stored list: after a good discovery, a 500 — still `reachable`,
+/// like any answered status — and a 200 whose body carries no `data` list both leave the entry
+/// alone, exactly as an unreachable probe does (#1167).
+#[tokio::test]
+async fn a_500_or_a_listless_200_leaves_the_previous_discovery() {
+    let (addr, answer) = switching_server().await;
+    let root = cache_root();
+    let app = crate::tests::test_app(&root);
+    let provider = Provider {
+        base_url: format!("http://{addr}"),
+        ..provider("x", None)
+    };
+    on_file(&root, &provider);
+    probe(&app, &provider).await;
+    let kept = || app.provider_models.entry("x", &provider.base_url).unwrap();
+
+    *answer.lock().unwrap() = (StatusCode::INTERNAL_SERVER_ERROR, json!(null));
+    let health = probe(&app, &provider).await;
+    assert_eq!(health["reachable"], true);
+    assert_eq!(health["status"], 500);
+    assert_eq!(kept().models, vec!["kept"], "a 5xx blip must not wipe the list");
+
+    *answer.lock().unwrap() = (StatusCode::OK, json!("not a catalogue"));
+    let health = probe(&app, &provider).await;
+    assert_eq!(health["status"], 200);
+    assert_eq!(health["models"], json!([]));
+    assert_eq!(kept().models, vec!["kept"], "a 200 with no data list discovers nothing");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// The number a quota pointer reads: a JSON number or a numeric string — some plans quote the
 /// count — and nothing else.
 #[test]
@@ -2574,7 +2741,7 @@ fn usage_gateway(dir: &std::path::Path) -> Gateway {
     Gateway::new(dir).unwrap()
 }
 
-fn provider(id: &str, fallback_model: Option<&str>) -> Provider {
+pub(crate) fn provider(id: &str, fallback_model: Option<&str>) -> Provider {
     Provider {
         id: id.into(),
         name: id.into(),

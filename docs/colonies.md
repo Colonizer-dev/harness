@@ -730,7 +730,9 @@ shows "N left in plan". A failing balance check never marks the provider unhealt
   `api.anthropic.com` and does not pass the gateway, so it is not counted here.
 - Requests already in flight are not reserved against `budget_tokens`, so parallel requests can
   take a colony a little past it before it stops.
-- No provider comes with a plan-balance URL preset. You enter the URL yourself.
+- One provider comes with a plan-balance URL preset: MiniMax's international endpoint
+  (`api.minimax.io`), whose fields the add form prefills. For every other provider you enter the URL
+  yourself.
 
 The reference is in [configuration.md](configuration.md) and
 [architecture.md, Per-colony limits](architecture.md#per-colony-limits).

@@ -1,11 +1,12 @@
 //! In-guest process hardening for the agent runner child (issue #301). The child runs the agent
 //! module's untrusted code as root inside a single-tenant microVM, so before exec it gets: the
-//! capability bounding set trimmed (for uid 0, caps after execve are exactly the bounding set, so a
-//! drop here strips the agent and everything it spawns, while chown/dac_override/setuid/setgid/
-//! net_raw survive for package managers), RLIMIT_CORE 0 (no core dumps), PR_SET_NO_NEW_PRIVS and a
-//! hand-assembled classic-BPF seccomp denylist that turns the dangerous calls — kernel module/BPF/
-//! io_uring/userfaultfd/mount/namespace/ptrace territory — into ordinary EPERM tool failures
-//! instead of kills.
+//! capability bounding set trimmed (for uid 0, caps after execve are exactly the bounding set, so
+//! a drop here strips the agent and everything it spawns; chown/dac_override/setuid/setgid survive
+//! for package managers — none of which use raw sockets — while net_raw is dropped, because a raw
+//! socket could read agentd's bearer token off the wire, #932), RLIMIT_CORE 0 (no core dumps),
+//! PR_SET_NO_NEW_PRIVS, and a hand-assembled classic-BPF seccomp denylist that turns the dangerous
+//! calls — kernel module/BPF/io_uring/userfaultfd/mount/namespace/ptrace territory — into ordinary
+//! EPERM tool failures instead of kills.
 //!
 //! Everything is assembled before the fork ([`Hardening::prepare`]); the pre_exec closure only
 //! makes async-signal-safe raw syscalls and a failure in any step fails the spawn (fail closed).
@@ -54,12 +55,14 @@ mod imp {
     const NAMESPACE_FLAGS: u32 = 0x7e02_0000; // NEW{NS,CGROUP,UTS,IPC,USER,PID,NET}
 
     /// Capabilities dropped from the bounding set before exec: kernel module/BPF/perf/port-I/O
-    /// territory, mounts, ptrace, audit, syslog, quotas. Two are walls on purpose: no CAP_SYS_RESOURCE
-    /// keeps RLIMIT_CORE=0 from being raised again, and no CAP_SYS_PTRACE keeps a non-dumpable
-    /// agentd's /proc/<pid>/{environ,mem} closed to the agent.
+    /// territory, mounts, ptrace, audit, syslog, quotas, and NET_RAW — a raw socket (AF_PACKET, or
+    /// AF_INET with SOCK_RAW) copies frames off the wire, agentd's plaintext bearer token included
+    /// (#932). Two are walls on purpose: no CAP_SYS_RESOURCE keeps RLIMIT_CORE=0 from being raised
+    /// again, and no CAP_SYS_PTRACE keeps a non-dumpable agentd's /proc/<pid>/{environ,mem} closed
+    /// to the agent.
     #[rustfmt::skip]
     const DROPPED_CAPS: &[libc::c_ulong] = &[
-        9 /* LINUX_IMMUTABLE */, 12 /* NET_ADMIN */, 16 /* SYS_MODULE */, 17 /* SYS_RAWIO */,
+        9 /* LINUX_IMMUTABLE */, 12 /* NET_ADMIN */, 13 /* NET_RAW */, 16 /* SYS_MODULE */, 17 /* SYS_RAWIO */,
         19 /* SYS_PTRACE */, 20 /* SYS_PACCT */, 21 /* SYS_ADMIN */, 22 /* SYS_BOOT */,
         24 /* SYS_RESOURCE */, 25 /* SYS_TIME */, 26 /* SYS_TTY_CONFIG */, 27 /* MKNOD */,
         30 /* AUDIT_CONTROL */, 32 /* MAC_OVERRIDE */, 33 /* MAC_ADMIN */, 34 /* SYSLOG */,
@@ -159,6 +162,16 @@ mod imp {
             ),
             rule("ioctl", libc::SYS_ioctl, Action::ArgEq(1, TIOCSTI), "arg1 == TIOCSTI"),
             rule("ioctl", libc::SYS_ioctl, Action::ArgEq(1, TIOCLINUX), "arg1 == TIOCLINUX"),
+            // Only the packet family is gated: AF_PACKET reads whole frames off the wire, agentd's
+            // plaintext bearer token included (#932) — the dropped CAP_NET_RAW is the first wall,
+            // this one holds even if the cap is ever re-granted. Every other family passes, and
+            // there is no socketcall multiplexer to cover on x86_64/aarch64.
+            rule(
+                "socket",
+                libc::SYS_socket,
+                Action::ArgEq(0, libc::AF_PACKET as u32),
+                "arg0 == AF_PACKET",
+            ),
         ]);
         rules
     }
@@ -241,7 +254,7 @@ mod imp {
             }
         }
 
-        /// The startup log line: e.g. `seccomp denylist 51 rules fnv64=…, caps dropped 21, core dumps off`.
+        /// The startup log line: e.g. `seccomp denylist 52 rules fnv64=…, caps dropped 22, core dumps off`.
         pub fn describe(&self) -> String {
             let caps = if unsafe { libc::geteuid() } == 0 {
                 DROPPED_CAPS.len()
@@ -431,6 +444,15 @@ mod imp {
                 1,
                 "exactly one clone rule"
             );
+            // The token-sniffing route (#932) is closed at both layers: the cap is gone from the
+            // bounding set, and only the packet family of socket(2) is denied.
+            let net_raw: libc::c_ulong = 13;
+            assert!(DROPPED_CAPS.contains(&net_raw), "CAP_NET_RAW must be dropped");
+            let socket = rule_list.iter().find(|r| r.name == "socket").unwrap();
+            assert!(
+                matches!(socket.action, Action::ArgEq(0, v) if v == libc::AF_PACKET as u32),
+                "socket must be denied for AF_PACKET only"
+            );
         }
 
         #[test]
@@ -518,6 +540,12 @@ mod imp {
                 run(&filter, libc::SYS_ioctl as u32, AUDIT_ARCH, [0, 0x5401, 0, 0, 0, 0]),
                 ALLOW
             );
+            // socket: only the packet family is gated — AF_PACKET (frame sniffing, #932) is
+            // denied, the ordinary AF_INET/AF_UNIX families pass.
+            let sock = |f: u64| run(&filter, libc::SYS_socket as u32, AUDIT_ARCH, [f, 0, 0, 0, 0, 0]);
+            denied(sock(libc::AF_PACKET as u64), libc::EPERM);
+            assert_eq!(sock(libc::AF_INET as u64), ALLOW);
+            assert_eq!(sock(libc::AF_UNIX as u64), ALLOW);
         }
 
         /// The child half of `spawning_through_guard_hardens_the_child`: it runs inside a child
@@ -555,6 +583,15 @@ mod imp {
                 errno_of(|| unsafe { libc::syscall(libc::SYS_ioctl, 0, TIOCSTI as libc::c_ulong, 0) }),
                 libc::EPERM
             );
+            // The packet family is denied by the filter itself, so the sniffing route (#932) stays
+            // closed even as root and even if the cap were ever re-granted. The fd is closed if the
+            // call unexpectedly succeeds, so a regression does not leak it before the assert.
+            let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+            }
+            assert_eq!(fd, -1, "AF_PACKET sockets must be denied");
+            assert_eq!(std::io::Error::last_os_error().raw_os_error().unwrap(), libc::EPERM);
 
             // The rlimits and no_new_privs actually landed.
             let mut limit = libc::rlimit {
@@ -571,6 +608,7 @@ mod imp {
                 let eff = u64::from_str_radix(eff.trim(), 16).unwrap();
                 assert_eq!(eff & (1 << 21), 0, "CAP_SYS_ADMIN must not survive exec");
                 assert_eq!(eff & (1 << 19), 0, "CAP_SYS_PTRACE must not survive exec");
+                assert_eq!(eff & (1 << 13), 0, "CAP_NET_RAW must not survive exec (#932)");
                 assert_ne!(eff & 1, 0, "CAP_CHOWN is kept on purpose for package managers");
             }
 
