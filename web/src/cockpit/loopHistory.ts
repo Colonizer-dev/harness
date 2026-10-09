@@ -127,6 +127,8 @@ export interface DetailItem {
   title?: string;
   /** The colony this item started or belongs to. */
   colony?: string;
+  /** Which pass of a bounded retry this is, as a resolving colony's "attempt 1/3". */
+  attempt?: { n: number; m: number };
   reason: string;
 }
 
@@ -134,12 +136,16 @@ export interface DetailGroupDef {
   key: string;
   label: string;
   tone: "ok" | "warn" | "err" | "neutral" | "info" | "accent";
+  /** A group that needs a person: its section starts open and its chip reads as a count of work. */
+  attention?: boolean;
 }
 
 /** One merged line: `count` items that share a repository and a reason. */
 export interface DetailLine {
   repo: string;
   reason: ReasonText;
+  /** The first item's attempt, for a single-item line to show as a pill. */
+  attempt?: { n: number; m: number };
   items: DetailItem[];
 }
 
@@ -148,21 +154,63 @@ export interface DetailGroup extends DetailGroupDef {
   lines: DetailLine[];
 }
 
+/** The actions the cockpit itself can take on a reason, as one of a line's fixes. */
+export type FixAction = "local_checks";
+
+/** Where a reason's fix goes: a page on github.com, or an action the cockpit performs. */
+export type Fix = { label: string; href: string } | { label: string; action: FixAction };
+
 /** A reason in plain words, and where to go to fix it when there is somewhere. */
 export interface ReasonText {
   text: string;
-  /** The reason as GitHub or the loop said it, for a tooltip. */
+  /** The reason as GitHub or the loop said it, for a tooltip and a "details" toggle. */
   raw: string;
-  fix?: { label: string; href: string };
+  fixes?: Fix[];
 }
 
-/** Rewrites the reasons that are really one problem: a billing lock reads the same on every pull request. */
+/** Rewrites the reasons that are really one problem: a billing lock reads the same on every pull request, and a
+ * timed-out `gh` call is GitHub's slowness, not the pull request's. */
 export function friendlyReason(raw: string, repo: string): ReasonText {
   const org = repo.split("/")[0];
   if (/spending limit|payments have failed|billing/i.test(raw) && /actions|job|check/i.test(raw)) {
-    return { text: "GitHub Actions is blocked (billing)", raw, fix: org ? { label: "Fix billing", href: `https://github.com/organizations/${org}/settings/billing` } : undefined };
+    return {
+      text: "GitHub Actions is blocked (billing)",
+      raw,
+      fixes: [...(org ? [{ label: "Fix billing", href: `https://github.com/organizations/${org}/settings/billing` }] : []), { label: "Use local checks", action: "local_checks" satisfies FixAction }],
+    };
+  }
+  // A `gh` command that ran out of time says nothing about the pull request; a local check that timed
+  // out does, so only the backticked GitHub calls read as "GitHub didn't answer".
+  if (/timed out|timeout/i.test(raw) && /`gh |gh api|gh pr|gh run/i.test(raw)) {
+    return { text: "GitHub didn't answer in time; retrying next run", raw };
   }
   return { text: raw.replace(/\s+/g, " ").trim(), raw };
+}
+
+/** One summary chip: a group's size in the header, clickable to open or close its section. */
+export interface DetailChip {
+  key: string;
+  count: number;
+  label: string;
+  tone: DetailGroupDef["tone"];
+  attention: boolean;
+}
+
+/** A chip per group with something in it, in the defs' order; the keys in `always` also chip at zero. */
+export function detailChips(items: readonly DetailItem[], defs: readonly DetailGroupDef[], always: readonly string[] = []): DetailChip[] {
+  const counts = new Map<string, number>();
+  for (const i of items) counts.set(i.group, (counts.get(i.group) ?? 0) + 1);
+  return defs
+    .filter((d) => (counts.get(d.key) ?? 0) > 0 || always.includes(d.key))
+    .map((d) => ({ key: d.key, count: counts.get(d.key) ?? 0, label: d.label, tone: d.tone, attention: d.attention ?? false }));
+}
+
+/** The open set with one group's key flipped in or out. */
+export function toggleKey(open: ReadonlySet<string>, key: string): Set<string> {
+  const next = new Set(open);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
 }
 
 /**
@@ -179,7 +227,7 @@ export function groupItems(items: readonly DetailItem[], defs: readonly DetailGr
         const key = item.ref ? `${item.repo}\u0000${reason.text}` : `\u0000${reason.text}`;
         const line = lines.get(key);
         if (line) line.items.push(item);
-        else lines.set(key, { repo: item.ref ? item.repo : "", reason, items: [item] });
+        else lines.set(key, { repo: item.ref ? item.repo : "", reason, attempt: item.attempt, items: [item] });
       }
       const list = [...lines.values()].sort((a, b) => b.items.length - a.items.length);
       return { ...def, count: list.reduce((n, l) => n + l.items.length, 0), lines: list };

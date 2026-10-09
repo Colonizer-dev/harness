@@ -28,7 +28,7 @@ export function Button({ variant, size, className, type = "button", ...props }: 
 
 export type Tone = "neutral" | "info" | "ok" | "warn" | "err" | "accent";
 
-const TONE: Record<Tone, string> = {
+export const TONE: Record<Tone, string> = {
   neutral: "border-border bg-panel-2 text-muted",
   info: "border-transparent bg-info-soft text-info",
   ok: "border-transparent bg-ok-soft text-ok",
