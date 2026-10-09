@@ -27,7 +27,7 @@ describe("execPolicyProblem", () => {
       'exec policy rule "x": "decision" must be "deny", "ask" or "allow"',
     );
     expect(execPolicyProblem('{"rules": [{"decision": "deny"}]}')).toBe(
-      'exec policy rule 1: a rule needs "command", "script", "touches" or "writes_outside", or it would match every command',
+      'exec policy rule 1: a rule needs "command", "script", "touches", "writes_outside" or "writes_git", or it would match every command',
     );
   });
 });

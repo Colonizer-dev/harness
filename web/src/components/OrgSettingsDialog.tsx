@@ -809,7 +809,7 @@ export function ExecPolicyEditor({
       <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Exec policy</h3>
       <div className="py-3">
         <div className="text-small text-muted">
-          Rules for the commands {org} colonies run, as JSON: {'{"rules": [{"id", "decision": "deny" | "ask" | "allow", "reason", "command" | "script" | "touches" | "writes_outside"}]}'}.
+          Rules for the commands {org} colonies run, as JSON: {'{"rules": [{"id", "decision": "deny" | "ask" | "allow", "reason", "command" | "script" | "touches" | "writes_outside" | "writes_git"}]}'}.
           Layered between the install's policy and a repository's own .colonizer/exec-policy.json; the strictest decision
           wins, so it can only narrow. Agent modules that cannot apply it refuse to launch while it is set. Empty adds nothing.
         </div>

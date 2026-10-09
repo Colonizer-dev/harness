@@ -98,7 +98,7 @@ test('the default layer asks when a command writes outside the repository, and n
 // a colony whose microVM root filesystem is discarded, with only these host-backed mounts writable.
 const vmWrites = JSON.parse(readFileSync(new URL('./fixtures/execpolicy-vm-writes.json', import.meta.url), 'utf8'));
 
-test('with the boot’s host mounts, a host-backed, read-only or .git write asks; a VM-local one does not (#877, #750)', () => {
+test('with the boot’s host mounts, a host-backed or read-only write asks, a .git write denies, a VM-local one does not (#877, #750, #1258)', () => {
   const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
   const policy = loadExecPolicy({}, {
     cwd: vmWrites.cwd,
@@ -120,7 +120,7 @@ test('without a host-mount list, every write outside the repository still asks (
   assert.equal(decide(policy, 'echo x > /usr/local/bin/tool', '/workspace')?.decision, 'ask');
 });
 
-test('the ask names why: a read-only mount, the .git internals or a host-backed path (#750)', () => {
+test('the ask names why: a read-only mount, or a host-backed path (#750)', () => {
   const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
   const policy = loadExecPolicy({}, {
     cwd: vmWrites.cwd,
@@ -129,13 +129,49 @@ test('the ask names why: a read-only mount, the .git internals or a host-backed 
   const question = (command) => execPolicyQuestion(decide(policy, command, vmWrites.cwd), command).questions[0].question;
   assert.match(question('echo x > /opt/colonizer/agent/runner.mjs'), /writes to a read-only mount \(\/opt\/colonizer\)/);
   assert.match(question('echo x > /colonizer/memory/repo/notes.json'), /read-only mount \(\/colonizer\)/);
-  assert.match(question('echo x > /workspace/.git/config'), /into the repository's \.git internals/);
-  assert.match(question('echo x > /workspace/sub/../.git/x'), /into the repository's \.git internals/);
-  assert.match(question('echo x > .git/HEAD'), /into the repository's \.git internals/);
   assert.match(question('echo x > /opt/node/bin/node'), /read-only mount \(\/opt\/node\/bin\/node\)/);
   assert.match(question('cp a /harness/out/z'), /to a host-backed path outside the repository/);
   // A nested writable bind of the read-only /colonizer is host-backed, not read-only.
   assert.match(question('echo x > /colonizer/services/s.json'), /host-backed path outside the repository/);
+});
+
+// #1258: `.git` is read-only by design. The invocations that must write it, and any write under
+// it, deny instead of asking — the agent is hitting the intended wall, so the reason it sees is
+// the instruction to leave its changes in the working tree.
+test('the default layer denies git add/commit/stash and writes under .git; reads still pass (#1258)', () => {
+  const policy = loadExecPolicy({}, { readFile: () => null });
+  const deny = (command) => {
+    const hit = decide(policy, command, '/workspace');
+    assert.equal(hit?.decision, 'deny', command);
+    assert.equal(hit.rule, 'git-read-only', command);
+    assert.equal(hit.layer, 'default', command);
+    assert.match(hit.reason, /read-only by design/, command);
+    assert.match(hit.reason, /harness commits them/, command);
+  };
+  for (const command of ['git add .', 'git add -A', 'git add modules/agents/x.mjs', 'git commit -m wip',
+    'git commit --amend', 'git stash', 'git stash pop', 'git stash drop', 'git -C /workspace add -A',
+    'git -c core.pager=cat commit -m wip', 'git --no-pager stash', 'make && git add -A',
+    'git status; git commit -m x', 'sudo git add .', 'touch .git/objects/testwrite', 'echo x > .git/HEAD',
+    'echo x > /workspace/.git/HEAD', 'rm .git/index.lock', 'mkdir -p .git/refs/heads/wip',
+    'printf x | tee /workspace/.git/HEAD']) {
+    deny(command);
+  }
+  for (const command of ['git status', 'git diff HEAD~1', 'git log -p -- modules/agents/x.mjs',
+    'git status && git diff --stat', 'git show HEAD:README.md', 'cat .git/HEAD', 'ls .git',
+    'ls -la .git/objects', 'git check-ignore -v .env', 'git diff > /tmp/patch.diff',
+    'git stash list', 'git stash show', 'git --no-pager stash list']) {
+    assert.equal(decide(policy, command, '/workspace'), null, command);
+  }
+  // The wall is the design, so a later layer cannot wave it through: the strictest decision wins
+  // across layers, and an allow is the loosest there is.
+  const widened = {
+    layers: [
+      ...policy.layers,
+      { name: 'repo', rules: parsePolicy({ rules: [{ id: 'allow-git', decision: 'allow', writes_git: true }] }).rules },
+    ],
+  };
+  assert.equal(decide(widened, 'git commit -m wip', '/workspace').decision, 'deny');
+  assert.equal(decide(widened, 'git commit -m wip', '/workspace').rule, 'git-read-only');
 });
 
 test('an org-layer `"writes_outside": "strict"` rule restores the pre-#877 asks (#750)', () => {
@@ -234,7 +270,7 @@ function keptWhole(text) {
   if (policy.rules.length !== raw.length) return false;
   const named = (rule) =>
     ['command', 'script', 'touches'].filter((key) => key in rule).length +
-    (rule.writes_outside !== undefined && rule.writes_outside !== false ? 1 : 0);
+    ['writes_outside', 'writes_git'].filter((key) => rule[key] !== undefined && rule[key] !== false).length;
   return policy.rules.every((rule, i) => rule.predicates.length === named(raw[i]));
 }
 
@@ -263,7 +299,7 @@ test('a malformed layer is ignored with a warning; the default keeps enforcing',
   assert.deepEqual(rules.map((rule) => rule.id), ['fine']);
   const emptied = loadExecPolicy({ COLONIZER_EXEC_POLICY: '{"rules": [{"decision": "deny"}]}' });
   assert.deepEqual(emptied.warnings, []);
-  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 3], ['install', 0]]);
+  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 4], ['install', 0]]);
   assert.equal(decide(emptied, 'cat .env', '/repo').rule, 'secret-paths');
 });
 
@@ -305,7 +341,7 @@ test('the question carries the rule, Allow and Deny options', () => {
   assert.match(questions[0].question, /Exec policy rule `writes-outside-repo` \(default\)/);
   assert.match(questions[0].question, /echo x > \/etc\/foo/);
   assert.deepEqual(questions[0].options.map((option) => option.label), ['Allow', 'Deny']);
-  assert.equal(defaultPolicy().rules.length, 3);
+  assert.equal(defaultPolicy().rules.length, 4);
 });
 
 test('the installed hook denies with the rule named, and logs every decision', async () => {

@@ -25,6 +25,23 @@ fn fix(signature: &str, detail: &str, at: DateTime<Utc>) -> AutoFix {
     }
 }
 
+/// The question an exec-policy `ask` raises, as the runner words it: the rule in the text, the
+/// reason, Allow and Deny on offer (modules/agents/claude-code/execpolicy.mjs).
+fn exec_ask(command: &str, reason: &str) -> Vec<Value> {
+    vec![json!({
+        "question": format!("Exec policy rule `writes-outside-repo` (default) asks before running: {command}. {reason}. Run it?"),
+        "header": "Exec policy",
+        "options": [{"label": "Allow"}, {"label": "Deny"}],
+    })]
+}
+
+fn question_signature_of(kind: Option<&str>, questions: &[Value]) -> Option<String> {
+    defaults()
+        .into_iter()
+        .find(|e| matches_question(e, kind, questions))
+        .map(|e| e.signature)
+}
+
 #[test]
 fn each_denial_signature_maps_to_its_row() {
     let placeholder = deny("exec_policy:secret-paths", "cat .env", Some(".env"));
@@ -88,6 +105,38 @@ fn a_denial_that_is_not_a_known_signature_matches_nothing() {
     // Only exec-policy denials are read: an egress denial naming rustup is the egress policy's.
     let egress = Boundary::new("egress_denied", "egress", "rustup.rs", Some("rustup.rs"));
     assert_eq!(signature_of(&egress), None);
+}
+
+#[test]
+fn a_git_write_ask_matches_the_git_read_only_row_and_an_unrelated_ask_does_not() {
+    let git_write = exec_ask("git add -A", "the command writes into the repository's .git internals");
+    assert_eq!(
+        question_signature_of(Some("exec_policy"), &git_write).as_deref(),
+        Some("git_read_only_ask")
+    );
+    // The bare command alone, without the runner's reason, still names a git write.
+    let bare = exec_ask(
+        "git commit -m wip",
+        "the command writes to a host-backed path outside the repository",
+    );
+    assert_eq!(
+        question_signature_of(Some("exec_policy"), &bare).as_deref(),
+        Some("git_read_only_ask")
+    );
+    // Writes outside the repo that are not git are not this row's.
+    let etc = exec_ask(
+        "cp a /etc/foo",
+        "the command writes to a host-backed path outside the repository",
+    );
+    assert_eq!(question_signature_of(Some("exec_policy"), &etc), None);
+    let cargo_home = exec_ask(
+        "cp a ~/.cargo/config.toml",
+        "the command writes to a host-backed path outside the repository",
+    );
+    assert_eq!(question_signature_of(Some("exec_policy"), &cargo_home), None);
+    // A question of another kind entirely (the agent's own, not an exec-policy ask) never matches.
+    let own = vec![json!({"question": "git add -A?", "options": [{"label": "Allow"}, {"label": "Deny"}]})];
+    assert_eq!(question_signature_of(None, &own), None);
 }
 
 #[test]
@@ -330,6 +379,71 @@ async fn a_looping_colony_is_stopped_and_flagged() {
     assert_eq!(s.attention.as_ref().unwrap()["reason"], LOOPING_REASON);
     assert_eq!(s.attention.as_ref().unwrap()["signature"], "pr_md_write");
     assert_eq!(s.auto_fixes.last().unwrap().signature, LOOPING_SIGNATURE);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A git-write exec-policy ask is answered Deny at once, with the playbook's explanation as the
+/// response the agent reads and the fix on the record; the same ask inside the settle window is
+/// left alone.
+#[tokio::test]
+async fn a_git_write_ask_is_answered_deny_once_with_the_explanation() {
+    let (app, root) = app_with_colony("g1", SessionStatus::WaitingForAnswer).await;
+    let rt = app.runtime("g1").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    let questions = exec_ask("git add -A", "the command writes into the repository's .git internals");
+    on_question(&app, "g1", &rt, "exec-policy-1", Some("exec_policy"), &questions).await;
+    let sent = rx.try_recv().expect("the playbook answer");
+    assert_eq!(sent["type"], "answer");
+    assert_eq!(sent["question_id"], "exec-policy-1");
+    assert_eq!(
+        sent["answers"]["Exec policy rule `writes-outside-repo` (default) asks before running: git add -A. \
+         the command writes into the repository's .git internals. Run it?"],
+        "Deny"
+    );
+    let response = sent["response"].as_str().unwrap();
+    assert!(
+        response.contains("Answered automatically by the watchdog's playbook"),
+        "{response}"
+    );
+    assert!(response.contains("`.git` is read-only by design"), "{response}");
+    assert!(response.contains("git add`, `git commit` or `git stash`"), "{response}");
+    let s = app.session("g1").await.unwrap();
+    assert_eq!(s.auto_fixes.len(), 1);
+    assert_eq!(s.auto_fixes[0].signature, "git_read_only_ask");
+    assert_eq!(s.auto_fixes[0].action, "answer_deny");
+    // The answer's echo reads as the watchdog's: the id is in the runtime's set until it comes back.
+    assert!(rt.playbook_questions.lock().await.contains("exec-policy-1"));
+
+    // Settling: the same ask again inside the window is not answered twice.
+    on_question(&app, "g1", &rt, "exec-policy-2", Some("exec_policy"), &questions).await;
+    assert!(rx.try_recv().is_err(), "settling: no second answer");
+    assert_eq!(app.session("g1").await.unwrap().auto_fixes.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An ask the table does not name — a write to /etc, to ~/.cargo, or any non-exec-policy question —
+/// is left for the person (or the judge), and the Deny option is picked from the question itself.
+#[tokio::test]
+async fn an_unrelated_ask_is_left_alone_and_the_deny_label_is_read_off_the_question() {
+    let (app, root) = app_with_colony("g2", SessionStatus::WaitingForAnswer).await;
+    let rt = app.runtime("g2").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    let etc = exec_ask(
+        "cp a /etc/foo",
+        "the command writes to a host-backed path outside the repository",
+    );
+    on_question(&app, "g2", &rt, "exec-policy-1", Some("exec_policy"), &etc).await;
+    assert!(rx.try_recv().is_err(), "not this row's ask");
+    assert!(app.session("g2").await.unwrap().auto_fixes.is_empty());
+    // A matching ask whose options do not offer a Deny is not guessed at, either.
+    let custom = vec![json!({
+        "question": "Exec policy rule `writes-outside-repo` (default) asks before running: git add -A. \
+         the command writes into the repository's .git internals. Run it?",
+        "options": [{"label": "Run it"}, {"label": "Refuse"}],
+    })];
+    on_question(&app, "g2", &rt, "exec-policy-2", Some("exec_policy"), &custom).await;
+    assert!(rx.try_recv().is_err(), "no Deny option on offer: left alone");
+    assert!(app.session("g2").await.unwrap().auto_fixes.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
 

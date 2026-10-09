@@ -108,7 +108,7 @@ export function loopEnv(env = process.env) {
 export const INSTRUCTIONS = [
   'You run inside the Colonizer; the user follows along in a web UI.',
   '- Whenever you need a decision, a clarification or any other input from the user, call the colonizer_ask_user tool with 2-4 concrete options, each a short label plus a one-sentence description. Never ask the user in plain text, and never end a turn with a plain-text question.',
-  '- Do not run `git commit` or `git push` and do not create branches; the harness commits your changes and opens the pull request.',
+  '- `.git` is read-only by design: never run `git add`, `git commit`, `git stash` or `git push`, and do not create branches. A "Read-only file system" error on `.git` is expected — do not debug it; leave your changes in the working tree and the harness commits them and opens the pull request.',
   '- Propose a durable learning for shared memory with colonizer_memory_propose; send problems outside your task to colonizer_finding_file with how you confirmed them.',
 ].join('\n');
 

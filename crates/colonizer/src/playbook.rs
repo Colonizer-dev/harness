@@ -10,6 +10,7 @@
 //! | `placeholder_dotfiles` | `secret-paths` denial naming only a harness placeholder | message |
 //! | `pr_md_write` | `writes-outside-repo` denial on `/harness/out/pr.md` | message |
 //! | `toolchain_installer` | `script-egress` denial on a toolchain installer | message |
+//! | `git_read_only_ask` | an `exec_policy` ask whose subject is a git write | answer Deny |
 //! | `provider_unavailable` | `unrecognized_model` hold, or a quota flag, with a healthy fallback | switch and resume |
 //! | `idle_verified` | idle after `pr.md` with a confirmed verification | publish |
 //!
@@ -71,6 +72,9 @@ pub enum Action {
     SwitchFallbackAndResume,
     /// Stop the colony, free its slot and flag it `looping`.
     StopLooping,
+    /// Answer the question the entry matched with the option that refuses it, `message` riding
+    /// along as the reason the agent reads.
+    AnswerDeny,
 }
 
 impl Action {
@@ -80,6 +84,7 @@ impl Action {
             Action::Publish => "publish",
             Action::SwitchFallbackAndResume => "switch_fallback_and_resume",
             Action::StopLooping => "stop_looping",
+            Action::AnswerDeny => "answer_deny",
         }
     }
 }
@@ -91,6 +96,9 @@ pub enum Trigger {
     /// A `boundary` event, as it arrives.
     #[default]
     Denial,
+    /// A question a runner opened, as it opens — an exec-policy `ask` (#759) holds its tool call
+    /// in flight, so the colony is idle on it either way.
+    Question,
     /// A colony held on a turn error, or flagged for quota, with the provider named.
     ProviderFailure,
     /// An idle colony with a confirmed verification and a `pr.md`.
@@ -101,7 +109,8 @@ pub enum Trigger {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Matcher {
-    /// The boundary kind; `exec_policy_deny` when absent.
+    /// The event kind: a denial's boundary kind (`exec_policy_deny` when absent) or a question's
+    /// kind (`exec_policy` — named explicitly, so the denial default never matches one).
     pub kind: Option<String>,
     /// A substring of the boundary's control (`secret-paths` for `exec_policy:secret-paths`).
     pub control: Option<String>,
@@ -136,7 +145,8 @@ pub struct Entry {
     #[serde(default)]
     pub trigger: Trigger,
     pub action: Action,
-    /// The message `send_message` sends. Written for the agent: no secrets, no host paths.
+    /// The message `send_message` sends — and `answer_deny` rides as the reason. Written for the
+    /// agent: no secrets, no host paths.
     #[serde(default)]
     pub message: String,
     #[serde(default = "one")]
@@ -171,6 +181,12 @@ const PR_MD_MESSAGE: &str = "Playbook: writing /harness/out/pr.md through the sh
 const TOOLCHAIN_MESSAGE: &str = "Playbook: installing a toolchain (rustup, swift and the like) is refused here and will \
     stay refused. Do not install toolchains. Finish what you can without them, and say in /harness/out/pr.md which \
     checks you could not compile or run.";
+/// What the playbook answers a git-write exec-policy ask with: the Deny note the agent reads. The
+/// sentence after the `Playbook: ` prefix is the runner's own deny reason (execpolicy.mjs), so the
+/// agent hears one explanation wherever the wall comes from.
+const GIT_READ_ONLY_MESSAGE: &str = "Playbook: `.git` is read-only by design: never run `git add`, `git commit` or \
+    `git stash`, and don't write under `.git/` or debug the read-only mount. Leave your changes in the working tree; \
+    the harness commits them and opens the pull request when you finish.";
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -257,6 +273,31 @@ pub fn defaults() -> Vec<Entry> {
                 ..Matcher::default()
             },
         ),
+        // An old runner image that still asks before a git write instead of denying it outright
+        // (the `git-read-only` rule): the ask holds the colony's slot until someone answers, and
+        // the only useful answer is no. Every git-write ask carries the runner's `.git internals`
+        // reason; the bare commands catch a policy of the operator's that asks about them instead.
+        Entry {
+            signature: "git_read_only_ask".into(),
+            trigger: Trigger::Question,
+            action: Action::AnswerDeny,
+            message: GIT_READ_ONLY_MESSAGE.into(),
+            max_tries: 1,
+            settle_secs: DEFAULT_SETTLE_SECS,
+            stop_when_exhausted: true,
+            idle_minutes: DEFAULT_IDLE_MINUTES,
+            enabled: true,
+            when: Matcher {
+                kind: Some(crate::protocol::EXEC_POLICY_QUESTION_KIND.into()),
+                text_any: strings(&[
+                    "the command writes into the repository's .git internals",
+                    "git add",
+                    "git commit",
+                    "git stash",
+                ]),
+                ..Matcher::default()
+            },
+        },
         Entry {
             signature: "provider_unavailable".into(),
             trigger: Trigger::ProviderFailure,
@@ -325,19 +366,41 @@ fn parse(text: &str) -> (Vec<Entry>, Option<String>) {
 
 /// Whether a boundary event is this entry's signature. Pure.
 pub fn matches_denial(entry: &Entry, boundary: &Boundary) -> bool {
-    if entry.trigger != Trigger::Denial || !entry.enabled {
+    entry.trigger == Trigger::Denial
+        && entry.enabled
+        && matcher_hits(
+            &entry.when,
+            &boundary.kind,
+            &boundary.control,
+            &boundary.detail,
+            boundary.target.as_deref(),
+        )
+}
+
+/// Whether a question a runner opened is this entry's signature: its `kind` and its questions'
+/// texts, read the way a denial's detail and target are. Pure.
+pub fn matches_question(entry: &Entry, kind: Option<&str>, questions: &[Value]) -> bool {
+    let text = questions
+        .iter()
+        .filter_map(|q| q["question"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    entry.trigger == Trigger::Question && entry.enabled && matcher_hits(&entry.when, kind.unwrap_or_default(), "", &text, None)
+}
+
+/// Whether a match's conditions hold for an event of `kind` — the boundary kinds, or a question's
+/// — with `control`, `detail` and `target`. Text is matched case-insensitively; `target` is a
+/// denial's, and a question has none. Pure, and the one place the matcher's fields mean anything.
+fn matcher_hits(when: &Matcher, kind: &str, control: &str, detail: &str, target: Option<&str>) -> bool {
+    if kind != when.kind.as_deref().unwrap_or("exec_policy_deny") {
         return false;
     }
-    let when = &entry.when;
-    if boundary.kind != when.kind.as_deref().unwrap_or("exec_policy_deny") {
-        return false;
-    }
-    if let Some(control) = &when.control
-        && !boundary.control.to_lowercase().contains(&control.to_lowercase())
+    if let Some(want) = &when.control
+        && !control.to_lowercase().contains(&want.to_lowercase())
     {
         return false;
     }
-    let text = format!("{} {}", boundary.detail, boundary.target.as_deref().unwrap_or_default()).to_lowercase();
+    let text = format!("{detail} {}", target.unwrap_or_default()).to_lowercase();
     let has = |needle: &String| text.contains(&needle.to_lowercase());
     if !when.text_any.is_empty() && !when.text_any.iter().any(has) {
         return false;
@@ -346,7 +409,7 @@ pub fn matches_denial(entry: &Entry, boundary: &Boundary) -> bool {
         return false;
     }
     if !when.target_in.is_empty() {
-        let Some(target) = boundary.target.as_deref() else {
+        let Some(target) = target else {
             return false;
         };
         let target = target.strip_prefix("./").unwrap_or(target);
@@ -531,6 +594,81 @@ pub(crate) async fn on_boundary(app: &Shared, id: &str, boundary: &Boundary) {
     }
 }
 
+/// A question opened (called from the question path in events.rs, once the question is tracked).
+/// The table's question rows are matched against it and the first hit is answered at once: an
+/// exec-policy `ask` holds its tool call in flight, so the colony is idle on it either way, and
+/// "the question has been open a while" has no better answer behind it — the only useful reply to
+/// this ask is no. The guards match [`on_boundary`]: a suspended colony (its question is a
+/// person's by policy) and a security hold are left alone.
+pub(crate) async fn on_question(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    question_id: &str,
+    kind: Option<&str>,
+    questions: &[Value],
+) {
+    let Some(s) = app.session(id).await else { return };
+    if !s.status.is_live() || s.suspended.is_some() || is_security_hold(s.attention.as_ref()) {
+        return;
+    }
+    let entries = table(app);
+    let Some(entry) = entries.iter().find(|e| matches_question(e, kind, questions)) else {
+        return;
+    };
+    match step(entry, &s.auto_fixes, Utc::now()) {
+        Step::Act { attempt } => answer_deny(app, id, rt, entry, attempt, question_id, questions).await,
+        Step::Stop => stop_looping(app, &s, &entry.signature).await,
+        Step::Settling | Step::Spent => {}
+    }
+}
+
+/// Answers a matched question with the option that refuses it — the runner keeps asking only
+/// while it waits, so this is what frees the colony — with the entry's message as the response
+/// the agent reads alongside. The id goes into the runtime's set before the send, and
+/// `handle_agent_event` spends it stamping the answer's echo `watchdog` (§3), the way the judge
+/// marks its own answers `autonomy`.
+async fn answer_deny(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    entry: &Entry,
+    attempt: u32,
+    question_id: &str,
+    questions: &[Value],
+) {
+    if entry.message.trim().is_empty() {
+        return;
+    }
+    let mut answers = serde_json::Map::new();
+    for question in questions {
+        let Some(text) = question["question"].as_str() else { return };
+        let Some(label) = crate::autonomy::options(question)
+            .into_iter()
+            .find(|label| label.to_lowercase().contains("deny"))
+        else {
+            return; // nothing on offer refuses it: the question is a person's (or the judge's)
+        };
+        answers.insert(text.to_string(), Value::String(label));
+    }
+    rt.playbook_questions.lock().await.insert(question_id.to_string());
+    rt.send_command(json!({
+        "type": "answer",
+        "question_id": question_id,
+        "answers": answers,
+        // The colony is told, so the agent knows nobody chose this.
+        "response": format!("Answered automatically by the watchdog's playbook, with nobody watching: {}", entry.message),
+    }));
+    record(
+        app,
+        id,
+        &entry.signature,
+        entry.action,
+        format!("answered the exec-policy ask Deny (try {attempt} of {})", entry.max_tries),
+    )
+    .await;
+}
+
 /// The once-a-minute pass over colonies in play: the provider-failure rows, for live and parked
 /// colonies alike (a quota park is exactly where a fallback helps).
 pub(crate) async fn tick_providers(app: &Shared, s: &Session, now: DateTime<Utc>) -> bool {
@@ -626,6 +764,8 @@ async fn perform(app: &Shared, s: &Session, rt: &Arc<Runtime>, entry: &Entry, at
         Action::StopLooping => stop_looping(app, s, &entry.signature).await,
         // Needs the failing provider, which only the provider-failure pass knows.
         Action::SwitchFallbackAndResume => {}
+        // Answered where the question opened ([`on_question`]); a tick pass has no question.
+        Action::AnswerDeny => {}
     }
 }
 

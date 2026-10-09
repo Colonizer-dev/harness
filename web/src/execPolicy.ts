@@ -43,7 +43,12 @@ function ruleProblem(rule: Json): string | null {
     if (rule.writes_outside !== true && rule.writes_outside !== "strict") return '"writes_outside" must be true or "strict"';
     predicates++;
   }
-  if (!predicates) return 'a rule needs "command", "script", "touches" or "writes_outside", or it would match every command';
+  if ("writes_git" in rule && rule.writes_git !== false) {
+    if (rule.writes_git !== true) return '"writes_git" must be true';
+    predicates++;
+  }
+  if (!predicates)
+    return 'a rule needs "command", "script", "touches", "writes_outside" or "writes_git", or it would match every command';
   return null;
 }
 

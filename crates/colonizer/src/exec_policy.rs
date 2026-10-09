@@ -74,8 +74,16 @@ fn validate_rule(rule: &Value) -> Result<(), String> {
         Some(Value::String(s)) if s == "strict" => predicates += 1,
         Some(_) => return Err(r#""writes_outside" must be true or "strict""#.into()),
     }
+    match rule.get("writes_git") {
+        None | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => predicates += 1,
+        Some(_) => return Err(r#""writes_git" must be true"#.into()),
+    }
     if predicates == 0 {
-        return Err(r#"a rule needs "command", "script", "touches" or "writes_outside", or it would match every command"#.into());
+        return Err(
+            r#"a rule needs "command", "script", "touches", "writes_outside" or "writes_git", or it would match every command"#
+                .into(),
+        );
     }
     Ok(())
 }
@@ -108,6 +116,7 @@ mod tests {
         validate(r#"{"rules": []}"#).unwrap();
         validate(r#"{"rules": [{"id": "no-rm", "decision": "DENY", "command": ["\\brm\\b", "shred"]}]}"#).unwrap();
         validate(r#"{"rules": [{"decision": "ask", "writes_outside": "strict"}, {"decision": "allow", "touches": ["docs/**", "!docs/secret"]}]}"#).unwrap();
+        validate(r#"{"rules": [{"id": "git-read-only", "decision": "deny", "writes_git": true}]}"#).unwrap();
     }
 
     #[test]
@@ -121,9 +130,10 @@ mod tests {
         );
         assert_eq!(
             refused(r#"{"rules": [{"decision": "deny"}]}"#),
-            r#"exec policy rule 1: a rule needs "command", "script", "touches" or "writes_outside", or it would match every command"#
+            r#"exec policy rule 1: a rule needs "command", "script", "touches", "writes_outside" or "writes_git", or it would match every command"#
         );
         assert!(refused(r#"{"rules": [{"decision": "deny", "writes_outside": "loose"}]}"#).contains("writes_outside"));
+        assert!(refused(r#"{"rules": [{"decision": "deny", "writes_git": "sometimes"}]}"#).contains("writes_git"));
         assert!(
             refused(&format!(
                 r#"{{"rules": [{{"decision": "deny", "command": "{}"}}]}}"#,
