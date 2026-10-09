@@ -1826,3 +1826,107 @@ async fn autopilot_waiting_on_a_question_exposes_it_on_the_record() {
     assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::WaitingForAnswer);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Issue #1266: the settlement of the last in-flight background subagent arms the turn-lost
+/// window, the orchestrator's own output stands it down, and everything else — a subagent's
+/// relayed lines, a settlement for an id this run never tracked, a `status` heartbeat — leaves it
+/// as it stands.
+#[tokio::test]
+async fn the_last_settling_subagent_arms_the_turn_lost_window() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let task = |id: &str| json!({"type": "tool_call", "tool_call_id": id, "name": "Task"});
+    let settled = |id: &str, status: &str| json!({"type": "subagent_end", "tool_call_id": id, "status": status});
+
+    // Two background Tasks in flight: nothing is armed while one is still outstanding.
+    note_turn_shape(&rt, &task("t1")).await;
+    note_turn_shape(&rt, &task("t2")).await;
+    assert_eq!(rt.open_subagents.lock().await.len(), 2, "both Task calls are tracked");
+    assert!(!rt.turn_lost_since.lock().await.is_some());
+    note_turn_shape(&rt, &settled("t2", "completed")).await;
+    assert!(!rt.turn_lost_since.lock().await.is_some(), "t1 is still in flight");
+    // Completed, failed or stopped all mean the continuation should now happen: the last one to
+    // settle arms the window whatever its status was.
+    note_turn_shape(&rt, &settled("t1", "failed")).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "the window is armed");
+
+    // A subagent's own text carries the `agent` ref and is its own turn's, not the continuation.
+    let relayed = json!({"type": "assistant_text", "text": "done", "agent": {"id": "t1", "name": "explore"}});
+    note_turn_shape(&rt, &relayed).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "a relayed line does not disarm");
+    // A settlement for an id this run never tracked — launched before a mothership restart —
+    // changes nothing: it neither re-arms the window nor disarms it.
+    note_turn_shape(&rt, &settled("ghost", "completed")).await;
+    assert!(
+        rt.turn_lost_since.lock().await.is_some(),
+        "an untracked settlement leaves the armed window alone"
+    );
+    // The orchestrator's own output is the lost continuation arriving: stand the re-drive down.
+    let lead = json!({"type": "assistant_text", "text": "both reports are in"});
+    note_turn_shape(&rt, &lead).await;
+    assert!(!rt.turn_lost_since.lock().await.is_some());
+    // And now, with the set empty and the window down, that same untracked settlement arms
+    // nothing — the case a restart leaves behind.
+    note_turn_shape(&rt, &settled("ghost", "completed")).await;
+    assert!(
+        !rt.turn_lost_since.lock().await.is_some(),
+        "an untracked settlement never arms"
+    );
+    // `status` is lifecycle telemetry, and even `working` must not mask a dead turn: a heartbeat
+    // cannot stall-proof a lost continuation.
+    note_turn_shape(&rt, &task("t3")).await;
+    note_turn_shape(&rt, &settled("t3", "completed")).await;
+    assert!(rt.turn_lost_since.lock().await.is_some());
+    note_turn_shape(&rt, &json!({"type": "status", "state": "working"})).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "a status line does not disarm");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1266: only the lead's own calls move the window. A Task call relayed from inside a
+/// subagent neither tracks a subagent nor stands the re-drive down, and a lead Task relaunched
+/// after a settlement both disarms the window and is tracked again — the continuation and the
+/// next wait, in that order.
+#[tokio::test]
+async fn a_relayed_task_call_neither_tracks_nor_disarms_a_relaunch_does_both() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let task = |id: &str| json!({"type": "tool_call", "tool_call_id": id, "name": "Task"});
+    let settled = |id: &str, status: &str| json!({"type": "subagent_end", "tool_call_id": id, "status": status});
+
+    note_turn_shape(&rt, &task("t1")).await;
+    note_turn_shape(&rt, &settled("t1", "completed")).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "armed by the settlement");
+
+    // The subagent of a later turn making its own Task call: not the lead's, so it tracks nothing
+    // and disarms nothing.
+    let relayed = json!({"type": "tool_call", "tool_call_id": "t9", "name": "Task", "agent": {"id": "t1", "name": "explore"}});
+    note_turn_shape(&rt, &relayed).await;
+    assert!(
+        !rt.open_subagents.lock().await.contains("t9"),
+        "a subagent's own Task call is not tracked"
+    );
+    assert!(rt.turn_lost_since.lock().await.is_some(), "and it does not disarm");
+
+    // The lead calling Task again is the continuation arriving: the window is spent, and the new
+    // subagent is tracked so its own settlement is judged against it later.
+    note_turn_shape(&rt, &task("t2")).await;
+    assert!(rt.turn_lost_since.lock().await.is_none(), "the relaunch disarmed the window");
+    assert!(
+        rt.open_subagents.lock().await.contains("t2"),
+        "and the new subagent is tracked"
+    );
+    note_turn_shape(&rt, &settled("t2", "stopped")).await;
+    assert!(
+        rt.turn_lost_since.lock().await.is_some(),
+        "its settlement arms the window again"
+    );
+    // A lead call that is not a Task is the continuation too, and tracks no subagent.
+    let bash = json!({"type": "tool_call", "tool_call_id": "t4", "name": "Bash"});
+    note_turn_shape(&rt, &bash).await;
+    assert!(rt.turn_lost_since.lock().await.is_none());
+    assert!(
+        !rt.open_subagents.lock().await.contains("t4"),
+        "only a Task tracks a subagent"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

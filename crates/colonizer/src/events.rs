@@ -308,7 +308,8 @@ fn is_watchdog_progress(origin: Origin, kind: &str) -> bool {
 }
 
 /// Tracks the shape of the turn the runner is in, for the watchdog's turn-end recovery (issue #878):
-/// when it last spoke its final answer, and which tool calls it has opened and not answered. Read off
+/// when it last spoke its final answer, and which tool calls it has opened and not answered — and,
+/// for issue #1266, which background subagents are in flight and when the last settled. Read off
 /// the raw line, like [`resolve_origin`], because most of these types never reach the dispatch below.
 /// A final `assistant_text` is the colony's "it's done"; every later sign of work clears it, so a
 /// stale one means the runner said it was finished and then went quiet. Only the lead agent's own
@@ -321,13 +322,50 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
             if let Some(id) = event["tool_call_id"].as_str() {
                 rt.open_tool_calls.lock().await.insert(id.to_string());
             }
+            // Issue #1266: only the lead's own calls count — a relayed one carries the `agent` ref
+            // and is the subagent's own turn's. The lead calling Task again is the continuation
+            // arriving: the call disarms the window and its subagent is tracked for its settlement.
+            if event.get("agent").is_none() {
+                *rt.turn_lost_since.lock().await = None;
+                if matches!(event["name"].as_str(), Some("Task") | Some("Agent"))
+                    && let Some(id) = event["tool_call_id"].as_str()
+                {
+                    rt.open_subagents.lock().await.insert(id.to_string());
+                }
+            }
         }
         "tool_result" => {
             if let Some(id) = event["tool_call_id"].as_str() {
                 rt.open_tool_calls.lock().await.remove(id);
             }
         }
-        "turn_end" => rt.open_tool_calls.lock().await.clear(),
+        "turn_end" => {
+            rt.open_tool_calls.lock().await.clear();
+            *rt.turn_lost_since.lock().await = None;
+        }
+        // A background subagent settled (issue #1266): the runner emits this and pushes nothing
+        // into the SDK input queue, so the continuation it owes can go missing. When the last
+        // in-flight one settles the clock starts; a settlement for an untracked id arms nothing,
+        // and completed, failed and stopped all settle it the same.
+        "subagent_end" => {
+            let settled = if let Some(id) = event["tool_call_id"].as_str() {
+                rt.open_subagents.lock().await.remove(id)
+            } else {
+                false
+            };
+            if settled && rt.open_subagents.lock().await.is_empty() {
+                *rt.turn_lost_since.lock().await = Some(Utc::now());
+            }
+        }
+        _ => {}
+    }
+    // Issue #1266: the orchestrator's own output is the lost continuation arriving — the same
+    // lines that clear `final_text_at` stand the re-drive down. Deliberately narrow: even a
+    // `working` status must not mask a dead turn, or the settlement would stall-proof itself.
+    match kind {
+        "assistant_text" | "thinking" | "tool_result" | "question" | "turn_end" if event.get("agent").is_none() => {
+            *rt.turn_lost_since.lock().await = None;
+        }
         _ => {}
     }
     let mut final_text = rt.final_text_at.lock().await;
