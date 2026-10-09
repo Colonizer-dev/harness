@@ -803,6 +803,20 @@ owning most of the changed files — and whether it would have caught the failur
 that check first and stops at its failure. `off` records nothing. A confirmed verdict always needs
 every check to pass.
 
+**Before publishing.** When autopilot is about to open the pull request, the repository's own fast
+checks run first, each in a fresh checkout like the rest: what the [merge train's local
+checks](loops/merge-train.md#when-github-ci-cannot-run) detect — `cargo fmt --check`, `clippy -D
+warnings`, a package's `typecheck` and `lint` — plus any `scripts/ci/check-*.sh` a
+`.github/workflows` file actually runs. Tests are the claim checks' job above, and builds and e2e
+runs are left to CI. The repository steers the pass from its **base branch's**
+`.colonizer/checks.toml` (never the colony's branch, so a colony cannot weaken its own gate):
+`pre_publish = ["cargo fmt --all --check", …]` lists exactly what runs, and `pre_publish = []`
+switches the pass off. A check that fails the way the base branch fails too is not the colony's:
+the pull request still opens, as a **draft** naming the failing checks. A check the base passes is
+the change's own: the colony gets its normal fix rounds, and nothing publishes until the checks
+are green. What ran is recorded in the pull request body — "Checks run before publishing: fmt ✓,
+clippy ✓ …".
+
 **Limits.** If the colony image lacks the tool a check needs, that check is unverifiable — every
 image carries a small toolbox and a repository can add its own with a `.colonizer/setup.sh` hook
 (see [Tools in the colony image and the setup hook](#tools-in-the-colony-image-and-the-setup-hook)).

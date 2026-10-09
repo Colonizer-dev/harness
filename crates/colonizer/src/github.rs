@@ -2449,7 +2449,14 @@ impl PublishOps for GitPublishOps<'_> {
             .settings
             .get("draft")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            // Issue #1055: a pre-publish check that fails on the base branch as well opens the
+            // pull request as a draft, never ready-for-review with known-red checks.
+            || self
+                .s
+                .verification
+                .as_ref()
+                .is_some_and(|v| !v.pre_publish_red.is_empty());
         let mut create = self.app.gh([
             "pr",
             "create",
