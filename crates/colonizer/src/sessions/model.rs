@@ -162,6 +162,100 @@ impl Session {
         (self.suspended.is_none() || self.prewarming())
             && (self.status.is_live() || (self.status == SessionStatus::Publishing && self.publishing_holds_slot))
     }
+
+    /// Puts an operator's decision on the record (issue #1247): one entry per question the answer
+    /// names a choice for, read out of the answers map the way [`crate::sessions::api`] keys it —
+    /// by question text. An entry for the same AskUserQuestion header is replaced rather than
+    /// duplicated, latest answer wins, and a question that carried no header is keyed by its
+    /// exact text, so a retried answer never doubles a row.
+    pub(crate) fn record_answered_question(
+        &mut self,
+        question_id: &str,
+        questions: &[Value],
+        answers: &Value,
+        response: Option<&str>,
+    ) {
+        let Some(map) = answers.as_object() else {
+            return;
+        };
+        let response = response.map(str::trim).filter(|r| !r.is_empty());
+        for q in questions {
+            let Some(text) = q["question"].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            let Some(answer) = map.get(text) else {
+                continue;
+            };
+            let header = q["header"].as_str().unwrap_or_default().trim().to_string();
+            self.answered_questions.retain(|kept| {
+                if header.is_empty() {
+                    !(kept.header.is_empty() && kept.question == text)
+                } else {
+                    kept.header != header
+                }
+            });
+            self.answered_questions.push(AnsweredQuestion {
+                question_id: question_id.to_string(),
+                header,
+                question: text.to_string(),
+                answer: answer.clone(),
+                response: response.map(String::from),
+                answered_at: Utc::now(),
+            });
+        }
+        while self.answered_questions.len() > KEPT_ANSWERS {
+            self.answered_questions.remove(0);
+        }
+    }
+
+    /// The recorded answer to re-apply for a question the agent is asking again (issue #1247).
+    /// The caller hands the question's AskUserQuestion header when it carries one — the stable
+    /// name of the decision, good across a reworded question — or its exact text when it does
+    /// not; a text key matches the header-less entries, which are the only ones keyed by text.
+    pub(crate) fn answer_for_header(&self, header: &str) -> Option<&AnsweredQuestion> {
+        let key = header.trim();
+        if key.is_empty() {
+            return None;
+        }
+        self.answered_questions
+            .iter()
+            .rev()
+            .find(|a| (a.header == key) || (a.header.is_empty() && a.question == key))
+    }
+
+    /// The "Decisions already made" section a resumed colony's brief or resume prompt carries
+    /// (issue #1247): every question the operator has already answered, so the agent does not
+    /// ask the same thing again after a restart. `None` when nothing has been answered — most
+    /// briefs carry no section at all.
+    pub(crate) fn answered_questions_note(&self) -> Option<String> {
+        if self.answered_questions.is_empty() {
+            return None;
+        }
+        let mut lines = vec![
+            "## Decisions already made".to_string(),
+            "The operator answered these earlier in this colony and the decisions stand: do not \
+             ask again unless something has materially changed — apply the recorded answer."
+                .to_string(),
+        ];
+        for a in &self.answered_questions {
+            let asked = if a.header.is_empty() {
+                a.question.as_str()
+            } else {
+                a.header.as_str()
+            };
+            let given = match &a.answer {
+                Value::String(label) => label.clone(),
+                Value::Array(labels) => labels.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+                other => other.to_string(),
+            };
+            let mut line = format!("- {asked}: {given}");
+            if let Some(note) = a.response.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                line.push_str(&format!(", note: {note}"));
+            }
+            lines.push(line);
+        }
+        Some(lines.join("\n"))
+    }
 }
 
 /// How far the last publish got, persisted on the session so a retry continues from there instead of
@@ -271,6 +365,28 @@ pub struct PendingAnswer {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_at: Option<DateTime<Utc>>,
+}
+
+/// How many answered questions a colony keeps on its record (issue #1247): enough for every
+/// decision a long-lived colony lives by, bounded so a chatty one cannot bloat sessions.json.
+/// The oldest entries go first.
+pub const KEPT_ANSWERS: usize = 50;
+
+/// A question the operator has already answered (issue #1247), kept on the record so a restart
+/// does not put the same question to the person twice: the colony's decisions outlive the runner's
+/// session. `header` is the AskUserQuestion tab label the decision is named by — the stable thing
+/// a re-asked question matches on (empty when the runner sent none) — and `question` the question
+/// text the answer map was keyed by. `answer` is the raw per-question answer, a label or the array
+/// of labels a multi-select was given; `response` the operator's free-text note, when they wrote one.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AnsweredQuestion {
+    pub question_id: String,
+    pub header: String,
+    pub question: String,
+    pub answer: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    pub answered_at: DateTime<Utc>,
 }
 
 /// A pre-warm request for a suspended colony's question (issue #701): the queue boots the colony
@@ -625,6 +741,13 @@ pub struct Session {
     /// cleared — like `pending_answer` but with no suspension behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_note: Option<String>,
+    /// Questions the operator has already answered (issue #1247), oldest last and capped at
+    /// [`KEPT_ANSWERS`]: the record a resumed brief reads its "Decisions already made" section
+    /// from and a re-asked question is answered from, so a colony that parks or restarts never
+    /// asks the person the same thing twice. Written by every operator answer path; never
+    /// consumed — unlike `pending_answer` this is standing state, not a delivery in flight.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answered_questions: Vec<AnsweredQuestion>,
     /// How many times a publish stopped on a secret-shaped literal and resumed the colony to remove it
     /// (issue #1206). The first time the colony is resumed with the path, line and kind; after that the
     /// scan stands aside and GitHub's own push protection has the last word.
@@ -797,6 +920,7 @@ impl Default for Session {
             pending_answer: None,
             switch_note: None,
             resume_note: None,
+            answered_questions: Vec::new(),
             secret_fix_rounds: 0,
             push_conflict_rounds: 0,
             publish_resume_pending: false,
@@ -937,6 +1061,132 @@ mod tests {
         let answer: PendingAnswer = serde_json::from_str(saved).unwrap();
         assert_eq!(answer.question_id, "q1");
         assert_eq!(answer.answered_at, None, "no time on the record, none read back");
+    }
+
+    /// One decision, one row (issue #1247): an answer replaced by a later one for the same
+    /// AskUserQuestion header overwrites rather than duplicating, a retried answer to the same
+    /// question id lands on the row it already made, and a question without a header is keyed by
+    /// its exact text — which is also how a re-asked question finds its answer again.
+    #[test]
+    fn recorded_answers_dedup_by_header_and_by_question_text() {
+        let mut s = colony("acme", SessionStatus::Running);
+        let asked = json!({"question": "Which file name?", "header": "File", "options": []});
+        s.record_answered_question(
+            "q1",
+            std::slice::from_ref(&asked),
+            &json!({"Which file name?": "hello.txt"}),
+            None,
+        );
+        // The same question answered again — a retry, the same id — replaces its own row.
+        s.record_answered_question(
+            "q1",
+            std::slice::from_ref(&asked),
+            &json!({"Which file name?": "hi.txt"}),
+            None,
+        );
+        assert_eq!(s.answered_questions.len(), 1, "a retry never doubles the row");
+        assert_eq!(s.answered_questions[0].answer, json!("hi.txt"));
+        // A different decision under the same header — the agent reworded the question — wins over
+        // the older one, still as a single row.
+        let reworded = json!({"question": "What should the file be called?", "header": "File", "options": []});
+        s.record_answered_question(
+            "q2",
+            &[reworded],
+            &json!({"What should the file be called?": "yes.txt"}),
+            None,
+        );
+        assert_eq!(s.answered_questions.len(), 1, "the header is the decision's name: one row");
+        assert_eq!(s.answered_questions[0].question_id, "q2");
+        assert_eq!(s.answered_questions[0].answer, json!("yes.txt"));
+        // A question with no header is its own key: a second header-less question keeps its own row.
+        let bare = json!({"question": "Push now?", "options": []});
+        s.record_answered_question("q3", std::slice::from_ref(&bare), &json!({"Push now?": "yes"}), None);
+        assert_eq!(s.answered_questions.len(), 2);
+        s.record_answered_question("q4", std::slice::from_ref(&bare), &json!({"Push now?": "no"}), None);
+        assert_eq!(s.answered_questions.len(), 2, "the text keys a header-less decision");
+        assert_eq!(s.answered_questions[1].answer, json!("no"));
+        // And an answer that names no question the event asked records nothing.
+        let before = s.answered_questions.clone();
+        s.record_answered_question("q5", &[asked], &json!({}), None);
+        assert_eq!(s.answered_questions, before, "no choice, no row");
+        // What a re-asked question matches on: the header, trimmed; the exact text only for a
+        // question that carries no header. Never a fuzzy match.
+        assert_eq!(s.answer_for_header("File").unwrap().answer, json!("yes.txt"));
+        assert_eq!(
+            s.answer_for_header("  File  ").unwrap().answer,
+            json!("yes.txt"),
+            "padded matches"
+        );
+        assert_eq!(s.answer_for_header("Push now?").unwrap().answer, json!("no"));
+        assert!(s.answer_for_header("Push now").is_none(), "no fuzzy matches");
+        assert!(s.answer_for_header("").is_none(), "an empty header names nothing");
+    }
+
+    /// The record is bounded (issue #1247): past the cap the oldest decisions go, so a chatty
+    /// colony cannot bloat sessions.json — and the newest, the ones a restart is likeliest to
+    /// need, are the ones kept.
+    #[test]
+    fn the_answer_record_is_capped_at_the_oldest_expense() {
+        let mut s = colony("acme", SessionStatus::Running);
+        for i in 0..(KEPT_ANSWERS as i32 + 10) {
+            let text = format!("Question {i}?");
+            s.record_answered_question(
+                &format!("q{i}"),
+                &[json!({"question": text, "header": format!("H{i}")})],
+                &json!({format!("Question {i}?"): "yes"}),
+                None,
+            );
+        }
+        assert_eq!(s.answered_questions.len(), KEPT_ANSWERS);
+        assert_eq!(s.answered_questions[0].header, "H10", "the ten oldest went");
+        assert_eq!(s.answered_questions.last().unwrap().header, format!("H{}", KEPT_ANSWERS + 9));
+    }
+
+    /// The note a resumed brief carries (issue #1247): one line per decision, the free-text note
+    /// when the operator wrote one, and nothing at all for a colony that has answered nothing.
+    #[test]
+    fn the_decisions_note_names_every_answer_and_skips_an_empty_record() {
+        let mut s = colony("acme", SessionStatus::Running);
+        assert_eq!(s.answered_questions_note(), None, "nothing decided, nothing to say");
+
+        s.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            Some("  the short one  "),
+        );
+        s.record_answered_question(
+            "q2",
+            &[json!({"question": "Which tests?"})],
+            &json!({"Which tests?": ["unit", "integration"]}),
+            None,
+        );
+        let note = s.answered_questions_note().expect("decisions to report");
+        assert!(note.starts_with("## Decisions already made"), "{note}");
+        assert!(
+            note.contains("do not ask again unless something has materially changed"),
+            "{note}"
+        );
+        assert!(note.contains("- File: hello.txt, note: the short one"), "{note}");
+        assert!(note.contains("- Which tests?: unit, integration"), "{note}");
+        assert!(
+            !note.contains("(no choice given)"),
+            "a recorded answer always has one: {note}"
+        );
+        // And the record survives the trip to the wire and back — the shape sessions.json keeps
+        // across a restart — while a sessions.json written before answers were recorded loads
+        // with none (the container-level `#[serde(default)]`).
+        let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(again.answered_questions, s.answered_questions);
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!(wire["answered_questions"][0]["header"], json!("File"));
+        assert_eq!(wire["answered_questions"][0]["answer"], json!("hello.txt"));
+        assert_eq!(wire["answered_questions"][0]["response"], json!("the short one"));
+        let old = r#"{"id":"c","repo":"acme/repo","issue":null,"issue_title":"","status":"running","branch":"b","base":null,"worktree":"","git_admin_dir":null,"sandbox":"s","mesh":null,"agent":"a","pr_url":null,"error":null,"cost_usd":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+        assert!(
+            serde_json::from_str::<Session>(old).unwrap().answered_questions.is_empty(),
+            "a row that predates the field keeps no answers"
+        );
     }
 
     /// The park record (issue #213) survives the trip to the wire and back — this is the shape

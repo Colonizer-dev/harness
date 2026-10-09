@@ -737,6 +737,7 @@ pub async fn create(
         pending_answer: None,
         switch_note: None,
         resume_note: None,
+        answered_questions: Vec::new(),
         secret_fix_rounds: 0,
         push_conflict_rounds: 0,
         publish_resume_pending: false,

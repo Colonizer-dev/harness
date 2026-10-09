@@ -8,7 +8,7 @@
 use crate::{Shared, findings, github, memory, orgs, provider_quota, spend};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -710,13 +710,79 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             );
             // A new question retires the old one's notification answer tokens (issue #742).
             app.answer_tokens.revoke(id).await;
-            // Cloned for the playbook call below: the slot keeps its own copy, as the cockpit and
-            // the judge read theirs back from the slot.
-            *rt.open_question.lock().await = Some((question_id.clone(), questions.clone(), risk));
-            rt.activity.lock().await.question_since = Some(Utc::now());
-            // The playbook's question rows (issue #1258): an ask the table knows — a git write on a
-            // read-only `.git` — is answered as it opens, before it can hold the slot for a person.
-            crate::playbook::on_question(app, id, rt, &question_id, kind.as_deref(), &questions).await;
+            // A question the operator has already answered (issue #1247) is answered from the
+            // record instead of the person — the session restarted, the agent lost the answer, the
+            // decision stands. Only when it is safe to decide for them: never an exec-policy ask
+            // (a blocked tool call, not a decision re-asked) and never anything credential-shaped.
+            // Applied only when every inner question has a recorded answer — a mixed bag leaves
+            // the whole question standing, the simpler truth about what the operator actually saw.
+            let recorded: Vec<(String, AnsweredQuestion)> = if kind.as_deref() != Some(crate::protocol::EXEC_POLICY_QUESTION_KIND)
+                && risk != QuestionRisk::CredentialAdjacent
+            {
+                let matches = app.session(id).await;
+                matches
+                    .map(|s| {
+                        questions
+                            .iter()
+                            .filter_map(|q| {
+                                let header = q["header"].as_str().unwrap_or_default();
+                                let key = if header.trim().is_empty() {
+                                    q["question"].as_str()?.trim()
+                                } else {
+                                    header.trim()
+                                };
+                                let answer = s.answer_for_header(key)?;
+                                Some((q["question"].as_str().unwrap_or_default().to_string(), answer.clone()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !questions.is_empty() && recorded.len() == questions.len() {
+                let answers = recorded
+                    .iter()
+                    .map(|(text, a)| (text.clone(), a.answer.clone()))
+                    .collect::<Map<String, Value>>();
+                let response = recorded.iter().find_map(|(_, a)| a.response.clone()).unwrap_or_default();
+                let asked = recorded
+                    .iter()
+                    .map(|(_, a)| {
+                        if a.header.is_empty() {
+                            a.question.as_str()
+                        } else {
+                            a.header.as_str()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                app.session_log(
+                    id,
+                    "info",
+                    format!(
+                        "answered from the record: the operator already decided '{asked}', so their earlier answer goes back down"
+                    ),
+                )
+                .await;
+                rt.send_command(json!({
+                    "type": "answer",
+                    "question_id": question_id,
+                    "answers": answers,
+                    "response": response,
+                }));
+                // The runner's `question_answered` echo closes a question this run never tracked:
+                // clearing the in-flight flag here keeps a later turn end from closing it again.
+                rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                // Cloned for the playbook call below: the slot keeps its own copy, as the cockpit and
+                // the judge read theirs back from the slot.
+                *rt.open_question.lock().await = Some((question_id.clone(), questions.clone(), risk));
+                rt.activity.lock().await.question_since = Some(Utc::now());
+                // The playbook's question rows (issue #1258): an ask the table knows — a git write on a
+                // read-only `.git` — is answered as it opens, before it can hold the slot for a person.
+                crate::playbook::on_question(app, id, rt, &question_id, kind.as_deref(), &questions).await;
+            }
         }
         AgentEvent::QuestionAnswered { question_id, .. } => {
             // Only the question we are actually tracking closes here (issue #981). The slot holds one

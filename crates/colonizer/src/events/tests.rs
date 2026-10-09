@@ -1218,6 +1218,87 @@ async fn a_judge_answer_is_not_watchdog_progress() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Issue #1247: a question the operator has already answered is answered from the record. The
+/// stored label goes back down keyed by the question as re-asked, no question opens for the
+/// person, and the colony log says where the answer came from. A reworded question under the
+/// same AskUserQuestion header is the same decision; a note the operator wrote rides along.
+#[tokio::test]
+async fn a_reasked_question_is_answered_from_the_record() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    app.update_session("abc", |x| {
+        x.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            Some("the short one"),
+        );
+    })
+    .await;
+    let reasked = r#"{"seq":1,"type":"question","question_id":"q9","questions":[{"question":"Which file name should the config use?","header":"File","options":[{"label":"hi.txt"}]}],"risk":"read_only"}"#;
+    handle_agent_event(&app, "abc", &rt, reasked).await;
+    assert!(rt.open_question().await.is_none(), "nobody is asked: the record answered");
+    assert!(rt.activity.lock().await.question_since.is_none());
+    let answer = rx.try_recv().unwrap();
+    assert_eq!(answer["type"], "answer");
+    assert_eq!(answer["question_id"], "q9");
+    assert_eq!(
+        answer["answers"],
+        json!({"Which file name should the config use?": "hello.txt"}),
+        "the stored label, keyed by the question as re-asked: {answer}"
+    );
+    assert_eq!(answer["response"], "the short one");
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(log.contains("answered from the record") && log.contains("File"), "{log}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1247, the guards: an exec-policy ask is a blocked tool call, not a decision re-asked —
+/// it waits for its person even under a recorded header. So does anything credential-shaped, and
+/// a question whose inner questions do not all match the record stays open whole.
+#[tokio::test]
+async fn an_ask_that_must_not_be_answered_from_the_record_still_opens() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    app.update_session("abc", |x| {
+        x.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            None,
+        );
+    })
+    .await;
+
+    // An exec-policy ask under the same header: the person decides, always.
+    let ask = r#"{"seq":1,"type":"question","question_id":"call_1","questions":[{"question":"Allow rm -rf dist?","header":"File"}],"kind":"exec_policy","blocking":true,"risk":"workspace_write"}"#;
+    handle_agent_event(&app, "abc", &rt, ask).await;
+    assert!(rt.open_question().await.is_some(), "a blocked call waits for its person");
+    assert!(rt.question_holds_tool_call.load(Ordering::SeqCst));
+    assert!(rx.try_recv().is_err(), "nothing went down the link");
+    *rt.open_question.lock().await = None;
+
+    // Credential-adjacent under the same header: never decided for the operator.
+    let secret = r#"{"seq":2,"type":"question","question_id":"q2","questions":[{"question":"Paste the token?","header":"File"}],"risk":"credential_adjacent"}"#;
+    handle_agent_event(&app, "abc", &rt, secret).await;
+    assert!(
+        rt.open_question().await.is_some(),
+        "a credential question waits for its person"
+    );
+    assert!(rx.try_recv().is_err());
+    *rt.open_question.lock().await = None;
+
+    // Half the inner questions are on the record, half are not: the whole question opens, rather
+    // than an answer that only covers what the operator actually decided.
+    let mixed = r#"{"seq":3,"type":"question","question_id":"q3","questions":[{"question":"Which file name now?","header":"File"},{"question":"Deploy to prod?","header":"Ship"}],"risk":"read_only"}"#;
+    handle_agent_event(&app, "abc", &rt, mixed).await;
+    assert!(rt.open_question().await.is_some(), "a mixed question waits whole");
+    assert!(rx.try_recv().is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A person's message resets the stall clock and the nudge count; the agent working — a tool
 /// call — counts as progress, clearing a held colony as before.
 #[tokio::test]

@@ -102,6 +102,23 @@ async fn resume_digest(store: &dyn SessionStore, id: &str) -> Option<String> {
     Some(block)
 }
 
+/// What a brief closes with beyond the task itself (issue #876, issue #1247): the one-shot note an
+/// automatic resume carries — the hold-timeout backoff's "choose for yourself", or an answer that
+/// arrived while the colony was parked — and, on a resume only, the decisions the operator has
+/// already answered, so a restarted colony does not put the same question to the person twice.
+/// Pure, so tests pin what the agent reads.
+pub(crate) fn resume_extras(s: &Session, resume: bool) -> String {
+    let mut extras = String::new();
+    if let Some(note) = s.resume_note.as_deref() {
+        extras.push_str(&format!("\n## What to do now\n\n{note}\n"));
+    }
+    if resume && let Some(decisions) = s.answered_questions_note() {
+        extras.push_str(&decisions);
+        extras.push('\n');
+    }
+    extras
+}
+
 /// One subagent a run ended with still in flight (issue #756): the name its Task call gave it, the
 /// task prompt it was handed, and its last event digested. Built from the archived log at resume
 /// and reported in the brief, so a resumed orchestrator knows the pinned runner's "stopped by the
@@ -1086,10 +1103,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // A one-shot note an automatic resume carries (issue #876) — the hold-timeout backoff's "choose
     // for yourself" or an answer that arrived while the colony was parked — rides the brief. Cleared
-    // once the runner is up, below; a warm resume hands it over on its own prompt instead.
-    if let Some(note) = s.resume_note.as_deref() {
-        prompt.push_str(&format!("\n## What to do now\n\n{note}\n"));
-    }
+    // once the runner is up, below; a warm resume hands it over on its own prompt instead. So do the
+    // colony's standing decisions (issue #1247): a resume's brief lists what the operator already
+    // answered, so a re-asked question never waits on the person twice.
+    prompt.push_str(&resume_extras(&s, resume));
     app.store().write_private(id, "vm/token", random_token().as_bytes()).await?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
@@ -2534,6 +2551,33 @@ mod tests {
         assert!(!story.contains("the new run"), "the live log is not the story");
         assert!(!story.contains("assistant_text_delta"), "delta noise is digested away");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resume's brief closes with the operator's standing decisions (issue #1247), so a colony
+    /// that restarts reads what was already answered instead of asking again; a fresh boot's brief
+    /// carries none — there is nothing to be continuing. The one-shot resume note rides both.
+    #[test]
+    fn a_resumed_brief_carries_the_decisions_already_made() {
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+        s.resume_note = Some("pick either and carry on".into());
+        assert!(
+            !resume_extras(&s, false).contains("Decisions already made"),
+            "a fresh boot does not replay decisions: {}",
+            resume_extras(&s, false)
+        );
+        s.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            Some("the short one"),
+        );
+        let resumed = resume_extras(&s, true);
+        assert!(
+            resumed.contains("## What to do now") && resumed.contains("pick either and carry on"),
+            "{resumed}"
+        );
+        assert!(resumed.contains("## Decisions already made"), "{resumed}");
+        assert!(resumed.contains("- File: hello.txt, note: the short one"), "{resumed}");
     }
 
     /// A run's log: a Task still in flight (its Bash line is the last it emitted), a Task that

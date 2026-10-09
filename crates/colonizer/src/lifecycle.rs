@@ -1420,10 +1420,16 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session, due: &(dyn Fn(&Session
          never stopped. Pick up where you left off and continue with the task."
     );
     // The note the resume carries, if any: the hold-timeout backoff's "choose for yourself", or the
-    // answer that arrived while the colony was parked.
+    // answer that arrived while the colony was parked. And the standing decisions (issue #1247):
+    // a warm resume never boots, so the brief's "Decisions already made" rides this prompt instead —
+    // not consumed; the list is the colony's record, not a delivery in flight.
     if let Some(note) = &note {
         text.push_str("\n\n");
         text.push_str(note);
+    }
+    if let Some(decisions) = s.answered_questions_note() {
+        text.push_str("\n\n");
+        text.push_str(&decisions);
     }
     let _ = rt.commands.send(json!({
         "type": "user_message",
