@@ -221,6 +221,11 @@ pub struct App {
     /// Phones paired through Settings → Add your phone (phone.rs, issue #746): the open invites and
     /// pairings in memory, the paired phones in `<config_dir>/phones.json`.
     pub phones: crate::phone::PhoneStore,
+    /// Model lists discovered from each provider's `GET /v1/models` (issue #1167), persisted to the
+    /// sidecar `<config_dir>/provider-models.json` so discovery never rewrites `providers.json`.
+    /// Recorded by every fresh probe, read by `GET /api/providers`, swept daily by the gateway's
+    /// `discover::refresh_loop`.
+    pub(crate) provider_models: crate::gateway::Discover,
     /// Boot-time provider probe results, keyed on provider id + base URL
     /// (`crate::gateway::probe_cache_key`) so repointing a provider never serves the old endpoint's
     /// answer. Both reachable and unreachable answers are kept for [`crate::gateway::PROVIDER_PROBE_TTL`];
@@ -331,6 +336,7 @@ impl App {
             orgs_failed_at: Mutex::new(None),
             orgs_refreshed: Mutex::new(None),
             phones: crate::phone::PhoneStore::load(&cfg.config_dir),
+            provider_models: crate::gateway::Discover::load(&cfg.config_dir),
             provider_probe_cache: Mutex::new(HashMap::new()),
             pull: Mutex::new(Default::default()),
             redteam: crate::redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),

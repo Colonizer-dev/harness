@@ -6,7 +6,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error, config_unreadable,
-    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, forget_probe, health},
+    gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, forget_probe, health, probe_cached},
     modules::AgentModule,
     orgs::effective_agent,
     provider_quota,
@@ -1133,7 +1133,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
     if quota_exhausted {
         health.degraded = true;
     }
-    json!({
+    let mut described = json!({
         "id": provider.id,
         "name": provider.name,
         "base_url": provider.base_url,
@@ -1165,7 +1165,16 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         } else {
             None::<Value>
         },
-    })
+    });
+    // What discovery last read from this endpoint (issue #1167) — omitted until one exists, and
+    // hidden when the entry names another base URL, so a repointed provider is not offered its old
+    // endpoint's models. The operator's own `models` list is never touched by any of it.
+    if let Some(found) = app.provider_models.entry(&provider.id, &provider.base_url) {
+        described["discovered_models"] = json!(found.models);
+        described["new_models"] = json!(found.new_models);
+        described["discovered_at"] = json!(found.discovered_at);
+    }
+    described
 }
 
 /// Quota exhaustion across providers for the status poll and the queue (issue #225): whether every
@@ -1740,6 +1749,16 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     // The probe cache key carries no credential, so a rotated key or a changed auth mode /
     // endpoint would otherwise keep serving the old answer for up to the probe TTL.
     forget_probe(&app, &id).await;
+    // The cache was just dropped, so this probes fresh: it re-discovers the endpoint's model list
+    // (issue #1167) and warms the next boot lookup, in the background, so a slow or dead endpoint
+    // never holds the save.
+    {
+        let app = app.clone();
+        let provider = provider.clone();
+        tokio::spawn(async move {
+            probe_cached(&app, &provider).await;
+        });
+    }
     let envs = runner_envs(&app).await;
     Ok(Json(describe(&app, &provider, &envs)))
 }
@@ -1765,7 +1784,9 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     app.gateway.forget_usage(&id);
     app.gateway.forget_quota(&id);
     app.gateway.history.forget(&id);
-    // Nor its probe answer: a later provider reusing the id must be probed fresh.
+    // Nor its discovered model list (#1167), nor its probe answer: a later provider reusing the id
+    // must not inherit either.
+    app.provider_models.forget(&id);
     forget_probe(&app, &id).await;
     Ok(Json(json!({"ok": true})))
 }
@@ -2780,6 +2801,47 @@ mod tests {
             json!(false),
             "an unmarked provider reports trusted: false"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The discovered model list rides the same GET (#1167), but only while the stored entry names
+    /// the provider's current base URL — a provider repointed elsewhere is not offered its old
+    /// endpoint's models, and nothing here ever touches the operator's own `models`.
+    #[tokio::test]
+    async fn the_list_reports_the_discovered_models_while_the_base_url_matches() {
+        let (app, root) = providers_app();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(put_req("DeepSeek")))
+            .await
+            .unwrap();
+        let saved = app.providers()[0].clone();
+
+        app.provider_models.record(
+            &saved,
+            &[
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4".to_string(),
+                "deepseek-v4-flash".to_string(),
+            ],
+        );
+        let Json(listed) = list(State(app.clone())).await;
+        let row = listed.iter().find(|p| p["id"] == "deepseek").unwrap();
+        assert_eq!(row["discovered_models"], json!(["deepseek-v4", "deepseek-v4-flash"]));
+        assert_eq!(row["new_models"], json!([]), "a first discovery flags nothing");
+        assert!(row.get("discovered_at").is_some());
+        assert_eq!(row["models"], json!(saved.models), "the operator's own list is untouched");
+
+        // A discovery at another base URL is the entry that replaces it, and it is hidden until
+        // the provider is saved against that URL.
+        let moved = Provider {
+            base_url: "https://elsewhere.example".into(),
+            ..saved
+        };
+        app.provider_models.record(&moved, &["elsewhere-model".to_string()]);
+        let Json(listed) = list(State(app.clone())).await;
+        let row = listed.iter().find(|p| p["id"] == "deepseek").unwrap();
+        assert!(row.get("discovered_models").is_none());
+        assert!(row.get("new_models").is_none());
+        assert!(row.get("discovered_at").is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

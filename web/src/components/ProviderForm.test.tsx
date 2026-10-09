@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { Api } from "../api";
 import { ApiContext } from "../context";
 import type { ModelProvider } from "../types";
+import { toggleModel } from "./settings/providerOverview";
 import { ProviderForm, duplicateModelMapCanonicals, modelMapCanonicals, providerSaveBody, type ProviderSaveInput } from "./SettingsDialog";
 
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(<ApiContext.Provider value={{} as Api}>{node}</ApiContext.Provider>);
@@ -139,5 +140,36 @@ describe("provider plan-balance preset", () => {
     );
     expect(html).toContain('value="https://api.minimax.io/v1/api/openplatform/coding_plan/remains"');
     expect(html).toContain('value="/data/model_remains/0/current_interval_usage_count"');
+  });
+});
+
+// Issue #1167: the edit form lists the endpoint's models as checkboxes beside the free-typed chips —
+// "new" just appeared upstream, "gone" is enabled though the endpoint no longer names it, and
+// unticking is the only way a model leaves the save.
+describe("provider model checklist", () => {
+  const discovered = provider({
+    models: ["deepseek-flash", "deepseek-vintage"],
+    discovered_models: ["deepseek-flash", "deepseek-v4-pro"],
+    new_models: ["deepseek-v4-pro"],
+    discovered_at: "2026-10-09T10:00:00Z",
+  });
+
+  it("renders the endpoint's models as checkboxes, flagged new and gone, with when they were found", () => {
+    const html = form(discovered);
+    expect(html.split('type="checkbox"').length - 1).toBe(3);
+    expect(html).toContain(">deepseek-v4-pro</span>");
+    expect(html).toContain(">new</span>");
+    expect(html).toContain(">gone</span>");
+    expect(html).toMatch(/type="checkbox"[^>]*checked/);
+    expect(html).toContain("Available on the endpoint, discovered");
+  });
+
+  it("stays hidden while the endpoint and the catalogue have nothing to offer", () => {
+    expect(form(provider({ preset: "custom", models: [], discovered_models: [] }))).not.toContain('type="checkbox"');
+  });
+
+  it("flips a checkbox in and out of the saved models, never duplicating one already there", () => {
+    expect(toggleModel(["deepseek-flash"], "deepseek-v4-pro", true)).toEqual(["deepseek-flash", "deepseek-v4-pro"]);
+    expect(toggleModel(["deepseek-flash", "deepseek-vintage"], "deepseek-vintage", false)).toEqual(["deepseek-flash"]);
   });
 });
