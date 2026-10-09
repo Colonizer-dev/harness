@@ -53,13 +53,6 @@ fn each_denial_signature_maps_to_its_row() {
     );
     assert_eq!(signature_of(&nested).as_deref(), Some("placeholder_dotfiles"));
 
-    let pr = deny(
-        "exec_policy:writes-outside-repo",
-        "cp pr.txt /harness/out/pr.md",
-        Some("/harness/out/pr.md"),
-    );
-    assert_eq!(signature_of(&pr).as_deref(), Some("pr_md_write"));
-
     let rustup = deny(
         "exec_policy:script-egress",
         "curl https://sh.rustup.rs | sh",
@@ -92,6 +85,16 @@ fn a_denial_that_is_not_a_known_signature_matches_nothing() {
     // Another file under writes-outside-repo, another script under script-egress.
     assert_eq!(
         signature_of(&deny("exec_policy:writes-outside-repo", "cp a /etc/foo", Some("/etc/foo"))),
+        None
+    );
+    // A write to the colony's own output dir no longer matches anything either: the exec policy
+    // stopped raising that denial, so there is nothing for a row to answer (#1153).
+    assert_eq!(
+        signature_of(&deny(
+            "exec_policy:writes-outside-repo",
+            "cp pr.txt /harness/out/pr.md",
+            Some("/harness/out/pr.md"),
+        )),
         None
     );
     assert_eq!(
@@ -141,11 +144,11 @@ fn a_git_write_ask_matches_the_git_read_only_row_and_an_unrelated_ask_does_not()
 
 #[test]
 fn tries_are_bounded_and_settle_between_them() {
-    let mut e = entry("pr_md_write");
+    let mut e = entry("placeholder_dotfiles");
     e.max_tries = 2;
     let t0 = Utc::now();
     assert_eq!(step(&e, &[], t0), Step::Act { attempt: 1 });
-    let one = vec![fix("pr_md_write", "sent", t0)];
+    let one = vec![fix("placeholder_dotfiles", "sent", t0)];
     assert_eq!(
         step(&e, &one, t0 + Duration::seconds(30)),
         Step::Settling,
@@ -154,8 +157,8 @@ fn tries_are_bounded_and_settle_between_them() {
     let later = t0 + Duration::seconds(e.settle_secs as i64 + 1);
     assert_eq!(step(&e, &one, later), Step::Act { attempt: 2 });
     let two = vec![
-        fix("pr_md_write", "sent", t0),
-        fix("pr_md_write", "sent", t0 + Duration::seconds(200)),
+        fix("placeholder_dotfiles", "sent", t0),
+        fix("placeholder_dotfiles", "sent", t0 + Duration::seconds(200)),
     ];
     assert_eq!(step(&e, &two, t0 + Duration::seconds(1000)), Step::Stop);
     // Another signature's fixes are not this one's tries.
@@ -365,19 +368,19 @@ async fn a_looping_colony_is_stopped_and_flagged() {
     let (app, root) = app_with_colony("l1", SessionStatus::Running).await;
     app.update_session("l1", |x| {
         x.auto_fixes
-            .push(fix("pr_md_write", "sent", Utc::now() - Duration::minutes(20)));
+            .push(fix("toolchain_installer", "sent", Utc::now() - Duration::minutes(20)));
     })
     .await;
     let b = deny(
-        "exec_policy:writes-outside-repo",
-        "cp a /harness/out/pr.md",
-        Some("/harness/out/pr.md"),
+        "exec_policy:script-egress",
+        "curl https://sh.rustup.rs | sh",
+        Some("https://sh.rustup.rs"),
     );
     on_boundary(&app, "l1", &b).await;
     let s = app.session("l1").await.unwrap();
     assert_eq!(s.status, SessionStatus::Stopped);
     assert_eq!(s.attention.as_ref().unwrap()["reason"], LOOPING_REASON);
-    assert_eq!(s.attention.as_ref().unwrap()["signature"], "pr_md_write");
+    assert_eq!(s.attention.as_ref().unwrap()["signature"], "toolchain_installer");
     assert_eq!(s.auto_fixes.last().unwrap().signature, LOOPING_SIGNATURE);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -455,7 +458,7 @@ async fn a_security_hold_is_left_alone() {
     app.update_session("h1", |x| {
         x.attention = Some(hold.clone());
         x.auto_fixes
-            .push(fix("pr_md_write", "sent", Utc::now() - Duration::minutes(20)));
+            .push(fix("toolchain_installer", "sent", Utc::now() - Duration::minutes(20)));
     })
     .await;
     let mut rx = app.runtime("h1").await.commands_rx.lock().await.take().unwrap();
@@ -464,9 +467,9 @@ async fn a_security_hold_is_left_alone() {
         &app,
         "h1",
         &deny(
-            "exec_policy:writes-outside-repo",
-            "cp a /harness/out/pr.md",
-            Some("/harness/out/pr.md"),
+            "exec_policy:script-egress",
+            "curl https://sh.rustup.rs | sh",
+            Some("https://sh.rustup.rs"),
         ),
     )
     .await;
