@@ -118,9 +118,10 @@ fn the_digest_stays_bounded_for_huge_inputs() {
 
 #[test]
 fn the_digest_is_redacted() {
-    // Assembled from fragments so no token-shaped literal lands in source (push protection).
-    let token = concat!("ghp_", "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
-    let key = concat!("sk-ant-api03", "-AbCdEf123456_GhIjKl", "-789012MnOpQr");
+    // Built at runtime from short repeats so no token-shaped literal lands in source (push
+    // protection); the bodies still match the redactor's shapes (length and charset).
+    let token = format!("{}{}", "ghp_", "a1B2".repeat(9));
+    let key = format!("{}-{}", "sk-ant-api03", "a1B2_".repeat(8));
     let m = Materials {
         harness_tail: format!("ran: GH={token}"),
         pr_md: format!("used the key {key}"),
