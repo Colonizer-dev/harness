@@ -893,6 +893,12 @@ enum MergeTrainCommand {
         /// Resolve attempts per pull request before it is labelled needs-human (1-10)
         #[arg(long, value_name = "N")]
         resolve_attempts: Option<u32>,
+        /// Send a red pull request back to its own colony to fix its failing checks
+        #[arg(long, value_enum)]
+        fix_red: Option<Toggle>,
+        /// Fix attempts per pull request before it is labelled needs-human (1-10)
+        #[arg(long, value_name = "N")]
+        fix_attempts: Option<u32>,
     },
     /// Run it now in the background, or with --dry-run list what it would merge, update, rebase and skip
     Run {
@@ -2651,6 +2657,8 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
             local_checks,
             resolve,
             resolve_attempts,
+            fix_red,
+            fix_attempts,
         } => {
             if let Some(minutes) = every {
                 settings["cadence"] = json!({"every": "interval", "minutes": minutes});
@@ -2684,6 +2692,9 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
             if let Some(n) = resolve_attempts {
                 settings["resolve_attempts"] = json!(n);
             }
+            if let Some(n) = fix_attempts {
+                settings["fix_attempts"] = json!(n);
+            }
             if let Some(targets) = local_checks {
                 let targets: Vec<String> = targets.split(',').map(norm).filter(|t| !t.is_empty()).collect();
                 settings["local_checks"] = json!(targets);
@@ -2693,6 +2704,7 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
                 ("revert_on_red", revert_on_red),
                 ("redo_on_conflict", redo),
                 ("resolve_conflicts", resolve),
+                ("fix_red", fix_red),
             ] {
                 if let Some(t) = toggle {
                     settings[key] = json!(*t == Toggle::On);
@@ -2741,6 +2753,11 @@ fn describe_merge_loop(view: &Value) -> Vec<String> {
             "  resolve conflicts with the colony: {} (at most {} attempts)",
             on("resolve_conflicts"),
             s["resolve_attempts"]
+        ),
+        format!(
+            "  fix red pull requests with the colony: {} (at most {} attempts)",
+            on("fix_red"),
+            s["fix_attempts"]
         ),
         format!(
             "  self-heal: {}, revert on red: {}, redo colonies: {}",
@@ -4693,6 +4710,8 @@ mod tests {
                 local_checks: Some("Acme, ".into()),
                 resolve: Some(Toggle::On),
                 resolve_attempts: Some(2),
+                fix_red: Some(Toggle::On),
+                fix_attempts: Some(5),
             },
         )
         .unwrap();
@@ -4708,6 +4727,7 @@ mod tests {
             (s["resolve_conflicts"].clone(), s["resolve_attempts"].clone()),
             (json!(true), json!(2))
         );
+        assert_eq!((s["fix_red"].clone(), s["fix_attempts"].clone()), (json!(true), json!(5)));
         assert_eq!(
             (s["self_heal"].clone(), s["redo_on_conflict"].clone()),
             (json!(true), json!(false))
@@ -4734,6 +4754,8 @@ mod tests {
             local_checks: None,
             resolve: None,
             resolve_attempts: None,
+            fix_red: None,
+            fix_attempts: None,
         };
         assert!(edit_merge_loop(&mut s, &bad).is_err());
 
