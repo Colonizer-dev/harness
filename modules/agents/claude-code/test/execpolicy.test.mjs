@@ -875,3 +875,56 @@ test('git <rev>:<path> object specs naming a secret path are refused; other path
   ];
   for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
 });
+
+// #1279: the harness seeds empty placeholder dotfiles (.env, .envrc, .npmrc, .netrc,
+// .git-credentials, .pypirc, .mcp.json, .gitmodules) at the checkout root, and an agent that ran
+// `git status` and then asked about their names was denied three times over and held. The whole
+// investigation is name-only, and so is each shape it takes.
+test('the placeholder investigation sequence is allowed end to end (#1279)', () => {
+  const policy = policyIn('/workspace');
+  const names = '.env .envrc .netrc .git-credentials .npmrc .pypirc .mcp.json .gitmodules';
+  // The exact sequence the issue held over: status, then check-ignore across all eight names,
+  // then ls — one call each, and the -C spelling of the same check.
+  for (const command of ['git status', `git check-ignore -v ${names}`, `ls -la ${names}`,
+    `git -C /workspace check-ignore -v ${names}`]) {
+    assert.equal(decide(policy, command, '/workspace'), null, command);
+  }
+});
+
+test('the investigation shapes the placeholders bring out are name-only; reads through them are not (#1279)', () => {
+  const policy = policyIn('/workspace');
+  const allowed = [
+    'cd /workspace && ls -la .env',
+    'cd /workspace && git check-ignore -v .env',
+    'for f in .env .netrc; do test -e "$f" && echo "$f"; done',
+    'for f in .env .netrc; do git check-ignore -q "$f" || echo "$f"; done',
+    'git check-ignore -v .env 2>&1; echo $?',
+    'ls -la .env 2>/dev/null || echo missing',
+    'wc -c .env && echo $?',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/workspace'), null, command);
+  // Each allowance keeps its read-shaped twin refused: a `cd` or loop-glued read, a bare `|`, `&`
+  // or `;` handing one loop part to another, and `$?` tacked onto a read.
+  const reads = [
+    'cd /workspace && cat .env',
+    'cd /tmp && ls .env',
+    'cd /tmp && git check-ignore .env',
+    'for f in .env; do cat "$f" && echo x; done',
+    'for f in .env; do echo x || cat "$f"; done',
+    'for f in .env; do test -e "$f" || cat "$f"; done',
+    'for f in .env; do wc -c "$f" && cat "$f"; done',
+    'for f in .env; do ls "$f" & cat "$f"; done',
+    'for f in .env; do git check-ignore "$f" | head; done',
+    'for f in .env; do test -e "$f"; cat "$f"; done',
+    'for f in .env; do ls "$f"; done; cat .env',
+    'for f in .env; do cat "$f"; done; echo $?',
+    'cat .env; echo $?',
+    'cat .env && echo $?',
+    'git check-ignore -v .env 2>&1; echo $(cat .env)',
+    // `file` opens the file and reads bytes to guess its type, and `git log` subsumes spellings
+    // that print contents (`-p`, `--format=`) the flag vetting cannot separate. Both stay refused.
+    'file .env',
+    'git log --oneline -- .env',
+  ];
+  for (const command of reads) assert.equal(decide(policy, command, '/workspace')?.rule, 'secret-paths', command);
+});

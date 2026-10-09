@@ -2171,9 +2171,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
     // credential files about to be committed, and the agent goes to ignore or inspect them. The
     // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise.
-    let mut excludes = crate::path_policy::exclude_lines(&planned);
+    let placeholders = crate::path_policy::exclude_lines(&planned);
+    let mut excludes = placeholders.clone();
     excludes.extend(crate::path_policy::ua_exclude_lines(&plugin_names));
     crate::path_policy::write_list(&vm_dir.join(crate::path_policy::EXCLUDE_FILE), &excludes)?;
+    // The placeholders into the repository's shared `info/exclude` (#1279): a git that strips the
+    // environment — the host's own calls, an agent's startup snapshot — never sees the
+    // `core.excludesFile` above, and for a linked worktree it reads `info/exclude` from the common
+    // dir, which is the bare repo. Only the placeholders: the understand-anything lines are a
+    // per-colony view (see `ua_exclude_lines`), so they stay guest-side. Best effort: the env arm
+    // still covers the guest's own shells.
+    if let Err(e) = crate::path_policy::write_repo_exclude(&bare, &placeholders.join("\n")) {
+        log.warn(format!("path policy: could not update the repository's info/exclude: {e}"))
+            .await;
+    }
     crate::path_policy::apply(&wt, &planned)?;
     log.info(crate::path_policy::summary(&policy, &planned)).await;
     if let Some(note) = crate::path_policy::opt_outs(&policy) {

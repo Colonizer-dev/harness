@@ -985,9 +985,11 @@ pub(crate) fn neutralize_close(text: &str, close: &str) -> String {
     out
 }
 
-/// The brief's line about the path policy's placeholders (issue #1169).
-pub(crate) const PLACEHOLDER_NOTE: &str =
-    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: don't inspect, gitignore or edit them.";
+/// The brief's line about the path policy's placeholders (issue #1169): harness-managed, hidden
+/// from `git status` (#1279), and nothing an agent needs to look at.
+pub(crate) const PLACEHOLDER_NOTE: &str = "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: hidden from \
+     git status and managed by the harness, they need no `ls` or `git check-ignore` — don't \
+     inspect, gitignore or edit them.";
 
 pub fn build_prompt(
     s: &Session,
@@ -3652,7 +3654,8 @@ mod tests {
         }
     }
 
-    /// Issue #1169: the brief says the empty dotfiles are harness placeholders, to leave alone.
+    /// Issue #1169, #1279: the brief says the empty dotfiles are harness placeholders, hidden from
+    /// git status and in need of no investigation.
     #[test]
     fn the_prompt_names_the_empty_dotfiles_as_placeholders_to_leave_alone() {
         let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
@@ -3660,8 +3663,9 @@ mod tests {
             let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
             assert!(
                 prompt.contains(
-                    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: \
-                     don't inspect, gitignore or edit them."
+                    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: hidden from \
+                     git status and managed by the harness, they need no `ls` or `git check-ignore` — don't inspect, \
+                     gitignore or edit them."
                 ),
                 "{prompt}"
             );
