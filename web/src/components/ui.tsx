@@ -421,6 +421,8 @@ export function attentionText(attention: Attention): string {
       return "A control may have been bypassed";
     case "looping":
       return attention.signature ? `Looping on ${attention.signature} — stopped, resume to continue` : "Looping — stopped, resume to continue";
+    case "operator_escalation":
+      return attention.detail?.trim() || "The operator needs a person";
     case "provider_retry":
       return attention.summary?.trim() || attention.detail?.trim() || "Retrying a provider error automatically";
     default:
@@ -439,6 +441,17 @@ export function autoFixLine(session: Pick<Session, "auto_fixes">): string | null
   for (const fix of fixes) counts.set(fix.signature, (counts.get(fix.signature) ?? 0) + 1);
   const names = [...counts].map(([signature, n]) => (n > 1 ? `${signature} ×${n}` : signature));
   return `auto-fixed: ${names.join(", ")}`;
+}
+
+/**
+ * The colony header's "operator" line (issue #1192): what the operator turn did by itself, reading
+ * the latest note. `null` when it has done nothing.
+ */
+export function operatorLine(session: Pick<Session, "operator">): string | null {
+  const note = (session.operator ?? []).at(-1);
+  if (!note) return null;
+  const diagnosis = note.diagnosis.length > 80 ? `${note.diagnosis.slice(0, 80)}…` : note.diagnosis;
+  return `operator: diagnosed ${diagnosis}, did ${note.action}`;
 }
 
 /** The amber marker for colonies the watchdog flagged. */
