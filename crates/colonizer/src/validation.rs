@@ -1,11 +1,11 @@
 //! Host-side validation of a colony's findings, and the autofix pipeline that follows them.
 //!
 //! A colony's orchestrator has already confirmed a finding before it is sent; this module is the
-//! second, host-side check. Every finding is judged by a one-shot call to the orchestrator model
-//! — the same provider route the autonomous judge uses (autonomy.rs) — and only a finding that
-//! passes is filed. The outcome of every stage, from validation through a fix colony's merge, is
-//! recorded on the hunter's findings ledger and on its event stream, so nothing happens to a
-//! repository that is not minuted first.
+//! second, host-side check. Every finding is judged by a one-shot request on the host's judgement
+//! model (issue #1154) — the same provider route the autonomous judge uses (autonomy.rs) — and
+//! only a finding that passes is filed. The outcome of every stage, from validation through a fix
+//! colony's merge, is recorded on the hunter's findings ledger and on its event stream, so nothing
+//! happens to a repository that is not minuted first.
 //!
 //! Autofix is the sharpest edge here: a filed finding spawns a *second* colony whose change is
 //! reviewed by a fresh independent session before it can merge, and it merges only on a passing
@@ -14,9 +14,7 @@
 
 use crate::{
     App, Shared,
-    config::{ModulesConfig, setting_str},
     findings::Finding,
-    modules::schema_for,
     sessions::{FixFor, NewSession, Session, automerge_enabled},
     util::{short_id, truncate},
 };
@@ -205,28 +203,22 @@ fn review_prompt(repo: &str, issue_url: &str, title: &str, diff: &str) -> String
     )
 }
 
-/// The orchestrator model host-side calls run on: the agent module's `model` setting, the same one
-/// a colony's own orchestrator would resolve (sessions.rs `boot`). Without one there is nothing to
-/// judge with, so the call refuses and the finding is recorded as an error rather than filed
-/// unjudged — a model that cannot be reached must never silently mean "file it anyway".
-async fn orchestrator_model(app: &App, modules: &ModulesConfig) -> Result<String> {
-    let schema = schema_for("agent", &modules.agent.provider, &app.agents);
-    let model = setting_str(&modules.agent, &schema, "model").trim().to_string();
-    if model.is_empty() {
-        bail!(
-            "no orchestrator model is configured: set the agent module's model in Settings, and \
-             nothing can be validated against the finding"
-        );
-    }
-    Ok(model)
+/// The model host-side judgement runs on (issue #1154): the judge's explicit model, else a
+/// background or subagent model naming a provider, else the orchestrator model when it is
+/// callable — a plain Claude id only through an Anthropic provider, never the subscription
+/// login. What happens when nothing is callable is the caller's business: `file_finding`
+/// queues the finding, the judge's question waits.
+pub(crate) async fn judgement_model(app: &App) -> Result<String> {
+    crate::autonomy::host_model(app).await.context(
+        "no model the host can call for judgement: add a model provider in Settings → Model providers, or set judge_model",
+    )
 }
 
-/// One validation call: a one-shot orchestrator-model request, exactly the route the autonomous
-/// judge uses. The reply is parsed by [`parse_decision`]; a reply that is not the JSON asked for is
-/// an error, and an error files nothing.
+/// One validation call: a one-shot request on the host's judgement model (issue #1154), exactly the
+/// route the autonomous judge uses. The reply is parsed by [`parse_decision`]; a reply that is not
+/// the JSON asked for is an error, and an error files nothing.
 pub(crate) async fn validate(app: &App, s: &Session, finding: &Finding) -> Result<Decision> {
-    let modules = app.modules.read().await.clone();
-    let model = orchestrator_model(app, &modules).await?;
+    let model = judgement_model(app).await?;
     let reply = crate::autonomy::ask_model(app, &model, &validation_prompt(&s.repo, finding)).await?;
     parse_decision(&reply).context("the validator's reply was not the JSON it was asked for")
 }
@@ -459,8 +451,7 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
     let diff = crate::util::exec(&mut app.gh(["pr", "diff", pr_url.as_str()]))
         .await
         .context("could not fetch the pull request's diff")?;
-    let modules = app.modules.read().await.clone();
-    let model = orchestrator_model(app, &modules).await?;
+    let model = judgement_model(app).await?;
     let issue_url = fix_for.issue.as_deref().unwrap_or(pr_url.as_str());
     let reply = crate::autonomy::ask_model(
         app,

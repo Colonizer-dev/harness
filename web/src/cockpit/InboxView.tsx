@@ -12,7 +12,7 @@ import { ApiContext } from "../context";
 import { store, stored } from "../components/ui";
 import { needsYouFeed } from "../notifications";
 import { OldQuestionsRow } from "./OldQuestionsRow";
-import type { ActivityEntry, DecisionAnswerRequest, DecisionsView, PrAction, PrCard, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
+import type { ActivityEntry, DecisionAnswerRequest, DecisionsView, FindingsCard, PrAction, PrCard, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
 import { ProviderQuotaCard, QuotaChangeSummary, isQuotaReply, quotaCardColonyIds } from "./ProviderQuotaCard";
 import { expectsAnswer, needsYouLine, useOpenQuestions } from "./questions";
 import { inboxEntries, type FeedKind } from "./feed";
@@ -43,6 +43,7 @@ export function InboxView({
   onOpenColony,
   onOpenNotificationSettings,
   quotaCards = [],
+  findingsCards = [],
   onQuotaAction,
   decisions = null,
   onAnswerDecision,
@@ -55,6 +56,8 @@ export function InboxView({
   onOpenNotificationSettings: () => void;
   /** "Provider out of quota" cards (issue #767), shown first: one per provider, not one per colony. */
   quotaCards?: QuotaCard[];
+  /** The "Findings and judge are off" card (issue #1154), shown beside the quota cards; empty while a model can host-validate findings. */
+  findingsCards?: FindingsCard[];
   onQuotaAction?: (provider: string, body: QuotaActionRequest) => Promise<unknown>;
   /** The decisions inbox (issue #1036): repo decisions and pull requests that need a person. */
   decisions?: DecisionsView | null;
@@ -146,6 +149,27 @@ export function InboxView({
           <QuotaChangeSummary reply={switched} onDismiss={() => setSwitched(null)} />
           {quotaCards.map((card) => (
             <ProviderQuotaCard key={card.provider} card={card} onOpenColony={onOpenColony} onAction={quotaAction} />
+          ))}
+
+          {findingsCards.map((card) => (
+            <div key={card.title} className="rounded-md border border-warn bg-warn-soft px-3.5 py-3 text-body-sm text-text">
+              <div className="text-lead font-semibold [text-wrap:pretty]">{card.title}</div>
+              <div className="mt-1 text-small-lg text-muted">{card.detail}</div>
+              <ul className="m-0 mt-1 list-none p-0">
+                {card.colonies.map((colony) => (
+                  <li key={colony.id} className="flex items-center gap-2 py-0.5 font-mono text-small">
+                    <span className="shrink-0">
+                      {colony.repo}
+                      {colony.issue != null ? ` · #${colony.issue}` : ""}
+                    </span>
+                    {colony.issue_title && <span className="min-w-0 truncate text-faint">{colony.issue_title}</span>}
+                    <span className="ml-auto shrink-0 text-faint">
+                      {colony.count} {colony.count === 1 ? "finding" : "findings"} queued
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ))}
 
           {waiting.length === 0 && (quotaCards.length > 0 || decisionCards > 0 || feed.oldQuestions.length > 0) ? null : waiting.length === 0 ? (

@@ -62,6 +62,7 @@ mod exec_policy;
 mod execution;
 mod features;
 mod findings;
+mod findings_queue;
 mod fleet;
 mod fleet_export;
 mod fleet_health;

@@ -1506,6 +1506,13 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             return;
         }
     };
+    // Issue #1154: with no model the host can call, the finding is queued in the colony's out/
+    // and retried when one becomes callable; one install-level card says findings are off, so
+    // there is no warn line per finding here.
+    if crate::autonomy::host_model(&app).await.is_none() {
+        crate::findings_queue::queue(&app, &id, &event, &finding).await;
+        return;
+    }
     let decision = match crate::validation::validate(&app, &s, &finding).await {
         Ok(decision) => decision,
         Err(e) => {

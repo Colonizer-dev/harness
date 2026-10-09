@@ -115,6 +115,26 @@ export interface QuotaCardColony {
   resume_unix: number | null;
 }
 
+/** One colony on the "Findings and judge are off" card. */
+export interface FindingsCardColony {
+  id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string | null;
+  /** Findings sitting queued in this colony's out/. */
+  count: number;
+}
+
+/** GET /api/attention `findings_cards` (issue #1154): the one install-level card raised while no model can host-validate findings. */
+export interface FindingsCard {
+  title: string;
+  detail: string;
+  /** How many findings sit queued across the colonies. */
+  count: number;
+  colonies: FindingsCardColony[];
+}
+
 /** GET /api/attention `quota_cards` (issue #767): one card per provider that ran out of quota. */
 export interface QuotaCard {
   provider: string;
@@ -483,7 +503,8 @@ export interface FindingRecord {
   session: string;
   repo?: string;
   title: string;
-  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
+  /** `queued` waits for a model the host can call (issue #1154); it files once one is callable. */
+  state: "queued" | "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
   ts?: string;
   reason?: string;
   severity?: "low" | "medium" | "high" | "critical";

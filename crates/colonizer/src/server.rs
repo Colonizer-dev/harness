@@ -481,6 +481,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
             start(app);
         }
     }
+    crate::findings_queue::start_tasks(app);
     crate::fleet_sync::start_tasks(app);
     crate::gateway::start_tasks(app);
     crate::lifecycle::start_tasks(app);
