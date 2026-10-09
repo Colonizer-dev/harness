@@ -82,6 +82,12 @@ describe("provider connection policy", () => {
     expect(body.name).toBe("DeepSeek");
     expect(body.base_url).toBe("https://api.deepseek.com/anthropic");
     expect(body.quota).toEqual({ url: "https://api.deepseek.com/plan", pointer: "/data/remaining" });
+    // The limit pointer round-trips trimmed too, and stays off the body when blank.
+    expect(providerSaveBody(bodyInput({ quota: { url: "https://api.deepseek.com/plan", pointer: "/data/remaining", limit_pointer: " /data/total " } })).quota).toEqual({
+      url: "https://api.deepseek.com/plan",
+      pointer: "/data/remaining",
+      limit_pointer: "/data/total",
+    });
   });
 
   it("keeps a blank wire name, dropping only rows whose canonical is blank", () => {
@@ -108,5 +114,30 @@ describe("provider connection policy", () => {
     expect(duplicateModelMapCanonicals([{ canonical: "sonnet", wire: "a" }, { canonical: " sonnet ", wire: "b" }])).toEqual(["sonnet"]);
     expect(duplicateModelMapCanonicals([{ canonical: "sonnet", wire: "a" }, { canonical: "", wire: "" }, { canonical: "", wire: "" }])).toEqual([]);
     expect(modelMapCanonicals([{ canonical: " sonnet ", wire: "" }, { canonical: "  ", wire: "x" }])).toEqual(["sonnet"]);
+  });
+});
+
+// Issue #1223: a catalogue entry's plan-balance preset prefills the Plan balance fields on create.
+describe("provider plan-balance preset", () => {
+  it("prefills the MiniMax international quota fields on create, and none without a preset", () => {
+    const add = (preset: string) => wrap(<ProviderForm preset={preset} takenIds={[]} onCancel={() => {}} onSaved={() => {}} />);
+    expect(add("minimax-en")).toContain('value="https://api.minimax.io/v1/api/openplatform/coding_plan/remains"');
+    expect(add("minimax-en")).toContain('value="/data/model_remains/0/current_interval_usage_count"');
+    expect(add("minimax-en")).toContain('value="/data/model_remains/0/current_interval_total_count"');
+    expect(add("minimax")).not.toContain("coding_plan/remains");
+  });
+
+  it("keeps a saved probe when editing, so its pointers survive the save", () => {
+    const html = form(
+      provider({
+        quota: {
+          url: "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+          pointer: "/data/model_remains/0/current_interval_usage_count",
+          limit_pointer: "/data/model_remains/0/current_interval_total_count",
+        },
+      }),
+    );
+    expect(html).toContain('value="https://api.minimax.io/v1/api/openplatform/coding_plan/remains"');
+    expect(html).toContain('value="/data/model_remains/0/current_interval_usage_count"');
   });
 });

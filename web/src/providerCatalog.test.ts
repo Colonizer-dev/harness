@@ -31,3 +31,18 @@ describe("PROVIDER_CATALOG meta entry", () => {
     expect(meta?.pricing).toBeUndefined();
   });
 });
+
+// Issue #1223: MiniMax international ships with its plan-balance preset; China, where the same field counts what was spent, does not.
+describe("PROVIDER_CATALOG minimax-en entry", () => {
+  const en = PROVIDER_CATALOG.find((entry) => entry.id === "minimax-en");
+
+  it("carries the plan-balance preset, and the China endpoint none", () => {
+    expect(en?.quota).toEqual({
+      url: "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+      pointer: "/data/model_remains/0/current_interval_usage_count",
+      limit_pointer: "/data/model_remains/0/current_interval_total_count",
+      reset_pointer: "/data/model_remains/0/end_time",
+    });
+    expect(PROVIDER_CATALOG.find((entry) => entry.id === "minimax")?.quota).toBeUndefined();
+  });
+});

@@ -148,6 +148,10 @@ pub struct App {
     /// and check time for each configured account, refreshed by a background task so the status poll
     /// and the accounts list never call Anthropic on the request path.
     pub claude_health: Mutex<HashMap<String, crate::claude_login::AccountHealth>>,
+    /// The Claude subscription's last good usage reading (claude_login.rs, issue #1223), taken by the
+    /// same background task and read by the plans handler — the usage endpoint is rate-limited, so
+    /// nothing on the request path calls it. In memory only: a restart re-reads within 15 minutes.
+    pub claude_usage: Mutex<Option<crate::claude_login::UsageReading>>,
     /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
     pub deja: crate::deja::Deja,
     /// The draining flag that holds the queue back while an update or a restart runs (drain.rs,
@@ -299,6 +303,7 @@ impl App {
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
             claude_health: Mutex::new(HashMap::new()),
+            claude_usage: Mutex::new(None),
             deja: crate::deja::Deja::default(),
             drain: crate::drain::Drain::default(),
             execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),

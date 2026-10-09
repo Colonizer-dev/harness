@@ -1,5 +1,5 @@
 import { PROVIDER_CATALOG } from "../../providerCatalog";
-import type { ModelProvider, ProviderAuth, ProviderLimits, ProviderPreset, ProviderPricing, ProviderWire, SaveProviderRequest } from "../../types";
+import type { ModelProvider, ProviderAuth, ProviderLimits, ProviderPreset, ProviderPricing, ProviderQuotaProbe, ProviderWire, SaveProviderRequest } from "../../types";
 
 // ---------------------------------------------------------------------------
 // Model providers (§6.3): the presets and catalogue the form is built from, the
@@ -15,6 +15,8 @@ export type ProviderDraft = ProviderLimits & {
   models: string[];
   /** Prefilled from a catalogue entry's verified rates, if it has any; a built-in preset never sets this. */
   pricing?: ProviderPricing;
+  /** Prefilled from a catalogue entry's plan-balance preset (#1223), if it has one; never overwrites a saved probe. */
+  quota?: ProviderQuotaProbe;
 };
 
 export const DEFAULT_TIMEOUT = 600;
@@ -197,6 +199,7 @@ export function presetDraft(preset: ProviderPreset): ProviderDraft {
     models: entry.models ?? PRESETS.custom.models,
     max_concurrent: entry.max_concurrent ?? PRESETS.custom.max_concurrent,
     pricing: entry.pricing ?? PRESETS.custom.pricing,
+    quota: entry.quota,
   };
 }
 
@@ -313,7 +316,7 @@ export interface ProviderSaveInput {
   preset: ProviderPreset;
   api_key?: string;
   pricing?: ProviderPricing;
-  quota: { url: string; pointer: string; reset_pointer?: string };
+  quota: { url: string; pointer: string; limit_pointer?: string; reset_pointer?: string };
   timeout_secs: number | null;
   max_concurrent: number | null;
   queue_timeout_secs: number | null;
@@ -343,7 +346,12 @@ export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest 
     preset: input.preset,
     api_key: input.api_key,
     pricing: input.pricing,
-    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim(), reset_pointer: input.quota.reset_pointer?.trim() || undefined },
+    quota: {
+      url: input.quota.url.trim(),
+      pointer: input.quota.pointer.trim(),
+      limit_pointer: input.quota.limit_pointer?.trim() || undefined,
+      reset_pointer: input.quota.reset_pointer?.trim() || undefined,
+    },
     timeout_secs: input.timeout_secs,
     max_concurrent: input.max_concurrent,
     queue_timeout_secs: input.queue_timeout_secs,
