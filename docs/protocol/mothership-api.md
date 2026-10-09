@@ -169,7 +169,7 @@ something is pinned above it). `null` inherits.
 object with a `rules` array, at most 64 KiB — the cap both runners put on a layer, so a larger one is
 refused at save time rather than dropped at boot. (The API counts UTF-16 units, as the runners do.)
 Every rule must be one the runner would keep whole: a `deny`/`ask`/`allow` decision with at least one
-usable `command`, `script`, `touches` or `writes_outside` predicate — a policy the runner would trim
+usable `command`, `script`, `touches`, `writes_outside` or `writes_git` predicate — a policy the runner would trim
 is refused rather than saved with a rule the operator believes holds
 (`crates/colonizer/src/exec_policy.rs`, which shares its fixture with the runner's `parsePolicy`; a
 pattern's regex syntax is the one thing it cannot check). It narrows the install agent module's

@@ -40,7 +40,7 @@ import { subagentDefinitions } from './subagents.mjs';
 export const SYSTEM_PROMPT_APPEND = [
   'You are running inside the Colonizer; the user follows along in a web UI.',
   '- Whenever you need a decision, a clarification or any other input from the user, call the AskUserQuestion tool with 2-4 concrete options. Never ask the user in plain text, and never end a turn with a plain-text question. The UI always adds a free-text "Other" choice, so do not add one yourself.',
-  '- Do not run `git commit` or `git push` and do not create branches; the harness commits your changes and opens the pull request.',
+  '- `.git` is read-only by design: never run `git add`, `git commit`, `git stash` or `git push`, and do not create branches. A "Read-only file system" error on `.git` is expected — do not debug it; leave your changes in the working tree and the harness commits them and opens the pull request.',
 ].join('\n');
 
 export const DELEGATE_PROMPT_APPEND = [

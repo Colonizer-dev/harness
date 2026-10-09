@@ -41,7 +41,7 @@ export type AttentionReason =
 export interface AutoFix {
   /** The signature that matched, e.g. `pr_md_write`, `toolchain_installer`, `idle_verified`; `looping` for a stop. */
   signature: string;
-  /** `send_message`, `publish`, `switch_fallback_and_resume` or `stop_looping`. */
+  /** `send_message`, `publish`, `answer_deny`, `switch_fallback_and_resume` or `stop_looping`. */
   action: string;
   at: string;
   /** One line for a person. */

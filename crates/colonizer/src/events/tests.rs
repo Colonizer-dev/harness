@@ -854,13 +854,18 @@ async fn a_re_ask_and_a_new_turn_are_not_a_finished_turn() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// Every branch of the origin resolver, against the line and the two things that cannot be read
-/// off it: the session's launch tag, and whether the judge sent the answer.
+/// Every branch of the origin resolver, against the line and the things that cannot be read
+/// off it: the session's launch tag, and which machine answerer sent the answer, if either.
 #[test]
 fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
     // A subagent's `agent` ref is the tell, whatever the event type.
     assert_eq!(
-        resolve_origin(&json!({"type":"tool_call","agent":{"id":"a","name":"Explore"}}), None, false),
+        resolve_origin(
+            &json!({"type":"tool_call","agent":{"id":"a","name":"Explore"}}),
+            None,
+            false,
+            false
+        ),
         Origin::Subagent
     );
     // The message echo tells its senders apart by id.
@@ -868,6 +873,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"watchdog-a1","text":"Watchdog check"}),
             None,
+            false,
             false
         ),
         Origin::Watchdog
@@ -876,6 +882,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"initial","text":"Fix the issue"}),
             None,
+            false,
             false
         ),
         Origin::User,
@@ -885,6 +892,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"initial","text":"Fix the issue"}),
             Some("burn_down"),
+            false,
             false
         ),
         Origin::BurnDown
@@ -893,6 +901,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"initial","text":"Hunt"}),
             Some(crate::redteam::REDTEAM_ORIGIN),
+            false,
             false
         ),
         Origin::Redteam
@@ -901,16 +910,18 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"m1","text":"try X"}),
             Some("burn_down"),
+            false,
             false
         ),
         Origin::User
     );
-    // The judge's answer reads as autonomy only while the record spent on it says so.
+    // A machine answer reads as its answerer only while the record spent on it says so.
     assert_eq!(
         resolve_origin(
             &json!({"type":"question_answered","question_id":"q1","answers":{}}),
             None,
-            true
+            true,
+            false
         ),
         Origin::Autonomy
     );
@@ -918,19 +929,36 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"question_answered","question_id":"q1","answers":{}}),
             None,
+            false,
+            true
+        ),
+        Origin::Watchdog,
+        "the playbook's answer reads as the watchdog's"
+    );
+    assert_eq!(
+        resolve_origin(
+            &json!({"type":"question_answered","question_id":"q1","answers":{}}),
+            None,
+            false,
             false
         ),
         Origin::User
     );
     // Everything else the runner said is the agent's own.
     assert_eq!(
-        resolve_origin(&json!({"type":"question","question_id":"q1","questions":[]}), None, false),
+        resolve_origin(
+            &json!({"type":"question","question_id":"q1","questions":[]}),
+            None,
+            false,
+            false
+        ),
         Origin::Agent
     );
     assert_eq!(
         resolve_origin(
             &json!({"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}),
             None,
+            false,
             false
         ),
         Origin::Agent

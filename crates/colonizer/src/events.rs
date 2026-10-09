@@ -260,9 +260,10 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
 /// Which subsystem a runner line came from: the closed `origin` the host stamps onto it before
 /// persisting (docs/protocol.md §3). Pure, so every branch is pinned by a test; what cannot be read
 /// off the line is handed in — the session's launch tag as `launch`, and, for a `question_answered`,
-/// whether the judge is the one who answered as `judged`. Anything unrecognisable stays a runner
-/// line (`agent`): an origin is provenance, never a contract a line can fail.
-pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
+/// whether the judge answered it as `judged` or the watchdog's playbook did as `playbook`.
+/// Anything unrecognisable stays a runner line (`agent`): an origin is provenance, never a contract
+/// a line can fail.
+pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool, playbook: bool) -> Origin {
     // A subagent's events carry the `agent` ref (§2 rules); the ref is the tell, whatever the type.
     if event.get("agent").is_some() {
         return Origin::Subagent;
@@ -275,10 +276,12 @@ pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Orig
             Some("initial") => launch_origin(launch),
             _ => Origin::User,
         },
-        // The judge's answer and a person's arrive as the same echo, so the judge records the ids it
-        // answered (autonomy.rs) and the handler spends that record here. Spent: a replay of the
-        // same echo — or one still in flight across a mothership restart — reads as the person's.
+        // A machine answer and a person's arrive as the same echo, so each answerer records the ids
+        // it sent (autonomy.rs, playbook.rs) and the handler spends that record here. Spent: a
+        // replay of the same echo — or one still in flight across a mothership restart — reads as
+        // the person's.
         Some("question_answered") if judged => Origin::Autonomy,
+        Some("question_answered") if playbook => Origin::Watchdog,
         Some("question_answered") => Origin::User,
         _ => Origin::Agent,
     }
@@ -373,6 +376,7 @@ pub(crate) async fn close_question(app: &Shared, id: &str, rt: &Arc<Runtime>, on
     let Some(question_id) = closed else { return false };
     rt.question_holds_tool_call.store(false, Ordering::SeqCst);
     rt.judged_questions.lock().await.remove(&question_id);
+    rt.playbook_questions.lock().await.remove(&question_id);
     {
         let mut activity = rt.activity.lock().await;
         activity.question_since = None;
@@ -439,14 +443,18 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // are never stamped — an absent body origin must stay absent (it reads as the orchestrator's),
     // and the dispatch below reads the proposer, not a stamp.
     let launch = app.session(id).await.and_then(|s| s.origin.clone());
-    let judged = match event["type"].as_str() {
+    let (judged, by_playbook) = match event["type"].as_str() {
         Some("question_answered") => match event["question_id"].as_str() {
-            Some(question_id) => rt.judged_questions.lock().await.remove(question_id),
-            None => false,
+            Some(question_id) => {
+                let judged = rt.judged_questions.lock().await.remove(question_id);
+                let by_playbook = !judged && rt.playbook_questions.lock().await.remove(question_id);
+                (judged, by_playbook)
+            }
+            None => (false, false),
         },
-        _ => false,
+        _ => (false, false),
     };
-    let origin = resolve_origin(&event, launch.as_deref(), judged);
+    let origin = resolve_origin(&event, launch.as_deref(), judged, by_playbook);
     if event["type"] != "memory_proposal" {
         // A line arriving with an `origin` of its own is speaking outside its contract: the envelope
         // is the host's, and the resolved stamp below overwrites whatever it carried. The carried
@@ -702,8 +710,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             );
             // A new question retires the old one's notification answer tokens (issue #742).
             app.answer_tokens.revoke(id).await;
-            *rt.open_question.lock().await = Some((question_id, questions, risk));
+            // Cloned for the playbook call below: the slot keeps its own copy, as the cockpit and
+            // the judge read theirs back from the slot.
+            *rt.open_question.lock().await = Some((question_id.clone(), questions.clone(), risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
+            // The playbook's question rows (issue #1258): an ask the table knows — a git write on a
+            // read-only `.git` — is answered as it opens, before it can hold the slot for a person.
+            crate::playbook::on_question(app, id, rt, &question_id, kind.as_deref(), &questions).await;
         }
         AgentEvent::QuestionAnswered { question_id, .. } => {
             // Only the question we are actually tracking closes here (issue #981). The slot holds one

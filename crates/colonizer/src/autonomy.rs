@@ -371,8 +371,9 @@ fn field(value: &Value) -> String {
     truncate(value.as_str().unwrap_or_default().trim(), MAX_FIELD)
 }
 
-/// The labels one question offers, in order.
-fn options(question: &Value) -> Vec<String> {
+/// The labels one question offers, in order. The playbook reads them too, to find the option that
+/// refuses a question it answers.
+pub(crate) fn options(question: &Value) -> Vec<String> {
     question["options"]
         .as_array()
         .map(|o| o.iter().map(|opt| field(&opt["label"])).filter(|l| !l.is_empty()).collect())

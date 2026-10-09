@@ -34,6 +34,10 @@ pub struct Runtime {
     /// origin). In memory only: after a mothership restart the set is empty, so a judge answer still
     /// in flight reads as the person's — a mislabelled line, never a wrong decision.
     pub(crate) judged_questions: Mutex<HashSet<String>>,
+    /// Question ids the watchdog playbook has answered and whose `question_answered` echo has not
+    /// come back yet — [`judged_questions`] in reverse: playbook.rs writes, events.rs spends one
+    /// entry resolving that echo's origin as `watchdog`. In memory only, same terms.
+    pub(crate) playbook_questions: Mutex<HashSet<String>>,
     /// Jev visibility-ladder watch state (#475, jev_ladder.rs): what each recent tool call looked
     /// like, and which pending decisions still await their reread. In memory only, like
     /// `judged_questions`: after a mothership restart the watchlist is empty, so rereads that would
@@ -312,6 +316,7 @@ impl Runtime {
             ),
             question_holds_tool_call: std::sync::atomic::AtomicBool::new(open_question.is_some() && holds_tool_call),
             judged_questions: Mutex::new(HashSet::new()),
+            playbook_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
             pr_mark: Mutex::new(if resumed { None } else { github::pr_description_mark(out_dir) }),

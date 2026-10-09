@@ -1186,9 +1186,10 @@ pub fn build_prompt(
             and the reason.\n\
          4. If the change is growing because a second problem was found, that is a separate issue: file it \
             with the findings tool rather than folding it into this change.\n\
-         5. Do not run `git commit`, `git push` or create branches: git metadata is read-only in this sandbox \
-            (`git status`, `git diff` and `git log` work). The harness commits every working-tree change that \
-            .gitignore doesn't exclude and opens the pull request.\n\
+         5. `.git` is read-only by design: never run `git add`, `git commit`, `git stash` or `git push`, and do not \
+            create branches. A \"Read-only file system\" error on `.git` is expected — don't debug it (`git status`, \
+            `git diff` and `git log` work). Leave your changes in the working tree; the harness commits every \
+            working-tree change that .gitignore doesn't exclude and opens the pull request.\n\
          6. Don't leave build artifacts, logs or scratch files in /workspace unless .gitignore covers them.\n\
          7. When you're done, write the pull request description to /harness/out/pr.md: the first line is a concise \
             PR title (no leading '#'), then a blank line, then a Markdown body covering what changed and why, how you \
@@ -3622,6 +3623,26 @@ mod tests {
         let prompt = build_prompt(&me, None, "main", false, &[], None, None);
         assert!(prompt.contains("`changelog.d/`"), "{prompt}");
         assert!(prompt.contains("leave the changelog file itself alone"), "{prompt}");
+    }
+
+    /// Issue #1258: the brief says `.git` is read-only by design, so a "Read-only file system"
+    /// error there reads as the intended wall and not something to debug or ask about.
+    #[test]
+    fn the_prompt_says_git_is_read_only_by_design() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        for resumed in [false, true] {
+            let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
+            assert!(prompt.contains("`.git` is read-only by design"), "{prompt}");
+            assert!(
+                prompt.contains("never run `git add`, `git commit`, `git stash` or `git push`"),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains("A \"Read-only file system\" error on `.git` is expected"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("the harness commits every working-tree change"), "{prompt}");
+        }
     }
 
     /// Issue #1169: the brief says the empty dotfiles are harness placeholders, to leave alone.

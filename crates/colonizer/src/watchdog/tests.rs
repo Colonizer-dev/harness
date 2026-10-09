@@ -1075,6 +1075,45 @@ fn repeated_denials_of_one_control_within_the_window_fire_with_their_evidence() 
     );
 }
 
+// Issue #1258: `.git` is read-only by design, and `git-read-only` denies the attempts with a reason
+// saying so — an agent retrying `git add` is hitting the intended wall, not defeating a control.
+#[test]
+fn repeated_git_read_only_denials_never_flag_control_defeat() {
+    let mut trail = BoundaryTrail::default();
+    let deny = |attempt: &str| Boundary {
+        detail: format!("deny (default): {attempt}"),
+        ..denial("exec_policy_deny", "exec_policy:git-read-only", Some(".git/index"))
+    };
+    for minute in 0..REPEATED_DENIALS as i64 + 2 {
+        assert_eq!(
+            note_boundary(&mut trail, deny(&format!("git add -A (try {minute})")), at(minute)),
+            None,
+            "the read-only .git wall is by design, so the retries never add up"
+        );
+    }
+    // A different exec-policy control in the same window still counts as before: the exemption is
+    // the rule, not the kind.
+    let mut other = BoundaryTrail::default();
+    for minute in 0..REPEATED_DENIALS as i64 - 1 {
+        assert_eq!(
+            note_boundary(
+                &mut other,
+                denial("exec_policy_deny", "exec_policy:script-egress", None),
+                at(minute)
+            ),
+            None
+        );
+    }
+    assert!(
+        note_boundary(
+            &mut other,
+            denial("exec_policy_deny", "exec_policy:script-egress", None),
+            at(9)
+        )
+        .is_some()
+    );
+}
+
 #[test]
 fn an_ask_bypass_attempt_and_a_publish_rewrite_fire_at_once() {
     let mut trail = BoundaryTrail::default();

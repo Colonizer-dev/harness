@@ -343,7 +343,7 @@ Across layers the strictest decision wins, so each layer can only narrow the one
 Only the owner can change an org's policy. The save is refused, with the reason under the box, unless
 the runner would keep every rule of it: valid JSON of at most 64 KiB, an object with a `rules` array,
 and every rule a `deny`, `ask` or `allow` decision with at least one usable `command`, `script`,
-`touches` or `writes_outside`. Leave the box empty for no org layer.
+`touches`, `writes_outside` or `writes_git`. Leave the box empty for no org layer.
 
 **Limits.** Claude Code and ACP apply the policy; Codex, Grok Build, Hermes, OpenCode and Pi do not.
 While any layer is set, a colony on one of those refuses to launch and names where the policy came
@@ -443,11 +443,12 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   write to `/root`, `/usr`, a `CARGO_TARGET_DIR` such as `/root/colonizer-target`, or the rest of the
   microVM's own root filesystem — discarded with the VM — no longer asks, while a write to a host
   mount outside the repository, such as `/harness/out` or the agent's transcript directory, still
-  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) or into the checkout's
-  own `.git` asks too, and the card says why. An org can restore the older, stricter behaviour — any
-  absolute write outside the repository asks, the microVM's root filesystem included — with a policy
-  rule whose predicate is `"writes_outside": "strict"`. The `secret-paths` and `script-egress` denies
-  are unchanged.
+  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) asks too, and the card
+  says why; a write into the checkout's own `.git`, or a `git add`/`git commit`/`git stash`, is
+  denied outright by the `git-read-only` rule (#1258). An org can restore the older, stricter
+  behaviour — any absolute write outside the repository asks, the microVM's root filesystem
+  included — with a policy rule whose predicate is `"writes_outside": "strict"`. The `secret-paths`
+  and `script-egress` denies are unchanged.
 
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
   permission request: the tool call that asked is blocked in flight, and suspending the colony
@@ -780,6 +781,7 @@ listed on the session as `auto_fixes`, and shown in the colony header ("auto-fix
 | `placeholder_dotfiles` | a `secret-paths` denial whose target is a harness placeholder (`.env`, `.netrc`, ...) in the worktree and names no real credential path | message: the placeholders are harness mounts, leave them, continue the issue | 1 |
 | `pr_md_write` | a `writes-outside-repo` denial on `/harness/out/pr.md` | message: write `pr.md` with the file tool | 1 |
 | `toolchain_installer` | a `script-egress` denial on a toolchain installer (rustup, swift, ghcup, ...) | message: no toolchains, say in `pr.md` what was not compiled | 1 |
+| `git_read_only_ask` | an `exec_policy` question whose subject is a git write — the runner's `.git internals` reason, or a `git add`/`git commit`/`git stash` command in the ask | `answer_deny`: the question is answered Deny with the `.git`-is-read-only explanation | 1 |
 | `provider_unavailable` | a turn-error hold on `unrecognized_model`, or a provider quota flag, where the provider's `fallback_model` is a `<provider>/<model>` on a configured provider that is not itself out of quota | `switch_fallback_and_resume` | 2 |
 | `idle_verified` | idle, autopilot on, `pr.md` written, a confirmed verification of the tree as it stands now, nothing flagged, quiet for 10 minutes | `publish` | 1 |
 
@@ -788,6 +790,14 @@ the colony is stopped, its slot is freed, and it carries the attention reason `l
 signature. Between a fix and the next action on the same signature the playbook waits
 `settle_secs` (120 by default) for the agent to read the message. A person's resume gives a
 stopped colony fresh tries.
+
+The `answer_deny` action answers a question instead of sending a message: it picks the option
+whose label says Deny, and the entry's `message` rides along as the reason the agent reads. It
+fires the moment the question opens — an exec-policy ask holds the colony's slot until someone
+answers, and the only useful reply to a git write on a read-only `.git` is no. The answer's echo
+is stamped `watchdog` in the colony's events, the way the autonomy judge's is stamped `autonomy`.
+A question with no refusing option on offer is left alone, and so is a suspended colony's — its
+question is a person's by policy.
 
 Rows handled by their own mechanism are not repeated here: a contradicted verification is sent back
 to the agent in fix rounds, a `pr.md` that only redaction changed is published redacted, and an
@@ -811,8 +821,8 @@ is ignored with a line in the mothership's output.
 
 [[entry]]
 signature = "npm_registry_denied"       # what the cockpit shows as "auto-fixed: ..."
-trigger = "denial"                      # denial (default) | provider_failure | idle_verified
-action = "send_message"                 # send_message | publish | switch_fallback_and_resume | stop_looping
+trigger = "denial"                      # denial (default) | question | provider_failure | idle_verified
+action = "send_message"                 # send_message | publish | answer_deny | switch_fallback_and_resume | stop_looping
 message = "The npm registry is not reachable from here; use the vendored packages."
 max_tries = 2                           # fixes per colony before the signature counts as looping
 settle_secs = 120                       # wait this long after a fix before acting again
@@ -820,9 +830,9 @@ stop_when_exhausted = true              # stop the colony (attention `looping`) 
 # enabled = false                       # switch a default off by repeating its signature
 
 [entry.when]
-kind = "egress_denied"                  # the boundary kind; exec_policy_deny when absent
+kind = "egress_denied"                  # the boundary kind; exec_policy_deny when absent (a question row names the question's kind)
 control = "egress"                      # substring of the control
-text_any = ["registry.npmjs.org"]       # one of these in the denial's detail or target
+text_any = ["registry.npmjs.org"]       # one of these in the denial's detail or target, or in a question's text
 text_none = []                          # none of these
 target_in = []                          # target must be a relative path with one of these file names
 # error_any = ["unrecognized_model"]    # provider_failure: words in the hold's detail

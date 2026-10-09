@@ -177,10 +177,12 @@ it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly
 Predicates: `command` (regex over the command), `touches` (path globs matched against the path-like
 tokens of the command and its scripts; `~` is $HOME; components at any depth, `*` never crosses
 `/`; an entry starting with `!` excludes the tokens it matches), `script` (regex over script
-contents) and `writes_outside` (a redirect or cp/mv/rm/tee-style target that is an absolute path
+contents), `writes_outside` (a redirect or cp/mv/rm/tee-style target that is an absolute path
 outside the repository *and on a host-backed mount*, or a write onto a read-only host mount
 (`/colonizer`, `/opt/colonizer`) or into the checkout's own `.git` — `/tmp`, the `/dev` sinks and
-the microVM's own root filesystem don't count). `writes_outside` is `true` for that set; the string
+the microVM's own root filesystem don't count) and `writes_git` (a write into the checkout's own
+`.git`, named or not, or a `git add`/`git commit`/`git stash` invocation, #1258).
+`writes_outside` is `true` for that set; the string
 `"strict"` widens it to *every* absolute path outside the repository, as before issue #877 (see
 below). The reason on the card says which: a host-backed path, a read-only mount by name, or the
 `.git` internals.
@@ -191,7 +193,9 @@ stays the egress policy's business. A syntax check (`bash -n`, `node --check`, `
 nothing and is not read, and the repository's own scripts, byte for byte as the base commit has
 them (the boot writes their object ids to `/colonizer/tracked-scripts`, #1239), are left to the
 egress policy too; a script the colony adds or edits is read as before, and other layers still see
-every script; ask `writes-outside-repo`), **install** (the agent module's
+every script; deny `git-read-only` — `git add`/`git commit`/`git stash` and any write under the
+checkout's `.git`, since the mount is read-only by design and the denial carries the instruction
+to leave the changes in the working tree (#1258); ask `writes-outside-repo`), **install** (the agent module's
 `exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (the org's workspace settings → Exec
 policy, stored as `exec_policy` in `orgs.json` and passed as `COLONIZER_EXEC_POLICY_ORG`) and
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
@@ -212,9 +216,10 @@ only a path at, under or above a listed mount (`/workspace`, `/harness/out`, the
 `/colonizer/services`) asks. A write *above* a mount asks too, so `rm -rf /root` still asks while
 `/root/.claude/projects` is mounted. The guest's own read-only host mounts — `/colonizer` (the
 mothership's `host-mounts`, memory scopes, the services mount point) and `/opt/colonizer` (the
-agent's binaries, runner and plugins), the vendored runtime binaries (`/opt/node/bin/node`,
-`/opt/claude/bin/claude`), plus a write into the checkout's `.git` — ask regardless of the list,
-since a write there is the host's even though the mount refuses it. When the list is
+agent's binaries, runner and plugins) and the vendored runtime binaries (`/opt/node/bin/node`,
+`/opt/claude/bin/claude`) — ask regardless of the list, since a write there is the host's even
+though the mount refuses it; a write into the checkout's `.git` is not an ask but the `git-read-only`
+deny, whatever the list says (#1258). When the list is
 absent — an older mothership, or a runner outside a VM — every absolute path outside the repository
 asks, as before.
 
