@@ -273,7 +273,7 @@ stays quiet for a month. **Keep fresh…** brings the offer back. See
 row, or **⌘K** (Ctrl+K on Linux and Windows) from any view.
 
 ⌘K opens Colonize everywhere in the cockpit, except inside the code editor or a terminal, which keep
-the key for themselves. It no longer opens the floating composer.
+the key for themselves.
 
 The pane has two parts.
 
@@ -305,13 +305,6 @@ Limits:
 - Colonize is disabled until GitHub is connected.
 - If the Source module has include labels, a new issue does not get them. The pane keeps it in its
   own list so you can dispatch it, but it will not show in the filtered list after a reload.
-
-### The floating composer
-
-On Overview, Nest, Inbox, History, Memory and Host, a composer pill floats at the bottom. Click it
-to open it. It has two modes: **Launch colony** starts a colony on the chosen repository (type `#123`
-or pick a suggested issue to link one), and **Ask** sends the text to Chat. It also accepts
-`/loop <interval> <task>` and dictation.
 
 ## Launch
 

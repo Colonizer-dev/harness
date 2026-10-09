@@ -13,7 +13,7 @@ changelog entries (as `changelog.d/` fragments in a repository that keeps them, 
   triage new issues, keep dependencies current, fix last night's flaky tests, write changelog
   entries), choose when, and optionally a model, a subagent model, autopilot (on by default) and a
   run limit.
-- **Colonize (⌘K) or the composer**: `/loop 1h check CI on main and fix flakes` creates a loop on
+- **Colonize (⌘K)**: `/loop 1h check CI on main and fix flakes` creates a loop on
   the repository picked there that runs every hour. The interval takes `m`, `h` or `d`. `/loop 14d …`
   runs every 14 days at the current time of day: a whole-day interval past a week becomes an
   every-N-days cadence (up to 365 days). `/loop <task>` without an interval is self-paced.

@@ -438,7 +438,7 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 | `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` | Claude, in that order, when no Claude account is saved |
 | `MEM0_API_KEY` | The mem0 shared-memory provider |
 | `JEV_API_KEY` | Jev compaction and the Jev second opinion (TypeSafe). A key saved on the Secrets page wins; this is the fallback |
-| `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY` | Speech to text in the composer, one per voice service (the last is the OpenAI-compatible one) |
+| `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY` | Speech to text in Colonize, one per voice service (the last is the OpenAI-compatible one) |
 | `OPENAI_API_KEY`, `XAI_API_KEY` | Also the vendor key the `codex` and `grok-build` agent modules get, when no `openai` or `xai-grok` provider has a saved key ([docs/runner-authoring.md](runner-authoring.md)) |
 | `COLONIZER_NOTIFY_SECRET` | Signing outgoing notification webhooks |
 

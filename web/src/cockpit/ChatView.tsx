@@ -153,8 +153,6 @@ export function ChatView({
   repos,
   sessions,
   autopilotDefault,
-  initialPrompt,
-  onPromptTaken,
   openRequest,
   onCreated,
   workspaces = [],
@@ -164,9 +162,6 @@ export function ChatView({
   repos: readonly Repo[];
   sessions: readonly Session[];
   autopilotDefault: boolean;
-  /** A question sent from the composer's Ask mode: a new conversation starts with it. */
-  initialPrompt?: { text: string; n: number } | null;
-  onPromptTaken?: () => void;
   /** A conversation Spotlight expanded into this page: opened once (a fresh `n` each time). */
   openRequest?: { id: string | null; n: number } | null;
   onCreated: (session: Session) => void;
@@ -443,22 +438,6 @@ export function ChatView({
     },
     [api, onEvent, settle, toast],
   );
-
-  // A question from the composer's Ask mode starts a new conversation.
-  const taken = useRef(0);
-  useEffect(() => {
-    if (!initialPrompt || initialPrompt.n === taken.current || !models) return;
-    taken.current = initialPrompt.n;
-    onPromptTaken?.();
-    void (async () => {
-      reset();
-      const meta = await api.createChat({ model: models.default ?? "", workspace: org ?? undefined });
-      setCurrent(meta);
-      setMessages([]);
-      void refresh();
-      await send(meta, initialPrompt.text);
-    })();
-  }, [initialPrompt, models, onPromptTaken, api, org, refresh, reset, send]);
 
   // A conversation Spotlight expanded into this page opens once.
   const opened = useRef(0);

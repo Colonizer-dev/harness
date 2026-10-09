@@ -9,7 +9,7 @@
 //   a chat), shown for a confirm or an edit, filed on GitHub (POST /api/repos/{o}/{r}/issues, the same
 //   `gh issue create` a chat's "file an issue" runs), dropped into the list pre-selected, and, unless
 //   "dispatch right after creating" is off, dispatched at once. `/loop 1h <task>` makes a loop instead,
-//   and "Launch without an issue" starts an open colony on the text, both as the composer does.
+//   and "Launch without an issue" starts an open colony on the text.
 //   `/model` is the "Switch model…" command: it closes the pane and opens the header's model
 //   switcher (issue #1051).
 //
@@ -22,7 +22,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import { Spinner, cx, sameOrg, stored, store } from "../components/ui";
 import type { CreatedIssue, Issue, IssueDraft, Repo, Session } from "../types";
 import { AntGlyph } from "./chat/PersonaAnt";
-import { MicButton, appendHeard, useVoiceInput } from "./Composer";
+import { MicButton, appendHeard, useVoiceInput } from "./voiceInput";
 import { Pagination } from "./ListControls";
 import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
 import { isModelCommand, openModelSwitcher, shortModelName } from "./ModelSwitcher";
@@ -726,7 +726,7 @@ export function ColonizePane({
     }
   };
 
-  /** "Launch without an issue": the text as an open colony's instructions, as the composer launches. */
+  /** "Launch without an issue": the text as an open colony's instructions. */
   const launchOpen = async () => {
     const text = shown.trim();
     if (!text || busy) return;
