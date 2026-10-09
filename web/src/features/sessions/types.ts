@@ -22,6 +22,8 @@ export type AttentionReason =
   | "stalled"
   | "waiting_for_answer"
   | "nudges_exhausted"
+  /** The turn's continuation after its last background subagent settled never came (issue #1266); the watchdog interrupted and re-drove it. */
+  | "turn_lost_after_subagent"
   | "autopilot_held"
   | "provider_quota_exhausted"
   | "hold_timeout"

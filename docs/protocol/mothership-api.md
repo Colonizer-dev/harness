@@ -322,7 +322,7 @@ on by default; setting `require_review` = true; off lets only `repo` notes skip 
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|idle_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|turn_lost_after_subagent|autopilot_held|provider_quota_exhausted|hold_timeout|idle_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -386,6 +386,11 @@ as they would have. A later real `turn_end` for the same turn publishes nothing 
 is unchanged), and a synthetic end carries no cost, so no spend is double-counted. If agentd does
 not answer, the watchdog keeps the final answer for the next tick to retry, logs once that it could
 not finish the turn, and leaves the colony to the stall handling above rather than restarting it.
+A third wedge is a turn whose continuation after its last background subagent settled never came
+(issue #1266): the runner reports the settlement but nothing wakes the orchestrator, so past a
+two-minute grace the watchdog interrupts the dead turn, sends the agent a `user_message` telling it
+to recover the subagent's outcome from the repository state, and flags `turn_lost_after_subagent`
+dated from the settlement.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,

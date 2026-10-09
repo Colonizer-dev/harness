@@ -233,7 +233,12 @@ pub enum Decision {
 
 /// Attention reasons the watchdog sets and may clear; others (such as `autopilot_held`) belong to their setter.
 /// Shared with usage.rs, which buckets them as its closed failure labels.
-pub(crate) const WATCHDOG_REASONS: [&str; 3] = ["stalled", "waiting_for_answer", "nudges_exhausted"];
+pub(crate) const WATCHDOG_REASONS: [&str; 4] = ["stalled", "waiting_for_answer", "nudges_exhausted", TURN_LOST_REASON];
+
+/// The attention reason for a turn whose continuation went missing after its last background
+/// subagent settled (issue #1266): the colony is not merely stalled — the work it waited on is
+/// done and its result never reached it.
+pub(crate) const TURN_LOST_REASON: &str = "turn_lost_after_subagent";
 
 pub fn decide(
     settings: &WatchdogSettings,
@@ -320,6 +325,11 @@ pub fn nudge_text(minutes: u64) -> String {
 /// minutes against the 60 s tick: a runner that is only thinking between blocks is left alone, and a
 /// turn the runner will never end is finished within three.
 const TURN_END_GRACE: Duration = Duration::seconds(120);
+
+/// How long the last subagent's settlement may stand with no orchestrator output behind it before
+/// the turn reads as lost (issue #1266): the same two minutes [`TURN_END_GRACE`] gets, so a
+/// thinking continuation is left alone and a dead one is re-driven within three.
+const TURN_LOST_GRACE: Duration = Duration::seconds(120);
 
 /// Whether a colony's quiet final answer is a turn the watchdog should finish (issue #878): the
 /// runner said it was done, its final text is past the grace, and nothing is in flight — no tool
@@ -438,6 +448,61 @@ async fn maybe_finish_turn(app: &Shared, s: &Session, rt: &Arc<Runtime>, setting
     }
 }
 
+/// The message that re-drives a turn gone quiet after its last background subagent settled (issue #1266).
+const TURN_LOST_MESSAGE: &str = "A background subagent finished but your turn never resumed, so its result never \
+     reached you. Recover its outcome from the repository state — its work is on disk — and continue from where \
+     the turn left off.";
+
+/// Re-drives a turn gone quiet after its last background subagent settled (issue #1266): the
+/// runner emits `subagent_end` and pushes nothing into the SDK input queue, and the settlement
+/// itself counts as progress (`events.rs` `note_turn_shape`), so the ordinary stall handling
+/// stands by while the clock the settlement reset runs down. The one reliable lever on a wedged
+/// turn is the interrupt — fire-and-forget, harmless with no turn in flight — after which the
+/// queued message starts a fresh turn.
+///
+/// The claim is spent only on the send: an event landing between the read and the clear (the real
+/// continuation, a fresh Task call) has disarmed the window, so the compare-and-clear under the one
+/// lock sends nothing for a turn that resumed. Not a nudge: no budget is spent, `activity` is
+/// untouched, and the watchdog-id message's echo is not progress either, so a re-drive that fails
+/// again still reads as stalled. The attention reason is [`TURN_LOST_REASON`], not `stalled`.
+async fn maybe_redrive_subagent_turn(
+    app: &Shared,
+    s: &Session,
+    rt: &Arc<Runtime>,
+    settings: &WatchdogSettings,
+    now: DateTime<Utc>,
+) {
+    if !settings.enabled || s.status != SessionStatus::Running {
+        return;
+    }
+    let armed_at = *rt.turn_lost_since.lock().await;
+    let Some(armed_at) = armed_at else { return };
+    if now - armed_at < TURN_LOST_GRACE {
+        return;
+    }
+    {
+        let mut claim = rt.turn_lost_since.lock().await;
+        if *claim != Some(armed_at) {
+            return;
+        }
+        *claim = None;
+    }
+    let elapsed = (now - armed_at).num_seconds();
+    app.session_log_as(
+        Origin::Watchdog,
+        &s.id,
+        "warn",
+        format!("watchdog: the last background subagent finished {elapsed}s ago but the turn never resumed; interrupting the dead turn and re-driving it"),
+    )
+    .await;
+    rt.send_command(json!({"type": "interrupt"}));
+    crate::recovery::send_user_message(rt, "watchdog", TURN_LOST_MESSAGE);
+    app.update_session(&s.id, |x| {
+        x.attention = Some(json!({"reason": TURN_LOST_REASON, "since": armed_at}))
+    })
+    .await;
+}
+
 /// The nudge for a hint loop (issue #609): a colony whose last calls were all denied is circling a
 /// boundary, so the nudge names what was denied and asks for a different route rather than a retry.
 pub fn hint_loop_text(denials: u32, class: &str, hint: &str) -> String {
@@ -513,6 +578,8 @@ async fn check_all(app: &Shared) {
         // A turn the runner said was over but never ended is finished first (issue #878): the agent
         // is done, so it must not also be nudged as though it had stalled.
         maybe_finish_turn(app, &s, &rt, &settings, now).await;
+        // A turn that lost its continuation after its last subagent settled is re-driven too (issue #1266).
+        maybe_redrive_subagent_turn(app, &s, &rt, &settings, now).await;
         let state = match s.status {
             // The evidence that separates "the agent has not linked" from "the boot is still
             // pulling an image" — see `starting_reference`.
@@ -616,6 +683,13 @@ async fn check_all(app: &Shared) {
                                 None => nudge_text(settings.stall_minutes),
                             }
                         };
+                        // Issue #1266: a nudge is a plain `user_message`, and behind a wedged turn
+                        // it would only queue — the interrupt (harmless with no turn in flight)
+                        // is what starts the fresh one.
+                        let turn_lost = *rt.turn_lost_since.lock().await;
+                        if turn_lost.is_some() {
+                            rt.send_command(json!({"type": "interrupt"}));
+                        }
                         crate::recovery::send_user_message(&rt, "watchdog", &text);
                         // A nudge keeps the log line it has always had; a hint loop and any other
                         // pick say which.
@@ -639,11 +713,15 @@ async fn check_all(app: &Shared) {
                             )
                         };
                         app.session_log_as(Origin::Watchdog, &s.id, "info", message).await;
-                        app.update_session(&s.id, |x| {
-                            x.attention =
-                                Some(json!({"reason": "stalled", "since": activity.progress_reference(), "nudges": nudges}));
-                        })
-                        .await;
+                        // When the nudge went out over a lost turn, the card says that rather than
+                        // a stall — the interrupt above is what actually happened (issue #1266).
+                        let attention = match turn_lost {
+                            Some(armed_at) => json!({"reason": TURN_LOST_REASON, "since": armed_at}),
+                            None => json!({
+                                "reason": "stalled", "since": activity.progress_reference(), "nudges": nudges
+                            }),
+                        };
+                        app.update_session(&s.id, |x| x.attention = Some(attention)).await;
                     }
                 }
             }
