@@ -1,5 +1,5 @@
 // The pure half of loops (loops.rs): the operator's local schedule choice as the UTC cadence the
-// mothership stores, a cadence back in words, the Composer's `/loop <interval> <prompt>` shorthand,
+// mothership stores, a cadence back in words, Colonize's `/loop <interval> <prompt>` shorthand,
 // the map loops that keep architecture maps fresh, and the prompt templates the "New loop" dialog
 // offers. Kept apart from the view so it is testable.
 import type { Loop, LoopCadence, ModuleInfo, ModuleProviderInfo, NewLoop, OrgInfo } from "../types";
@@ -134,7 +134,7 @@ export function parseInterval(raw: string): number | null {
 }
 
 /**
- * The Composer's `/loop` shorthand, like Claude Code's: `/loop 1h check CI on main` runs every hour;
+ * Colonize's `/loop` shorthand, like Claude Code's: `/loop 1h check CI on main` runs every hour;
  * `/loop check CI on main` (no interval) is self-paced; `/loop 14d …` runs every 14 days, anchored
  * at this UTC time of day. Null when the text is not a `/loop` command.
  */

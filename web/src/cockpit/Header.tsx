@@ -176,7 +176,7 @@ export function UserMenu({ login, name, avatarUrl, onOpenSettings, onOpenSecrets
         <div role="menu" className="absolute right-0 top-10 z-50 w-56 rounded-xl border border-border-strong bg-panel p-1.5 shadow-[0_16px_48px_rgb(0_0_0/0.35)]">
           <div className="border-b border-border px-2.5 pb-2 pt-1">
             <div className="truncate text-body-sm font-medium text-text">{name || login || "Not signed in"}</div>
-            {login && <div className="truncate text-small text-faint">@{login} · GitHub</div>}
+            {login && <div className="truncate text-small text-muted">@{login} · GitHub</div>}
           </div>
           <div className="pt-1">
             <button type="button" role="menuitem" className={item} onClick={() => (setOpen(false), onOpenSettings())}>

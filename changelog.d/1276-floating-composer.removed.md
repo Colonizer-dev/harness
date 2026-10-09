@@ -1,0 +1,1 @@
+- **The floating "Describe a task for a new colony" pill at the foot of Overview, Nest, Inbox, History, Memory and Host is gone.** Everything it did has another home: launch a colony, `/loop` and dictation are in **Colonize** (the sidebar button or ⌘K), and questions go to the **Ask** panel (⌘J) or the Chat page. ([#1276])

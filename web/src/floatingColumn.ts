@@ -8,7 +8,7 @@
 /**
  * The column's classes: the bottom-right corner, stepping left while the cockpit's inspector shows.
  * A phone (below `sm`) runs the cockpit with the tab bar across the foot (issue #516), so the
- * desktop corner is overridden to full width above the bar — the same offset the composer keeps.
+ * desktop corner is overridden to full width, just above the bar.
  */
 export function floatingColumnClass(inspectorShown: boolean): string {
   const phone = "max-sm:left-3 max-sm:right-3 max-sm:bottom-[calc(4.25rem+env(safe-area-inset-bottom))] max-sm:w-auto";

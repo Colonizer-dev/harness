@@ -127,7 +127,7 @@ export function LoopsView({
           <h1 className="m-0 text-display-xl font-semibold tracking-[-0.035em] text-text">Loops</h1>
           <p className="mt-2 text-body-lg text-muted">
             Work that runs on a schedule, without you. Built-in loops look after your repositories; your own loops launch a colony from a prompt. Tip: type{" "}
-            <code className="rounded bg-panel-3 px-1 font-mono text-small-lg">/loop 1h check CI and fix flakes</code> in the composer (⌘K).
+            <code className="rounded bg-panel-3 px-1 font-mono text-small-lg">/loop 1h check CI and fix flakes</code> in Colonize (⌘K).
           </p>
         </div>
         <Button variant="primary" onClick={() => newLoop()}>

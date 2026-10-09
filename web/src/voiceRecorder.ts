@@ -16,7 +16,7 @@ export function pickFormat(isSupported: (type: string) => boolean): string {
 }
 
 /**
- * What the composer shows as the clip nears its cap: the seconds left over the last ten, else
+ * What the Colonize box shows as the clip nears its cap: the seconds left over the last ten, else
  * nothing. `elapsedMs` is how long it has been recording.
  */
 export function countdown(elapsedMs: number, maxSeconds: number): string | null {

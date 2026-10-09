@@ -26,7 +26,6 @@ import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { AskProvider } from "./spotlight/Ask";
 import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
-import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
@@ -219,8 +218,6 @@ export function Cockpit({
     return isRootPath(pathname, routerBase()) ? null : parseRoute(pathname, search, routerBase());
   });
   const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? (bootRoute?.view === "colony" ? "home" : bootRoute?.view) ?? storedView());
-  // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
-  const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   // A conversation Spotlight expanded into the Chat page (or `null`: a fresh one), opened once.
   const [chatRequest, setChatRequest] = useState<{ id: string | null; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
@@ -724,8 +721,6 @@ export function Cockpit({
                 repos={repos}
                 sessions={sessions}
                 autopilotDefault={autopilotDefault}
-                initialPrompt={askPrompt}
-                onPromptTaken={() => setAskPrompt(null)}
                 openRequest={chatRequest}
                 onCreated={(session) => {
                   onCreated(session);
@@ -979,26 +974,6 @@ export function Cockpit({
               </button>
             )}
           </div>
-          {/* The composer floats over every overview-style view; the launch form, an open colony and
-              settings have their own inputs. */}
-          {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory" || view === "host") && (
-            <Composer
-              org={selectedOrg}
-              repos={repos}
-              githubConnected={status?.github.connected ?? false}
-              autopilotDefault={autopilotDefault}
-              sessions={sessions}
-              shortcutTaken
-              onCreated={(session) => {
-                onCreated(session);
-                setView("home");
-              }}
-              onAsk={(text) => {
-                setAskPrompt({ text, n: Date.now() });
-                setView("chat");
-              }}
-            />
-          )}
         </div>
         {/* Only while something is picked: closing it (×) gives the nest the full width back, and
             clicking a chamber or the mothership opens it again. With nothing picked, the workspace
