@@ -630,9 +630,10 @@ test('disabled tools become the session disallow list, and stay absent by defaul
 });
 
 test('subagent effort redefines the built-in agents the orchestrator delegates to', () => {
-  // Unset: only repo-explorer is added; the two built-ins stay and inherit the orchestrator's effort.
+  // Unset: the always-on crew (sarge, silka, mellie) plus repo-explorer; the two built-ins stay and
+  // inherit the orchestrator's effort.
   const unset = buildOptions({ COLONIZER_EFFORT: 'xhigh' }).options.agents;
-  assert.deepEqual(Object.keys(unset), ['repo-explorer']);
+  assert.deepEqual(Object.keys(unset), ['mellie', 'sarge', 'silka', 'repo-explorer']);
   assert.equal(unset['repo-explorer'].effort, undefined);
 
   const { options, warnings } = buildOptions({
@@ -642,7 +643,7 @@ test('subagent effort redefines the built-in agents the orchestrator delegates t
   });
   assert.deepEqual(warnings, []);
   assert.equal(options.effort, 'xhigh');
-  assert.deepEqual(Object.keys(options.agents).sort(), ['Explore', 'general-purpose', 'repo-explorer']);
+  assert.deepEqual(Object.keys(options.agents).sort(), ['Explore', 'general-purpose', 'mellie', 'repo-explorer', 'sarge', 'silka']);
   for (const agent of Object.values(options.agents)) {
     assert.equal(agent.effort, 'medium');
     assert.ok(agent.description && agent.prompt);
@@ -657,8 +658,9 @@ test('subagent effort redefines the built-in agents the orchestrator delegates t
   assert.equal(options.agents['general-purpose'].disallowedTools, undefined);
 
   const bad = buildOptions({ COLONIZER_SUBAGENT_EFFORT: 'extreme' });
-  // The bad effort is ignored, so only repo-explorer is added and the built-ins keep the session's.
-  assert.deepEqual(Object.keys(bad.options.agents), ['repo-explorer']);
+  // The bad effort is ignored, so only the always-on crew plus repo-explorer is added and the
+  // built-ins keep the session's.
+  assert.deepEqual(Object.keys(bad.options.agents), ['mellie', 'sarge', 'silka', 'repo-explorer']);
   assert.equal(bad.options.agents['repo-explorer'].effort, undefined);
   assert.equal(bad.warnings.length, 1);
   assert.match(bad.warnings[0], /COLONIZER_SUBAGENT_EFFORT=extreme/);
@@ -712,12 +714,13 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
     assert.equal(append.split('<EXTREMELY_IMPORTANT>').length, 2, 'once, however many plugins load');
     // Loading it is still just a plugin entry; nothing registers a hook for it. (The always
     // present hooks are the denial layer's PostToolUseFailure and the exec policy's Bash gate,
-    // issue #471.)
+    // issue #471; the Skill matcher is the per-ant skillsets gate, #1163, which mounts with the
+    // plugin dirs.)
     assert.deepEqual(options.plugins, [
       { type: 'local', path: ecc },
       { type: 'local', path: superpowers },
     ]);
-    assert.deepEqual(options.hooks.PreToolUse.map((entry) => entry.matcher), ['Bash']);
+    assert.deepEqual(options.hooks.PreToolUse.map((entry) => entry.matcher), ['Skill', 'Bash']);
 
     assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
   } finally {

@@ -5,11 +5,11 @@
 //! toggles show is what a colony will mount.
 
 use crate::{Shared, config::Settings, util::is_plain_name};
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use axum::{Json, extract::State};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -49,7 +49,8 @@ fn locate(cfg: &Settings, name: &str) -> Option<PathBuf> {
 }
 
 /// The directory boot mounts for `name`. A local copy overrides a vendored one of the same name, and
-/// neither can be named by a path. Whichever copy wins must pass [`validate`].
+/// neither can be named by a path. Whichever copy wins must pass [`validate`], and every ant it
+/// defines must carry only skillsets that are installed ([`check_carried_skillsets`]).
 pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
     let root = local_root(cfg);
     if !is_plain_name(name) {
@@ -61,7 +62,8 @@ pub fn resolve(cfg: &Settings, name: &str) -> Result<PathBuf> {
             root.display()
         );
     };
-    validate(&dir)?;
+    let ants = validate_pack(&dir)?;
+    check_carried_skillsets(cfg, name, &ants)?;
     Ok(dir)
 }
 
@@ -108,12 +110,20 @@ fn is_skill_tree(dir: &Path, rel: &str) -> bool {
 /// [`resolve`]: the manifest must exist and parse (root or legacy path),
 /// every `skills/*/` directory carrying a `SKILL.md` must have a safe plain
 /// name, every skill the manifest's `skills` array lists must exist on disk,
+/// every `agents/*.md` must parse into a well-formed ant ([`validate_ants`]),
 /// and an optional `mcp.json` must give every server a stdio `command` or a
 /// remote `url` with declared hosts ([`mcp_hosts`]). A pack that fails any of
 /// these blocks its colony's launch with the named error rather than mounting
 /// a degraded colony. The deeper rule set — semver, SKILL.md frontmatter,
-/// duplicate names within a pack — lives in `scripts/validate-plugins.mjs`.
+/// duplicate skill names within a pack — lives in `scripts/validate-plugins.mjs`,
+/// which applies the same agent-file rules.
 pub fn validate(dir: &Path) -> Result<()> {
+    validate_pack(dir).map(|_| ())
+}
+
+/// [`validate`] plus the ants it parsed, for the callers that check what a pack's agents carry:
+/// [`resolve`] and [`check_skillsets`] verify each ant's `skillsets` against the installed packs.
+fn validate_pack(dir: &Path) -> Result<Vec<AntSpec>> {
     let manifest_path = manifest_file(dir);
     let data = match std::fs::read(&manifest_path) {
         Ok(data) => data,
@@ -170,7 +180,7 @@ pub fn validate(dir: &Path) -> Result<()> {
     // the pack's own `mcp.json` (not Claude Code's `.mcp.json` spelling, which this does not
     // read): boot refuses what staging would refuse.
     mcp_hosts(dir)?;
-    Ok(())
+    validate_ants(dir)
 }
 
 /// The server map an `mcp.json` document carries: `mcpServers`/`servers` when either key holds an
@@ -257,6 +267,422 @@ pub(crate) fn mcp_hosts(dir: &Path) -> Result<Vec<String>> {
     Ok(hosts)
 }
 
+// ---- Agent files (issue #1163) --------------------------------------------------------------
+//
+// An ant is a Claude Code agent file — `agents/<file>.md`, frontmatter plus a system prompt —
+// that optionally carries Colonizer identity in an `ant:` block and a `skillsets:` list. The
+// files are read with a small YAML subset, identical to `parseAgentFrontmatter` in
+// `scripts/validate-plugins.mjs`, so a pack passes or fails the same rules in CI and at boot.
+
+/// The castes an ant can hold. A colony role is one of these (docs/protocol.md).
+const ANT_CASTES: [&str; 7] = ["forager", "soldier", "weaver", "honeypot", "scout", "worker", "queen"];
+
+/// The keys an `ant:` block may carry. Unlike the top level — where Claude Code adds fields of its
+/// own over time and unknown ones are allowed — the ant block is Colonizer's, so a typo'd key is
+/// an error rather than a silently ignored one.
+const ANT_KEYS: [&str; 5] = ["display_name", "caste", "title", "colors", "move"];
+
+/// One frontmatter value: the text after `key:`, and whether it was written as a double-quoted
+/// string. `quoted` matters only to `ant.colors`, whose entries must be quoted so a bare `#ff0000`
+/// — which YAML would read as a comment — is refused instead.
+#[derive(Clone)]
+struct AntField {
+    value: String,
+    quoted: bool,
+}
+
+/// One agent file's frontmatter: the top-level scalars and inline arrays, plus the `ant:` block's
+/// own scalars when the file opens one.
+#[derive(Default)]
+struct AgentFrontmatter {
+    scalars: BTreeMap<String, AntField>,
+    arrays: BTreeMap<String, Vec<AntField>>,
+    ant: Option<BTreeMap<String, AntField>>,
+}
+
+/// What an agent file carries that the cross-pack checks read: the ant's `name` and the skillsets
+/// it draws on.
+struct AntSpec {
+    name: String,
+    skillsets: Vec<String>,
+}
+
+/// `key: value` split at the first colon: the key in the plain spelling every frontmatter key here
+/// uses (letters, digits, `_`, `-` — the shape `scripts/validate-plugins.mjs` matches), the value
+/// trimmed.
+fn key_value(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once(':')?;
+    let key = key.trim();
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return None;
+    }
+    Some((key, value.trim()))
+}
+
+/// One scalar: double-quoted or bare. A leading `"` must close on the same line — there are no
+/// multiline scalars in this subset.
+fn scalar(raw: &str) -> Option<AntField> {
+    let raw = raw.trim();
+    if let Some(inner) = raw.strip_prefix('"') {
+        let inner = inner.strip_suffix('"')?;
+        return Some(AntField {
+            value: inner.to_string(),
+            quoted: true,
+        });
+    }
+    Some(AntField {
+        value: raw.to_string(),
+        quoted: false,
+    })
+}
+
+/// Splits on `separator`, ignoring separators inside double quotes, `[...]` and `{...}`, so a
+/// nested `{ k: [a, b] }` stays one item for its consumer to reject.
+fn split_items(raw: &str, separator: char) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut depth: i32 = 0;
+    for ch in raw.chars() {
+        if quoted {
+            if ch == '"' {
+                quoted = false;
+            }
+        } else if ch == '"' {
+            quoted = true;
+        } else if ch == '[' || ch == '{' {
+            depth += 1;
+        } else if ch == ']' || ch == '}' {
+            depth -= 1;
+        } else if ch == separator && depth == 0 {
+            items.push(std::mem::take(&mut current));
+            continue;
+        }
+        current.push(ch);
+    }
+    items.push(current);
+    items
+}
+
+/// An inline array `[a, b]` of scalars; `[]` is the empty array.
+fn inline_array(raw: &str) -> Option<Vec<AntField>> {
+    let inner = raw.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    split_items(inner, ',').iter().map(|item| scalar(item)).collect()
+}
+
+/// An inline map `{ k: "v" }` of keys to scalars.
+fn inline_map(raw: &str) -> Option<Vec<(String, AntField)>> {
+    let inner = raw.strip_prefix('{')?.strip_suffix('}')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    split_items(inner, ',')
+        .iter()
+        .map(|item| key_value(item).and_then(|(key, value)| scalar(value).map(|field| (key.to_string(), field))))
+        .collect()
+}
+
+/// Parses an agent file's frontmatter under the shared YAML subset: `key: value` scalars bare or
+/// double-quoted, inline arrays `[a, b]` and inline maps `{ k: "v" }`, and one nested block level
+/// at exactly two spaces of indent, which only `ant:` opens. Blank lines are skipped; any other
+/// line this cannot read is an error naming the file and the line's number.
+fn parse_agent_frontmatter(path: &Path, text: &str) -> Result<AgentFrontmatter> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.first().map(|line| line.trim()) != Some("---") {
+        bail!("{}: agent files need a leading --- frontmatter block", path.display());
+    }
+    // The index within `lines` of the closing fence (`position` counts from the skip, so add the
+    // opening fence back).
+    let Some(end) = lines
+        .iter()
+        .skip(1)
+        .position(|line| line.trim() == "---")
+        .map(|index| index + 1)
+    else {
+        bail!("{}: the frontmatter is missing its closing ---", path.display());
+    };
+    let mut parsed = AgentFrontmatter::default();
+    for (offset, line) in lines[1..end].iter().enumerate() {
+        let number = offset + 2; // 1-based, counting the opening ---.
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Indented lines belong to the `ant:` block, at exactly two spaces and nothing else.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !line.starts_with("  ") || line.starts_with("   ") {
+                bail!(
+                    "{}: line {number}: the ant: block is indented exactly two spaces",
+                    path.display()
+                );
+            }
+            let Some(block) = parsed.ant.as_mut() else {
+                bail!("{}: line {number}: only ant: opens an indented block", path.display());
+            };
+            let (key, raw) =
+                key_value(&line[2..]).ok_or_else(|| anyhow!("{}: line {number}: cannot parse that line", path.display()))?;
+            let field = if raw.is_empty() {
+                AntField {
+                    value: String::new(),
+                    quoted: false,
+                }
+            } else {
+                scalar(raw).ok_or_else(|| anyhow!("{}: line {number}: cannot parse that line", path.display()))?
+            };
+            block.insert(key.to_string(), field);
+            continue;
+        }
+        let (key, raw) = key_value(line).ok_or_else(|| anyhow!("{}: line {number}: cannot parse that line", path.display()))?;
+        if raw.is_empty() {
+            // `ant:` opens the nested block; any other bare `key:` is an empty scalar, which the
+            // required-field rules refuse where emptiness matters.
+            if key == "ant" {
+                parsed.ant = Some(BTreeMap::new());
+            } else {
+                parsed.scalars.insert(
+                    key.to_string(),
+                    AntField {
+                        value: String::new(),
+                        quoted: false,
+                    },
+                );
+            }
+            continue;
+        }
+        if key == "ant" {
+            // An inline `ant: { display_name: "Sarge", caste: forager }` reads like the block
+            // form; anything else spelled after `ant:` cannot be one.
+            let entries = inline_map(raw).ok_or_else(|| {
+                anyhow!(
+                    "{}: line {number}: ant: must be a block indented two spaces or an inline map",
+                    path.display()
+                )
+            })?;
+            parsed.ant = Some(entries.into_iter().collect());
+            continue;
+        }
+        if raw.starts_with('[') {
+            let items = inline_array(raw).ok_or_else(|| anyhow!("{}: line {number}: cannot parse that line", path.display()))?;
+            parsed.arrays.insert(key.to_string(), items);
+            continue;
+        }
+        let field = scalar(raw).ok_or_else(|| anyhow!("{}: line {number}: cannot parse that line", path.display()))?;
+        parsed.scalars.insert(key.to_string(), field);
+    }
+    Ok(parsed)
+}
+
+/// Whether `value` is a `#rrggbb` color.
+fn is_hex_color(value: &str) -> bool {
+    value
+        .strip_prefix('#')
+        .is_some_and(|digits| digits.len() == 6 && digits.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// `ant.colors`, when present, is exactly `{ body: "#rrggbb", dark: "#rrggbb", accent: "#rrggbb" }`:
+/// the three keys and nothing else, each a double-quoted six-digit hex string.
+fn check_ant_colors(path: &Path, colors: &AntField) -> Result<()> {
+    let entries = inline_map(&colors.value).ok_or_else(|| {
+        anyhow!(
+            "{}: ant.colors must be an inline map {{ body: \"#rrggbb\", dark: \"#rrggbb\", accent: \"#rrggbb\" }}",
+            path.display()
+        )
+    })?;
+    let mut seen = BTreeSet::new();
+    for (key, field) in entries {
+        if !matches!(key.as_str(), "body" | "dark" | "accent") {
+            bail!("{}: unknown ant color {key:?} (known: body, dark, accent)", path.display());
+        }
+        if !field.quoted || !is_hex_color(&field.value) {
+            bail!(
+                "{}: ant.colors.{key} must be a double-quoted #rrggbb hex string",
+                path.display()
+            );
+        }
+        seen.insert(key);
+    }
+    for key in ["body", "dark", "accent"] {
+        if !seen.contains(key) {
+            bail!("{}: ant.colors must list {key}: (body, dark, accent)", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// The Colonizer `ant:` block: `display_name` and `caste` are required (the caste one of
+/// [`ANT_CASTES`]), `title`, `colors` and `move` are optional strings, and unknown keys are
+/// refused — a typo'd ant field would otherwise silently strip the ant of its identity.
+fn check_ant_block(path: &Path, ant: &BTreeMap<String, AntField>) -> Result<()> {
+    for key in ant.keys() {
+        if !ANT_KEYS.contains(&key.as_str()) {
+            bail!(
+                "{}: unknown ant field {key:?} (known: {})",
+                path.display(),
+                ANT_KEYS.join(", ")
+            );
+        }
+    }
+    match ant.get("display_name") {
+        Some(field) if !field.value.trim().is_empty() => {}
+        _ => bail!("{}: the ant block needs a non-empty display_name:", path.display()),
+    }
+    match ant.get("caste").map(|field| field.value.as_str()) {
+        Some(caste) if ANT_CASTES.contains(&caste) => {}
+        None | Some("") => {
+            bail!(
+                "{}: the ant block needs a caste: one of {}",
+                path.display(),
+                ANT_CASTES.join(", ")
+            )
+        }
+        Some(caste) => bail!("{}: unknown ant caste {caste:?}", path.display()),
+    }
+    for key in ["title", "move"] {
+        if let Some(field) = ant.get(key)
+            && field.value.trim().is_empty()
+        {
+            bail!("{}: ant.{key} must be a non-empty string", path.display());
+        }
+    }
+    if let Some(colors) = ant.get("colors") {
+        check_ant_colors(path, colors)?;
+    }
+    Ok(())
+}
+
+/// Parses and judges one agent file: the frontmatter must be present and terminated, `name` and
+/// `description` are required (the name a plain name), and the Colonizer fields — `tools`,
+/// `disallowedTools`, `skillsets`, `model`, `effort`, and the `ant:` block — are checked when
+/// present. Plain Claude Code frontmatter passes unchanged: unknown top-level keys are Claude
+/// Code's to add, and only Colonizer's own fields are judged.
+fn parse_agent_file(path: &Path, text: &str) -> Result<AntSpec> {
+    let parsed = parse_agent_frontmatter(path, text)?;
+    let Some(name) = parsed.scalars.get("name").filter(|field| !field.value.trim().is_empty()) else {
+        bail!("{}: agents need a non-empty name:", path.display());
+    };
+    if !is_plain_name(&name.value) {
+        bail!("{}: agent name {:?} must be a plain name", path.display(), name.value);
+    }
+    match parsed.scalars.get("description") {
+        Some(field) if !field.value.trim().is_empty() => {}
+        _ => bail!("{}: agents need a non-empty description:", path.display()),
+    }
+    for key in ["tools", "disallowedTools"] {
+        if let Some(items) = parsed.arrays.get(key)
+            && items.iter().any(|item| item.value.trim().is_empty())
+        {
+            bail!("{}: {key}: entries must be non-empty strings", path.display());
+        }
+    }
+    let mut skillsets = Vec::new();
+    if let Some(items) = parsed.arrays.get("skillsets") {
+        for item in items {
+            if !is_plain_name(&item.value) {
+                bail!("{}: skillset {:?} is not a plain name", path.display(), item.value);
+            }
+            skillsets.push(item.value.clone());
+        }
+    }
+    for key in ["model", "effort"] {
+        if parsed.arrays.contains_key(key) {
+            bail!("{}: {key}: must be a string", path.display());
+        }
+    }
+    if let Some(ant) = parsed.ant.as_ref() {
+        check_ant_block(path, ant)?;
+    }
+    Ok(AntSpec {
+        name: name.value.clone(),
+        skillsets,
+    })
+}
+
+/// The agents half of [`validate_pack`]: every `agents/*.md` must parse into a well-formed ant,
+/// and one pack cannot define the same ant name twice — Claude Code addresses an agent by name,
+/// so two files answering to `sarge` in one pack are ambiguous by construction.
+fn validate_ants(dir: &Path) -> Result<Vec<AntSpec>> {
+    let mut ants = Vec::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir.join("agents")) else {
+        return Ok(ants);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !path.extension().is_some_and(|ext| ext == "md") {
+            continue;
+        }
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let ant = parse_agent_file(&path, &std::fs::read_to_string(&path)?)?;
+        if let Some(first) = seen.insert(ant.name.to_lowercase(), file.clone()) {
+            bail!(
+                "{}: agent {:?} is defined by both agents/{first} and agents/{file}: agent names must be unique within a pack",
+                dir.display(),
+                ant.name
+            );
+        }
+        ants.push(ant);
+    }
+    Ok(ants)
+}
+
+/// Every `agents/*.md` in a pack, as the ant each defines. Files that do not parse are skipped:
+/// [`validate`] has already refused any pack carrying one, so this lenient read serves only the
+/// cross-pack checks, which run after every enabled pack has passed.
+fn ants(dir: &Path) -> Vec<AntSpec> {
+    let Ok(entries) = std::fs::read_dir(dir.join("agents")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_file() && entry.path().extension().is_some_and(|ext| ext == "md"))
+        .filter_map(|entry| {
+            let path = entry.path();
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| parse_agent_file(&path, &text).ok())
+        })
+        .collect()
+}
+
+/// The skillsets an ant carries must be installed: `skillsets:` names the packs the ant draws on,
+/// and an ant pointing at a pack neither the operator's data directory nor the app has would mount
+/// a colony missing its own crew's tools. `resolve` runs this per pack, and so does
+/// [`check_skillsets`] at save time, so a name is never accepted that boot would refuse.
+fn check_carried_skillsets(cfg: &Settings, pack: &str, ants: &[AntSpec]) -> Result<()> {
+    for ant in ants {
+        for skillset in &ant.skillsets {
+            if locate(cfg, skillset).is_none() {
+                bail!(
+                    "ant {:?} in skillset {pack:?} carries unknown skillset {skillset:?}; available: {}",
+                    ant.name,
+                    known_skillsets(cfg).join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The agent names across the enabled packs must be unique, the way skill names must be
+/// (issue #1163): Claude Code loads `agents/<file>.md` by name, so two packs defining an ant
+/// called `sarge` are ambiguous by construction. A collision blocks boot with both packs named.
+pub fn check_ant_uniqueness(packs: &[(&str, PathBuf)]) -> Result<()> {
+    let mut owner: BTreeMap<String, &str> = BTreeMap::new();
+    for (pack, dir) in packs {
+        for ant in ants(dir) {
+            if let Some(first) = owner.insert(ant.name.clone(), *pack) {
+                bail!(
+                    "agent {:?} is defined by both {first:?} and {pack:?}: agent names must be unique across enabled packs",
+                    ant.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Skill names across the enabled packs must be unique: the model addresses a
 /// skill as `<pack>:<name>`, so two packs answering to the same name are
 /// ambiguous by construction. A collision blocks boot with both packs named.
@@ -314,16 +740,26 @@ pub fn check_skillsets<'a>(cfg: &Settings, names: impl IntoIterator<Item = &'a s
         if let Some(vendored) = shadowed_vendored(cfg, name) {
             eprintln!("{}", shadow_message(name, &dir, &vendored));
         }
-        validate(&dir).map_err(|err| format!("skillset {name:?} is invalid: {err:#}"))?;
+        let ants = validate_pack(&dir).map_err(|err| format!("skillset {name:?} is invalid: {err:#}"))?;
+        // The same rule resolve applies at boot: an ant may only carry installed skillsets, so a
+        // save never accepts a pack whose crew would block the colony's next launch.
+        check_carried_skillsets(cfg, name, &ants).map_err(|err| format!("skillset {name:?} is invalid: {err:#}"))?;
     }
     Ok(())
 }
 
-fn unknown_skillset(cfg: &Settings, name: &str) -> String {
+/// The names both install places could provide, sorted and deduplicated: what an "unknown" error
+/// offers as the things that could have been named instead.
+fn known_skillsets(cfg: &Settings) -> Vec<String> {
     let mut known: Vec<String> = directories(&local_root(cfg)).into_keys().collect();
     known.extend(vendored_root(cfg).into_iter().flat_map(|root| directories(&root).into_keys()));
     known.sort();
     known.dedup();
+    known
+}
+
+fn unknown_skillset(cfg: &Settings, name: &str) -> String {
+    let known = known_skillsets(cfg);
     let available = if known.is_empty() {
         "none".to_string()
     } else {
@@ -437,9 +873,21 @@ mod tests {
         std::fs::create_dir_all(dir.join("skills/not-a-skill")).unwrap();
         std::fs::create_dir_all(dir.join("agents")).unwrap();
         for agent in agents {
-            std::fs::write(dir.join("agents").join(format!("{agent}.md")), "").unwrap();
+            std::fs::write(
+                dir.join("agents").join(format!("{agent}.md")),
+                format!("---\nname: {agent}\ndescription: an ant\n---\n"),
+            )
+            .unwrap();
         }
         std::fs::write(dir.join("agents/README.txt"), "").unwrap();
+    }
+
+    /// A full ant file: `name`/`description` plus whatever `extra` spells after them, and a
+    /// system prompt body behind the closing fence.
+    fn ant_md(name: &str, extra: &[&str]) -> String {
+        let mut front = vec![format!("name: {name}"), "description: Runs the crew".to_string()];
+        front.extend(extra.iter().map(|line| line.to_string()));
+        format!("---\n{}\n---\n\nDo the work.\n", front.join("\n"))
     }
 
     fn settings(root: &Path, assets: Option<PathBuf>) -> Settings {
@@ -517,6 +965,208 @@ mod tests {
             .to_string();
         assert!(err.contains("pack-a") && err.contains("pack-b"), "names both packs: {err}");
         assert!(err.contains("shared"), "names the skill: {err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_agent_file_without_frontmatter_is_refused_naming_the_file() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/no-fm");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(dir.join("agents/broken.md"), "Just a body, no frontmatter.\n").unwrap();
+        let err = resolve(&cfg, "no-fm").unwrap_err().to_string();
+        assert!(err.contains("agents/broken.md"), "names the file: {err}");
+        assert!(err.contains("leading ---"), "names the rule: {err}");
+        // An unterminated block fails at the closing fence.
+        std::fs::write(dir.join("agents/broken.md"), "---\nname: broken\n").unwrap();
+        let err = resolve(&cfg, "no-fm").unwrap_err().to_string();
+        assert!(err.contains("closing ---"), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_plain_claude_code_agent_passes_and_unknown_top_level_keys_are_allowed() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/plain-agents");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(
+            dir.join("agents/planner.md"),
+            "---\nname: planner\ndescription: Plans the work\ntools: [Read, Grep]\ndisallowedTools: [Edit]\n\
+             model: sonnet\neffort: high\nsomething-new: whatever Claude Code adds next\n---\n\nPlan.\n",
+        )
+        .unwrap();
+        assert!(resolve(&cfg, "plain-agents").is_ok(), "plain frontmatter keeps validating");
+        // The Colonizer fields are judged only when present: an array where a string belongs,
+        // or a skillset name that is not a plain name, each fail naming the field.
+        std::fs::write(dir.join("agents/planner.md"), ant_md("planner", &["model: [sonnet]"])).unwrap();
+        let err = resolve(&cfg, "plain-agents").unwrap_err().to_string();
+        assert!(err.contains("model: must be a string"), "{err}");
+        std::fs::write(dir.join("agents/planner.md"), ant_md("planner", &["skillsets: [../escape]"])).unwrap();
+        let err = resolve(&cfg, "plain-agents").unwrap_err().to_string();
+        assert!(err.contains("not a plain name"), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_whitespace_only_quoted_name_is_refused_as_empty() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/blank-name");
+        plugin(&dir, "1.0.0", &[], &[]);
+        // `name: " "` survives `is_empty` but the runner's own parser trims the value away, so boot
+        // must refuse it exactly like a missing name (the JS validator already does).
+        std::fs::write(dir.join("agents/sarge.md"), ant_md("\" \"", &[])).unwrap();
+        let err = resolve(&cfg, "blank-name").unwrap_err().to_string();
+        assert!(err.contains("agents/sarge.md"), "names the file: {err}");
+        assert!(
+            err.contains("agents need a non-empty name:"),
+            "the standard name error: {err}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_ant_with_a_broken_block_is_refused_with_the_field_named() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/castes");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(
+            dir.join("agents/sarge.md"),
+            ant_md("sarge", &["ant:", "  display_name: Sarge", "  caste: general"]),
+        )
+        .unwrap();
+        let err = resolve(&cfg, "castes").unwrap_err().to_string();
+        assert!(err.contains("unknown ant caste \"general\""), "names the caste: {err}");
+
+        // The ant block is Colonizer's, so a typo'd key is an error, not a silent ignore.
+        std::fs::write(
+            dir.join("agents/sarge.md"),
+            ant_md(
+                "sarge",
+                &["ant:", "  display_name: Sarge", "  caste: forager", "  colour: red"],
+            ),
+        )
+        .unwrap();
+        let err = resolve(&cfg, "castes").unwrap_err().to_string();
+        assert!(err.contains("unknown ant field \"colour\""), "{err}");
+
+        std::fs::write(dir.join("agents/sarge.md"), ant_md("sarge", &["ant:", "  caste: forager"])).unwrap();
+        let err = resolve(&cfg, "castes").unwrap_err().to_string();
+        assert!(err.contains("non-empty display_name"), "{err}");
+
+        std::fs::write(
+            dir.join("agents/sarge.md"),
+            ant_md(
+                "sarge",
+                &[
+                    "ant:",
+                    "  display_name: Sarge",
+                    "  caste: forager",
+                    "  colors: { body: \"#112233\", dark: #445566, accent: \"#778899\" }",
+                ],
+            ),
+        )
+        .unwrap();
+        let err = resolve(&cfg, "castes").unwrap_err().to_string();
+        assert!(
+            err.contains("ant.colors.dark must be a double-quoted #rrggbb hex string"),
+            "{err}"
+        );
+
+        std::fs::write(
+            dir.join("agents/sarge.md"),
+            ant_md(
+                "sarge",
+                &[
+                    "ant:",
+                    "  display_name: Sarge",
+                    "  caste: forager",
+                    "  colors: { body: \"#112233\", dark: \"#445566\" }",
+                ],
+            ),
+        )
+        .unwrap();
+        let err = resolve(&cfg, "castes").unwrap_err().to_string();
+        assert!(err.contains("ant.colors must list accent"), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unparsable_frontmatter_line_is_named_with_its_number() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/junk-frontmatter");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(
+            dir.join("agents/junk.md"),
+            "---\nname: junk\ndescription: d\nnot a frontmatter line\n---\n",
+        )
+        .unwrap();
+        let err = resolve(&cfg, "junk-frontmatter").unwrap_err().to_string();
+        assert!(err.contains("agents/junk.md: line 4"), "names the file and the line: {err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_agent_names_within_one_pack_are_refused() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/twins");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(dir.join("agents/sarge.md"), ant_md("sarge", &[])).unwrap();
+        std::fs::write(dir.join("agents/again.md"), ant_md("sarge", &[])).unwrap();
+        let err = resolve(&cfg, "twins").unwrap_err().to_string();
+        assert!(err.contains("both agents/sarge.md and agents/again.md"), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_ant_carrying_an_uninstalled_skillset_fails_naming_ant_pack_and_skillset() {
+        let (root, cfg) = install();
+        let dir = cfg.data_dir.join("plugins/crew");
+        plugin(&dir, "1.0.0", &[], &[]);
+        std::fs::write(
+            dir.join("agents/sarge.md"),
+            ant_md(
+                "sarge",
+                &[
+                    "skillsets: [ponytail, ecc]",
+                    "ant:",
+                    "  display_name: Sarge",
+                    "  caste: soldier",
+                ],
+            ),
+        )
+        .unwrap();
+        let err = resolve(&cfg, "crew").unwrap_err().to_string();
+        assert!(
+            err.contains("ant \"sarge\" in skillset \"crew\" carries unknown skillset \"ponytail\""),
+            "names the ant, the pack and the skillset: {err}"
+        );
+        // Installed — vendored or local — the ant's crew is there, and the pack boots.
+        plugin(&cfg.assets.clone().unwrap().join("plugins/ponytail"), "1.0.0", &[], &[]);
+        plugin(&cfg.assets.clone().unwrap().join("plugins/ecc"), "2.2.1", &[], &[]);
+        assert!(resolve(&cfg, "crew").is_ok());
+        // The save-time gate refuses the same pack with the same rule.
+        std::fs::remove_dir_all(cfg.assets.clone().unwrap().join("plugins/ponytail")).unwrap();
+        let err = check_skillsets(&cfg, ["crew"]).unwrap_err();
+        assert!(err.starts_with("skillset \"crew\" is invalid: "), "{err}");
+        assert!(err.contains("carries unknown skillset \"ponytail\""), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_agent_name_in_two_enabled_packs_fails_naming_both_packs() {
+        let (root, cfg) = install();
+        let a = cfg.data_dir.join("plugins/crew-a");
+        let b = cfg.data_dir.join("plugins/crew-b");
+        plugin(&a, "1.0.0", &[], &["shared"]);
+        plugin(&b, "1.0.0", &[], &["shared", "only-b"]);
+        let err = check_ant_uniqueness(&[("crew-a", a.clone()), ("crew-b", b.clone())])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("crew-a") && err.contains("crew-b"), "names both packs: {err}");
+        assert!(err.contains("agent \"shared\""), "names the agent: {err}");
+        // Distinct names pass; the check runs on the packs boot resolved.
+        std::fs::remove_file(b.join("agents/shared.md")).unwrap();
+        assert!(check_ant_uniqueness(&[("crew-a", a), ("crew-b", b)]).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 

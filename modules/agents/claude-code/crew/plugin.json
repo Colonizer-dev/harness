@@ -1,0 +1,5 @@
+{
+  "name": "claude-code-crew",
+  "version": "0.1.0",
+  "description": "The claude-code agent module's built-in crew: every role as an ant defined in agents/<name>.md."
+}
