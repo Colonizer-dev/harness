@@ -247,6 +247,67 @@ while read -r name version plat kind sha url; do
       [ "$(find "$dest/skills" -name SKILL.md | wc -l)" -eq 6 ] || { echo "ponytail staging has not exactly the six skills" >&2; exit 1; }
       rm -rf "$tmp"
       ;;
+    security-audit)
+      # Staged at dist/plugins/security-audit as a one-skill plugin: upstream's skills/security-audit/
+      # is the skill itself (SKILL.md beside the attack-class references it links by relative path,
+      # report-schema.json and the two dependency-free node validators its workflow runs on its own
+      # findings.json and coverage-ledger.json), so the directory is copied unchanged except for
+      # what a colony must not carry:
+      #   validate-*.test.cjs  upstream's own tests for the validators, not read by the skill
+      # The validators import node builtins only, so the colony runs `node validate-findings.cjs
+      # findings.json` straight from the read-only mount. Upstream ships no manifest, hooks or MCP
+      # server, so both manifests are generated here, in Colonizer's shape. The staged file set below
+      # is an allowlist: a new upstream file fails staging until a maintainer adds it to this arm
+      # and to the vendor.lock comment, or writes down there why it is not staged.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/security-audit-skill-*)
+      dest="$root/dist/plugins/security-audit"
+      skill=security-audit
+      files_expected="AI-AND-LLM.md ATTACK-CLASSES.md CLIENT-SIDE.md CLOUD-AND-DEPLOYMENT.md DATA-ISOLATION-AND-LIFECYCLE.md DESKTOP-MOBILE-AND-LOCAL-IPC.md HUNTING.md MEMORY-SAFETY-AND-BINARY.md PROTOCOLS-RPC-AND-MESSAGING.md RECONNAISSANCE.md RESOURCE-EXHAUSTION-AND-AVAILABILITY.md SKILL.md SUPPLY-CHAIN-AND-RELEASE.md VALIDATION-AND-REPORTING.md WEB-PROTOCOL-AND-AUTH.md report-schema.json validate-coverage-ledger.cjs validate-findings.cjs"
+      [ -d "$src/skills/$skill" ] || { echo "security-audit $version has no skills/$skill" >&2; exit 1; }
+      for present in $(ls "$src/skills"); do
+        [ "$present" = "$skill" ] || echo "security-audit $version has an unexpected skills/$present — add it to this arm of scripts/fetch-vendor.sh and to the vendor.lock comment, or say there why it is not staged" >&2
+      done
+      [ "$(ls "$src/skills")" = "$skill" ] || { rm -rf "$tmp"; exit 1; }
+      rm -rf "$dest"
+      mkdir -p "$dest/.claude-plugin" "$dest/skills"
+      cp -R "$src/skills/$skill" "$dest/skills/$skill"
+      # The tests are pruned by name, so a rename or removal upstream fails here instead of the
+      # prune going quiet.
+      for dropped in validate-findings.test.cjs validate-coverage-ledger.test.cjs; do
+        [ -f "$dest/skills/$skill/$dropped" ] || { echo "security-audit $version has no skills/$skill/$dropped to drop" >&2; exit 1; }
+        rm "$dest/skills/$skill/$dropped"
+      done
+      [ -f "$src/LICENSE" ] || { echo "security-audit $version has no LICENSE" >&2; exit 1; }
+      cp "$src/LICENSE" "$dest/LICENSE"
+      grep -q '^name: security-audit$' "$dest/skills/$skill/SKILL.md" || { echo "security-audit $version: SKILL.md is not the security-audit skill" >&2; exit 1; }
+      # Exactly the files this arm means to stage, no more: the staged list is compared to the
+      # allowlist entry by entry, so an upstream addition cannot slip through or drop in silence.
+      staged=$(cd "$dest/skills/$skill" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)
+      expected=$(printf '%s\n' $files_expected | LC_ALL=C sort)
+      if [ "$staged" != "$expected" ]; then
+        echo "security-audit $version staging does not match its allowlist; expected the files named in this arm, got:" >&2
+        echo "$staged" >&2
+        rm -rf "$tmp"
+        exit 1
+      fi
+      printf '{\n  "name": "security-audit",\n  "version": "%s",\n  "description": "Security guidance and vulnerability review (github.com/cloudflare/security-audit-skill); a six-phase audit workflow with independently verified, machine-readable findings",\n  "license": "MIT"\n}\n' "$version" > "$dest/.claude-plugin/plugin.json"
+      printf '{\n  "name": "security-audit",\n  "version": "%s",\n  "description": "Security guidance and vulnerability review (github.com/cloudflare/security-audit-skill); a six-phase audit workflow with independently verified, machine-readable findings",\n  "skills": ["security-audit"]\n}\n' "$version" > "$dest/plugin.json"
+      if [ -n "$(find "$dest" \( -name hooks -o -name hooks.json -o -name .mcp.json -o -name mcp.json \) -print -quit)" ]; then
+        echo "security-audit staging leaked a hook or an MCP server configuration" >&2; exit 1
+      fi
+      # The grep above only catches hooks and MCP by name. This is what makes "nothing else is
+      # staged" true for anything else upstream grows: the staged pack is an allowlist, and any
+      # top-level entry the staging did not plan for fails here.
+      for entry in $(ls -A "$dest"); do
+        case " .claude-plugin LICENSE plugin.json skills " in
+          *" $entry "*) ;;
+          *) echo "security-audit staging holds an unexpected top-level entry: $entry" >&2; exit 1 ;;
+        esac
+      done
+      rm -rf "$tmp"
+      ;;
     google-skills)
       # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
       # of google/skills would put ~17k tokens of skill descriptions into every
