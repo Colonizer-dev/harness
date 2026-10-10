@@ -327,14 +327,21 @@ pub(super) fn counted_body(
 /// window is left where a new request could see neither the reservation nor the recorded spend.
 /// A recorder that is dropped without ever running (an uncounted body, an abandoned stream) still
 /// drops the reservation it carries, at that moment.
-pub(super) fn usage_recorder(app: &Shared, colony: &str, provider: &Provider, reservation: Reserved) -> Recorder {
-    let (app, colony, provider) = (app.clone(), colony.to_string(), provider.clone());
+pub(super) fn usage_recorder(
+    app: &Shared,
+    colony: &str,
+    provider: &Provider,
+    model: Option<&str>,
+    reservation: Reserved,
+) -> Recorder {
+    let (app, colony, provider, model) = (app.clone(), colony.to_string(), provider.clone(), model.map(str::to_string));
     Box::new(move |usage| {
         tokio::spawn(async move {
             // The estimate goes back in the same critical section that adds the real cost, so no
             // reader ever counts both (or neither). If the cost is never recorded (zero, or the
             // colony is gone) the closure is dropped unrun and the guard goes with it.
-            crate::lifecycle::record_routed_usage(&app, &colony, &provider, usage, move || drop(reservation)).await;
+            crate::lifecycle::record_routed_usage(&app, &colony, &provider, model.as_deref(), usage, move || drop(reservation))
+                .await;
         });
     })
 }

@@ -1524,6 +1524,11 @@ pub(crate) mod tests {
             2,
             "vm/ leftovers after a stop, and the colony's disk measurement",
         ),
+        (
+            "loops/pr_labels.rs",
+            1,
+            "the VM-written out/pr-labels, read for the run's pull request labels",
+        ),
         ("maps.rs", 1, "the VM-written out/architecture.json"),
         ("publish.rs", 1, "the VM-written out/pr.md"),
         ("reclaim.rs", 2, "disk measurement of the working copy"),

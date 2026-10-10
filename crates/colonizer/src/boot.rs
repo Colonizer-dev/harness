@@ -1286,8 +1286,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         };
         if tokens != crate::routing::RoutingCostTokens::default() {
             let provider_list = app.providers();
-            let direct_pricing = providers::pricing_for(&provider_list, &module_model);
-            let routed_pricing = providers::pricing_for(&provider_list, routed_model);
+            let feed = app.price_feed.entries();
+            let direct_pricing = providers::pricing_for(&provider_list, &module_model, Some(&feed));
+            let routed_pricing = providers::pricing_for(&provider_list, routed_model, Some(&feed));
             if let (Some(direct_pricing), Some(routed_pricing)) = (direct_pricing, routed_pricing) {
                 let estimate = crate::routing::estimate_cost(direct_pricing, routed_pricing, tokens);
                 gated = setting(&agent_choice, &agent.schema, "route_cost_gate")

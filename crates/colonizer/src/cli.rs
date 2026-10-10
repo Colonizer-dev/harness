@@ -757,7 +757,8 @@ enum LoopCommand {
     ///
     /// The cadence takes `30m`/`2h`, `7d`, `14d@03:00`, `daily@09:00`, `weekly@mon@09:00`,
     /// `monthly@15@09:00` or `self`; clock times are your local time, stored UTC. `--kind map`
-    /// refreshes the architecture map instead of running the prompt.
+    /// refreshes the architecture map instead of running the prompt. `--template data-refresh`
+    /// starts from a built-in template and marks the loop as GitHub's.
     Create {
         /// The repository to run on, as owner/repo; owner/* for a map loop covers every repository of the org
         #[arg(value_name = "OWNER/REPO")]
@@ -765,15 +766,41 @@ enum LoopCommand {
         /// When it runs — see above for the grammar
         #[arg(value_name = "CADENCE")]
         cadence: String,
-        /// A name that says what it is for ("Triage new issues"); the lists show it
+        /// A name that says what it is for ("Triage new issues"); the lists show it. A template
+        /// loop is named for you ("Data refresh") when this is left out
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// What each run should do
         #[arg(long)]
         prompt: Option<String>,
         /// Read the prompt from a file (`-` reads stdin) instead of --prompt
         #[arg(long, value_name = "PATH")]
         prompt_file: Option<PathBuf>,
+        /// Start from a built-in template instead of a --prompt: `data-refresh` refreshes a
+        /// repository's data files from their sources and opens one pull request with the
+        /// evidence. Its inputs are the repository's to edit; the flags below override them
+        #[arg(long, value_enum, conflicts_with_all = ["prompt", "prompt_file"])]
+        template: Option<LoopTemplateArg>,
+        /// The template's sources file, as the repository holds it (default data/sources.json)
+        #[arg(long, value_name = "PATH", requires = "template")]
+        sources: Option<String>,
+        /// The template's extract command, with `<id>` for the source id
+        /// (default "npm run extract -- <id>")
+        #[arg(long, value_name = "CMD", requires = "template")]
+        extract: Option<String>,
+        /// The template's validate command (default "npm run validate")
+        #[arg(long, value_name = "CMD", requires = "template")]
+        validate: Option<String>,
+        /// The template's policy command, reading the change set on stdin
+        /// (default "npm run --silent refresh-policy")
+        #[arg(long, value_name = "CMD", requires = "template")]
+        policy: Option<String>,
+        /// The template's evidence directory (default evidence/)
+        #[arg(long, value_name = "DIR", requires = "template")]
+        evidence: Option<String>,
+        /// Failed fetches before a source is reported broken (default 3)
+        #[arg(long, value_name = "N", requires = "template")]
+        max_failures: Option<u32>,
         /// What a run does: colony (the prompt) or map (refresh the architecture map; the prompt is not used)
         #[arg(long, value_enum, default_value_t = LoopKindArg::Colony)]
         kind: LoopKindArg,
@@ -806,6 +833,10 @@ enum LoopCommand {
         /// The built-in disk-cleanup loop only: list what a run would remove, with sizes, and remove nothing
         #[arg(long)]
         dry_run: bool,
+        /// Colony loops only: narrow this one run to these source ids — the loop run's `only`
+        /// parameter, as the data-refresh template reads it — repeated or comma-separated
+        #[arg(long, value_name = "SOURCE_ID", value_delimiter = ',', conflicts_with = "dry_run")]
+        only: Vec<String>,
     },
     /// Pause a loop: its settings are kept, and nothing runs until `loop start` (alias: disable)
     #[command(alias = "disable")]
@@ -930,6 +961,14 @@ impl LoopKindArg {
             Self::Map => "map",
         }
     }
+}
+
+/// The built-in loop prompt templates (`--template`), the same list the cockpit's template picker
+/// offers; each renders its prompt in `loops/templates.rs`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum LoopTemplateArg {
+    /// Refresh a repository's data files from their sources and open one pull request with the evidence
+    DataRefresh,
 }
 
 // ---------------------------------------------------------------------------
@@ -2457,6 +2496,13 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 name,
                 prompt,
                 prompt_file,
+                template,
+                sources,
+                extract,
+                validate,
+                policy,
+                evidence,
+                max_failures,
                 kind,
                 model,
                 subagent_model,
@@ -2468,28 +2514,63 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
             } => {
                 let offset = local_offset_minutes();
                 let cadence = parse_cadence(&cadence, offset).map_err(anyhow::Error::msg)?;
-                let prompt = match (prompt, prompt_file) {
-                    (Some(text), None) => text,
-                    (None, Some(path)) => read_prompt(&path)?,
-                    (Some(_), Some(_)) => {
-                        return Err(Fail::Transport(anyhow::anyhow!("use --prompt or --prompt-file, not both")));
+                // A template builds the prompt from its defaults with the input flags applied;
+                // --prompt and --prompt-file next to it are refused at parse time.
+                let prompt = if let Some(template) = template {
+                    // One arm per template: each builds its own defaults, then the input flags
+                    // override them.
+                    let mut t = match template {
+                        LoopTemplateArg::DataRefresh => crate::loops::templates::DataRefresh::default(),
+                    };
+                    if let Some(v) = sources {
+                        t.sources = v;
                     }
-                    (None, None) => String::new(),
+                    if let Some(v) = extract {
+                        t.extract = v;
+                    }
+                    if let Some(v) = validate {
+                        t.validate = v;
+                    }
+                    if let Some(v) = policy {
+                        t.policy = v;
+                    }
+                    if let Some(v) = evidence {
+                        t.evidence = v;
+                    }
+                    if let Some(n) = max_failures {
+                        t.max_failures = n;
+                    }
+                    t.prompt()
+                } else {
+                    match (prompt, prompt_file) {
+                        (Some(text), None) => text,
+                        (None, Some(path)) => read_prompt(&path)?,
+                        (Some(_), Some(_)) => {
+                            return Err(Fail::Transport(anyhow::anyhow!("use --prompt or --prompt-file, not both")));
+                        }
+                        (None, None) => String::new(),
+                    }
                 };
                 if kind != LoopKindArg::Map && prompt.trim().is_empty() {
                     return Err(Fail::Transport(anyhow::anyhow!(
-                        "a colony loop needs a prompt (--prompt TEXT or --prompt-file PATH); a map loop needs neither"
+                        "a colony loop needs a prompt (--prompt TEXT, --prompt-file PATH or --template data-refresh); a map loop needs neither"
                     )));
                 }
                 if kind == LoopKindArg::Map && !prompt.trim().is_empty() {
                     eprintln!("note: a map loop ignores the prompt; it refreshes the repository's map");
                 }
+                // A template loop is named for the operator; a hand-written prompt still needs a name.
+                let name = name.unwrap_or_else(|| if template.is_some() { "Data refresh".into() } else { String::new() });
                 let body = json!({
                     "name": name,
                     "repo": repo,
                     "prompt": prompt,
                     "cadence": cadence,
                     "kind": kind.as_str(),
+                    // The templates' runs read what the mothership fetched and open pull requests,
+                    // so a template loop is GitHub's; a prompt loop says nothing here and stays
+                    // whatever the server's default makes it.
+                    "needs_github": template.is_some(),
                     // This machine's offset now, the field the cockpit sends with its own saves, so
                     // the loop's clock times can be shown in the operator's local time.
                     "tz_offset_minutes": offset,
@@ -2521,14 +2602,17 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 }
                 Ok(EXIT_OK)
             }
-            LoopCommand::Run { id, dry_run } => {
+            LoopCommand::Run { id, dry_run, only } => {
                 let path = if dry_run {
                     format!("/api/loops/{id}/run-now?dry_run=1")
                 } else {
                     format!("/api/loops/{id}/run-now")
                 };
+                // The run's parameters ride in the body; no `--only`, no body at all, exactly the
+                // request the cockpit sends.
+                let body = (!only.is_empty()).then(|| json!({"params": {"only": only.clone()}}));
                 let session = machine
-                    .post(&path, None)
+                    .post(&path, body.as_ref())
                     .await?
                     .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
                 if json {
@@ -3459,7 +3543,24 @@ mod tests {
                 "6",
                 "14d@03:00",
             ][..],
+            &["loop", "create", "acme/app", "--template", "data-refresh", "daily@05:00"][..],
+            &[
+                "loop",
+                "create",
+                "acme/app",
+                "--template",
+                "data-refresh",
+                "--sources",
+                "data/src.json",
+                "--extract",
+                "npm run extract -- <id>",
+                "--max-failures",
+                "5",
+                "daily@05:00",
+            ][..],
             &["loop", "run", "loop_x1"][..],
+            &["loop", "run", "loop_x1", "--only", "rainfall", "--only", "gdp"][..],
+            &["loop", "run", "loop_x1", "--only", "rainfall,gdp"][..],
             &["loop", "stop", "loop_x1"][..],
             &["loop", "start", "loop_x1"][..],
             &["loop", "delete", "loop_x1"][..],
@@ -3530,6 +3631,30 @@ mod tests {
         let err = parse(&["update", "--check", "--force"]).unwrap_err();
         assert_eq!(err.exit_code(), EXIT_USAGE);
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
+    }
+
+    /// `--template` builds the prompt, so it takes neither `--prompt` nor `--prompt-file`; and its
+    /// input flags mean nothing without it.
+    #[test]
+    fn a_template_conflicts_with_a_prompt_and_its_inputs_require_it() {
+        for extra in [&["--prompt", "Triage new issues"][..], &["--prompt-file", "prompt.md"][..]] {
+            let mut args = vec!["loop", "create", "acme/app", "--template", "data-refresh"];
+            args.extend_from_slice(extra);
+            args.push("daily@05:00");
+            let err = parse(&args).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{extra:?}: {err}");
+        }
+        for (flag, value) in [
+            ("--sources", "data/src.json"),
+            ("--extract", "cmd"),
+            ("--validate", "cmd"),
+            ("--policy", "cmd"),
+            ("--evidence", "ev"),
+            ("--max-failures", "5"),
+        ] {
+            let err = parse(&["loop", "create", "acme/app", flag, value, "daily@05:00"]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument, "{flag}: {err}");
+        }
     }
 
     /// The rendered `--help` of a subcommand, through the same parse the binary uses.

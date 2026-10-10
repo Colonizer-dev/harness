@@ -754,6 +754,8 @@ pub async fn enforce_budget(app: &Shared, id: &str) -> bool {
 /// its dollars never move and its tokens are all a token budget sees — while only a priced response
 /// also adds spend. (A response's tokens reach the session through the runner's per-model usage too,
 /// which `model_usage` keeps separately and nothing sums with this.)
+/// `model` is the name the client asked for, the canonical part before any `model_map` rename, so two
+/// models on one connection are priced differently (issue #1038).
 /// `landed` runs inside the same sessions write lock that adds the cost — the gateway hands its
 /// in-flight estimate back there, so budget checks (which read both under the read lock) never see
 /// the cost twice or not at all. A response with neither cost nor tokens drops `landed` unrun.
@@ -761,10 +763,14 @@ pub async fn record_routed_usage(
     app: &Shared,
     colony: &str,
     provider: &providers::Provider,
+    model: Option<&str>,
     usage: providers::Usage,
     landed: impl FnOnce() + Send,
 ) {
-    let cost = provider.cost_usd(usage);
+    let feed = app.price_feed.entries();
+    let cost = provider
+        .price_for(model.unwrap_or_default(), Some(&feed))
+        .map_or(0.0, |pricing| pricing.cost_usd(usage));
     // The tokens a bill counts: Anthropic folds thinking into output already, so it is not added again.
     let tokens = usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens;
     if cost <= 0.0 && tokens == 0 {
@@ -2232,6 +2238,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_pricing: Default::default(),
+            price_feed_id: None,
             model_map: Default::default(),
             disabled_tools: Vec::new(),
             quota: None,
@@ -2261,13 +2269,13 @@ mod tests {
         };
         // Priced at nothing: dollars stay at zero while the tokens pile up, thinking folded into
         // output and not counted twice. 4 kinds x 100 tokens = 400, still under the budget.
-        record_routed_usage(&app, "abc", &provider, usage(100), || {}).await;
+        record_routed_usage(&app, "abc", &provider, None, usage(100), || {}).await;
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.routed_tokens, Some(400));
         assert_eq!(s.routed_cost_usd, None, "an unpriced provider moves no money");
         assert_eq!(s.status, SessionStatus::Running, "under the token budget the colony runs on");
         // The response that crosses the budget stops the colony the way an overspend does.
-        record_routed_usage(&app, "abc", &provider, usage(400), || {}).await;
+        record_routed_usage(&app, "abc", &provider, None, usage(400), || {}).await;
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.routed_tokens, Some(2_000));
         assert_eq!(s.routed_cost_usd, None);

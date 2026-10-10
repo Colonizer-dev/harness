@@ -166,9 +166,16 @@ export function providersMock(ms: MockState): ProvidersApi {
     throw new ApiError("fallback_model must be an Anthropic model id or alias like sonnet", 400);
       }
       for (const rate of Object.values(body.pricing ?? {})) {
-    if (!Number.isFinite(rate) || rate < 0) {
-      throw new ApiError("pricing rates must be dollar amounts per million tokens, zero or more", 400);
-    }
+        if (!Number.isFinite(rate) || rate < 0) {
+          throw new ApiError("pricing rates must be dollar amounts per million tokens, zero or more", 400);
+        }
+      }
+      for (const rates of Object.values(body.model_pricing ?? {})) {
+        for (const rate of Object.values(rates)) {
+          if (!Number.isFinite(rate) || rate < 0) {
+            throw new ApiError("model pricing rates must be dollar amounts per million tokens, zero or more", 400);
+          }
+        }
       }
       const existing = ms.providers.find((p) => p.id === id);
       const has_key = body.api_key === undefined ? (existing?.has_key ?? false) : body.api_key.trim() !== "";
@@ -199,6 +206,10 @@ export function providersMock(ms: MockState): ProvidersApi {
     trusted: body.trusted ?? existing?.trusted ?? false,
     model_map: body.model_map ?? existing?.model_map ?? {},
     disabled_tools: body.disabled_tools ?? existing?.disabled_tools ?? [],
+    // Per-model prices and the feed mapping follow the key's convention too (#1038): omitted keeps,
+    // `{}` clears the prices, `""` clears the mapping.
+    model_pricing: body.model_pricing ?? existing?.model_pricing ?? {},
+    price_feed_id: body.price_feed_id === undefined ? existing?.price_feed_id : body.price_feed_id.trim() || undefined,
     in_flight: existing?.in_flight ?? 0,
     queued: existing?.queued ?? 0,
     usage: existing?.usage ?? ms.zeroUsage(),
@@ -214,6 +225,17 @@ export function providersMock(ms: MockState): ProvidersApi {
       if (index < 0) throw new ApiError("no such provider", 404);
       ms.providers.splice(index, 1);
       return { ok: true };
+    },
+    priceFeed: async () => clone(ms.priceFeed),
+    savePriceFeed: async (url) => {
+      await sleep(250);
+      const trimmed = url.trim();
+      if (trimmed && !/^https?:\/\/\S+/.test(trimmed)) throw new ApiError("price feed URL must be an http(s) URL, or empty to turn the feed off", 400);
+      // A save fetches straight away, so a turned-on feed is fresh and an emptied one has nothing.
+      ms.priceFeed = trimmed
+        ? { url: trimmed, fetched_at: now(), last_error: null, entries: ms.priceFeed.entries }
+        : { url: null, fetched_at: null, last_error: null, entries: 0 };
+      return clone(ms.priceFeed);
     },
     attention: async () => ({ quota_cards: [] }),
     quotaAction: async (provider, body) => {
