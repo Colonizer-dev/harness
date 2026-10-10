@@ -1,1 +1,0 @@
-**`COLONIZER_APP` with a trailing slash no longer makes the installer remove the running app.** The slash made the installer look through the app symlink at the slot it points to, so the update picked the live slot as the one to replace. Trailing slashes are now stripped first.
