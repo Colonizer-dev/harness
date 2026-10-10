@@ -608,12 +608,16 @@ fn validate_ants(dir: &Path) -> Result<Vec<AntSpec>> {
     let Ok(entries) = std::fs::read_dir(dir.join("agents")) else {
         return Ok(ants);
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || !path.extension().is_some_and(|ext| ext == "md") {
-            continue;
-        }
-        let file = entry.file_name().to_string_lossy().into_owned();
+    // In name order, as scripts/validate-plugins.mjs reads them: `read_dir` order is whatever the
+    // filesystem gives, and the duplicate error must name the same "first" file on every host.
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    files.sort();
+    for path in files {
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let ant = parse_agent_file(&path, &std::fs::read_to_string(&path)?)?;
         if let Some(first) = seen.insert(ant.name.to_lowercase(), file.clone()) {
             bail!(
@@ -1113,7 +1117,7 @@ mod tests {
         std::fs::write(dir.join("agents/sarge.md"), ant_md("sarge", &[])).unwrap();
         std::fs::write(dir.join("agents/again.md"), ant_md("sarge", &[])).unwrap();
         let err = resolve(&cfg, "twins").unwrap_err().to_string();
-        assert!(err.contains("both agents/sarge.md and agents/again.md"), "{err}");
+        assert!(err.contains("both agents/again.md and agents/sarge.md"), "{err}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
