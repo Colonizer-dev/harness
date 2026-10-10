@@ -218,6 +218,10 @@ pub struct App {
     pub orgs_failed_at: Mutex<Option<std::time::Instant>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// The model-price feed (price_feed.rs, issue #1038): the operator's URL setting and the last
+    /// good copy of the feed, the lowest rung of the pricing precedence
+    /// (`providers::Provider::price_for`). Read by the gateway's accounting and the cost gate.
+    pub(crate) price_feed: crate::price_feed::PriceFeed,
     /// Phones paired through Settings → Add your phone (phone.rs, issue #746): the open invites and
     /// pairings in memory, the paired phones in `<config_dir>/phones.json`.
     pub phones: crate::phone::PhoneStore,
@@ -335,6 +339,7 @@ impl App {
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_failed_at: Mutex::new(None),
             orgs_refreshed: Mutex::new(None),
+            price_feed: crate::price_feed::PriceFeed::load(&cfg.config_dir, &cfg.data_dir),
             phones: crate::phone::PhoneStore::load(&cfg.config_dir),
             provider_models: crate::gateway::Discover::load(&cfg.config_dir),
             provider_probe_cache: Mutex::new(HashMap::new()),

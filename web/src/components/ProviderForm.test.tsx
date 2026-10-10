@@ -173,3 +173,51 @@ describe("provider model checklist", () => {
     expect(toggleModel(["deepseek-flash", "deepseek-vintage"], "deepseek-vintage", false)).toEqual(["deepseek-flash"]);
   });
 });
+
+// Issue #1038: per-model prices and the price feed — the editor prefills the saved prices, and the
+// feed's read-only list marks what the operator's own rates already cover.
+describe("provider pricing and the price feed", () => {
+  const priced = provider({
+    model_pricing: { "deepseek-flash": { input_per_mtok: 0.3 } },
+    price_feed_id: "deepseek-official",
+    feed_prices: [
+      {
+        model: "deepseek-flash",
+        pricing: { input_per_mtok: 0.28, output_per_mtok: 1.12 },
+        last_verified_at: new Date(Date.now() - 86_400_000).toISOString(),
+        source: "https://example.com/prices",
+        stale: false,
+      },
+      { model: "deepseek-vintage", pricing: {}, last_verified_at: null, source: null, stale: true },
+    ],
+  });
+
+  it("prefills the saved per-model rows and the feed mapping", () => {
+    const html = form(priced);
+    expect(html).toContain('value="deepseek-flash"');
+    expect(html).toContain('value="0.3"');
+    expect(html).toContain('value="deepseek-official"');
+    expect(html).toContain("Add model price");
+  });
+
+  it("lists the feed's prices with verification age, source link, stale and overridden marks", () => {
+    const html = form(priced);
+    expect(html).toContain("from feed, verified 1 day ago");
+    expect(html).toContain("verified date unknown");
+    expect(html).toContain('href="https://example.com/prices"');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toContain("stale — verified over 14 days ago");
+    // Only the model the operator prices themselves is overridden; the connection has no rates.
+    expect(html.split("overridden by your price").length - 1).toBe(1);
+  });
+
+  it("carries model_pricing and price_feed_id on the save body, off it when untouched", () => {
+    // Both fields are trimmed and omitted-when-unchanged by the form; the body builder passes them as given.
+    const body = providerSaveBody(bodyInput({ model_pricing: { ds_v4: { input_per_mtok: 0.32 } }, price_feed_id: "deepseek-official" }));
+    expect(body.model_pricing).toEqual({ ds_v4: { input_per_mtok: 0.32 } });
+    expect(body.price_feed_id).toBe("deepseek-official");
+    expect(providerSaveBody(bodyInput()).model_pricing).toBeUndefined();
+    expect(providerSaveBody(bodyInput()).price_feed_id).toBeUndefined();
+  });
+});

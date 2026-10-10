@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { ProviderQuotaCard, QuotaChangeSummary, runQuotaAction } from "../../cockpit/ProviderQuotaCard";
-import type { HarnessStatus, ModelOption, ModelProvider, PlanUsage, QuotaActionReply, QuotaCard } from "../../types";
-import { Spinner } from "../ui";
+import type { HarnessStatus, ModelOption, ModelProvider, PlanUsage, PriceFeedStatus, QuotaActionReply, QuotaCard } from "../../types";
+import { Button, InfoButton, Spinner, cx, inputClass, timeAgo } from "../ui";
 import { AddProvider } from "./AddProvider";
 import { HealthStatus, type HealthView } from "./HealthStatus";
 import { ClaudeListRow, ProviderListRow } from "./ProviderRows";
@@ -201,8 +201,86 @@ export function ProvidersPane({
           />
         )}
         <AddProvider disabled={!providers || editing !== null} onPick={(preset) => setEditing({ mode: "new", preset })} />
+        <PriceFeedSection />
       </div>
     </Pane>
+  );
+}
+
+/**
+ * The price feed's URL setting (issue #1038): one input and save, with the feed's own status under it —
+ * how many prices it carries, when it was last read, and what the last fetch failed with. Hidden until
+ * the status arrives, so a mothership without /api/price-feed simply shows no section.
+ */
+function PriceFeedSection() {
+  const api = useApi();
+  const toast = useToast();
+  const [status, setStatus] = useState<PriceFeedStatus | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const urlId = useId();
+  useEffect(() => {
+    let live = true;
+    api
+      .priceFeed()
+      .then((s) => {
+        if (!live) return;
+        setStatus(s);
+        setDraft(s.url ?? "");
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [api]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const saved = await api.savePriceFeed(draft);
+      setStatus(saved);
+      setDraft(saved.url ?? "");
+      toast(saved.url ? "Price feed saved" : "Price feed turned off");
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!status) return null;
+  const changed = draft.trim() !== (status.url ?? "");
+  return (
+    <section className="space-y-2 rounded-xl border border-border px-3.5 py-3">
+      <div className="flex items-center gap-1">
+        <h3 className="text-body font-semibold">Price feed</h3>
+        <InfoButton label="Price feed">
+          <p>
+            A JSON file of model prices the Mothership re-reads every so often, so priced routing works without typing
+            every rate in. Your own rates win: a model's own price, then the connection's, then the feed's.
+          </p>
+        </InfoButton>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          id={urlId}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="https://example.com/model-prices.json"
+          spellCheck={false}
+          autoComplete="off"
+          aria-label="Price feed URL"
+          className={cx(inputClass, "min-w-0 flex-1 font-mono text-body-sm")}
+        />
+        <Button size="sm" variant="primary" disabled={busy || !changed} onClick={save}>
+          {busy && <Spinner />} Save
+        </Button>
+      </div>
+      <p className="text-small text-muted">
+        {status.url
+          ? `${status.entries} price${status.entries === 1 ? "" : "s"} · ${status.fetched_at ? `fetched ${timeAgo(status.fetched_at)}` : "not fetched yet"}`
+          : "Off — only the rates you set on a provider are counted."}
+      </p>
+      {status.last_error && <p className="text-small text-err">Last fetch failed: {status.last_error}</p>}
+    </section>
   );
 }
 
