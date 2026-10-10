@@ -4,6 +4,8 @@ export interface ModuleProviderInfo {
   description?: string;
   /** Agent rows only: the runner serves the loop MCP tools `loop_next` and `loop_stop` (issue #643). */
   loop_tools?: boolean;
+  /** Agent rows only: the module loads skill packs (issue #1164). */
+  skill_packs?: boolean;
 }
 
 /** A small JSON-Schema subset: an object whose properties are scalar settings. */
