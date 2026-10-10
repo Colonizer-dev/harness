@@ -6,7 +6,7 @@
 // route never starts Pi at all.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -123,14 +123,41 @@ export const MEMORY_EXTENSION = fileURLToPath(new URL('./memory-extension.mjs', 
 /** The loop-tools extension (issue #643), loaded by explicit path for a loop colony only. */
 export const LOOP_EXTENSION = fileURLToPath(new URL('./loop-extension.mjs', import.meta.url));
 
+/**
+ * The skills of the mounted skill packs (docs/skill-packs.md), one `<dir>/skills/<name>` path per
+ * child directory of a pack's skills/ that holds a SKILL.md, sorted by name so the argv is
+ * deterministic. The mothership mounts each COLONIZER_PLUGIN_DIRS directory read-only, so a
+ * missing or unreadable one is skipped silently: absence just means the pack shipped no skills.
+ */
+export function packSkillPaths(pluginDirs = []) {
+  const found = [];
+  for (const raw of pluginDirs) {
+    const dir = String(raw ?? '').trim();
+    if (!dir) continue;
+    let entries;
+    try {
+      entries = readdirSync(join(dir, 'skills'), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && existsSync(join(dir, 'skills', entry.name, 'SKILL.md'))) found.push({ dir, name: entry.name });
+    }
+  }
+  // Skill names are unique across packs (checked at boot), so the name sort needs no tiebreak.
+  return found.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map((skill) => join(skill.dir, 'skills', skill.name));
+}
+
 /** The Pi command line: RPC mode, no session or loadable extras, the gateway model, the colony note
  * and, when the harness switched tools off, an --exclude-tools denylist on top of Pi's default
  * read, bash, edit, write set. With shared memory mounted (`memory`), the memory extension is
  * loaded and the prompt gains one fixed line naming its tools — never any note text. With the operator
  * vault staged (`vault`, issue #777) the same extension is loaded for its vault_search tool. A loop
- * colony (`loop`) also loads the loop-tools extension; the mothership's brief names those tools. */
-export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false, vault = false, loop = false }) {
-  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', ...(memory || vault ? ['--extension', MEMORY_EXTENSION] : []), ...(loop ? ['--extension', LOOP_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
+ * colony (`loop`) also loads the loop-tools extension; the mothership's brief names those tools.
+ * The mounted skill packs' skills (`skills`, from packSkillPaths) load by explicit --skill path:
+ * --no-skills stays, so Pi discovers nothing on its own and the project-scope directories stay out. */
+export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false, vault = false, loop = false, skills = [] }) {
+  return ['--no-session', '--no-extensions', '--no-skills', ...(skills.length ? skills.flatMap((path) => ['--skill', path]) : []), '--no-prompt-templates', ...(memory || vault ? ['--extension', MEMORY_EXTENSION] : []), ...(loop ? ['--extension', LOOP_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
 }
 
 /**
@@ -211,7 +238,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Drives one Pi RPC process through the runner contract. `spawnPi` (the real spawn, injected for
  * tests) gets Pi's args and env; `selection` is what the model setting resolved to.
  */
-export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selection, effort = '', disabledTools = [], env = process.env, cwd = process.cwd(), graceMs = 5000 }) {
+export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selection, effort = '', disabledTools = [], skills = [], env = process.env, cwd = process.cwd(), graceMs = 5000 }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -235,7 +262,7 @@ export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selec
   const loopColony = loopSwitches(env).loop;
   const loopBridge = loopColony ? await createLoopBridge({ emit }) : null;
   const childEnv = loopBridge ? { ...env, COLONIZER_BRIDGE_URL: loopBridge.url, COLONIZER_BRIDGE_TOKEN: loopBridge.token } : env;
-  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, memory: Boolean(env.COLONIZER_MEMORY_DIR), vault: Boolean(env.COLONIZER_VAULT_DIR), loop: loopColony }), env: childEnv, cwd });
+  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, skills, memory: Boolean(env.COLONIZER_MEMORY_DIR), vault: Boolean(env.COLONIZER_VAULT_DIR), loop: loopColony }), env: childEnv, cwd });
   child.stdin.on('error', () => {}); // Pi gone: the exit path reports it, not a broken pipe
 
   /**
@@ -540,13 +567,17 @@ async function main() {
   // Harness-level tool switch (module.json `disabled_tools`, names validated at boot): pi drops
   // them from its default active set via --exclude-tools.
   const disabledTools = (process.env.COLONIZER_DISABLED_TOOLS ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  // Skill packs (docs/skill-packs.md) arrive mounted read-only, one directory per entry of
+  // COLONIZER_PLUGIN_DIRS; their skills load by explicit --skill path, and packSkillPaths skips a
+  // pack that ships no skills, so an empty or unset variable changes no argv at all.
+  const skills = packSkillPaths((process.env.COLONIZER_PLUGIN_DIRS ?? '').split(','));
 
   // The module directory is mounted read-only, so Pi's configuration lives in a fresh private
   // directory: models.json is written 0600 and holds the colony's gateway token in its headers.
   const agentDir = mkdtempSync(join(tmpdir(), 'colonizer-pi-'));
   writeFileSync(join(agentDir, 'models.json'), `${JSON.stringify(buildModelsConfig(routes, model, effort))}\n`, { mode: 0o600 });
   try {
-    await runAgent({ commands, emit, selection: resolveModel(routes, model), effort: EFFORT_LEVELS.has(effort) ? effort : '', disabledTools, env: piEnv(process.env, agentDir), cwd: process.cwd() });
+    await runAgent({ commands, emit, selection: resolveModel(routes, model), effort: EFFORT_LEVELS.has(effort) ? effort : '', disabledTools, skills, env: piEnv(process.env, agentDir), cwd: process.cwd() });
   } finally {
     rmSync(agentDir, { recursive: true, force: true });
   }

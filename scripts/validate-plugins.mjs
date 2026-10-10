@@ -15,6 +15,20 @@
 // | mcp-server (needs a stdio command or remote url) | mcp-remote-hosts (a remote url needs
 // non-empty hosts/allowedHosts, so the sandbox gate keeps working).
 //
+// Agents (issue #1163): every agents/*.md is a Claude Code agent file — frontmatter plus a system
+// prompt — read with a small YAML subset that mirrors parse_agent_frontmatter in
+// crates/colonizer/src/plugins.rs exactly: `key: value` scalars bare or double-quoted, inline
+// arrays `[a, b]` and inline maps `{ k: "v" }`, and one nested block level at exactly two spaces
+// of indent, which only `ant:` opens. Plain Claude Code frontmatter passes unchanged (unknown
+// top-level keys are Claude Code's to add); Colonizer's own fields are judged when present.
+// Rules: agent-frontmatter (a leading and closing --- block, a non-empty name and description,
+// unparseable lines named by their number, non-empty tools/disallowedTools entries) | agent-name
+// (the name is a plain name a la is_plain_name) | agent-caste (the ant block's display_name and
+// caste — forager, soldier, weaver, honeypot, scout, worker or queen — and no unknown ant keys)
+// | agent-colors (exactly body/dark/accent, each a double-quoted #rrggbb string) | agent-skillsets
+// (each entry a plain name) | agent-duplicate (one pack cannot define the same agent name twice;
+// the cross-pack duplicate check runs at boot, plugins.rs check_ant_uniqueness).
+//
 // Wired in at every gate (issue #370): the vendored-plugin updater runs validatePack on the new
 // archive of each pin it stages from that archive and skips the pin when !ok
 // (scripts/update-vendored-plugins.mjs); CI and the updater's proposal workflow stage the pinned
@@ -111,6 +125,189 @@ function serverMap(doc) {
     if (doc[key] && typeof doc[key] === 'object' && !Array.isArray(doc[key])) return doc[key];
   }
   return doc;
+}
+
+// ---- Agent files (issue #1163) ----
+// The YAML subset below mirrors plugins.rs's parse_agent_frontmatter line for line, so a pack
+// fails the same rules in CI and at boot.
+
+/** The castes an ant can hold. */
+const CASTES = ['forager', 'soldier', 'weaver', 'honeypot', 'scout', 'worker', 'queen'];
+
+/** The keys an `ant:` block may carry; anything else is a typo'd identity, refused. */
+const ANT_KEYS = ['display_name', 'caste', 'title', 'colors', 'move'];
+
+/** `key: value` split at the first colon; the key is letters/digits/_/-. */
+const keyValue = (line) => {
+  const colon = line.indexOf(':');
+  if (colon < 0) return null;
+  const key = line.slice(0, colon).trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(key)) return null;
+  return [key, line.slice(colon + 1).trim()];
+};
+
+/** One scalar: double-quoted or bare. `quoted` matters only to ant.colors, whose entries must be
+ * quoted so a bare `#ff0000` — which YAML would read as a comment — is refused instead. */
+const scalar = (raw) => {
+  const value = raw.trim();
+  if (value.startsWith('"')) {
+    if (value.length < 2 || !value.endsWith('"')) return null;
+    return { value: value.slice(1, -1), quoted: true };
+  }
+  return { value, quoted: false };
+};
+
+/** Splits on commas outside double quotes, [...] and {...}, so a nested `{ k: [a, b] }` stays one
+ * item for its consumer to reject. */
+const splitItems = (raw) => {
+  const items = [];
+  let current = '';
+  let quoted = false;
+  let depth = 0;
+  for (const ch of raw) {
+    if (quoted) {
+      if (ch === '"') quoted = false;
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === '[' || ch === '{') {
+      depth += 1;
+    } else if (ch === ']' || ch === '}') {
+      depth -= 1;
+    } else if (ch === ',' && depth === 0) {
+      items.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  items.push(current);
+  return items;
+};
+
+/** An inline array `[a, b]` of scalars; [] is the empty array. */
+const inlineArray = (raw) => {
+  if (!raw.startsWith('[') || !raw.endsWith(']')) return null;
+  const inner = raw.slice(1, -1);
+  if (inner.trim() === '') return [];
+  const items = [];
+  for (const item of splitItems(inner)) {
+    const parsed = scalar(item);
+    if (!parsed) return null;
+    items.push(parsed);
+  }
+  return items;
+};
+
+/** An inline map `{ k: "v" }` of keys to scalars. */
+const inlineMap = (raw) => {
+  if (!raw.startsWith('{') || !raw.endsWith('}')) return null;
+  const inner = raw.slice(1, -1);
+  if (inner.trim() === '') return [];
+  const entries = [];
+  for (const item of splitItems(inner)) {
+    const pair = keyValue(item.trim());
+    if (!pair) return null;
+    const value = scalar(pair[1]);
+    if (!value) return null;
+    entries.push([pair[0], value]);
+  }
+  return entries;
+};
+
+/** The agent-file frontmatter under the shared YAML subset: {errors, scalars, arrays, ant}.
+ * Blank lines are skipped; any other line this cannot read is an agent-frontmatter error naming
+ * the line's number. */
+function parseAgentFrontmatter(file, text) {
+  const errors = [];
+  const cannot = (number, line) =>
+    errors.push(err(file, 'agent-frontmatter', `line ${number}: cannot parse ${JSON.stringify(line)}`));
+  const scalars = {};
+  const arrays = {};
+  let ant = null;
+  const lines = text.split('\n');
+  if ((lines[0] ?? '').trim() !== '---') {
+    errors.push(err(file, 'agent-frontmatter', 'needs a leading --- frontmatter block'));
+    return { errors, scalars, arrays, ant };
+  }
+  const end = lines.findIndex((line, i) => i > 0 && line.trim() === '---');
+  if (end < 0) {
+    errors.push(err(file, 'agent-frontmatter', 'the frontmatter is missing its closing ---'));
+    return { errors, scalars, arrays, ant };
+  }
+  for (let i = 1; i < end; i++) {
+    const line = lines[i];
+    const number = i + 1; // 1-based, counting the opening ---.
+    if (line.trim() === '') continue;
+    // Indented lines belong to the `ant:` block, at exactly two spaces and nothing else.
+    if (line.startsWith(' ') || line.startsWith('\t')) {
+      if (!line.startsWith('  ') || line.startsWith('   ')) {
+        errors.push(err(file, 'agent-frontmatter', `line ${number}: the ant: block is indented exactly two spaces`));
+        continue;
+      }
+      if (!ant) {
+        errors.push(err(file, 'agent-frontmatter', `line ${number}: only ant: opens an indented block`));
+        continue;
+      }
+      const pair = keyValue(line.slice(2));
+      if (!pair) {
+        cannot(number, line);
+        continue;
+      }
+      if (pair[1] === '') {
+        ant.set(pair[0], { value: '', quoted: false });
+        continue;
+      }
+      const value = scalar(pair[1]);
+      if (!value) {
+        cannot(number, line);
+        continue;
+      }
+      ant.set(pair[0], value);
+      continue;
+    }
+    const pair = keyValue(line);
+    if (!pair) {
+      cannot(number, line);
+      continue;
+    }
+    const [key, raw] = pair;
+    if (raw === '') {
+      // `ant:` opens the nested block; any other bare `key:` is an empty scalar, which the
+      // required-field checks refuse where emptiness matters.
+      if (key === 'ant') ant = new Map();
+      else scalars[key] = { value: '', quoted: false };
+      continue;
+    }
+    if (key === 'ant') {
+      // An inline `ant: { display_name: "Sarge", caste: forager }` reads like the block form;
+      // anything else spelled after `ant:` cannot be one.
+      const entries = inlineMap(raw);
+      if (!entries) {
+        errors.push(
+          err(file, 'agent-frontmatter', `line ${number}: ant: must be a block indented two spaces or an inline map`),
+        );
+        continue;
+      }
+      ant = new Map(entries);
+      continue;
+    }
+    if (raw.startsWith('[')) {
+      const items = inlineArray(raw);
+      if (!items) {
+        cannot(number, line);
+        continue;
+      }
+      arrays[key] = items;
+      continue;
+    }
+    const value = scalar(raw);
+    if (!value) {
+      cannot(number, line);
+      continue;
+    }
+    scalars[key] = value;
+  }
+  return { errors, scalars, arrays, ant };
 }
 
 export function validatePack(dir) {
@@ -217,6 +414,109 @@ export function validatePack(dir) {
         errors.push(
           err(`skills/${entry.name}/SKILL.md`, 'skill-frontmatter', `SKILL.md needs a leading --- block with non-empty ${key}:`),
         );
+      }
+    }
+  }
+
+  // Agents (issue #1163): every agents/*.md is an ant file — Claude Code frontmatter plus, when
+  // present, Colonizer's `ant:` identity. One pack cannot define the same agent name twice (case
+  // matters to nobody's eyes: compared like skill names); the cross-pack duplicate check runs at
+  // boot (check_ant_uniqueness in plugins.rs).
+  let agentFiles = [];
+  try {
+    agentFiles = readdirSync(at('agents'), { withFileTypes: true })
+      .map((e) => e.name)
+      .filter((name) => name.endsWith('.md') && isFileAt(at(`agents/${name}`)))
+      .sort();
+  } catch {
+    agentFiles = [];
+  }
+  const agentNames = new Map();
+  for (const name of agentFiles) {
+    const rel = `agents/${name}`;
+    const { errors: parseErrors, scalars, arrays, ant } = parseAgentFrontmatter(rel, readFileSync(at(rel), 'utf8'));
+    errors.push(...parseErrors);
+    const agentName = scalars.name?.value;
+    if (!agentName || agentName.trim() === '') {
+      errors.push(err(rel, 'agent-frontmatter', 'needs a non-empty name:'));
+    } else if (!isPlainName(agentName)) {
+      errors.push(err(rel, 'agent-name', `name ${JSON.stringify(agentName)} is not a plain, filesystem-safe name`));
+    }
+    if (!scalars.description || scalars.description.value.trim() === '') {
+      errors.push(err(rel, 'agent-frontmatter', 'needs a non-empty description:'));
+    }
+    for (const key of ['tools', 'disallowedTools']) {
+      if (arrays[key]?.some((item) => item.value.trim() === '')) {
+        errors.push(err(rel, 'agent-frontmatter', `${key}: entries must be non-empty strings`));
+      }
+    }
+    if (arrays.skillsets) {
+      for (const item of arrays.skillsets) {
+        if (!isPlainName(item.value)) {
+          errors.push(err(rel, 'agent-skillsets', `skillset ${JSON.stringify(item.value)} is not a plain, filesystem-safe name`));
+        }
+      }
+    }
+    for (const key of ['model', 'effort']) {
+      if (arrays[key]) {
+        errors.push(err(rel, 'agent-frontmatter', `${key}: must be a string`));
+      }
+    }
+    if (ant) {
+      for (const key of ant.keys()) {
+        if (!ANT_KEYS.includes(key)) {
+          errors.push(err(rel, 'agent-caste', `unknown ant field ${JSON.stringify(key)} (known: ${ANT_KEYS.join(', ')})`));
+        }
+      }
+      const displayName = ant.get('display_name');
+      if (!displayName || displayName.value.trim() === '') {
+        errors.push(err(rel, 'agent-caste', 'the ant block needs a non-empty display_name:'));
+      }
+      const caste = ant.get('caste');
+      if (!caste || caste.value === '') {
+        errors.push(err(rel, 'agent-caste', `the ant block needs a caste: one of ${CASTES.join(', ')}`));
+      } else if (!CASTES.includes(caste.value)) {
+        errors.push(err(rel, 'agent-caste', `unknown ant caste ${JSON.stringify(caste.value)}`));
+      }
+      for (const key of ['title', 'move']) {
+        const field = ant.get(key);
+        if (field && field.value.trim() === '') {
+          errors.push(err(rel, 'agent-caste', `ant.${key} must be a non-empty string`));
+        }
+      }
+      const colors = ant.get('colors');
+      if (colors) {
+        const entries = inlineMap(colors.value);
+        if (!entries) {
+          errors.push(
+            err(rel, 'agent-colors', 'ant.colors must be an inline map { body: "#rrggbb", dark: "#rrggbb", accent: "#rrggbb" }'),
+          );
+        } else {
+          const seen = new Set();
+          for (const [key, field] of entries) {
+            if (!['body', 'dark', 'accent'].includes(key)) {
+              errors.push(err(rel, 'agent-colors', `unknown ant color ${JSON.stringify(key)} (known: body, dark, accent)`));
+              continue;
+            }
+            if (!field.quoted || !/^#[0-9a-fA-F]{6}$/.test(field.value)) {
+              errors.push(err(rel, 'agent-colors', `ant.colors.${key} must be a double-quoted #rrggbb hex string`));
+            }
+            seen.add(key);
+          }
+          for (const key of ['body', 'dark', 'accent']) {
+            if (!seen.has(key)) {
+              errors.push(err(rel, 'agent-colors', `ant.colors must list ${key}: (body, dark, accent)`));
+            }
+          }
+        }
+      }
+    }
+    const key = agentName?.toLowerCase();
+    if (key) {
+      if (agentNames.has(key)) {
+        errors.push(err(rel, 'agent-duplicate', `duplicate agent name ${JSON.stringify(agentName)} (also agents/${agentNames.get(key)})`));
+      } else {
+        agentNames.set(key, name);
       }
     }
   }

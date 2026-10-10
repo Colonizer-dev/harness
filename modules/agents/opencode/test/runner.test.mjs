@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { AsyncQueue, MAX_TOOL_OUTPUT, archPlatform, createBridge, defaultCacheDir, loopEnv, mapLine, opencodeConfig, parseRoutes, preflight, resolveOpencode, runAgent, splitModel } from '../runner.mjs';
+import { AsyncQueue, MAX_TOOL_OUTPUT, archPlatform, createBridge, defaultCacheDir, loopEnv, mapLine, opencodeConfig, packSkills, parseRoutes, preflight, resolveOpencode, runAgent, splitModel } from '../runner.mjs';
 
 const ROUTES = parseRoutes(JSON.stringify([
   { provider: 'local', prefix: 'local/', base_url: 'http://gw:41750/providers/local', auth: 'none', headers: { 'x-colonizer-colony': 'tok' }, timeout_secs: 900, context_tokens: 131072 },
@@ -76,6 +76,39 @@ test('config maps a local auth:none route onto the gateway', () => {
 test('disabled tools deny just those ids and leave everything else allowed', () => {
   const cfg = opencodeConfig({ routes: ROUTES, model: 'local/fake', smallModel: '', disabledTools: ['bash', 'webfetch'] });
   assert.deepEqual(cfg.permission, { '*': 'allow', bash: 'deny', webfetch: 'deny' });
+});
+
+test('a vendored pack skill is discoverable, and every other skill stays denied', () => {
+  const pack = mkdtempSync(join(tmpdir(), 'archify-')); // stands in for the read-only /opt/colonizer/plugins/archify
+  try {
+    mkdirSync(join(pack, 'skills', 'grafter'), { recursive: true });
+    writeFileSync(join(pack, 'skills', 'grafter', 'SKILL.md'), '---\nname: grafter\n---\n');
+    mkdirSync(join(pack, 'skills', 'empty')); // a skill directory without SKILL.md is not a skill
+    writeFileSync(join(pack, 'skills', 'stray.md'), 'not a directory');
+    const skills = packSkills([pack, '  ', join(pack, 'absent'), join(pack, 'skills', 'grafter', 'SKILL.md')]);
+    assert.deepEqual(skills, { paths: [join(pack, 'skills', 'grafter')], names: ['grafter'] });
+    const cfg = opencodeConfig({ routes: ROUTES, model: 'local/fake', smallModel: '', skills });
+    assert.deepEqual(cfg.skills, { paths: [join(pack, 'skills', 'grafter')] });
+    assert.deepEqual(cfg.permission.skill, { '*': 'deny', grafter: 'allow' }); // deny-all first: OpenCode takes the last match
+    assert.deepEqual(Object.keys(cfg.permission.skill), ['*', 'grafter']);
+    assert.deepEqual(Object.keys(cfg.permission), ['*', 'skill']); // the `*` allow still comes first
+  } finally {
+    rmSync(pack, { recursive: true, force: true });
+  }
+});
+
+test('pack skills with the skill tool switched off keep the string deny and the paths', () => {
+  const cfg = opencodeConfig({ routes: ROUTES, model: 'local/fake', smallModel: '', disabledTools: ['skill'], skills: { paths: ['/opt/colonizer/plugins/archify/skills/archify'], names: ['archify'] } });
+  assert.deepEqual(cfg.permission, { '*': 'allow', skill: 'deny' }); // no permission object: no skill loads at all
+  assert.deepEqual(cfg.skills, { paths: ['/opt/colonizer/plugins/archify/skills/archify'] });
+});
+
+test('missing and skill-less pack dirs are skipped; without packs the config is today\'s', () => {
+  assert.deepEqual(packSkills([]), { paths: [], names: [] });
+  assert.deepEqual(packSkills(['', '   ', '/nonexistent-pack']), { paths: [], names: [] });
+  const cfg = opencodeConfig({ routes: ROUTES, model: 'local/fake', smallModel: '', skills: packSkills(['/nonexistent-pack']) });
+  assert.equal(cfg.skills, undefined);
+  assert.equal(cfg.permission, 'allow');
 });
 
 test('preflight names the fix for every unrouted model', () => {

@@ -579,67 +579,57 @@ async fn finish(app: &Shared, id: &str, signature: &str, ended: Ended) {
         confidence,
         outcome: crate::util::truncate(&outcome, OUTCOME_CHARS),
     };
+    // The log line goes first and the note and its flag land in one update after it, so whoever
+    // sees the note — the cockpit, a test, the next turn's budget check — also sees the flag and
+    // the line that explain it, never the note alone.
+    let (level, line) = match &why {
+        Some(why) => (
+            "warn",
+            format!(
+                "operator: left for you ({}): {}",
+                why,
+                crate::util::truncate(&note.diagnosis, 200)
+            ),
+        ),
+        None if note.action == "stood_down" => (
+            "info",
+            format!(
+                "operator: stood down ({}): {}",
+                note.outcome,
+                crate::util::truncate(&note.diagnosis, 120)
+            ),
+        ),
+        None => (
+            "info",
+            format!(
+                "operator: diagnosed {}, did {} ({})",
+                crate::util::truncate(&note.diagnosis, 120),
+                note.action,
+                note.outcome
+            ),
+        ),
+    };
+    app.session_log_as(Origin::Watchdog, id, level, line).await;
+    let escalation = why.map(|why| {
+        json!({
+            "reason": ESCALATION_REASON,
+            "since": Utc::now(),
+            "detail": crate::util::truncate(&format!("{why}; {}", note.diagnosis), OUTCOME_CHARS),
+        })
+    });
     app.update_session(id, |x| {
-        x.operator.push(note.clone());
+        // The simplest safe rule: an escalation never replaces a security hold — that flag is a
+        // person's, whatever the model concluded. Any other attention is fair game.
+        if let Some(flag) = escalation
+            && !crate::playbook::is_security_hold(x.attention.as_ref())
+        {
+            x.attention = Some(flag);
+        }
+        x.operator.push(note);
         let extra = x.operator.len().saturating_sub(KEPT_NOTES);
         x.operator.drain(..extra);
     })
     .await;
-    match why {
-        Some(why) => {
-            let since = Utc::now();
-            // The simplest safe rule: an escalation never replaces a security hold — that flag is a
-            // person's, whatever the model concluded. Any other attention is fair game.
-            app.update_session(id, |x| {
-                if !crate::playbook::is_security_hold(x.attention.as_ref()) {
-                    x.attention = Some(json!({
-                        "reason": ESCALATION_REASON,
-                        "since": since,
-                        "detail": crate::util::truncate(&format!("{why}; {}", note.diagnosis), OUTCOME_CHARS),
-                    }));
-                }
-            })
-            .await;
-            app.session_log_as(
-                Origin::Watchdog,
-                id,
-                "warn",
-                format!(
-                    "operator: left for you ({}): {}",
-                    why,
-                    crate::util::truncate(&note.diagnosis, 200)
-                ),
-            )
-            .await;
-        }
-        None if note.action == "stood_down" => {
-            app.session_log_as(
-                Origin::Watchdog,
-                id,
-                "info",
-                format!(
-                    "operator: stood down ({}): {}",
-                    note.outcome,
-                    crate::util::truncate(&note.diagnosis, 120)
-                ),
-            )
-            .await;
-        }
-        None => {
-            app.session_log_as(
-                Origin::Watchdog,
-                id,
-                "info",
-                format!(
-                    "operator: diagnosed {}, did {} ({})",
-                    crate::util::truncate(&note.diagnosis, 120),
-                    note.action,
-                    note.outcome
-                ),
-            )
-            .await;
-        }
-    }
 }
 
 /// Applies an acted verdict to the fresh session [`due_session`] returned. Each action re-checks,
