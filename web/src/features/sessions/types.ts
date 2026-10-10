@@ -39,7 +39,9 @@ export type AttentionReason =
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
   | "provider_retry"
   /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
-  | "looping";
+  | "looping"
+  /** The operator turn (issue #1192) diagnosed a stall no playbook row matched and needs a person; `detail` carries its diagnosis. */
+  | "operator_escalation";
 
 /** One thing the watchdog's remediation playbook fixed on a colony by itself (issue #1191). */
 export interface AutoFix {
@@ -50,6 +52,21 @@ export interface AutoFix {
   at: string;
   /** One line for a person. */
   detail: string;
+}
+
+/** One operator turn on a colony (issue #1192): the diagnosis, the action taken, and how it ended. */
+export interface OperatorNote {
+  /** The stable key the trigger derives — the attention reason plus the denial kind, e.g. `stalled+secret-paths`. */
+  signature: string;
+  /** The model's diagnosis, in its own words. */
+  diagnosis: string;
+  /** `message`, `publish`, `resume`, `stop`, `switch_model` or `escalate`. */
+  action: string;
+  /** What the model said, 0 to 1. */
+  confidence: number;
+  at: string;
+  /** One line for a person: what the turn did. */
+  outcome: string;
 }
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
@@ -316,6 +333,8 @@ export interface Session {
   attention?: Attention | null;
   /** What the watchdog playbook fixed here by itself (issue #1191), oldest first; absent when nothing. */
   auto_fixes?: AutoFix[];
+  /** What the operator turn did here by itself (issue #1192), oldest first; absent when nothing. */
+  operator?: OperatorNote[];
   /**
    * True while the colony is `failed` and nobody has opened it since (issue #744): the badge and
    * the mothership's attention count include it until POST /api/sessions/{id}/seen marks it looked
