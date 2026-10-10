@@ -2722,7 +2722,14 @@ pub async fn publish(
         .await;
     }
     let screen = ScreenGate::of(app.clone(), s).await;
-    run_publish_with(&ops, screen.as_ref(), grant).await
+    let published = run_publish_with(&ops, screen.as_ref(), grant).await;
+    // A loop colony's template may have asked for labels on its pull request (`out/pr-labels`,
+    // issue #1037): applied once the pull request exists — opened just now, or found already
+    // open — best effort, and never the publish's failure.
+    if let Ok(Published::PullRequest(url)) = &published {
+        crate::loops::pr_labels::apply(app, s, log, url).await;
+    }
+    published
 }
 
 /// The tree a publish approval binds (issue #98): what `stage_all` + `commit` would produce from
