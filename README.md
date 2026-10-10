@@ -48,12 +48,13 @@ cargo install colonizer-harness --locked && colonizer setup
   and a real terminal are right there.
 - **Decisions, not prose.** When the agent needs you, it asks with choices. When the work is done, your
   machine, the mothership, commits it and opens the pull request.
-- **The open-source core.** MIT, running on one machine today: Linux with KVM, or an Apple Silicon Mac.
-  The hosted Colonizer is not built yet.
+- **The open-source core.** MIT, running on one machine today: Linux with KVM, an Apple Silicon Mac,
+  or Windows 11 through [WSL2](docs/install.md#on-windows-wsl2). The hosted Colonizer is not built yet.
 
 ## Run it
 
-You need `git`, `gh`, `curl` and `tar`. On Linux, give your user `/dev/kvm`
+You need `git`, `gh`, `curl` and `tar`. On Linux — or Windows 11 through
+[WSL2](docs/install.md#on-windows-wsl2) — give your user `/dev/kvm`
 (`sudo usermod -aG kvm "$USER"`, then log out and back in) and install native Claude Code, which
 colonies run. Install the latest [release](https://github.com/Colonizer-dev/harness/releases) with a
 Rust toolchain (1.88 or newer), or without one by piping the installer script instead — the crate is

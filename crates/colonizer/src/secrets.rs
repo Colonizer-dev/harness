@@ -3,7 +3,8 @@
 //! Every saved secret — provider keys, the GitHub and Claude tokens, voice, memory and notification
 //! keys — is read and written through `util::{read,write,delete}_secret`, keyed by its file path
 //! under the config directory. This module sits underneath those three: a secret whose index entry
-//! says `keychain` lives in the system keychain (Keychain on macOS, the Secret Service on Linux) as
+//! says `keychain` lives in the system keychain (Keychain on macOS, the Secret Service on Linux,
+//! the Windows Credential Manager on Windows) as
 //! a generic password under service [`SERVICE`] and account = its path relative to the config dir;
 //! every other secret stays the file it always was, so an existing install keeps working unchanged.
 //!
@@ -62,14 +63,16 @@ pub trait Backend: Send + Sync {
 }
 
 /// The system keychain through the `keyring` crate.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub struct OsKeychain;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 impl Backend for OsKeychain {
     fn name(&self) -> &'static str {
         if cfg!(target_os = "macos") {
             "macOS Keychain"
+        } else if cfg!(target_os = "windows") {
+            "Windows Credential Manager"
         } else {
             "Secret Service"
         }
@@ -99,10 +102,28 @@ impl Backend for OsKeychain {
 
 /// The platform's keychain, where there is one.
 pub fn os_backend() -> Option<Box<dyn Backend>> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     return Some(Box::new(OsKeychain));
     #[allow(unreachable_code)]
     None
+}
+
+/// True when a `/proc/sys/kernel/osrelease` string says this Linux is really WSL, where the Secret
+/// Service usually has no session bus to answer. Microsoft's kernels carry the mark in both WSL1
+/// (`4.4.0-19041-Microsoft`) and WSL2 (`5.15.153.1-microsoft-standard-WSL2`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn wsl(osrelease: &str) -> bool {
+    osrelease.to_ascii_lowercase().contains("microsoft")
+}
+
+/// Whether this host runs under WSL, read once; `false` off Linux, where there is no `/proc`.
+fn running_under_wsl() -> bool {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    static WSL: OnceLock<bool> = OnceLock::new();
+    #[cfg(target_os = "linux")]
+    return *WSL.get_or_init(|| std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|s| wsl(&s)));
+    #[allow(unreachable_code)]
+    false
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +139,10 @@ pub struct Health {
     /// Why the keychain is not in use, in words the cockpit shows as they are.
     pub reason: Option<String>,
     pub checked_at: Option<DateTime<Utc>>,
+    /// True when this Linux is WSL: the mothership cannot reach the Windows Credential Manager
+    /// there, so the file store is the plan rather than a fault — the cockpit says so instead of
+    /// the desktop-session hint.
+    pub wsl: bool,
 }
 
 pub struct Store {
@@ -157,6 +182,7 @@ impl Store {
                 backend: name,
                 reason: Some("not checked yet".into()),
                 checked_at: None,
+                wsl: running_under_wsl(),
             }),
         }
     }
@@ -969,5 +995,14 @@ mod tests {
             "the row goes with the copy"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// WSL1 and WSL2 both carry Microsoft's mark in the kernel string; a plain Linux does not.
+    #[test]
+    fn the_kernel_release_string_tells_wsl_from_plain_linux() {
+        assert!(wsl("5.15.153.1-microsoft-standard-WSL2"));
+        assert!(wsl("4.4.0-19041-Microsoft"));
+        assert!(!wsl("6.8.0-45-generic"));
+        assert!(!wsl(""));
     }
 }

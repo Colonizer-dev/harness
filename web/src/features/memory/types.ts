@@ -136,10 +136,12 @@ export interface SecretRow {
 
 export interface KeychainHealth {
   available: boolean;
-  /** "macOS Keychain", "Secret Service", or "none". */
+  /** "macOS Keychain", "Secret Service", "Windows Credential Manager", or "none". */
   backend: string;
   reason: string | null;
   checked_at: string | null;
+  /** True when this Linux is WSL: the Windows Credential Manager is unreachable, so secrets stay 0600 files. Absent from an older mothership. */
+  wsl?: boolean;
 }
 
 export interface SecretsListing {
