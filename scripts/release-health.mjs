@@ -20,8 +20,8 @@ import { fileURLToPath } from 'node:url';
 const REPO = 'Colonizer-dev/harness';
 const SITE = 'https://colonizer.dev';
 const CRATES = ['colonizer-harness', 'colonizer-agentd'];
-// Keep in step with the assets release.yml attaches.
-const ASSETS = ['colonizer-linux-x86_64.tar.gz', 'colonizer-darwin-arm64.tar.gz', 'install.sh', 'SHA256SUMS'];
+// Keep in step with the assets release.yml attaches, Colonizer-arm64.dmg included (#1138).
+export const ASSETS = ['colonizer-linux-x86_64.tar.gz', 'colonizer-darwin-arm64.tar.gz', 'Colonizer-arm64.dmg', 'install.sh', 'SHA256SUMS'];
 const USER_AGENT = 'colonizer-release-health';
 
 const args = process.argv.slice(2);
@@ -38,32 +38,40 @@ const record = (ok, text) => checks.push({ ok, text });
 const recordIf = (ok, onOk, onFail) => record(ok, ok ? onOk : onFail);
 
 // Downloads and the site get no Authorization, so a redirect to the asset host is followed cleanly.
-async function get(url, headers = UA) {
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(600000) });
+async function get(url, headers = UA, fetchImpl = fetch) {
+  const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(600000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res;
 }
-const text = async (url) => (await get(url)).text();
+const text = async (url, fetchImpl = fetch) => (await get(url, UA, fetchImpl)).text();
 
-async function releaseChecks(tag) {
+// The GitHub half of the checks, returned like siteChecks' results so the test can drive them
+// offline. Records nothing into the module's own `checks`, which belongs to a whole run.
+export async function releaseChecks(tag, { fetchImpl = fetch } = {}) {
+  const records = [];
+  const record = (ok, text) => records.push({ ok, text });
+  const recordIf = (ok, onOk, onFail) => record(ok, ok ? onOk : onFail);
+
   let release;
   try {
-    release = await get(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`, API).then((r) => r.json());
+    release = await get(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`, API, fetchImpl).then((r) => r.json());
   } catch (e) {
-    return record(false, `**release** — no GitHub release for ${tag} (${e.message})`);
+    record(false, `**release** — no GitHub release for ${tag} (${e.message})`);
+    return records;
   }
   const present = new Set(release.assets.map((a) => a.name));
   const missing = ASSETS.filter((name) => !present.has(name));
   recordIf(missing.length === 0, `**release** — all ${ASSETS.length} assets present`,
     `**release** — missing ${missing.join(', ')}`);
-  if (missing.length) return;
+  if (missing.length) return records;
 
   const base = `https://github.com/${REPO}/releases/download/${tag}`;
   let sums;
   try {
-    sums = await text(`${base}/SHA256SUMS`);
+    sums = await text(`${base}/SHA256SUMS`, fetchImpl);
   } catch (e) {
-    return record(false, `**checksums** — could not read SHA256SUMS (${e.message})`);
+    record(false, `**checksums** — could not read SHA256SUMS (${e.message})`);
+    return records;
   }
   const lines = sums.split('\n').map((l) => l.trim()).filter(Boolean);
   const listed = lines.map((l) => (l.split(/\s+/)[1] ?? '').replace(/^\*/, ''));
@@ -76,7 +84,7 @@ async function releaseChecks(tag) {
     const [want, raw] = line.split(/\s+/);
     const name = (raw ?? '').replace(/^\*/, '');
     try {
-      const body = Buffer.from(await (await get(`${base}/${name}`)).arrayBuffer());
+      const body = Buffer.from(await (await get(`${base}/${name}`, UA, fetchImpl)).arrayBuffer());
       const got = createHash('sha256').update(body).digest('hex');
       if (got !== want) bad.push(`${name} (sha256 ${got})`);
     } catch (e) {
@@ -84,6 +92,7 @@ async function releaseChecks(tag) {
     }
   }
   recordIf(bad.length === 0, `**checksums** — ${lines.length} files match SHA256SUMS`, `**checksums** — ${bad.join(', ')}`);
+  return records;
 }
 
 async function crateChecks(version) {
@@ -166,7 +175,7 @@ async function main() {
   const version = tag.replace(/^v/, '');
 
   console.log(`## Release health: ${tag}\n`);
-  await releaseChecks(tag);
+  checks.push(...await releaseChecks(tag));
   await crateChecks(version);
   checks.push(...await siteChecks(tag));
   if (forceFailure) record(false, '**forced failure** — the workflow was run with force_failure');

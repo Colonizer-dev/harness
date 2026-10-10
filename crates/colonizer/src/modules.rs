@@ -60,6 +60,10 @@ pub struct AgentModule {
     /// declared as `"loop_tools": true` in the manifest. A loop's brief only names the tools when
     /// the module it launches on declares them.
     pub loop_tools: bool,
+    /// Whether the runner loads skill packs (issue #1164), declared as `"skill_packs": true` in the
+    /// manifest. Boot mounts the Skillsets setting's packs for a module that declares this and
+    /// warns on one that does not, so the setting's reach is the module's own word, not a hardcoded id.
+    pub skill_packs: bool,
 }
 
 /// The manifest's `requires` declaration (issue #633): the binaries a colony needs on its `PATH`,
@@ -406,6 +410,7 @@ impl AgentModule {
             egress: None,
             resume_dir: None,
             loop_tools: false,
+            skill_packs: false,
         }
     }
 
@@ -521,6 +526,12 @@ pub fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         None => false,
         Some(value) => value.as_bool().ok_or("\"loop_tools\" must be a boolean")?,
     };
+    // A pack-loading flag that is anything but a boolean would have boot mounting the Skillsets
+    // setting's packs at a runner that never reads them, so name the manifest problem now.
+    let skill_packs = match manifest.get("skill_packs") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("\"skill_packs\" must be a boolean")?,
+    };
     // A declared egress omitting a host its secrets are for would have the allowlist (#304) break
     // the requests those secrets authenticate; with no section, nothing is held to this.
     if let Some(egress) = &egress {
@@ -548,6 +559,7 @@ pub fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         egress,
         resume_dir,
         loop_tools,
+        skill_packs,
     })
 }
 
@@ -599,6 +611,8 @@ pub struct Provider {
     pub schema: Value,
     /// Agent kind only: whether the module's runner serves the loop tools (`loop_tools`, #643).
     pub loop_tools: bool,
+    /// Agent kind only: whether the module's runner loads skill packs (`skill_packs`, #1164).
+    pub skill_packs: bool,
 }
 
 pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
@@ -608,6 +622,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         description: description.into(),
         schema,
         loop_tools: false,
+        skill_packs: false,
     };
     match kind {
         "source" => vec![p(
@@ -709,6 +724,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 description: a.description.clone(),
                 schema: a.schema.clone(),
                 loop_tools: a.loop_tools,
+                skill_packs: a.skill_packs,
             })
             .collect(),
         "interfaces" => vec![p(
@@ -894,6 +910,7 @@ fn describe_kind(kind: &str, choice: &ModuleChoice, app: &App) -> Value {
             // Only the agent kind's rows say it: the loop tools are a runner capability (#643).
             if kind == "agent" {
                 row["loop_tools"] = json!(p.loop_tools);
+                row["skill_packs"] = json!(p.skill_packs);
             }
             row
         }).collect::<Vec<_>>(),

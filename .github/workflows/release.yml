@@ -6,12 +6,14 @@
 #   static musl binaries built inside rust:1-alpine. That is `docker run` from an ordinary job, because
 #   GitHub's JavaScript actions don't run inside Alpine containers.
 # - bundle: scripts/install.sh --bundle for each platform, then a smoke test: the app starts from the
-#   unpacked archive, finds its assets there, and serves its API and web UI.
+#   unpacked archive, finds its assets there, and serves its API and web UI. The macOS leg wraps its
+#   tarball in Colonizer.app: signed ad hoc, or Developer ID-signed and notarized on a tag push when
+#   the APPLE_* secrets are configured in the release environment.
 # - release: tags only. The tag has to match the version of both crates. Every published artifact — the
-#   tarballs, install.sh and SHA256SUMS — is attested with build provenance, and the release is created
-#   as a draft, given all its assets, and only then published. The draft step is what makes the release
-#   safe for GitHub's immutable releases, which freeze the assets and the tag the moment a release is
-#   published, so nothing can be added or replaced afterwards. Immutability itself is a repository
+#   tarballs, the DMG, install.sh and SHA256SUMS — is attested with build provenance, and the release is
+#   created as a draft, given all its assets, and only then published. The draft step is what makes
+#   the release safe for GitHub's immutable releases, which freeze the assets and the tag the moment a
+#   release is published, so nothing can be added or replaced afterwards. Immutability itself is a repository
 #   setting (Settings → Releases → "Enable release immutability"), not anything a workflow can commit:
 #   this workflow is ready for it, and flipping that toggle is the missing half.
 # - crates: tags only, after the release. Publishes colonizer-agentd and colonizer-harness to crates.io
@@ -35,6 +37,7 @@ on:
       - scripts/build-agentd.sh
       - scripts/build-rtk.sh
       - scripts/build-tailscaled.sh
+      - scripts/build-dmg.sh
       - scripts/fetch-vendor.sh
   workflow_dispatch:
 
@@ -111,9 +114,21 @@ jobs:
             guest: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # An empty environment name is "no environment" (the workflow syntax docs): a tag push runs in the
+    # `release` environment and sees its APPLE_* secrets, a pull request runs in none and stays ad
+    # hoc. Step-level `if` cannot read `secrets.*`, so these flags carry secret presence down to the
+    # steps below; they hold yes/no, never the secrets themselves.
+    environment: ${{ startsWith(github.ref, 'refs/tags/') && 'release' || '' }}
     env:
       PLATFORM: ${{ matrix.platform }}
       VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
+      APPLE_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' && 'yes' || 'no' }}
+      APPLE_SIGNING: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' && secrets.APPLE_DEVELOPER_ID_P12_PASSWORD != '' && 'yes' || 'no' }}
+      APPLE_NOTARY: ${{ secrets.APPLE_NOTARY_KEY_P8 != '' && secrets.APPLE_NOTARY_KEY_ID != '' && secrets.APPLE_NOTARY_ISSUER_ID != '' && 'yes' || 'no' }}
+    outputs:
+      # The publish job has no environment and reads no secrets, so notarization reaches it as
+      # this job's output rather than as another look at the secret list.
+      dmg_notarized: ${{ steps.notarize.outputs.dmg_notarized }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -151,6 +166,57 @@ jobs:
         run: |
           chmod 755 prebuilt/*
           COLONIZER_PREBUILT="$PWD/prebuilt" scripts/install.sh --bundle
+
+      # The macOS signing and notarization secrets, issue #1138. A Developer ID signature on the
+      # mothership binary and the app is what makes macOS Keychain grants survive updates: the grant
+      # is tied to the signing identity, and a release signed with the same certificate every time
+      # keeps it. The certificate (a base64 .p12) is unpacked into a throwaway keychain under
+      # $RUNNER_TEMP and deleted again at the end of the job.
+      - name: Refuse a partial set of Apple credentials
+        if: matrix.platform == 'darwin-arm64' && env.APPLE_P12 == 'yes' && (env.APPLE_SIGNING != 'yes' || env.APPLE_NOTARY != 'yes')
+        run: |
+          if [ "$APPLE_SIGNING" != yes ]; then
+            echo "APPLE_DEVELOPER_ID_P12 is set without APPLE_DEVELOPER_ID_P12_PASSWORD, the certificate's" >&2
+            echo "export password, so it cannot be imported. Set the password or remove the certificate." >&2
+          fi
+          if [ "$APPLE_NOTARY" != yes ]; then
+            echo "APPLE_DEVELOPER_ID_P12 is set, but notarization also needs APPLE_NOTARY_KEY_P8," >&2
+            echo "APPLE_NOTARY_KEY_ID and APPLE_NOTARY_ISSUER_ID in the release environment." >&2
+          fi
+          echo "A Developer ID signature without a notarization ticket is still Gatekeeper-blocked," >&2
+          echo "so set all five APPLE_* secrets, or none and keep the ad hoc DMG." >&2
+          exit 1
+
+      - name: Import the Developer ID certificate
+        if: matrix.platform == 'darwin-arm64' && env.APPLE_SIGNING == 'yes'
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/colonizer-signing.keychain"
+          pass=$(openssl rand -hex 32)
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          printf '%s' "$APPLE_DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          # Lets codesign use the imported key without a GUI prompt for it.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$pass" "$keychain"
+          # codesign resolves the identity through the keychain search list, so the build keychain
+          # becomes it; the job uses nothing from the login keychain, which the runner forgets anyway.
+          security list-keychains -d user -s "$keychain"
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk '/^ *[0-9]+\) / { print $2; exit }')
+          [ -n "$identity" ] || { echo "no valid codesigning identity in APPLE_DEVELOPER_ID_P12" >&2; exit 1; }
+          echo "DMG_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      # Signed before the Package step tars it, so both the tarball and the DMG carry the release
+      # identity. --identifier matches what install-release.sh re-signs with (docs/updates.md).
+      - name: Sign the mothership binary
+        if: matrix.platform == 'darwin-arm64' && env.APPLE_SIGNING == 'yes'
+        run: |
+          codesign --force --options runtime --timestamp --sign "$DMG_SIGN_IDENTITY" \
+            --identifier dev.colonizer.mothership dist/bin/colonizer
+          codesign --verify --strict dist/bin/colonizer
 
       - name: Package
         run: |
@@ -203,13 +269,63 @@ jobs:
           curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:17878/ | grep -qi '<html'
           kill "$pid"
 
-      # The unsigned (ad hoc) macOS app, issue #1138 phase 1: Colonizer.app around the tarball just
-      # built and smoke-tested, in a DMG with a stable name. No Developer ID, no notarization.
+      # Colonizer.app around the tarball just built and smoke-tested, in a DMG with a stable name:
+      # ad hoc unless the Developer ID identity above was imported, in which case build-dmg.sh signs
+      # the app and the DMG with it (and the notarization step below attaches the ticket).
       - name: Build the macOS app (DMG)
         if: matrix.platform == 'darwin-arm64'
+        env:
+          COLONIZER_DMG_IDENTITY: ${{ env.DMG_SIGN_IDENTITY || '-' }}
         run: |
           scripts/build-dmg.sh "out/colonizer-$PLATFORM.tar.gz" "$VERSION" out/Colonizer-arm64.dmg
           hdiutil verify out/Colonizer-arm64.dmg
+
+      # The ticket is what turns the Developer ID signature into a DMG Gatekeeper opens without an
+      # "Open Anyway". A submission that is not Accepted fails the job, printing Apple's log.
+      - name: Notarize and staple the DMG
+        id: notarize
+        if: matrix.platform == 'darwin-arm64' && env.APPLE_SIGNING == 'yes' && env.APPLE_NOTARY == 'yes'
+        env:
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          dmg=out/Colonizer-arm64.dmg
+          key="$RUNNER_TEMP/notary-key.p8"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$key"
+          rejected=
+          answer=$(xcrun notarytool submit "$dmg" --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" --wait --output-format json) || rejected=1
+          printf '%s\n' "$answer"
+          id=$(printf '%s' "$answer" | jq -r '.id // empty')
+          status=$(printf '%s' "$answer" | jq -r '.status // empty')
+          if [ -n "$rejected" ] || [ "$status" != Accepted ]; then
+            # Apple's verdict on why it was rejected; notarytool log needs the submission id.
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" \
+                --issuer "$APPLE_NOTARY_ISSUER_ID" || true
+            fi
+            exit 1
+          fi
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          hdiutil verify "$dmg"
+          spctl --assess --type open --context context:primary-signature -v "$dmg"
+          echo "dmg_notarized=yes" >> "$GITHUB_OUTPUT"
+          # And the app a user would actually open, assessed where it ships: on the image itself.
+          mount="$RUNNER_TEMP/dmg"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          rc=0
+          spctl --assess --type execute -v "$mount/Colonizer.app" || rc=$?
+          hdiutil detach "$mount"
+          exit "$rc"
+
+      - name: Remove the signing material
+        if: always() && matrix.platform == 'darwin-arm64'
+        run: |
+          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary-key.p8"
+          security delete-keychain "$RUNNER_TEMP/colonizer-signing.keychain" 2>/dev/null || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -239,6 +355,8 @@ jobs:
     needs: bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # No environment: this job reads no secrets. Whether the DMG was notarized comes from the
+    # bundle job's output above, not from probing the secret list again.
     # id-token: write mints the Sigstore signing certificate for the attestations through OIDC;
     # attestations: write stores the attestations on the repository; artifact-metadata: write is the
     # storage record the attestation action requires; contents: write publishes the release itself.
@@ -250,6 +368,7 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+      DMG_NOTARIZED: ${{ needs.bundle.outputs.dmg_notarized == 'yes' && 'yes' || 'no' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -307,7 +426,11 @@ jobs:
             echo
             echo 'Here <platform> is linux-x86_64 or darwin-arm64.'
             echo
-            echo "Apple Silicon Macs can also use Colonizer-arm64.dmg: an unsigned app, so macOS asks you to approve it once (System Settings > Privacy & Security > Open Anyway). The curl installer above is the recommended path."
+            if [ "$DMG_NOTARIZED" = yes ]; then
+              echo "Apple Silicon Macs can also use Colonizer-arm64.dmg: a Developer ID-signed, notarized app, which macOS opens like any other download. The curl installer above is the recommended path."
+            else
+              echo "Apple Silicon Macs can also use Colonizer-arm64.dmg: an unsigned app, so macOS asks you to approve it once (System Settings > Privacy & Security > Open Anyway). The curl installer above is the recommended path."
+            fi
             echo
             echo '```'
             cat SHA256SUMS

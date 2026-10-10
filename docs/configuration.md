@@ -47,14 +47,20 @@ again; if the key is lost, delete the `.enc` files and enter the secrets again.
 
 ## The system keychain
 
-When the macOS Keychain or the Linux Secret Service answers a startup probe, newly saved secrets go
-there instead of to files (existing files stay until you move them on the cockpit's Secrets page, which
-also shows where each one lives). On macOS the Keychain ties an item to the binary that wrote it, so
-build with `COLONIZER_CODESIGN_IDENTITY` set (see `scripts/install.sh`) to keep access across rebuilds.
+When the macOS Keychain, the Linux Secret Service or — once the mothership builds on Windows — the
+Windows Credential Manager answers a startup probe, newly saved secrets go there instead of to files
+(existing files stay until you move them on the cockpit's Secrets page, which also shows where each
+one lives). On macOS the Keychain ties an item to the binary that wrote it, so build with
+`COLONIZER_CODESIGN_IDENTITY` set (see `scripts/install.sh`) to keep access across rebuilds.
 A release install run with it set records the identity in
 `~/.local/share/colonizer/codesign-identity`, and every later install or in-place update re-signs the
 new host binary with it before switching, so `colonizer update` does not lose the Keychain either;
 delete that file to stop re-signing ([docs/updates.md](updates.md#updating-in-place)).
+
+Under WSL the mothership runs in Linux and cannot reach the Windows Credential Manager, so the probe
+fails and secrets stay 0600 files under the config directory, inside the WSL filesystem — the Secrets
+page says so rather than suggesting a desktop keyring. Encrypt the disk (BitLocker on the Windows
+side) to protect those files at rest.
 
 ## Per-colony limits
 

@@ -88,12 +88,16 @@ txcript = { version = "=0.14.4", default-features = false, features = ["opencode
 uuid = { version = "1.26.1", features = ["v4"] }
 
 # The system keychain for saved secrets (secrets.rs): Keychain on macOS, the Secret Service
-# (GNOME Keyring, KWallet) on Linux. libdbus is vendored so a build host needs no dbus headers.
+# (GNOME Keyring, KWallet) on Linux, the Windows Credential Manager on Windows (the mothership
+# does not build there yet, #1091). libdbus is vendored so a build host needs no dbus headers.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", features = ["windows-native"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
