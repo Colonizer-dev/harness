@@ -1105,6 +1105,13 @@ about the code's structure, such as "where is Y defined" or "who calls Z". Befor
 It is always on, and there is no setting. It has the same write restrictions as the built-in
 `Explore` subagent.
 
+It is one member of a larger crew. The Claude Code module ships its default crew as agent
+files — Pip does general work, Scout is the read-only `Explore` search, Sarge reviews
+changes, Silka answers design questions, Mellie writes release notes and pull-request
+descriptions, and the queen, the orchestrator itself, is the main thread rather than a
+subagent of her own. [Skill packs](skill-packs.md#agents-ants) has the crew table, the agent
+file schema and the rules a pack's ants are held to.
+
 **Limits.** It only prefers graft when graft is installed. graft is a downloadable skillset, not
 part of the default install. Without it, `repo-explorer` searches the same way `Explore` does.
 
