@@ -51,12 +51,12 @@ caveman      3.1.0     any           prompt  676ae2e9bd2ee23c9fa216056d6ad38b97b
 # catalog of the other 149. The finder never fetches from GitHub; see scripts/fetch-vendor.sh.
 google-skills 2026.10.02-1d77046 any       plugin  6af0ed4e318866f9c6086e5dd117c6905de86c813dd0f6fe77fb9356b75ebfdb  https://codeload.github.com/google/skills/tar.gz/1d77046ad3670d62227f50a8f53286f6c6cde08b
 
-# archify is github.com/tt-a1i/archify at commit 3a5e785 (2026-10-04, 2.17.0-dev.1); pinned by commit because
+# archify is github.com/tt-a1i/archify at commit 73aaa06 (2026-10-05, 2.17.0-dev.1); pinned by commit because
 # the skill ships from main. MIT (LICENSE and THIRD_PARTY_NOTICES.md are staged with it). Staged as a
 # one-skill plugin (skills/archify/): the skill's schemas, examples, renderers and its dependency-free
 # node CLI (validate/deliver), which mapping colonies run against the worktree (crates/colonizer/src/maps.rs).
 # Not staged: test/ and scripts/check-update.mjs, the skill's network update check.
-archify      2026.10.04-3a5e785 any       plugin  a416e6238cec4ddc36c225e9aa01a0915ec93cd93a17f1748dbed6adc6330b73  https://codeload.github.com/tt-a1i/archify/tar.gz/3a5e785d68ab45ee43cc3ae7b5a4e2e5188d1e31
+archify      2026.10.05-73aaa06 any       plugin  cb2c9693ed43049b64d407f091cfa50eef474ddc91663bfed0c8519e2562ebe1  https://codeload.github.com/tt-a1i/archify/tar.gz/73aaa0696e8f72c232ea710e6fa94fd953f3e773
 
 # ponytail is github.com/DietrichGebert/ponytail at tag v4.12.0. MIT (LICENSE is staged with it). Pinned by
 # tag, so the daily updater follows the repo's latest release like ECC's and superpowers' pins. Staged as a
