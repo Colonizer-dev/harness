@@ -7,7 +7,8 @@ environment is under [Settings](#settings).
 ## What you need
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
-  or an Apple Silicon Mac. On a stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
+  or an Apple Silicon Mac, or Windows 11 through WSL2 ([On Windows (WSL2)](#on-windows-wsl2)). On a
+  stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
   `kvm` group and log back in: `sudo usermod -aG kvm "$USER"`. An Intel Mac can't run Colonizer, because
   microsandbox's libkrun backend is aarch64-only. On Linux the host also needs glibc 2.28 or newer,
   which the pinned microsandbox binary requires.
@@ -243,6 +244,45 @@ release install instead gets the binaries in the tarball and builds nothing. The
 runs with userspace networking and a SOCKS5 listener, so a Mac needs no TUN device, no root and no
 special entitlements: Go's linker signs the binaries ad hoc, which is all Apple Silicon requires.
 If the three mesh binaries are absent, colonies fall back to a loopback port, as before.
+
+## On Windows (WSL2)
+
+Windows has no native build: Colonizer runs as the Linux build inside WSL2, on Ubuntu. Colonies are
+KVM microVMs, so the WSL2 VM has to pass virtualization through — nested virtualization, which
+Windows 11 has and Windows 10 does not.
+
+1. **Install WSL2** on Windows 11, with virtualization switched on in the firmware (Intel VT-x or
+   AMD-V): `wsl --install -d Ubuntu`, in PowerShell or Windows Terminal.
+2. **Turn nested virtualization on.** Create or edit `%UserProfile%\.wslconfig` to hold
+
+   ```toml
+   [wsl2]
+   nestedVirtualization=true
+   ```
+
+   then run `wsl --shutdown` from Windows and reopen Ubuntu.
+3. **Give your user `/dev/kvm`** inside Ubuntu: `ls -l /dev/kvm` should show it, and on a stock
+   Ubuntu it is `root:kvm 0660`, so `sudo usermod -aG kvm "$USER"` and restart the shell.
+4. **Install the release exactly as on Linux** ([Install a release](#install-a-release)). Keep the
+   repository and the data and config directories under your Linux home, not `/mnt/c`: the
+   filesystem that bridges Windows drives in is slow, and it does not carry Linux file permissions.
+5. **Run `colonizer doctor`.** A missing `/dev/kvm` comes back as one line naming the fix: on
+   WSL2, nested virtualization and the `.wslconfig` setting in step 2; on WSL1, which cannot run
+   microVMs at all, converting the distro with `wsl --set-version <distro> 2`.
+6. **Open the cockpit from Windows** at <http://127.0.0.1:7878>: WSL2 forwards localhost to Windows
+   by default (`localhostForwarding`, or mirrored networking on newer Windows 11), so the default
+   `COLONIZER_BIND` needs no change. Notifications reach the Windows browser the same way
+   ([Notifications and Web Push](cockpit.md#notifications-and-web-push)).
+
+If you start the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)),
+the systemd user unit needs systemd inside WSL: `[boot]` with `systemd=true` in `/etc/wsl.conf`,
+which new Ubuntu WSL installs have on by default. How long a colony takes to boot under WSL2 has
+not been measured yet.
+
+**Windows without WSL2.** Windows can be just a client: run the mothership on a Linux box or a Mac,
+and open its cockpit from Windows through [remote access](remote-tunnel.md), the
+`https://<install_id>.my.colonizer.dev` link. Native Windows through WHPX or Hyper-V is not planned
+yet; it is tracked in [#1091](https://github.com/Colonizer-dev/harness/issues/1091).
 
 ## Desktop: install the cockpit as an app, start at login
 
