@@ -1,11 +1,13 @@
 // The mock's per-call state slice for the providers feature (issue #827). The one shared state object
 // (MockState in src/mockState.ts) carries these fields so a reassignment is seen by every feature.
-import type { ModelProvider } from "../../types";
+import type { ModelProvider, PriceFeedStatus } from "../../types";
 import { ago } from "../../mockShared";
 import type { MockState } from "../../mockState";
 
 export type ProvidersMockState = {
     providers: ModelProvider[];
+    /** The one price feed setting (#1038); PUT /api/price-feed rewrites it. */
+    priceFeed: PriceFeedStatus;
     DEFAULT_LIMITS: {
         timeout_secs: number;
         max_concurrent: null;
@@ -32,6 +34,8 @@ export type ProvidersMockState = {
 };
 
 export function installProvidersMockState(ms: MockState): void {
+  // The demo's feed is on, so the providers page shows fetched prices beside the operator's (#1038).
+  ms.priceFeed = { url: "https://openrouter.ai/api/frontier/prices.json", fetched_at: ago(40), last_error: null, entries: 2 };
   ms.DEFAULT_LIMITS = { timeout_secs: 600, max_concurrent: null, queue_timeout_secs: null, context_tokens: null, fallback_model: null };
   ms.zeroUsage = () => ({ requests: 0, failures: 0, fallbacks: 0, duration_ms: 0, since: null, last_request_at: null });
   // What the Mothership computes for a tally with no requests: numbers of zero, and nothing rated.
@@ -50,6 +54,18 @@ export function installProvidersMockState(ms: MockState): void {
       trusted: true,
       // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
       pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
+      // The feed lists both models' prices; the operator's own rate for the pro model wins over the feed's (#1038).
+      price_feed_id: "deepseek",
+      feed_prices: [
+        {
+          model: "deepseek-flash",
+          pricing: { input_per_mtok: 0.28, output_per_mtok: 1.12, cache_read_per_mtok: 0.028, cache_write_per_mtok: 0.28 },
+          last_verified_at: ago(40),
+          source: "https://api-docs.deepseek.com/quick_start/pricing",
+          stale: false,
+        },
+        { model: "deepseek-v4-pro", pricing: { input_per_mtok: 0.32, output_per_mtok: 1.3 }, last_verified_at: ago(30 * 24 * 60), source: null, stale: true },
+      ],
       // A prepaid plan with a balance endpoint, so the health line shows "… left in plan" (issue #199).
       quota: { url: "https://api.deepseek.com/plan", pointer: "/data/remaining_tokens", limit_pointer: "/data/total_tokens", reset_pointer: "/data/reset_at" },
       // A daily plan: 3 h 12 min to its next refill, 62% left (issue #1204).

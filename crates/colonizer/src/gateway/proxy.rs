@@ -122,10 +122,15 @@ pub(super) fn micro_usd(usd: f64) -> u64 {
 /// the request's own `max_tokens` — `max_completion_tokens` in Chat Completions' spelling,
 /// `max_output_tokens` in Responses' — falling back to [`ESTIMATED_MAX_TOKENS`] when it names neither
 /// or is not JSON; the input side is the body's bytes over four, the usual tokens-per-byte rule of
-/// thumb. A provider without pricing estimates at $0, exactly what recording it would cost. This
-/// being the body's one parse, the requested model rides along for the audit record — which only ever
-/// names a model the model-id validator passed, never raw body text.
-pub(super) fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f64, Option<String>) {
+/// thumb. A request nothing prices — an unpriced connection with no feed price for its model —
+/// estimates at $0, exactly what recording it would cost. This being the body's one parse, the
+/// requested model rides along for the audit record — which only ever names a model the model-id
+/// validator passed, never raw body text.
+pub(super) fn estimate_request_cost_usd(
+    provider: &Provider,
+    body: &Bytes,
+    feed: Option<&crate::price_feed::FeedEntries>,
+) -> (f64, Option<String>) {
     let request: Value = serde_json::from_slice(body).unwrap_or_default();
     let output_tokens = request
         .get("max_tokens")
@@ -136,13 +141,16 @@ pub(super) fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f
     let model = request["model"]
         .as_str()
         .and_then(|m| valid_model(m).then_some(m.to_string()));
+    let pricing = provider.price_for(model.as_deref().unwrap_or_default(), feed);
     (
-        provider.cost_usd(Usage {
-            input_tokens: body.len() as u64 / 4,
-            output_tokens,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            thinking_tokens: 0,
+        pricing.map_or(0.0, |pricing| {
+            pricing.cost_usd(Usage {
+                input_tokens: body.len() as u64 / 4,
+                output_tokens,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                thinking_tokens: 0,
+            })
         }),
         model,
     )
@@ -423,8 +431,10 @@ async fn proxy_to(
     // `enforce_budget`'s job, for overspend that has actually been recorded.
     let modules = app.modules.read().await.clone();
     let budget = orgs::budget_usd(&modules, &app.org_settings(&session.org));
-    // The body's one parse, shared by the estimate and the audit record's requested model.
-    let (estimate, model) = estimate_request_cost_usd(&provider, &body);
+    // The body's one parse, shared by the estimate and the audit record's requested model. The
+    // estimate reads the same precedence the recording will (`price_for`), feed included.
+    let feed = app.price_feed.entries();
+    let (estimate, model) = estimate_request_cost_usd(&provider, &body, Some(&feed));
     audit.set_model(model.clone());
     // A model the colony's settings never routed to is refused like a provider outside them
     // (issue #681): the body's model is what the provider is asked to serve, and the token alone
@@ -507,7 +517,9 @@ async fn proxy_to(
             // policy (model_map, disabled tools) runs first, for the same reason and with the same
             // byte-identical escape hatch (#295).
             let mut body = body;
-            let mut wire_model = model;
+            // The requested model is priced and recorded after this arm returns, so it is cloned for
+            // the audit record's wire model rather than moved out of the request path.
+            let mut wire_model = model.clone();
             if let Some(policy) = apply_connection_policy(&body, &provider) {
                 // A `model_map` entry renames the model on the wire, so the audit record's wire model
                 // is read back from the rewritten body — validator applied, like the requested one.
@@ -704,7 +716,7 @@ async fn proxy_to(
     let guards = (busy, in_flight, permit, timed);
     let shape = match handling {
         Routed::Translated(info) => {
-            let record = usage_recorder(&app, &colony, &provider, reservation);
+            let record = usage_recorder(&app, &colony, &provider, model.as_deref(), reservation);
             // The fallback is decided here, where the provider's `fallback_model` is in reach: set means
             // quota failover is on for this role, unset opts it out, and the env opts out globally.
             let quota_fallback =
@@ -733,7 +745,19 @@ async fn proxy_to(
     if status.as_u16() >= 400 {
         // Buffered, not streamed: the body still forwards verbatim, but only a buffered error can
         // be classified for quota exhaustion before answering.
-        return anthropic_error(&app, &colony, upstream, guards, reservation, usage, &provider, timeout, audit).await;
+        return anthropic_error(
+            &app,
+            &colony,
+            upstream,
+            guards,
+            reservation,
+            usage,
+            &provider,
+            model,
+            timeout,
+            audit,
+        )
+        .await;
     }
     // A 2xx from upstream proves the plan is back: a quota record from an earlier error lapses now,
     // so the queue unpauses and parked colonies resume on the next tick.
@@ -759,7 +783,7 @@ async fn proxy_to(
     let body = counted_body(
         stream_body(upstream.bytes_stream(), guards, timeout, is_sse),
         UsageTap::new(shape, is_sse),
-        Some(usage_recorder(&app, &colony, &provider, reservation)),
+        Some(usage_recorder(&app, &colony, &provider, model.as_deref(), reservation)),
         Some(audit),
     );
     let mut response = Response::new(Body::from_stream(body));
@@ -783,6 +807,7 @@ async fn anthropic_error(
     reservation: Reserved,
     usage: Arc<UsageCounters>,
     provider: &Provider,
+    model: Option<String>,
     timeout: Duration,
     audit: GatewayAudit,
 ) -> Response {
@@ -814,7 +839,7 @@ async fn anthropic_error(
     // Errors carry no usage, but the recorder ran on them when they streamed past — keep it fed.
     // A record with neither cost nor tokens never lands: `record_routed_usage` early-returns and
     // the unrun closure drops the reservation, releasing it via `Reserved::drop`.
-    usage_recorder(app, colony, provider, reservation)(Usage::default());
+    usage_recorder(app, colony, provider, model.as_deref(), reservation)(Usage::default());
     let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
     let kind = body["error"]["type"].as_str().unwrap_or("api_error");
     let message = body["error"]["message"]
