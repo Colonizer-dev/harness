@@ -14,6 +14,7 @@ import { orgsHttp, type OrgsApi } from "./features/orgs/api";
 import { memoryHttp, type MemoryApi } from "./features/memory/api";
 import { chatHttp, type ChatApi } from "./features/chat/api";
 import { loopsHttp, type LoopsApi } from "./features/loops/api";
+import { queuesHttp, type QueuesApi } from "./features/queues/api";
 import { eventsHttp, type EventsApi } from "./features/events/api";
 import { historyHttp, type HistoryApi } from "./features/history/api";
 import { handoffHttp, type HandoffApi } from "./features/handoff/api";
@@ -26,7 +27,7 @@ export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor
 export type { SaveModuleRequest } from "./features/modules/api";
 export type { BehindInfo, CatchUpResult, StopReply } from "./features/sessions/api";
 
-export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi, ModelsApi, BuiltWithApi {
+export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, QueuesApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi, ModelsApi, BuiltWithApi {
   readonly mock: boolean;
 }
 
@@ -44,6 +45,7 @@ export const httpApi: Api = {
   ...memoryHttp,
   ...chatHttp,
   ...loopsHttp,
+  ...queuesHttp,
   ...eventsHttp,
   ...historyHttp,
   ...handoffHttp,

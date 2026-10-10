@@ -15,6 +15,7 @@ import { orgsMock } from "./features/orgs/mock";
 import { memoryMock } from "./features/memory/mock";
 import { chatMock } from "./features/chat/mock";
 import { loopsMock } from "./features/loops/mock";
+import { queuesMock } from "./features/queues/mock";
 import { eventsMock } from "./features/events/mock";
 import { historyMock } from "./features/history/mock";
 import { handoffMock } from "./features/handoff/mock";
@@ -40,6 +41,7 @@ export function createMockApi(): Api {
     ...memoryMock(ms),
     ...chatMock(ms),
     ...loopsMock(ms),
+    ...queuesMock(ms),
     ...eventsMock(ms),
     ...historyMock(ms),
     ...handoffMock(ms),

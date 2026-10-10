@@ -39,7 +39,9 @@ export type AttentionReason =
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
   | "provider_retry"
   /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
-  | "looping";
+  | "looping"
+  /** Parked because the host's GitHub account needs sign-in again (issue #984): the work is kept and the colony resumes when the account works. */
+  | "waiting_for_account";
 
 /** One thing the watchdog's remediation playbook fixed on a colony by itself (issue #1191). */
 export interface AutoFix {

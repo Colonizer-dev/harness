@@ -71,7 +71,7 @@ From top to bottom, the sidebar has:
 
 - the workspace switcher ([Workspaces](#workspaces-and-the-switcher)),
 - the **Colonize** button ([Colonize](#colonize)),
-- Overview, Nest, Chat, Code, History, Loops, Memory, Host and Secrets,
+- Overview, Nest, Chat, Code, History, Queues, Loops, Memory, Host and Secrets,
 - an **Update** row when a newer version is out (it opens Settings, Updates),
 - Settings, and a light/dark theme toggle.
 
@@ -426,6 +426,29 @@ row.
 
 Limit: outcomes from before the activity log existed come from the colony list and are marked as
 approximate.
+
+## Queues
+
+**Sidebar: Queues.**
+
+Queues is the waiting list: every colony that wants to start, why it is waiting, and what you can do
+about it. Each row names its colony, its status, its branch and age, and the wait in plain words —
+parked on a quota or on the repository's daily pull-request cap (with the time it resumes), waiting
+for your answer, held because a merge superseded it, or held by a policy, which nothing starts until
+the hold is lifted. A raised queue priority is shown on the row.
+
+- A strip at the top shows each host: how many of its slots are in use against its ceiling, how much
+  is queued and parked on it, and how deep its queue is. A host over its ceiling is highlighted, and
+  one that cannot be reached says so.
+- Search, and filter by host, reason, repository and agent. Group the rows flat, by host, by reason
+  or by repository.
+- The filters live in the address next to the workspace (`?host=…&q=…`), so a filtered view can be
+  bookmarked and shared.
+- Select rows for the bulk actions: **Resume selected**, **Stop selected** and **Restart on new
+  version**. Whatever the mothership refuses comes back with its reason, row by row.
+
+While an update or restart is draining the queue, the page says so at the top, like every other
+view.
 
 ## Inbox and the bell
 
@@ -894,8 +917,8 @@ This page is also where you switch a workspace off, or back on.
 
 Under 640px wide, the sidebar is replaced by a tab bar at the bottom of the screen with five tabs:
 **Nest**, **Inbox**, **Chat**, **Code** and **More**. More opens a sheet with Overview, Launch,
-History, Loops, Memory, Host, Secrets and Settings. An open colony counts as Nest. The bar sits
-above the phone's home indicator.
+History, Queues, Loops, Memory, Host, Secrets and Settings. An open colony counts as Nest. The bar
+sits above the phone's home indicator.
 
 ⌘K and ⌘B are keyboard shortcuts and do nothing on a phone without a keyboard. Use the Colonize
 button on Overview instead. The Colonize pane opens full width over the tab bar.

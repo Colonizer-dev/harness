@@ -57,6 +57,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::provider_history::FEATURE,
     &crate::public_feed::FEATURE,
     &crate::queue_priority::FEATURE,
+    &crate::queues::FEATURE,
     &crate::quota_cards::FEATURE,
     &crate::setup_state::FEATURE,
     &crate::supply_chain_loop::FEATURE,

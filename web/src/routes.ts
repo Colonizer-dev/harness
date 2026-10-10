@@ -3,7 +3,8 @@
 // the tests can pin the round trip: formatRoute(parseRoute(x)) is x for every path the cockpit makes.
 //
 //   /                          Overview          /history        History
-//   /nest                      Nest              /loops          Loops
+//   /nest                      Nest              /queues         Queues
+//   /chat                      Chat              /loops          Loops
 //   /chat                      Chat              /memory         Memory
 //   /code                      Code              /host           Host
 //   /launch                    Launch            /secrets        Secrets (also /settings/secrets)
@@ -40,6 +41,7 @@ export const VIEW_PATHS: Partial<Record<CockpitView, string>> = {
   launch: "/launch",
   inbox: "/inbox",
   history: "/history",
+  queues: "/queues",
   loops: "/loops",
   memory: "/memory",
   host: "/host",

@@ -286,6 +286,12 @@ describe("attentionText", () => {
     expect(attentionText(attention({ reason: "stalled", nudges: 2, detail: "ignored" }))).toBe("No progress, nudged 2×");
   });
 
+  it("names the quota, account and turn-lost flags a queue row can carry (issue #1127)", () => {
+    expect(attentionText(attention({ reason: "provider_quota_exhausted" }))).toBe("Provider out of quota — waiting for the plan to refill");
+    expect(attentionText(attention({ reason: "waiting_for_account" }))).toBe("Its Claude account needs sign-in again — it resumes when the account works");
+    expect(attentionText(attention({ reason: "turn_lost_after_subagent" }))).toBe("Its turn never resumed after a subagent — the watchdog re-drove it");
+  });
+
   it("puts the hold's detail in the attention badge's tooltip beside the suspended-answer badge", () => {
     const detail = "`web: npm test` exited 1 in a fresh checkout; failing: renders the banner";
     const out = renderToStaticMarkup(<AttentionBadge attention={attention({ reason: "autopilot_held", detail })} />);
