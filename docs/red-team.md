@@ -86,6 +86,21 @@ failing test, or a minimal script run against a local instance the hunter starte
 engagement: attack only the repository and a local instance inside the hunter's microVM — no
 deployed environment, external host or third-party service, and no real credentials.
 
+When the org has switched the vendored
+[`security-audit` skill pack](skill-packs.md#security-audit) on — Settings → Skillsets, or the org's
+`agent.skillsets` override; the preset itself never switches it on — each hunter's brief says so and
+changes how it hunts: run the skill's full audit on your focus area instead of an open-ended hunt,
+write the run to `/harness/out/security-audit/run-1` — the session's own output area, outside the
+checked-out target, so it needs no ignore rule — run the skill's `validate-findings.cjs` over
+`findings.json`, and file only the records the skill marks `confirmed` (`needs_validation` and
+`rejected` stay in `findings.json`, out of the findings tool and the issue tracker). The skill's
+execution rule stands inside the colony: target code runs only where outbound networking is denied.
+A hunter checks that a request to a public host fails before executing anything the target controls;
+a request that succeeds means no execution, and such leads stay `needs_validation`. Two things are
+deliberately not wired yet, so the pack stays off by default: there is no benchmark for the pack yet
+([bench.md](bench.md#measuring-a-skill-pack)), and each hunter's coverage ledger lives in its own
+audit run under that session's output — nothing carries a ledger between raids.
+
 Pick it with the wizard's **Preset** choice, `"preset": "security"` on `POST /api/redteam/runs` or
 `POST /api/redteam/schedules`, or `colonizer redteam start owner/repo --preset security`
 ([cli.md](cli.md#red-team-runs)). An unknown preset is a 400.
