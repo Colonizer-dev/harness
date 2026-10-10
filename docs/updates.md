@@ -163,7 +163,11 @@ new binary is re-signed before the switch when this host knows an identity:
 the app, in `~/.local/share/colonizer/codesign-identity`, by the install that set
 it. A release install records an identity it was run with, so an update started
 from Settings — whose installer child has no environment of its own — re-signs
-too, and no update loses the Keychain access its owner already granted. If
+too, and no update loses the Keychain access its owner already granted. A release
+the workflow signed at build time with Colonizer's Developer ID certificate — it
+does so once its `APPLE_*` secrets are configured
+([docs/install.md](install.md#macos-dmg)) — carries the same identity from one
+release to the next, so its updates need no re-signing at all. If
 `codesign` fails the update stops before the symlink moves and the running
 version is left as it was, so nothing is switched to a binary the Keychain would
 not recognise. Delete the recorded file to stop re-signing; an identity in the
