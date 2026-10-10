@@ -7,7 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
 import { providerSecretId } from "../secretsNav";
-import { SecretsView, colonyAccessText } from "./SecretsView";
+import type { KeychainHealth } from "../types";
+import { SecretsView, colonyAccessText, keychainHint } from "./SecretsView";
 
 describe("SecretsView", () => {
   it("renders its frame before the list arrives, with no values anywhere", () => {
@@ -77,5 +78,31 @@ describe("colonyAccessText", () => {
     expect(colonyAccessText({ kind: "gateway", hosts: [] }).text).toBe("Via gateway · never in the VM");
     expect(colonyAccessText({ kind: "injected", hosts: ["api.anthropic.com"] }).text).toBe("Injected for api.anthropic.com only");
     expect(colonyAccessText({ kind: "none", hosts: [] }).text).toBe("Not given to colonies");
+  });
+});
+
+describe("keychainHint", () => {
+  const health = (overrides: Partial<KeychainHealth> = {}): KeychainHealth => ({
+    available: false,
+    backend: "Secret Service",
+    reason: "no session bus",
+    checked_at: null,
+    ...overrides,
+  });
+
+  it("under WSL says why the Windows Credential Manager is out of reach, not the desktop-session story", () => {
+    const hint = keychainHint(health({ wsl: true }));
+    expect(hint).toContain("Under WSL the mothership runs in Linux");
+    expect(hint).toContain("Windows Credential Manager");
+    expect(hint).toContain("0600 files in the WSL filesystem");
+    expect(hint).toContain("BitLocker");
+    expect(hint).not.toContain("GNOME Keyring");
+  });
+
+  it("elsewhere it keeps the probe's reason and the Linux desktop-session hint", () => {
+    const hint = keychainHint(health());
+    expect(hint).toContain("no session bus");
+    expect(hint).toContain("GNOME Keyring");
+    expect(hint).not.toContain("WSL");
   });
 });
