@@ -782,10 +782,60 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
         .await?;
     }
     log.info("fetching origin").await;
-    exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    fetch_with_mirror_repair(app, repo, bare, log).await?;
     // Issue #765: a fetch may have brought a force-push of a colony branch; re-point the links of
     // any colony here whose branch tip moved (one `rev-parse` each, and only colonies with links).
     crate::commit_links::after_sync(app, repo).await;
+    Ok(())
+}
+
+/// The mirror's fetch, with the repair ladder behind it (`mirror_health`): a fetch whose stderr
+/// names a corrupt object first gets its corrupt loose objects cleaned and is retried, then, still
+/// corrupt, a full re-clone of the mirror and a third try. Any other failure — and a corruption
+/// both rungs could not fix — comes back unchanged for the boot-retry machinery above to count.
+/// A rung that lands announces one `mirror_repaired` line for the repository and re-queues the
+/// colonies the corruption had already failed; a ladder that runs out — a failed re-clone
+/// included — announces `mirror_needs_attention`.
+async fn fetch_with_mirror_repair(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger) -> Result<()> {
+    async fn fetch(app: &App, bare: &FsPath) -> Result<String> {
+        exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await
+    }
+    if let Err(err) = fetch(app, bare).await {
+        if !crate::mirror_health::is_corruption_error(&err.to_string()) {
+            return Err(err);
+        }
+        log.warn("fetching origin failed on what looks like a corrupt object; cleaning loose objects and retrying")
+            .await;
+        let cleaned = match crate::mirror_health::clean_corrupt_loose_objects(app, bare, log).await {
+            Ok(removed) => Some(removed),
+            Err(e) => {
+                log.warn(format!("cleaning the mirror's corrupt loose objects failed: {e:#}"))
+                    .await;
+                None
+            }
+        };
+        if let Err(err) = fetch(app, bare).await {
+            if !crate::mirror_health::is_corruption_error(&err.to_string()) {
+                return Err(err);
+            }
+            log.warn("fetching origin still fails on corruption; re-cloning the mirror")
+                .await;
+            let old = match crate::mirror_health::reclone_mirror(app, repo, bare, log).await {
+                Ok(old) => old,
+                Err(err) => {
+                    crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
+                    return Err(err);
+                }
+            };
+            if let Err(err) = fetch(app, bare).await {
+                crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
+                return Err(err);
+            }
+            crate::mirror_health::repaired_by_recloning(app, repo, &old).await;
+        } else {
+            crate::mirror_health::repaired_by_cleaning(app, repo, cleaned).await;
+        }
+    }
     Ok(())
 }
 
