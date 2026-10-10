@@ -45,6 +45,7 @@ pub(crate) struct Feature {
 pub(crate) const ALL: &[&Feature] = &[
     &crate::auto_colonize::FEATURE,
     &crate::built_with::FEATURE,
+    &crate::cratefield_push::FEATURE,
     &crate::decisions::FEATURE,
     &crate::github_breaker::FEATURE,
     &crate::handoff::FEATURE,
