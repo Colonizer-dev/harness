@@ -78,6 +78,11 @@ Only the connections this colony's model settings name (`model`, `subagent_model
 per-task routing picks one) are checked, so an
 unrelated connection that is down blocks nothing.
 
+Routing itself happens on the mothership, not the connection: the boot picks a per-task tier
+([docs/protocol.md §6.1b](protocol.md#61b-per-task-model-tiers-mothership)), and a per-turn shadow
+then measures what tier each turn would have needed — without ever changing a model
+([§6.1d](protocol.md#61d-per-turn-model-routing-shadow)).
+
 Two more misconfigurations refuse the launch the same way, before any probe runs:
 
 - a connection-policy row a save would have refused, in a hand-edited `providers.json` — the message

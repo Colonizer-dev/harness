@@ -25,17 +25,17 @@ use std::{
 
 /// The four token counts a model reports at turn end, in Anthropic's terms.
 #[derive(Clone, Copy, Debug, Default)]
-struct Tokens {
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
+pub(crate) struct Tokens {
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_read: u64,
+    pub(crate) cache_write: u64,
 }
 
 impl Tokens {
     /// Saturated so a journal row with absurd counts can never wrap a total around to a small
     /// number; the four fields add the same way the rolling accumulation does.
-    fn total(self) -> u64 {
+    pub(crate) fn total(self) -> u64 {
         self.input
             .saturating_add(self.output)
             .saturating_add(self.cache_read)
@@ -44,7 +44,7 @@ impl Tokens {
 
     /// The increment one turn added over the last cumulative, floored at zero so a cheaper
     /// re-estimate never writes a negative line.
-    fn saturating_sub(self, before: Tokens) -> Tokens {
+    pub(crate) fn saturating_sub(self, before: Tokens) -> Tokens {
         Tokens {
             input: self.input.saturating_sub(before.input),
             output: self.output.saturating_sub(before.output),
@@ -134,7 +134,7 @@ impl OrgSpend {
 /// cache_read_tokens, cache_write_tokens}}`, each key optional. Anything else (a non-object, a
 /// malformed model entry, a missing count) reads as no tokens for that part, never as an error: a
 /// runner that has not started reporting a key yet means zero for it.
-fn model_tokens(usage: Option<&Value>) -> Vec<(&str, Tokens)> {
+pub(crate) fn model_tokens(usage: Option<&Value>) -> Vec<(&str, Tokens)> {
     let Some(Value::Object(models)) = usage else {
         return Vec::new();
     };

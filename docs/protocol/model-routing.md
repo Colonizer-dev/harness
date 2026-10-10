@@ -225,3 +225,46 @@ A caveat worth stating plainly: this integration's specific vendor claims — th
 its latency — could not be independently verified while it was built. The design leans on that: with
 no key and no flag set, it is inert, so an unverified or even nonexistent vendor causes no harm to a
 real deployment. It only ever degrades to "no shadow opinion," every time.
+
+## 6.1d Per-turn model routing (shadow)
+
+§6.1b picks one tier for a colony's whole task, at boot. A colony's turns are not all worth the same
+model, but whether per-turn routing should ever act is a measurement question first. So at every
+orchestrator turn end (`crates/colonizer/src/turn_routing.rs`, issue #1152) the mothership re-asks —
+in shadow, never changing a model — what tier that turn needed: it classifies a bounded slice of the
+conversation with the same rule and Jev point the boot decision used, prices what moving to that tier
+would cost, and evaluates what an act mode *would* do. The answer is one JSON line appended to
+`turn_routing.jsonl` in the colony's session directory —
+`{ts, session, turn, model, current_tier, suggested_tier, source, verdict, would_switch,
+context_tokens, est_refill_usd, est_saving_usd, account_near_limit}` — and the colony report
+summarises the ledger: turn ends measured, the suggested tiers, how often a switch would have
+happened, and the estimated saving net of refill.
+
+The classifier's whole input is deliberately small: the turn's own prompt plus the six most recent
+orchestrator user/assistant texts, oldest first, each cut at 1,200 characters on a char boundary and
+prefixed with who said it. Tool calls and results, thinking, status lines and everything a subagent
+said are dropped before the input is built, and a subagent's turn end is never routed at all — only
+the lead conversation is classified. The classification is bounded at 1.5 s (the only part of it that
+can wait is the Jev ask): one that does not finish keeps the current tier, recorded as
+`source: "timeout"`. Jev is asked exactly when the boot decision would ask it — §6.1c's two settings,
+the org's Jev switch and the key — so a colony whose mode is off generates no network call per turn.
+
+The record carries a verdict, not just an opinion. `est_refill_usd` prices loading the turn's context
+on the suggested tier's model once (its first read is a cache write where the provider writes cache,
+uncached input where it does not — the dearer of the two rates); `est_saving_usd` prices the next
+three turns reading that same context from the target's cache instead of the current model's. The
+simulated act-mode policy: an upgrade is never second-guessed; a downgrade inside three turns of the
+previous switch is held (`verdict: "held_by_hysteresis"` — flipping tiers every turn would defeat the
+cache both ways); a downgrade outside the window needs its saving to beat the refill
+(`"cache_refill_exceeds_saving"`); an unpriced downgrade (`"unpriced"`) is held too — unless the
+Claude account is near its session cap (the gateway's exhaustion mark, or a fresh usage reading at or
+past 80% of the five-hour window), where stretching the subscription does not need the dollar case.
+`current_tier` is the tier the simulation has the colony on — the boot tier, or the last tier it
+would have switched to — and `would_switch` says whether act mode would move it at that turn end.
+
+| Setting | Default | |
+| --- | --- | --- |
+| `turn_route_shadow` | true | Off: no turn end is routed and nothing is written to the ledger |
+
+Act mode is not implemented: nothing here ever changes a model, and the ledger exists so the data can
+decide whether it should.

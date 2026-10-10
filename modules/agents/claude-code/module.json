@@ -150,6 +150,12 @@
         "minimum": 0,
         "default": 0
       },
+      "turn_route_shadow": {
+        "type": "boolean",
+        "title": "Per-turn routing, shadow",
+        "description": "At every turn's end, log to the colony's turn_routing.jsonl the model tier a per-turn router would pick for that turn and what switching to it would cost — never changes the model. The data decides whether per-turn routing ships.",
+        "default": true
+      },
       "jev_shadow_mode": {
         "type": "boolean",
         "title": "Jev shadow mode (experimental)",
