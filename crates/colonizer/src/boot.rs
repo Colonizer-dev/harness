@@ -1831,6 +1831,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // Two packs answering to the same skill name are ambiguous by
         // construction (docs/skill-packs.md): bail naming both packs.
         crate::plugins::check_skill_uniqueness(&resolved)?;
+        // So are two packs defining the same ant (issue #1163): Claude Code
+        // loads `agents/<file>.md` by name.
+        crate::plugins::check_ant_uniqueness(&resolved)?;
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its

@@ -25,7 +25,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_ACCOUNT_ROUTE` | none | JSON `{url, headers}` of the mothership's `GET /account-route` (set when the module's `account_fallback_model` is): before a request that would go to Anthropic, the router asks whether the Claude account is out and, if so, sends it to the fallback model's route instead (issue #1130) |
 | `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
 | `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
-| `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
+| `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the built-in crew pack's ants (sarge, silka, mellie) and the first-party read-only `repo-explorer` are added either way; other plugin agents keep the orchestrator's |
 | `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
 | `COLONIZER_DELEGATE` | `enforce` | `enforce`, `encourage` or `off`: how far the orchestrator hands work to subagents (see above) |
 | `COLONIZER_DISABLED_TOOLS` | none | Comma-separated Claude Code tool names the colony never gets |

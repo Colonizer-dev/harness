@@ -4,7 +4,7 @@
 // Diagnostics go to stderr only.
 
 import { execFile } from 'node:child_process';
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -35,7 +35,7 @@ import { startHeadroom } from './headroom.mjs';
 import { runPreflight, shouldBlock } from './preflight.mjs';
 import { createRecallServer, RECALL_PROMPT_APPEND, RECALL_SERVER } from './recall.mjs';
 import { PROVIDER_PREFIX, routeEnv, routingPlan, startRouter } from './router.mjs';
-import { subagentDefinitions } from './subagents.mjs';
+import { parseAgentMd, subagentDefinitions } from './subagents.mjs';
 
 export const SYSTEM_PROMPT_APPEND = [
   'You are running inside the Colonizer; the user follows along in a web UI.',
@@ -259,6 +259,105 @@ export function understandAnythingDenial(toolName, toolInput = {}, pluginDirs = 
   if (namespace !== null && namespace !== UNDERSTAND_ANYTHING_PLUGIN) return null;
   const reason = UNDERSTAND_ANYTHING_DENIED.get(skill);
   return reason ? `understand-anything: ${reason}` : null;
+}
+
+/** The built-in crew pack, whose ants ship with this module (crew/agents/*.md; crew/plugin.json names it). */
+export const CREW_PACK_NAME = 'claude-code-crew';
+const CREW_PACK_DIR = fileURLToPath(new URL('./crew/', import.meta.url));
+
+/**
+ * The colony's known ants, keyed by subagent type name: each pack's `agents/*.md`, parsed with the
+ * same parser the crew pack and the mothership's validator use. `packs` is an array of
+ * `{ packName, dir }` — the built-in crew first, then the mounted plugin packs — and nothing here
+ * reads the environment, so a test can point it at temp dirs. A pack without an `agents/` directory
+ * contributes nothing, a name already registered keeps its first entry (the crew wins over an
+ * operator pack), and an agent file that does not parse is skipped with a warning: a bad operator
+ * pack must never stop the colony booting. Only what the Skill gate consumes is kept.
+ * @param {{ packName: string, dir: string }[]} packs
+ * @returns {{ ants: Map<string, { name: string, pack: string, caste?: string, skillsets?: string[], tools?: string[], disallowedTools?: string[] }>, queen: object|null, warnings: string[] }}
+ */
+export function antRegistry(packs) {
+  const ants = new Map();
+  let queen = null;
+  const warnings = [];
+  for (const { packName, dir } of packs) {
+    let files;
+    try {
+      files = readdirSync(join(dir, 'agents')).filter((file) => file.endsWith('.md')).sort();
+    } catch {
+      continue; // no agents/ directory: the pack carries no ants
+    }
+    for (const file of files) {
+      let agent;
+      try {
+        agent = parseAgentMd(readFileSync(join(dir, 'agents', file), 'utf8'), `${packName}/agents/${file}`);
+      } catch (err) {
+        warnings.push(`skipping an agent file that does not parse: ${err.message}`);
+        continue;
+      }
+      if (ants.has(agent.name)) continue;
+      const entry = {
+        name: agent.name,
+        pack: packName,
+        ...(agent.ant?.caste && { caste: agent.ant.caste }),
+        ...(agent.skillsets && { skillsets: agent.skillsets }),
+        ...(agent.tools && { tools: agent.tools }),
+        ...(agent.disallowedTools && { disallowedTools: agent.disallowedTools }),
+      };
+      ants.set(agent.name, entry);
+      if (!queen && agent.ant?.caste === 'queen') queen = entry;
+    }
+  }
+  return { ants, queen, warnings };
+}
+
+/**
+ * The mounted pack that owns a skill, or null when none does: the first plugin directory shipping
+ * `skills/<name>/SKILL.md`. A pack's name is its directory's last segment, the same rule
+ * `understandAnythingMounted` reads COLONIZER_PLUGIN_DIRS with, and the mothership's
+ * `check_skill_uniqueness` (boot.rs) is what makes the bare name unambiguous across packs.
+ */
+function skillPackOwner(skill, pluginDirs) {
+  if (!skill) return null;
+  for (const dir of pluginDirs) {
+    if (existsSync(join(dir, 'skills', skill, 'SKILL.md'))) return String(dir).trim().split('/').pop();
+  }
+  return null;
+}
+
+/**
+ * Why a Skill call is refused on skillsets grounds — the calling ant's agent file lists `skillsets`
+ * and the skill ships in a mounted pack that list does not name — or null when it is allowed.
+ *
+ * Every miss fails open, on purpose: an unknown ant, an ant whose file sets no `skillsets`, and a
+ * skill no mounted pack ships are all allowed, so a colony that never uses skillsets behaves
+ * exactly as before. The calling ant is resolved from the hook input's `agent_type` — the SDK's
+ * field for the subagent type name, present alongside `agent_id`, which is a unique id for the run
+ * and counts as a name only when it exactly equals one; with neither field (the orchestrator's own
+ * calls) the queen's list applies.
+ * @param {object} [hookInput] the PreToolUse hook input (`agent_type`, `agent_id`, `tool_input`)
+ * @param {{ ants: Map<string, object>, queen: object|null }} [registry] as antRegistry returned
+ * @param {string[]} [pluginDirs] the mounted plugin directories, in mount order
+ */
+export function antSkillsetDenial(hookInput = {}, registry = null, pluginDirs = []) {
+  const ants = registry?.ants;
+  if (!ants || ants.size === 0) return null;
+  const agentType = typeof hookInput.agent_type === 'string' ? hookInput.agent_type.trim() : '';
+  const agentId = typeof hookInput.agent_id === 'string' ? hookInput.agent_id.trim() : '';
+  const ant =
+    (agentType && ants.get(agentType)) ||
+    (agentId && ants.get(agentId)) ||
+    (!agentType && !agentId && registry.queen) ||
+    null;
+  if (!ant || !Array.isArray(ant.skillsets)) return null;
+  const [, skill] = splitSkillName(hookInput.tool_input);
+  const owner = skillPackOwner(skill, pluginDirs);
+  if (!owner) return null; // built-in, or shipped by no mounted pack: not ours to refuse
+  if (ant.skillsets.includes(owner)) return null;
+  return (
+    `skillset "${owner}" is not one of ${ant.name}'s packs (${ant.skillsets.join(', ')}): the "${skill}" skill ships in it. ` +
+    `Use an ant that carries ${owner}, or do without that skill.`
+  );
 }
 
 /** Where the mothership mounts what the token-saving settings need (crates/colonizer/src/sessions.rs). */
@@ -677,6 +776,18 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
     const skill = readText(join(dir, SUPERPOWERS_SKILL));
     if (skill !== null) appended.push(superpowersBootstrap(skill.trimEnd()));
   }
+  // Per-ant skillsets (issue #1163): the registry of known ants — the crew's own files, then every
+  // mounted pack's agents/*.md — feeds the Skill gate below. Built only when packs are mounted:
+  // with none, no skill is attributable to a pack and the gate could never refuse anything.
+  let antSkillsets = null;
+  if (pluginDirs.length) {
+    const registry = antRegistry([
+      { packName: CREW_PACK_NAME, dir: CREW_PACK_DIR },
+      ...pluginDirs.map((dir) => ({ packName: dir.split('/').pop(), dir })),
+    ]);
+    for (const warning of registry.warnings) warnings.push(warning);
+    antSkillsets = registry;
+  }
   // Token savings (docs/protocol.md): each is off unless its setting is on and the mothership mounted it.
   if (env.COLONIZER_CAVEMAN === 'true') {
     const skill = readText(env.COLONIZER_CAVEMAN_SKILL || CAVEMAN_SKILL);
@@ -814,6 +925,25 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
       hooks: [
         async (input) => {
           const reason = understandAnythingDenial(input.tool_name, input.tool_input, pluginDirs);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (antSkillsets) {
+    // Per-ant skillsets (issue #1163), right after the understand-anything guard so that denial
+    // still applies first: an ant whose agent file lists `skillsets` may load only the skills those
+    // packs ship. The gate fails open — an unknown ant, an ant without a list, and a skill no
+    // mounted pack ships all pass — so only the whitelist violation itself is ever refused.
+    preToolUse.push({
+      matcher: 'Skill',
+      hooks: [
+        async (input) => {
+          const reason = antSkillsetDenial(input, antSkillsets, pluginDirs);
           if (!reason) return { continue: true };
           return {
             continue: true,
