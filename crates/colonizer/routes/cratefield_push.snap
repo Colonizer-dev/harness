@@ -1,0 +1,3 @@
+/api/push/cratefield                                 GET    unauth=401    token=owner            activity=-
+/api/push/cratefield                                 PUT    unauth=401    token=owner            activity=settings.save
+/api/push/cratefield/test                            POST   unauth=401    token=owner            activity=-

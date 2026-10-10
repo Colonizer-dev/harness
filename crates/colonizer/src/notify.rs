@@ -1439,12 +1439,18 @@ async fn deliver_routed(
         sent = true;
     }
     // Push carries the same event name and the same one line the other channels do, and each
-    // device's own preferences decide whether it wants this event, repo and hour.
+    // device's own preferences decide whether it wants this event, repo and hour. The Cratefield
+    // relay (#1085), when switched on, queues the same event and line beside it.
     let pushed = match route {
         PushRoute::Event(session) => {
-            push::deliver(app, client, payload["event"].as_str().unwrap_or("notify"), text, session).await
+            let event = payload["event"].as_str().unwrap_or("notify");
+            crate::cratefield_push::enqueue(app, event, session.map(|s| s.id.as_str()), None, text);
+            push::deliver(app, client, event, text, session).await
         }
-        PushRoute::Quota { provider, colonies } => push::deliver_quota(app, client, provider, text, colonies).await,
+        PushRoute::Quota { provider, colonies } => {
+            crate::cratefield_push::enqueue(app, crate::push_prefs::QUOTA, None, Some(provider), text);
+            push::deliver_quota(app, client, provider, text, colonies).await
+        }
     };
     if pushed {
         sent = true;
