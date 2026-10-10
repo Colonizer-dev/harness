@@ -108,6 +108,7 @@ Every heading of the single-page protocol, in its original order, and the area f
 | <a id="61-model-routing-runner"></a>6.1 Model routing (runner) | [protocol/model-routing.md](protocol/model-routing.md#61-model-routing-runner) |
 | <a id="61b-per-task-model-tiers-mothership"></a>6.1b Per-task model tiers (mothership) | [protocol/model-routing.md](protocol/model-routing.md#61b-per-task-model-tiers-mothership) |
 | <a id="61c-jev-second-opinion-shadow-mode"></a>6.1c Jev second opinion (shadow mode) | [protocol/model-routing.md](protocol/model-routing.md#61c-jev-second-opinion-shadow-mode) |
+| <a id="61d-per-turn-model-routing-shadow"></a>6.1d Per-turn model routing (shadow) | [protocol/model-routing.md](protocol/model-routing.md#61d-per-turn-model-routing-shadow) |
 | <a id="62-shared-memory-runner--mothership"></a>6.2 Shared memory (runner ⇄ mothership) | [protocol/memory.md](protocol/memory.md#62-shared-memory-runner--mothership) |
 | <a id="62b-autonomous-mode-mothership"></a>6.2b Autonomous mode (Mothership) | [protocol/autonomy.md](protocol/autonomy.md#62b-autonomous-mode-mothership) |
 | <a id="62c-burn-down-mode-mothership"></a>6.2c Burn-down mode (Mothership) | [protocol/autonomy.md](protocol/autonomy.md#62c-burn-down-mode-mothership) |
