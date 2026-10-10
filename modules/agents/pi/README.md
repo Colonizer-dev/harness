@@ -86,6 +86,16 @@ stand-in model endpoint to check the model is offered the tools and its `loop_ne
 an event. `module.json` declares `"loop_tools": true`, so a self-paced loop is briefed with
 `loop_next` instead of running every 24 hours.
 
+## Skill packs
+
+`module.json` declares `skill_packs`, so every colony gets the enabled Skillsets (the claude-code
+module's `plugins` setting, with any org override) mounted read-only at
+`/opt/colonizer/plugins/<name>`, with `COLONIZER_PLUGIN_DIRS` rewritten to those in-VM paths
+([skill-packs.md](../../../docs/skill-packs.md)). Discovery stays off — the runner keeps
+`--no-skills` — and each pack skill is loaded by explicit path instead, one
+`--skill <pack>/skills/<name>` per skill, so exactly the switched-on packs' skills exist. Pack
+`mcp.json` tool servers are not wired in: a skill that needs one sees it missing.
+
 ## What does not apply from the Claude Code module
 
 Pi has no subagents, so `subagent_model`, `background_model` and `delegate` have no counterpart, and

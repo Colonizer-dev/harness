@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 
@@ -8,6 +11,7 @@ import {
   commandQueue,
   EFFORT_LEVELS,
   lfSplitter,
+  packSkillPaths,
   parseRoutes,
   piArgs,
   piEnv,
@@ -75,6 +79,56 @@ test('piArgs builds the RPC command line; piEnv pins the agent dir and hides the
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
   }); // the gateway token never reaches pi or its shell commands
+});
+
+test('packSkillPaths lists every SKILL.md directory of the mounted packs, sorted, and skips the rest', () => {
+  const packs = mkdtempSync(join(tmpdir(), 'colonizer-pi-packs-'));
+  try {
+    for (const skill of ['beta', 'alpha']) {
+      mkdirSync(join(packs, 'archify', 'skills', skill), { recursive: true });
+      writeFileSync(join(packs, 'archify', 'skills', skill, 'SKILL.md'), `---\nname: ${skill}\n---\n`);
+    }
+    mkdirSync(join(packs, 'archify', 'skills', 'empty')); // a skill directory without SKILL.md is not a skill
+    writeFileSync(join(packs, 'archify', 'skills', 'stray.md'), 'not a directory');
+    mkdirSync(join(packs, 'bare')); // a pack that shipped no skills/ at all
+    const dirs = [join(packs, 'archify'), '  ', join(packs, 'absent'), join(packs, 'bare'), join(packs, 'bare', 'skills', 'graft', 'SKILL.md')];
+    assert.deepEqual(packSkillPaths(dirs), [join(packs, 'archify', 'skills', 'alpha'), join(packs, 'archify', 'skills', 'beta')]);
+    assert.deepEqual(packSkillPaths(), []);
+  } finally {
+    rmSync(packs, { recursive: true, force: true });
+  }
+});
+
+test('mounted pack skills load by explicit --skill path while --no-skills stays', () => {
+  // --no-skills keeps Pi's own discovery off; an explicit --skill path loads all the same.
+  assert.deepEqual(piArgs({ provider: 'fake', modelId: 'm', skills: ['/x/skills/a', '/x/skills/b'] }), [
+    '--no-session', '--no-extensions', '--no-skills', '--skill', '/x/skills/a', '--skill', '/x/skills/b',
+    '--no-prompt-templates', '--provider', 'fake', '--model', 'm', '--append-system-prompt', SYSTEM_PROMPT_APPEND,
+  ]);
+  assert.ok(piArgs({ provider: 'fake', modelId: 'm' }).includes('--no-skills'));
+});
+
+test('COLONIZER_PLUGIN_DIRS reaches pi as one --skill pair per pack skill', async () => {
+  const pack = mkdtempSync(join(tmpdir(), 'colonizer-pi-pack-'));
+  try {
+    for (const skill of ['beta', 'alpha']) {
+      mkdirSync(join(pack, 'skills', skill), { recursive: true });
+      writeFileSync(join(pack, 'skills', skill, 'SKILL.md'), '---\nname: x\n---\n');
+    }
+    // The mothership comma-joins the in-VM pack directories into COLONIZER_PLUGIN_DIRS (boot.rs);
+    // main() splits the variable and passes packSkillPaths' result into runAgent the way it passes
+    // disabledTools, so the harness call mirrors that wiring.
+    const env = { COLONIZER_PLUGIN_DIRS: `${pack},/nonexistent-pack` };
+    const pi = new FakePi();
+    pi.onCommand = (command) => pi.respond(command);
+    const commands = commandQueue();
+    const done = runAgent({ spawnPi: ({ args }) => ((pi.spawnArgs = args), pi), commands, emit: () => {}, selection: SELECTION, skills: packSkillPaths(env.COLONIZER_PLUGIN_DIRS.split(',')), env, graceMs: 50 });
+    commands.push({ type: 'shutdown' });
+    await done;
+    assert.deepEqual(pi.spawnArgs.slice(0, 7), ['--no-session', '--no-extensions', '--no-skills', '--skill', join(pack, 'skills', 'alpha'), '--skill', join(pack, 'skills', 'beta')]);
+  } finally {
+    rmSync(pack, { recursive: true, force: true });
+  }
 });
 
 test('toolResultText flattens and caps; lfSplitter splits on LF bytes only', () => {

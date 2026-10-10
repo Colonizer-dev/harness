@@ -49,6 +49,17 @@ LAN/tailnet endpoint add the `local` preset in Settings → Model providers (`ba
 `http://<tailnet-ip>:8000`, `auth` none), pick the OpenCode agent module, and set the model to
 `local/<model>`. The mothership host reaches the tailnet; the colony only reaches the gateway.
 
+## Skill packs
+
+The module manifest declares `skill_packs`, so every colony gets the enabled Skillsets (the
+claude-code module's `plugins` setting, with any org override) mounted read-only at
+`/opt/colonizer/plugins/<name>`, with `COLONIZER_PLUGIN_DIRS` rewritten to those in-VM paths
+(docs/skill-packs.md). The runner hands each pack skill to OpenCode as config `skills.paths` (one
+`<pack>/skills/<name>` entry per skill) inside `OPENCODE_CONFIG_CONTENT`, and keeps every other
+skill off: `permission.skill` denies all but the pack skills, and
+`OPENCODE_DISABLE_EXTERNAL_SKILLS=1` stops project-scope and external discovery. Pack `mcp.json`
+tool servers are not wired in — a skill that needs one sees it missing.
+
 ## Binary
 
 At boot the runner uses `COLONIZER_OPENCODE_BIN`, then `opencode` on `PATH`, else downloads the

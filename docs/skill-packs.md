@@ -16,8 +16,23 @@ off for its own colonies. The runner receives the list as `COLONIZER_PLUGIN_DIRS
 ([protocol.md](protocol.md#plugin-directories)). Each name resolves to `<data>/plugins/<name>`,
 else the vendored `<COLONIZER_HOME>/plugins/<name>` (a local copy wins, and the colony log says
 so), mounts read-only at `/opt/colonizer/plugins/<name>`, and loads into Claude Code as one
-`{type: 'local', path}` plugin entry. Skill packs are a Claude Code feature: the other agent
-modules have no `plugins` setting and load none.
+`{type: 'local', path}` plugin entry.
+
+The packs are not Claude-Code-only. Every agent module's manifest declares a `skill_packs`
+capability — Claude Code, OpenCode and Pi have it — and the mothership computes the Skillsets
+setting once (this `plugins` setting with any org override), mounts the enabled packs read-only
+at `/opt/colonizer/plugins/<name>` for every module that declares the capability, and rewrites
+that module's `COLONIZER_PLUGIN_DIRS` to the in-VM paths. A module without the capability starts
+without the packs and logs a boot warning that names the ones it is skipping.
+
+Each runner loads the mounts its own way. OpenCode is given every pack skill as config
+`skills.paths` (one `<pack>/skills/<name>` per skill), behind a `permission.skill` allowlist that
+denies every other skill, with `OPENCODE_DISABLE_EXTERNAL_SKILLS=1` — so project-scope skills and
+anything outside the packs stay off. Pi keeps discovery off (`--no-skills`) and is handed each
+pack skill by explicit `--skill <pack>/skills/<name>` path. The boot-time cross-pack skill-name
+uniqueness check covers every module that loads packs, so a collision blocks any of them. Pack
+`mcp.json` tool servers remain a Claude Code plugin mechanism: validated for every pack, wired
+into Claude Code alone.
 
 One pack is also loaded by purpose: `archify` (vendored from
 [tt-a1i/archify](https://github.com/tt-a1i/archify), MIT) is on by default, and it is added to
@@ -95,7 +110,8 @@ Two checkers, with different reach:
   server a stdio `command` or a remote `url` with a non-empty `hosts`/`allowedHosts`
   declaration (`mcp_hosts`, the reader the egress gate of #304 will consume). A pack that
   fails blocks the colony's boot, and the save is refused, with the error naming the file.
-  Skill-name uniqueness across packs is checked at boot only.
+  Skill-name uniqueness across packs is checked at boot only, and for every module that loads
+  packs, not Claude Code alone.
 - **The full rule set** (`scripts/validate-plugins.mjs`): semver `version`, non-empty
   `description`, SKILL.md frontmatter, `mcp.json` shape and remote-host declarations,
   and duplicate skill names within a pack (compared case-insensitively). It runs by hand

@@ -23,6 +23,7 @@ fn provider(id: &str, name: &str, description: &str, schema: Value) -> Provider 
         description: description.into(),
         schema,
         loop_tools: false,
+        skill_packs: false,
     }
 }
 
