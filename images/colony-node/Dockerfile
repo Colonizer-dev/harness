@@ -6,7 +6,7 @@
 # Built by .github/workflows/colony-image.yml, which also checks the base digest below against the
 # node row in crates/colonizer/images.lock so the two cannot drift. The node preset keeps using stock
 # node:24-bookworm until this image is published and its digest pinned in images.lock.
-FROM node:24-bookworm@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4
+FROM node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
 
 # Bun, pinned. The amd64 build is deliberately the -baseline one: colony microVMs may not expose
 # AVX2, and the default x64 build crashes on a CPU without it. arm64 has no baseline variant. The
