@@ -215,7 +215,9 @@ Loops are saved prompts that launch a colony on a schedule; what they do is
 colonizer loop list                                              # every loop this token may see, with its next run
 colonizer loop create acme/app --name "Triage" --prompt "Triage new issues" daily@09:00
 colonizer loop create acme/app --name "Maps" --kind map 14d@03:00   # refresh the map; no prompt needed
+colonizer loop create acme/app --template data-refresh daily@05:00  # refresh the repository's data files; no prompt needed
 colonizer loop run loop_x1                                       # start the next run now (exit 5 while one is live)
+colonizer loop run loop_x1 --only fx-rates --only member-count   # run those sources only (the data-refresh template)
 colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
 colonizer loop start loop_x1                                     # enable a paused or ended loop again
 colonizer loop delete loop_x1                                    # delete it; its past colonies stay
@@ -242,6 +244,19 @@ other flags mirror `launch`: `--model`, `--subagent-model`, `--autopilot`/`--no-
 run that failed for an infrastructure reason it is run once more (default 60; `0` switches the
 re-run off) and `--disabled` creates it paused. Cadence ranges
 (15 minutes to a week, days 1–365) are the mothership's to refuse, with its message.
+
+`--template data-refresh` builds the prompt from the repository's inputs instead of `--prompt`
+(which, like `--prompt-file`, it conflicts with): `--sources PATH` (default `data/sources.json`),
+`--extract CMD` (default `npm run extract -- <id>`), `--validate CMD` (default `npm run validate`),
+`--policy CMD` (default `npm run --silent refresh-policy`), `--evidence DIR` (default `evidence/`)
+and `--max-failures N` (default 3) fill the Inputs lines the prompt opens with. Needs GitHub is
+switched on and the name defaults to "Data refresh"; what the loop does is
+[data-refresh](loops/data-refresh.md).
+
+`loop run` takes `--only SOURCE_ID`, repeated or comma-separated: the ids go out as the run-now body
+`{"params":{"only":[…]}}` and the run's brief tells the colony to work only on those sources, due or
+not. Without the flag no body is sent and the run covers every due source. As ever the run is
+refused (exit 5) while the loop's previous one is still live.
 
 `loop stop` and `loop start` are the cockpit's switch: the loop's own settings are sent back
 with `enabled` flipped, so pausing keeps everything and re-enabling books the next run from the

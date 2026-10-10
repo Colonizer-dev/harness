@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModuleInfo, OrgInfo } from "../types";
-import { describeLoopCadence, effectiveAgentModule, intervalWords, nameFromPrompt, parseInterval, parseLoopCommand, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence } from "./loops";
+import { LOOP_TEMPLATES, describeLoopCadence, effectiveAgentModule, intervalWords, nameFromPrompt, parseInterval, parseLoopCommand, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence } from "./loops";
 
 describe("loops", () => {
   it("parses intervals the way people type them", () => {
@@ -112,5 +112,16 @@ describe("loops", () => {
     // A row without the flag reads as lacking the tools; no agent kind at all says nothing.
     expect(selfPacedWarning("globex", orgs, [agent(false)])).toMatch(/can't pace its own loop/);
     expect(selfPacedWarning("globex", orgs, [])).toBeNull();
+  });
+
+  it("offers a data-refresh template that needs GitHub and names its inputs", () => {
+    const t = LOOP_TEMPLATES.find((x) => x.label === "Refresh data files from their sources");
+    expect(t).toBeDefined();
+    expect(t?.needsGithub).toBe(true);
+    expect(t?.choice).toEqual({ every: "daily", time: "05:00" });
+    // Every input the colony is told to read and run, so editing the prompt cannot drop one.
+    for (const input of ["data/sources.json", "npm run extract -- <id>", "npm run validate", "npm run --silent refresh-policy", "evidence/", "/harness/out/pr-labels", "source-broken:"]) {
+      expect(t?.prompt).toContain(input);
+    }
   });
 });

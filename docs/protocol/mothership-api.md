@@ -489,6 +489,14 @@ log gets a `warn` line (`autopilot: not publishing, external writes are blocked
 `attention` is left as it was. Opening pull requests as drafts (`publish.settings.draft`) does not
 change this: a draft PR is still an external write, refused the same way as a ready one.
 
+**Pull-request labels.** A loop colony may write `/harness/out/pr-labels` — one label per line, at
+most 10, each ≤ 50 characters and without a comma (a comma would split at `--add-label`). At
+publish the mothership creates the labels that do not exist yet
+and adds them to the pull request, best effort: a label that cannot be created or applied is logged
+and dropped, never a reason to hold the publish. Only a loop colony's file is read; the data-refresh
+template writes `data-refresh:auto` or `data-refresh:review` from its policy command
+([data-refresh](../loops/data-refresh.md)).
+
 **Done-verification (issue #328).** Before a completion claim is published, the mothership verifies it
 on its own. It snapshots the colony's work — commits and uncommitted files — without touching the
 worktree, reads the git state directly (commits ahead of base, changed files, whether the paths the PR
