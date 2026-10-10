@@ -2,7 +2,7 @@
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, now, sleep } from "../../mockShared";
 import { defaultPushPrefs, mergePushPrefs } from "../../push";
-import type { ApiTokenMeta, PhoneOrigin, PushSubscriptionSummary } from "../../types";
+import type { ApiTokenMeta, CratefieldPushState, PhoneOrigin, PushSubscriptionSummary } from "../../types";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
 import type { RemoteApi } from "./api";
@@ -15,6 +15,15 @@ const phoneOrigins = (ms: MockState): PhoneOrigin[] =>
   ms.remoteState.enabled
     ? [{ kind: "relay", url: `https://${ms.remoteHost}`, reachable: true, secure: true, note: null }]
     : [{ kind: "lan", url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" }];
+
+// The server derives `state` on every read (cratefield_push.rs `view`): off while the switch is,
+// no_remote when remote access has no link to sign with, then queued or unreachable from the
+// queue, ok once it drains. The mock keeps the bookkeeping and derives the same way.
+const cratefieldView = (ms: MockState): CratefieldPushState => {
+  const s = ms.cratefieldState;
+  const state = !s.enabled ? "off" : !ms.remoteState.enabled ? "no_remote" : s.queued > 0 ? (s.last_error ? "unreachable" : "queued") : "ok";
+  return { ...s, state };
+};
 
 export function remoteMock(ms: MockState): RemoteApi {
   return {
@@ -93,6 +102,35 @@ export function remoteMock(ms: MockState): RemoteApi {
       const row = ms.pushSubs.find((candidate) => candidate.endpoint_host === host);
       if (!row) throw new ApiError("this endpoint is not subscribed", 404);
       row.last_seen = Math.floor(Date.now() / 1000);
+    },
+    cratefieldPush: () => ms.later(() => cratefieldView(ms)),
+    setCratefieldPush: async (enabled) => {
+      await sleep(250);
+      // Like the server: a PUT that does not change the switch answers the view and records nothing,
+      // and enabling without the remote link is the same 409, in the server's words.
+      if (enabled === ms.cratefieldState.enabled) return clone(cratefieldView(ms));
+      if (enabled && !ms.remoteState.enabled) throw new ApiError("remote access has no link yet; switch remote access on first", 409);
+      ms.cratefieldState = enabled
+        ? { ...ms.cratefieldState, enabled: true, since: now(), last_error: null }
+        : // Like the server's disable: a fresh queue, with the relay's refusal — if the DELETE had
+          // one — written back into last_error so a failed cleanup stays on the record. The demo's
+          // relay always answers, so there is never a refusal to keep.
+          { enabled: false, since: null, state: "off", queued: 0, dropped: 0, last_error: null, last_delivered: null, last_attempt: null };
+      ms.logActivity({ kind: "settings.save", actor: "you", via: "cockpit", target: "the Cratefield delivery", section: "notifications" });
+      return clone(cratefieldView(ms));
+    },
+    testCratefieldPush: async () => {
+      await sleep(250);
+      // The server's 409 for a test with the channel off.
+      if (!ms.cratefieldState.enabled) throw new ApiError("Deliver through Cratefield is off; switch it on first", 409);
+      // One test notification queued and flushed at once. With the link up the relay answers: the
+      // batch drains, both timestamps stamp, the state reads ok. Without it the flush fails like
+      // the server's — the batch stays queued, the refusal lands in last_error, and the state
+      // reads unreachable until a delivery clears it.
+      ms.cratefieldState = ms.remoteState.enabled
+        ? { ...ms.cratefieldState, queued: 0, last_error: null, last_attempt: now(), last_delivered: now() }
+        : { ...ms.cratefieldState, queued: ms.cratefieldState.queued + 1, last_error: "remote access is off, so the relay cannot be reached", last_attempt: now() };
+      return clone(cratefieldView(ms));
     },
     remote: () => ms.later(() => ms.remoteState),
     setRemote: async (enabled) => {

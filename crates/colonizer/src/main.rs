@@ -44,6 +44,7 @@ mod config;
 #[doc(hidden)]
 pub mod contract;
 mod coordination;
+mod cratefield_push;
 mod decide;
 mod decisions;
 mod deja;
