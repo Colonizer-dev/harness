@@ -108,6 +108,7 @@ mod needs_feed;
 mod notify;
 mod observability;
 mod openai;
+mod operator;
 mod orgs;
 mod packages;
 mod path_policy;

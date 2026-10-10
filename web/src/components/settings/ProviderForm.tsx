@@ -4,9 +4,10 @@ import { fillTemplate } from "../../providerCatalog";
 import { providerTestToast } from "../../providerHealth";
 import type { ModelProvider, ProviderAuth, ProviderPricing, ProviderPreset } from "../../types";
 import { useModels } from "../../useModels";
-import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass } from "../ui";
+import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass, timeAgo } from "../ui";
 import { IconCheck, IconChevron, IconX } from "../icons";
 import { ProviderMark } from "../providerMark";
+import { modelChoices, offeredModels, toggleModel } from "./providerOverview";
 import { Row, Code } from "./ui";
 import {
   AUTH_LABEL,
@@ -395,6 +396,7 @@ export function ProviderForm({
           info={<p>Model IDs as the endpoint expects them. Enter or a comma adds one; leave empty to type IDs where you pick a model.</p>}
         >
           <ChipsInput id={ids.models} values={models} onChange={setModels} placeholder={models.length ? "Add another" : "deepseek-flash, qwen3-coder, …"} />
+          <ModelChecklist provider={initial} models={models} onChange={setModels} />
         </FormField>
             <details open={detailsOpen} onToggle={(e) => setDetailsOpen(e.currentTarget.open)} className="group min-w-0 rounded-lg border border-border sm:col-span-2">
               <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
@@ -880,6 +882,7 @@ export function ProviderForm({
           info={<p>Model IDs as the endpoint expects them. Enter or a comma adds one; leave empty to type IDs where you pick a model.</p>}
         >
           <ChipsInput id={ids.models} values={models} onChange={setModels} placeholder={models.length ? "Add another" : "deepseek-flash, qwen3-coder, …"} />
+          <ModelChecklist provider={initial} models={models} onChange={setModels} />
         </FormField>
         <details
           open={advancedOpen}
@@ -1212,6 +1215,38 @@ function PriceField({
         className={cx(inputClass, "font-mono text-body-sm", error && "border-err")}
       />
     </FormField>
+  );
+}
+
+/**
+ * The models the endpoint offers as checkboxes beneath the free-typed chips (issue #1167): ticked is
+ * enabled, "new" just appeared upstream, "gone" is enabled though the endpoint no longer names it —
+ * nothing leaves `models` unless the user unticks it. Hidden while there is nothing to offer, for a
+ * provider that is not saved yet (no discovery) and no catalogue list.
+ */
+function ModelChecklist({ provider, models, onChange }: { provider?: ModelProvider; models: string[]; onChange: (models: string[]) => void }) {
+  if (!provider || offeredModels(provider).length === 0) return null;
+  return (
+    <div className="min-w-0 space-y-1.5 rounded-lg border border-border px-2.5 py-2">
+      <p className="text-small text-faint">
+        {provider.discovered_at
+          ? `Available on the endpoint, discovered ${timeAgo(provider.discovered_at)} — tick one to enable it.`
+          : "Available as the provider catalogue lists them; this endpoint serves no model list of its own."}
+      </p>
+      {modelChoices(provider, models).map((choice) => (
+        <label key={choice.model} className="flex min-w-0 items-center gap-2 font-mono text-body-sm">
+          <input
+            type="checkbox"
+            checked={choice.enabled}
+            onChange={(e) => onChange(toggleModel(models, choice.model, e.target.checked))}
+            className="size-4 shrink-0 cursor-pointer accent-[var(--accent)]"
+          />
+          <span className="truncate">{choice.model}</span>
+          {choice.isNew && <Badge tone="info">new</Badge>}
+          {choice.gone && <Badge tone="warn">gone</Badge>}
+        </label>
+      ))}
+    </div>
   );
 }
 

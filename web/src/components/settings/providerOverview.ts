@@ -4,6 +4,7 @@
 // reset it was never told is absent, and the run-out is a straight line through real readings.
 import { untilWords } from "../../resetTime";
 import type { ModelProvider, PlanUsage, ProviderBalance, ProviderUsageReport } from "../../types";
+import { presetDraft } from "./providerCatalog";
 
 export type StatusTone = "ok" | "warn" | "err" | "idle";
 
@@ -59,12 +60,56 @@ export function resetText(provider: ModelProvider, nowMs: number): string | null
   return words ? `resets ${words}` : null;
 }
 
-/** "3 enabled · +5 available": the enabled models, and how many more the endpoint lists (issue #1167). */
-export function modelsSummary(provider: Pick<ModelProvider, "models" | "discovered_models">): string {
+/**
+ * What the endpoint offers (issue #1167): the models discovered from its /v1/models once one came
+ * back non-empty, otherwise the preset's or catalogue entry's known models — an endpoint that serves
+ * no list (Alibaba's /apps/anthropic) still offers what the catalogue names.
+ */
+export function offeredModels(provider: Pick<ModelProvider, "discovered_models" | "preset">): string[] {
+  return provider.discovered_models?.length ? provider.discovered_models : presetDraft(provider.preset).models;
+}
+
+/** "3 enabled · +5 available": the enabled models, and how many more the endpoint offers (issue #1167). */
+export function modelsSummary(provider: Pick<ModelProvider, "models" | "discovered_models" | "preset">): string {
   const enabled = provider.models.length;
-  const extra = (provider.discovered_models ?? []).filter((m) => !provider.models.includes(m)).length;
+  const extra = offeredModels(provider).filter((m) => !provider.models.includes(m)).length;
   const head = enabled === 0 ? "No models enabled" : `${enabled} enabled`;
   return extra > 0 ? `${head} · +${extra} available` : head;
+}
+
+/** One row of the edit form's model checklist (issue #1167). */
+export interface ModelChoice {
+  model: string;
+  /** Ticked: the model is enabled, so it can be picked as provider/model. */
+  enabled: boolean;
+  /** The endpoint listed it for the first time at the last discovery. */
+  isNew: boolean;
+  /** Enabled, but the endpoint's own list no longer names it. Kept listed and ticked; nothing drops it behind a setting's back. */
+  gone: boolean;
+}
+
+/**
+ * The edit form's checklist (issue #1167): every model the endpoint offers, plus any enabled model
+ * the offer left out — unchecking one is the only way it leaves `models`. `models` is the form's
+ * live list, not the saved one, so a tick survives a re-render and a chip removed above unticks here.
+ */
+export function modelChoices(
+  provider: Pick<ModelProvider, "discovered_models" | "new_models" | "preset">,
+  models: string[],
+): ModelChoice[] {
+  const discovered = provider.discovered_models ?? [];
+  const fresh = provider.new_models ?? [];
+  return [...new Set([...offeredModels(provider), ...models])].map((model) => ({
+    model,
+    enabled: models.includes(model),
+    isNew: fresh.includes(model),
+    gone: discovered.length > 0 && models.includes(model) && !discovered.includes(model),
+  }));
+}
+
+/** The enabled list after one checklist checkbox flips: ticking adds, unticking removes. */
+export function toggleModel(models: string[], model: string, on: boolean): string[] {
+  return on ? (models.includes(model) ? models : [...models, model]) : models.filter((m) => m !== model);
 }
 
 export interface Projection {

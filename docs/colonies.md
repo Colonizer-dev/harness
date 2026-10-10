@@ -901,8 +901,31 @@ target_in = []                          # target must be a relative path with on
 # quota = true                          # provider_failure: a quota flag matches too
 ```
 
-A stall that no row matches goes to `playbook::on_unmatched_stall`, which does nothing today; it is
-the hook for an operator agent (#1192).
+### The operator turn
+
+A stall that no row matches goes to `playbook::on_unmatched_stall` — called when the watchdog is
+about to send its generic nudge, and again when it raises the final `nudges_exhausted` flag. There
+the operator turn (#1192) takes over: the mothership builds a bounded digest of the colony's recent
+life (its task, status and attention reason, the last lines of `harness.jsonl`, the denials in the
+event log, the open question, the verification verdict and check output, the tail of `pr.md`, and
+the changed paths — every untrusted section quoted, so none of it can forge a heading), redacts it,
+and asks the judge model — the one configured for autonomous mode; with none, the operator does
+nothing — for a strict JSON verdict: a diagnosis, one of `message`, `publish`, `resume`, `stop`,
+`switch_model` or `escalate`, and a confidence.
+
+The guardrails are the playbook's, restated: a security hold is never turned on (the digest is not
+even built, and the colony is re-read fresh before anything acts), at most two turns per colony per
+rolling hour counted on the persisted notes so a restart does not reset the budget, `publish`
+re-checks the idle-verified preconditions above on a fresh read and goes through the same guarded
+publish, `switch_model` offers only the provider's fallback (the model never names one), and a low
+confidence, an unknown action or a reply that does not parse escalates instead of acting. If the
+world moves while the model thinks — a hold lands, a person stops the colony or answers it — the
+turn stands down: a note, no action, the attention flag untouched. An escalation raises the
+attention reason `operator_escalation` — the diagnosis rides in the flag, and the colony lands in
+Needs you; it never replaces a security hold. Every turn, whatever came of it, is recorded on the
+session and shown in the colony header as "operator: diagnosed …, did …", under a stable signature
+(the attention reason plus the most recent denial's kind) so identical stalls can later be grouped;
+proposing playbook rows from those groups is future work, not built here.
 
 ## Conditional instructions
 
