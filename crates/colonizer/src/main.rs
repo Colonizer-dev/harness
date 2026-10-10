@@ -101,6 +101,7 @@ mod merge_loop;
 mod merge_steward;
 mod merge_train;
 mod mesh;
+mod mirror_health;
 mod model_switch;
 mod modules;
 mod needs_feed;
