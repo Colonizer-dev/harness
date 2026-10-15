@@ -186,11 +186,13 @@ pub(crate) fn clear(config_dir: &FsPath) -> Result<()> {
     save_queue(config_dir, &Queue::default())
 }
 
-/// Where a turn has ended: the states a colony is worth sending in.
+/// The states a colony is left in when its run is over or waiting — the collector's settled set.
 pub(crate) fn sendable(status: SessionStatus) -> bool {
     matches!(
         status,
         SessionStatus::Idle
+            | SessionStatus::WaitingForAnswer
+            | SessionStatus::Parked
             | SessionStatus::PrOpened
             | SessionStatus::Merged
             | SessionStatus::Closed
@@ -198,6 +200,15 @@ pub(crate) fn sendable(status: SessionStatus) -> bool {
             | SessionStatus::Stopped
             | SessionStatus::Failed
     )
+}
+
+/// How long the event logs must be quiet before a colony is sent: a colony in a settled state can
+/// still be mid-write (a resume, a late subagent), and half a run is not worth a version.
+pub(crate) const QUIET: Duration = Duration::from_secs(30 * 60);
+
+/// Settled: a settled status, and nothing written to the event logs for [`QUIET`].
+pub(crate) fn settled(status: SessionStatus, last_write: Option<std::time::SystemTime>, now: std::time::SystemTime) -> bool {
+    sendable(status) && last_write.is_none_or(|last| now.duration_since(last).is_ok_and(|quiet| quiet >= QUIET))
 }
 
 fn status_word(status: SessionStatus) -> String {
@@ -209,21 +220,24 @@ fn status_word(status: SessionStatus) -> String {
 
 /// The colony as far as the brain could tell a difference: status, pull request, cost and how much
 /// its event logs hold. Cheap — one stat per log — and stable while nothing happens.
-async fn fingerprint(app: &App, s: &crate::sessions::Session) -> String {
+async fn fingerprint(app: &App, s: &crate::sessions::Session) -> (String, Option<std::time::SystemTime>) {
     let mut events = 0u64;
+    let mut last_write = None;
     if let Ok(files) = app.store().list_files(&s.id).await {
         for name in files.iter().filter(|n| is_event_log(n)) {
             if let Ok(Some(stat)) = app.store().stat(&s.id, name).await {
                 events += stat.len;
+                last_write = last_write.max(stat.modified);
             }
         }
     }
-    format!(
+    let fp = format!(
         "{}|{}|{:.6}|{events}",
         status_word(s.status),
         s.pr_url.as_deref().unwrap_or(""),
         s.cost_usd.unwrap_or(0.0) + s.routed_cost_usd.unwrap_or(0.0)
-    )
+    );
+    (fp, last_write)
 }
 
 fn is_event_log(name: &str) -> bool {
@@ -302,8 +316,12 @@ async fn sweep(app: &App, saved: &Saved) {
         .cloned()
         .collect();
     let mut found = Vec::with_capacity(candidates.len());
+    let wall = std::time::SystemTime::now();
     for s in &candidates {
-        found.push((s.id.clone(), s.repo.clone(), status_word(s.status), fingerprint(app, s).await));
+        let (fp, last_write) = fingerprint(app, s).await;
+        if settled(s.status, last_write, wall) {
+            found.push((s.id.clone(), s.repo.clone(), status_word(s.status), fp));
+        }
     }
     let now = Utc::now();
     if let Err(e) = with_queue(&app.cfg.config_dir, |q| {
@@ -361,13 +379,15 @@ async fn send_one(app: &App, saved: &Saved, client: &Client, id: &str, entry: &E
     };
     let events = read_events(app, id).await;
     let scrub = record::Scrubber::new(std::env::var("HOME").ok(), crate::secrets::saved_values(app));
-    let built = record::build(&session, &events, rule.detail, &scrub);
-    let body = record::serialise(&built);
+    let Some(collected) = record::collect(&record::row(&session), &events) else {
+        return Outcome::Dropped; // a row with no repository
+    };
+    let (built, body) = record::prepare(collected, rule.detail, &scrub);
     let body_sha = sha256(&body);
     let project = record::project_of(&built.repo);
     // The note names the source it summarises; for an unchanged body that is the id we hold.
     if entry.body_sha.as_deref() == Some(body_sha.as_str()) && entry.note_url.is_some() {
-        let note = record::note_body(&built, &session, entry.source_id.as_deref(), &scrub);
+        let note = super::note::body(&built, entry.source_id.as_deref(), &scrub);
         if entry.note_sha.as_deref() == Some(sha256(&note).as_str()) {
             return Outcome::Unchanged;
         }
@@ -380,7 +400,7 @@ async fn send_one(app: &App, saved: &Saved, client: &Client, id: &str, entry: &E
         Err(e) => return Outcome::Failed(e),
     };
     let source_id = source.get("id").and_then(Value::as_str).map(str::to_owned);
-    let note = record::note_body(&built, &session, source_id.as_deref(), &scrub);
+    let note = super::note::body(&built, source_id.as_deref(), &scrub);
     let title = record::source_path(&built);
     match client
         .keyed_note(&record::note_slug(id), &title, &note, project.as_deref())
@@ -591,10 +611,13 @@ pub async fn backfill(State(app): State<Shared>, Json(body): Json<BackfillReques
     for s in &in_org {
         if !saved.rule_for(&s.repo).is_some_and(|r| r.send) {
             opted_out += 1;
-        } else if !sendable(s.status) {
-            not_ended += 1;
         } else {
-            found.push((s.id.clone(), s.repo.clone(), fingerprint(&app, s).await));
+            let (fp, last_write) = fingerprint(&app, s).await;
+            if settled(s.status, last_write, std::time::SystemTime::now()) {
+                found.push((s.id.clone(), s.repo.clone(), fp));
+            } else {
+                not_ended += 1;
+            }
         }
     }
     let queue = load_queue(&app.cfg.config_dir);

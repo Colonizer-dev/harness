@@ -1,7 +1,7 @@
 // Living Brain (crates/colonizer/src/living_brain): the connection, the per-org/per-repo rules and
 // the send queue, as GET /api/living-brain answers them. The token itself is never in any answer.
 
-/** How much of a colony travels: `full` adds tool inputs and outputs, `summary` sends no conversation. */
+/** How much of a colony travels (the brain CLI's levels): `full` every message, reasoning and tool input/output; `messages` every message, tool names only; `summary` messages cut to 2 000 characters, tool names only. */
 export type LivingBrainDetail = "full" | "messages" | "summary";
 
 /** One rule: an org (`acme`) or a repository (`acme/web`); a repository's rule wins over its org's. No rule is off. */
@@ -68,7 +68,7 @@ export interface LivingBrainState {
 export interface LivingBrainBackfill {
   org: string;
   dry_run: boolean;
-  /** Ended colonies of the org in repositories whose rule sends. */
+  /** Settled colonies of the org in repositories whose rule sends. */
   eligible: number;
   already_sent: number;
   to_send: number;

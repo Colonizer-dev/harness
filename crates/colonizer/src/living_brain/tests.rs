@@ -5,8 +5,7 @@ use crate::util::short_id;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// A colony as `sessions.json` holds one: a finished, merged colony with a sentinel secret in its
-/// instructions.
+/// A colony as `sessions.json` holds one: merged, with a sentinel provider key in its instructions.
 fn colony(id: &str) -> crate::sessions::Session {
     serde_json::from_value(json!({
         "id": id,
@@ -17,14 +16,16 @@ fn colony(id: &str) -> crate::sessions::Session {
         "instructions": "use the key sk-ant-api03-SENTINELSENTINELSENTINELSENTINELSENTINEL-abcdef only in tests",
         "status": "merged",
         "branch": "colonizer/issue-42-abc",
+        "base": "main",
         "worktree": "/colonizer/worktrees/wt",
         "sandbox": "colonizer-abc",
         "agent": "claude-code",
         "pr_url": "https://github.com/acme/webshop/pull/7",
         "cost_usd": 0.25,
+        "routed_cost_usd": 0.5,
         "model_usage": {
-            "claude-sonnet-5": {"input_tokens": 10, "output_tokens": 20, "cache_read_tokens": 30, "cache_write_tokens": 40},
-            "claude-haiku-4-5": {"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 0, "cache_write_tokens": 0}
+            "zz-routed/model": {"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 0, "cache_write_tokens": 0},
+            "claude-sonnet-5": {"input_tokens": 10, "output_tokens": 20, "cache_read_tokens": 30, "cache_write_tokens": 40}
         },
         "error": null,
         "created_at": "2026-10-01T10:00:00Z",
@@ -33,140 +34,201 @@ fn colony(id: &str) -> crate::sessions::Session {
     .unwrap()
 }
 
-fn events() -> Vec<Value> {
-    let lines = [
-        json!({"type":"log","level":"info","message":"agentd up","seq":1,"ts":"2026-10-01T10:00:01.000Z"}),
-        json!({"type":"user_message","id":"initial","text":"You are resolving GitHub issue #42 … HARNESS-BOILERPLATE","seq":2,"ts":"2026-10-01T10:00:02.000Z"}),
-        json!({"type":"model_changed","model":"claude-sonnet-5","previous":null,"seq":3,"ts":"2026-10-01T10:00:03.000Z"}),
-        json!({"type":"assistant_text","message_id":"m1","block_index":0,"text":"Reading /Users/alice/secret-notes first.","seq":4,"ts":"2026-10-01T10:00:04.000Z"}),
-        json!({"type":"tool_call","message_id":"m1","tool_call_id":"t1","name":"Bash","input":{"command":"cat cart.js"},"seq":5,"ts":"2026-10-01T10:00:05.000Z"}),
-        json!({"type":"tool_result","tool_call_id":"t1","output":"export function total() {}","is_error":false,"seq":6,"ts":"2026-10-01T10:00:06.000Z"}),
+fn lines() -> Vec<Value> {
+    vec![
+        json!({"seq":1,"ts":"t1","type":"log","origin":"agent","level":"info","message":"agentd up"}),
+        json!({"seq":2,"ts":"t2","type":"user_message","origin":"user","id":"initial","text":"You are resolving GitHub issue #42 … HARNESS-BOILERPLATE"}),
+        json!({"seq":3,"ts":"t3","type":"model_changed","origin":"agent","model":"claude-opus-5"}),
+        json!({"seq":4,"ts":"t4","type":"assistant_text","origin":"agent","message_id":"m1","block_index":0,"text":"Reading /Users/alice/notes first."}),
+        json!({"seq":5,"ts":"t4","type":"assistant_text_delta","origin":"agent","message_id":"m1","block_index":0,"delta":"Rea"}),
+        json!({"seq":6,"ts":"t5","type":"tool_call","origin":"agent","message_id":"m1","tool_call_id":"call-1","name":"Bash","input":{"command":"cargo test"}}),
+        json!({"seq":7,"ts":"t6","type":"tool_result","origin":"agent","tool_call_id":"call-1","is_error":true,"output":"Exit code 101\nfailed"}),
         // agentd's re-send after a reconnect: dropped by the seq rule.
-        json!({"type":"tool_result","tool_call_id":"t1","output":"DUPLICATE","is_error":false,"seq":6,"ts":"2026-10-01T10:00:06.000Z"}),
-        json!({"type":"assistant_text","message_id":"s1","text":"subagent chatter","agent":{"id":"x","name":"Explore"},"seq":7,"ts":"2026-10-01T10:00:07.000Z"}),
-        json!({"type":"user_message","id":"watchdog-1","text":"are you stuck?","seq":8,"ts":"2026-10-01T10:00:08.000Z"}),
-        json!({"type":"question","question_id":"q","risk":"workspace_write","questions":[{"question":"Round half up?","header":"R","multi_select":false,"options":[]}],"seq":9,"ts":"2026-10-01T10:00:09.000Z"}),
-        json!({"type":"question_answered","question_id":"q","answers":{"Round half up?":"Yes"},"response":null,"seq":10,"ts":"2026-10-01T10:00:10.000Z"}),
-        json!({"type":"assistant_text","message_id":"m2","block_index":0,"text":"Done.","seq":11,"ts":"2026-10-01T10:00:11.000Z"}),
-    ];
-    let bytes = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
-    record::parse_events(bytes.as_bytes())
+        json!({"seq":7,"ts":"t6","type":"tool_result","origin":"agent","tool_call_id":"call-1","is_error":false,"output":"DUPLICATE"}),
+        json!({"seq":8,"ts":"t7","type":"tool_call","origin":"agent","message_id":"m2","tool_call_id":"call-2","name":"Agent","input":{"prompt":"dig"}}),
+        json!({"seq":9,"ts":"t8","type":"tool_result","origin":"agent","tool_call_id":"call-2","is_error":false,"background":true,"output":"Async agent launched"}),
+        json!({"seq":10,"ts":"t9","type":"tool_call","origin":"subagent","agent":{"id":"call-2"},"message_id":"s1","tool_call_id":"sub-1","name":"Read","input":{"file_path":"/x"}}),
+        json!({"seq":11,"ts":"t10","type":"assistant_text","origin":"subagent","agent":{"id":"call-2"},"message_id":"s2","text":"Found it."}),
+        json!({"seq":12,"ts":"t11","type":"subagent_end","origin":"agent","tool_call_id":"call-2","status":"completed"}),
+        json!({"seq":13,"ts":"t12","type":"thinking","origin":"agent","message_id":"m3","text":"Hmm."}),
+        json!({"seq":14,"ts":"t13","type":"user_message","origin":"watchdog","id":"watchdog-1","text":"are you stuck?"}),
+        json!({"seq":15,"ts":"t14","type":"question","origin":"agent","question_id":"q","questions":[{"question":"Round half up?","options":[{"label":"Yes","description":"away from zero"}]}]}),
+        json!({"seq":16,"ts":"t15","type":"question_answered","origin":"user","question_id":"q","answers":{"Round half up?":"Yes"}}),
+        json!({"seq":17,"ts":"t16","type":"verification","origin":"system","verdict":"verified","summary":"cargo test passed"}),
+        json!({"seq":18,"ts":"t17","type":"status","origin":"agent","state":"idle"}),
+    ]
+}
+
+fn events() -> Vec<Value> {
+    let text: String = lines().iter().map(|l| format!("{l}\n")).collect();
+    record::parse_events(text.as_bytes())
 }
 
 fn scrub() -> Scrubber {
     Scrubber::new(Some("/Users/alice".into()), vec!["hunter2-the-saved-secret".into()])
 }
 
+fn prepared(detail: Detail) -> (record::SessionRecord, String) {
+    let collected = record::collect(&record::row(&colony("c1")), &events()).unwrap();
+    record::prepare(collected, detail, &scrub())
+}
+
 #[test]
-fn an_empty_record_has_the_cli_v1_shape_byte_for_byte() {
+fn an_empty_colony_has_the_schema_two_shape_byte_for_byte() {
     let mut s = colony("c0");
     s.model_usage = None;
     s.cost_usd = None;
+    s.routed_cost_usd = None;
     s.branch.clear();
-    let r = record::build(&s, &[], Detail::Messages, &Scrubber::default());
+    s.base = None;
+    s.pr_url = None;
+    s.issue_title.clear();
+    let collected = record::collect(&record::row(&s), &[]).unwrap();
+    let (_, body) = record::prepare(collected, Detail::Full, &Scrubber::default());
     assert_eq!(
-        record::serialise(&r),
+        body,
         concat!(
-            r#"{"schema_version":1,"agent":"colonizer","collector_version":1,"#,
-            r#""session_id":"c0","repo":"acme/webshop","branch":null,"models":[],"started_at":"2026-10-01T10:00:00.000Z","#,
-            r#""ended_at":"2026-10-01T10:05:00.000Z","turns":[],"totals":{"input_tokens":0,"output_tokens":0,"#,
+            r#"{"schema_version":2,"agent":"colonizer","collector_version":1,"detail":"full","#,
+            r#""session_id":"c0","repo":"acme/webshop","branch":null,"models":[],"started_at":"2026-10-01T10:00:00Z","#,
+            r#""ended_at":null,"turns":[],"totals":{"input_tokens":0,"output_tokens":0,"#,
             r#""cache_read_tokens":0,"cache_creation_tokens":0,"reasoning_tokens":0,"#,
-            r#""cost_usd":null},"outcome":"merged","truncated":false}"#
+            r#""cost_usd":null},"outcome":"merged","truncated":false,"omitted_turns":0,"#,
+            r#""colony":{"org":"acme","base":null,"issue":42,"issue_title":null,"pr_url":null,"#,
+            r#""pr_opened_at":null,"merged_at":null,"ci_state":null,"origin":null}}"#
         )
     );
 }
 
 #[test]
-fn messages_carry_the_conversation_and_tool_names_only() {
-    let r = record::build(&colony("c1"), &events(), Detail::Messages, &scrub());
-    let v: Value = serde_json::from_str(&record::serialise(&r)).unwrap();
+fn full_maps_the_stream_like_the_collector() {
+    let (r, body) = prepared(Detail::Full);
+    let v: Value = serde_json::from_str(&body).unwrap();
     let turns = v["turns"].as_array().unwrap();
-    let roles: Vec<&str> = turns.iter().map(|t| t["role"].as_str().unwrap()).collect();
-    assert_eq!(roles, ["user", "assistant", "assistant", "user", "assistant"]);
-    // The person's task, not the harness prompt; the watchdog nudge and the subagent are not turns.
+    let shape: Vec<(&str, &str)> = turns
+        .iter()
+        .map(|t| (t["role"].as_str().unwrap(), t["text"].as_str().unwrap()))
+        .collect();
     assert_eq!(
-        turns[0]["text"],
-        "Issue #42: Discount the cart\n\nuse the key [REDACTED:anthropic_key] only in tests"
+        shape,
+        vec![
+            ("user", "use the key [REDACTED:anthropic_key] only in tests"),
+            ("assistant", "Reading ~/notes first."),
+            ("assistant", ""),
+            ("reasoning", "Hmm."),
+            ("event", "Watchdog recovery check"),
+            ("assistant", "Round half up?\n- Yes: away from zero"),
+            ("user", "Yes"),
+            ("event", "Verification: verified — cargo test passed"),
+        ]
     );
-    let body = record::serialise(&r);
+    assert_eq!(
+        turns[1]["tool_calls"],
+        json!([{"name":"Bash","format":"shell","input":"cargo test","output":"Exit code 101\nfailed","status":"error","exit_code":101}])
+    );
+    assert_eq!(
+        turns[2]["tool_calls"],
+        json!([{"name":"Agent","format":"text","input":"dig","output":"Found it.","status":"ok"}]),
+        "the subagent folds into its call"
+    );
+    assert_eq!(
+        v["models"],
+        json!(["claude-opus-5", "claude-sonnet-5", "zz-routed/model"]),
+        "model_changed first, then sorted usage keys"
+    );
+    assert_eq!(v["totals"]["input_tokens"], 11);
+    assert_eq!(v["totals"]["cache_creation_tokens"], 40);
+    assert_eq!(v["totals"]["cost_usd"], 0.75);
+    assert_eq!(v["started_at"], "2026-10-01T10:00:00Z");
+    assert_eq!(v["ended_at"], "t16", "the last event the record used");
+    assert_eq!(v["colony"]["base"], "main");
+    assert_eq!(v["colony"]["issue_title"], "Discount the cart");
+    assert_eq!(r.detail, Detail::Full);
     for absent in [
         "HARNESS-BOILERPLATE",
         "are you stuck",
-        "subagent chatter",
-        "cat cart.js",
-        "export function",
         "DUPLICATE",
+        "Async agent launched",
+        "SENTINELSENTINEL",
     ] {
-        assert!(!body.contains(absent), "{absent} leaked into a messages record: {body}");
+        assert!(!body.contains(absent), "{absent} in {body}");
     }
-    assert_eq!(turns[1]["tool_calls"], json!([{"name": "Bash"}]));
-    assert_eq!(turns[2]["text"], "Question: Round half up?");
-    assert_eq!(turns[3]["text"], "Answer: Yes");
-    assert_eq!(v["models"], json!(["claude-sonnet-5", "claude-haiku-4-5"]));
-    assert_eq!(v["totals"]["input_tokens"], 11);
-    assert_eq!(v["totals"]["cache_creation_tokens"], 40);
-    assert_eq!(v["totals"]["cost_usd"], 0.25);
-    assert_eq!(v["ended_at"], "2026-10-01T10:00:11.000Z");
-    assert_eq!(v["schema_version"], 1);
 }
 
 #[test]
-fn full_adds_tool_input_and_output_and_says_schema_two() {
-    let r = record::build(&colony("c1"), &events(), Detail::Full, &scrub());
-    let v: Value = serde_json::from_str(&record::serialise(&r)).unwrap();
-    assert_eq!(v["schema_version"], record::FULL_SCHEMA_VERSION);
-    let call = &v["turns"][1]["tool_calls"][0];
-    assert_eq!(call["name"], "Bash");
-    assert_eq!(call["input"], r#"{"command":"cat cart.js"}"#);
-    assert_eq!(call["output"], "export function total() {}");
-    assert_eq!(call["is_error"], false);
+fn messages_and_summary_drop_tool_io_and_reasoning() {
+    let (_, body) = prepared(Detail::Messages);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["detail"], "messages");
+    assert_eq!(v["turns"][1]["tool_calls"], json!([{"name": "Bash"}]));
+    assert!(!body.contains("\"reasoning\""));
+    assert!(!body.contains("cargo test\""));
+    let mut long = colony("c1");
+    long.instructions = "x".repeat(5000);
+    let collected = record::collect(&record::row(&long), &events()).unwrap();
+    let (_, body) = record::prepare(collected, Detail::Summary, &Scrubber::default());
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["turns"][0]["text"].as_str().unwrap().len(), 2000);
 }
 
 #[test]
-fn summary_sends_no_conversation_at_all() {
-    let r = record::build(&colony("c1"), &events(), Detail::Summary, &scrub());
-    let v: Value = serde_json::from_str(&record::serialise(&r)).unwrap();
-    assert_eq!(v["turns"], json!([]));
-    assert_eq!(v["totals"]["output_tokens"], 22);
+fn a_resume_and_a_bare_issue_read_as_events() {
+    let mut s = colony("c2");
+    s.instructions.clear();
+    let evs = record::parse_events(
+        b"{\"seq\":1,\"ts\":\"a\",\"type\":\"user_message\",\"origin\":\"user\",\"id\":\"initial\",\"text\":\"p\"}\n{\"seq\":1,\"ts\":\"b\",\"type\":\"user_message\",\"origin\":\"user\",\"id\":\"initial\",\"text\":\"p\"}\n",
+    );
+    // Two files' worth of events in one buffer would dedupe; feed them as two files do.
+    let mut all = evs.clone();
+    all.extend(record::parse_events(
+        b"{\"seq\":1,\"ts\":\"c\",\"type\":\"user_message\",\"origin\":\"user\",\"id\":\"initial\",\"text\":\"p\"}\n",
+    ));
+    let r = record::collect(&record::row(&s), &all).unwrap();
+    let texts: Vec<&str> = r.turns.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, ["Colony started on issue #42: Discount the cart", "Colony resumed"]);
 }
 
 #[test]
 fn nothing_unredacted_leaves_the_record_or_the_note() {
     let s = colony("c1");
     let mut evs = events();
-    evs.push(json!({"type":"assistant_text","message_id":"m9","text":"the saved one is hunter2-the-saved-secret","seq":12}));
-    let r = record::build(&s, &evs, Detail::Full, &scrub());
-    let body = record::serialise(&r);
-    let note = record::note_body(&r, &s, Some("src1"), &scrub());
+    evs.push(json!({"type":"assistant_text","origin":"agent","message_id":"m9","text":"the saved one is hunter2-the-saved-secret","ts":"t99"}));
+    let collected = record::collect(&record::row(&s), &evs).unwrap();
+    let (r, body) = record::prepare(collected, Detail::Full, &scrub());
+    let note = super::note::body(&r, Some("src1"), &scrub());
     for text in [&body, &note] {
         assert!(!text.contains("SENTINELSENTINEL"), "a provider key leaked: {text}");
         assert!(!text.contains("hunter2-the-saved-secret"), "a saved secret leaked: {text}");
         assert!(!text.contains("/Users/alice"), "the home path leaked: {text}");
     }
-    assert!(body.contains("~/secret-notes"), "the home prefix becomes ~: {body}");
     assert!(note.contains("- Issue: #42 Discount the cart"));
     assert!(note.contains("- Pull request: https://github.com/acme/webshop/pull/7"));
+    assert!(note.contains("- Outcome: merged"));
+    assert!(note.contains("- Detail: full"));
     assert!(note.contains("- Source: src1 (agent_log)"));
     assert!(note.contains("Coding agent session: colonizer in webshop."));
 }
 
 #[test]
 fn one_colony_is_one_byte_string() {
-    let a = record::serialise(&record::build(&colony("c1"), &events(), Detail::Messages, &scrub()));
-    let b = record::serialise(&record::build(&colony("c1"), &events(), Detail::Messages, &scrub()));
-    assert_eq!(a, b);
+    assert_eq!(prepared(Detail::Full).1, prepared(Detail::Full).1);
 }
 
 #[test]
-fn an_oversized_colony_loses_trailing_turns_and_says_so() {
+fn an_oversized_colony_keeps_its_opening_and_says_what_it_cut() {
     let mut evs = Vec::new();
-    for i in 0..600 {
-        evs.push(json!({"type":"assistant_text","message_id":format!("m{i}"),"text":"word ".repeat(400),"seq":i + 1}));
+    for i in 0..400 {
+        evs.push(json!({"type":"assistant_text","origin":"agent","message_id":format!("m{i}"),"text":"word ".repeat(1000),"ts":format!("t{i}")}));
     }
-    let r = record::build(&colony("c2"), &evs, Detail::Messages, &Scrubber::default());
-    let body = record::serialise(&r);
+    let collected = record::collect(&record::row(&colony("c3")), &evs).unwrap();
+    let (r, body) = record::prepare(collected, Detail::Full, &Scrubber::default());
     assert!(body.len() <= record::MAX_BODY_BYTES, "{}", body.len());
-    assert!(body.ends_with(r#""truncated":true}"#));
+    assert!(r.truncated && r.omitted_turns > 0);
+    assert_eq!(r.turns[0].at.as_deref(), Some("t0"), "the opening stays");
+    assert!(
+        r.turns[1]
+            .text
+            .ends_with("earlier turn(s) omitted to fit the upload size cap")
+    );
 }
 
 #[test]
@@ -176,6 +238,18 @@ fn event_logs_are_read_archives_first() {
         record::order_event_files(&names),
         ["events-2.jsonl", "events-10.jsonl", "events.jsonl"]
     );
+}
+
+#[test]
+fn a_colony_settles_after_half_an_hour_of_quiet() {
+    use crate::sessions::SessionStatus;
+    let now = std::time::SystemTime::now();
+    let old = now - std::time::Duration::from_secs(31 * 60);
+    let recent = now - std::time::Duration::from_secs(60);
+    assert!(super::queue::settled(SessionStatus::Merged, Some(old), now));
+    assert!(super::queue::settled(SessionStatus::WaitingForAnswer, None, now));
+    assert!(!super::queue::settled(SessionStatus::Idle, Some(recent), now));
+    assert!(!super::queue::settled(SessionStatus::Running, Some(old), now));
 }
 
 #[test]
@@ -338,6 +412,14 @@ async fn connected_app(server: &str) -> (crate::Shared, std::path::PathBuf) {
     let s = colony("c1");
     let lines: String = events().iter().map(|e| format!("{e}\n")).collect();
     app.store().write_file("c1", "events.jsonl", lines.as_bytes()).await.unwrap();
+    // Settled: nothing written for over half an hour.
+    let file = app.cfg.data_dir.join("sessions/c1/events.jsonl");
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
     app.sessions.write().await.push(s);
     (app, root)
 }
@@ -360,6 +442,8 @@ async fn a_finished_colony_is_sent_once_as_a_source_and_a_note() {
         assert_eq!(body["project"], "webshop");
         let record: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
         assert_eq!(record["agent"], "colonizer");
+        assert_eq!(record["schema_version"], 2);
+        assert_eq!(record["detail"], "messages");
         assert_eq!(record["outcome"], "merged");
         let (path, _, note) = &calls[1];
         assert_eq!(path, "/v1/notes");

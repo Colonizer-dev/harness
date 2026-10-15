@@ -11,9 +11,9 @@ import { ConnectionCard, Pane } from "./ui";
 // ---------------------------------------------------------------------------
 
 export const DETAIL_LABEL: Record<LivingBrainDetail, string> = {
-  full: "Full — messages, tool inputs and outputs",
-  messages: "Messages — the conversation and tool names",
-  summary: "Summary — who, where, when, cost; no conversation",
+  full: "Full — messages, reasoning, tool inputs and outputs",
+  messages: "Messages — every message, tool names only",
+  summary: "Summary — messages cut to 2,000 characters, tool names only",
 };
 
 /** The connection in one line, for the card's header. */
@@ -231,7 +231,7 @@ export function LivingBrainPane({ orgs, back }: { orgs?: OrgInfo[]; back?: () =>
       toast(`${target} already has a rule.`, "error");
       return;
     }
-    saveRules([...state.rules, { target, send: false, detail: "messages", mcp: false }]);
+    saveRules([...state.rules, { target, send: false, detail: "full", mcp: false }]);
     setNewTarget("");
   };
 
@@ -353,8 +353,8 @@ export function LivingBrainPane({ orgs, back }: { orgs?: OrgInfo[]; back?: () =>
           <section className="space-y-2">
             <h4 className="text-small-lg font-semibold">Orgs and repositories</h4>
             <p className="text-small-lg text-muted">
-              Everything is off until you add a rule. A repository's rule wins over its org's. Sessions go out when a colony finishes a turn and
-              goes idle, ends, or opens or merges its pull request — in the background, never in a colony's way.
+              Everything is off until you add a rule. A repository's rule wins over its org's. A colony is sent once it is idle, waiting, parked or finished
+              and its log has been quiet for half an hour — in the background, never in a colony's way.
             </p>
             {state.rules.length > 0 && (
               <ul className="divide-y divide-border">

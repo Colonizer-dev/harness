@@ -20,6 +20,7 @@
 //!   secret placeholder that is swapped for the value on TLS to the MCP host ([`colony_mcp`]).
 
 pub(crate) mod client;
+mod note;
 pub(crate) mod queue;
 pub(crate) mod record;
 #[cfg(test)]

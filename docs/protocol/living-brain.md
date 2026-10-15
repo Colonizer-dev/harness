@@ -36,7 +36,7 @@ rule is off. A rule has three settings:
 | Setting | Meaning |
 | :--- | :--- |
 | `send` | File this target's colony sessions in the brain. |
-| `detail` | `messages` (default): the conversation and the names of the tools called — the brain CLI's record. `full`: also each tool call's input (first and last 8 KiB) and output (first and last 2 KiB). `summary`: who, where, when, models, tokens and cost, no conversation. |
+| `detail` | The brain CLI's levels. `full` (default): every message, reasoning summary and tool call with its input (first and last 8 KiB) and output (first and last 2 KiB). `messages`: every message, tool names only. `summary`: messages cut to 2 000 characters, tool names only. |
 | `mcp` | Give this target's colonies the brain's MCP server. |
 
 Switching `send` on stamps the rule's `since`: only colonies active since then are sent on their
@@ -45,30 +45,55 @@ and queues only when confirmed.
 
 ## What is sent
 
-A colony is sent when a turn has ended: `idle`, `pr_opened`, `merged`, `closed`, `no_changes`,
-`stopped` or `failed`. A sweep every minute — and at once whenever a notification goes out — queues
-every such colony whose fingerprint (status, pull request, cost and the size of its event logs)
-differs from the one last sent. Two requests per colony, both in the token owner's personal scope:
+A colony is sent once it has **settled**: its status is `idle`, `waiting_for_answer`, `parked`,
+`pr_opened`, `merged`, `closed`, `no_changes`, `stopped` or `failed`, and nothing has been written
+to its event logs for 30 minutes. A sweep every minute — and at once whenever a notification goes
+out — queues every settled colony whose fingerprint (status, pull request, cost and the size of its
+event logs) differs from the one last sent. Two requests per colony, both in the token owner's
+personal scope:
 
 - `POST /v1/pages/sources` `{kind: "agent_log", path: "colonizer session <id>", body, scope:
-  "personal", project}`. `body` is the brain's normalised session record (Living Brain's
-  `docs/logs.md`, schema version 1) with `agent: "colonizer"`, the colony id as `session_id`,
-  `owner/name` as `repo`, the branch, the models, the first and last event time, the turns, the
-  token totals and cost from the colony's `model_usage`, and the colony's status as `outcome`. The
-  first user turn is the issue and the operator's instructions, not the harness prompt; watchdog
-  nudges and subagents' own lines are not turns. A `full` record says `schema_version: 2`. The
-  record is serialised in declaration order from stored data only, so one colony in one state is one
-  byte string and the brain's `(scope, sha256(body))` key dedupes a resend. `project` is the
+  "personal", project}`. `body` is the brain's normalised session record, schema version 2
+  (Living Brain's `docs/logs.md`), compact JSON in this field order: `schema_version: 2`, `agent:
+  "colonizer"`, `collector_version: 1`, `detail`, `session_id` (the colony id), `repo`
+  (`owner/name`), `branch`, `models` (each `model_changed` model in order, then the sorted
+  `model_usage` keys), `started_at` (the colony's `created_at`), `ended_at` (the last event the
+  record used), `turns`, `totals` (from `model_usage`; `cache_creation_tokens` is
+  `cache_write_tokens`; `cost_usd` is `cost_usd` plus `routed_cost_usd`, or null), `outcome` (the
+  status), `truncated`, `omitted_turns`, and `colony` (`org`, `base`, `issue`, `issue_title`,
+  `pr_url`, `pr_opened_at`, `merged_at`, `ci_state`, `origin`; null when absent). `project` is the
   repository's name, so a repository's colonies meet the sessions its people sync with the CLI.
-- `POST /v1/notes` `{slug: "agent-log-colonizer-<id>", title, body, project}`: the CLI's note — agent,
-  session, repo, branch, when, models, turns, tool counts, tokens, cost, the source id and the
-  conversation excerpted — plus the issue, the pull request, the status and the colony's summary.
-  The slug keeps one page per colony, updated in place.
+- `POST /v1/notes` `{slug: "agent-log-colonizer-<id>", title, body, project}`: the CLI's session note
+  — header, outcome, detail, the source and a transcript link, then the conversation quoted to fit
+  48 KiB. The slug keeps one page per colony, updated in place.
 
-Redaction happens on the mothership before either is built: the home directory becomes `~`, every
-saved secret's value becomes `[REDACTED:secret]`, and the shared detectors (`colonizer-redact`) run
-over every free-text field. The brain redacts again on arrival. The mapping lives in one file,
-`living_brain/record.rs`.
+The events become turns the way the brain's `colonizer` collector reads them. The logs are read
+`events-1.jsonl` … then `events.jsonl`, and a line at or below the last `seq` seen in the same file
+(agentd's re-send) is dropped. The first `initial` message is a user turn carrying the colony's
+instructions (an event `Colony started on issue #N: <title>` or `Colony started` when there are
+none); a later one is `Colony resumed` (`Red-team probe started` for a red-team colony). Harness
+nudges — ids starting `watchdog-`, `verify-fix-`, `pr-rewrite-`, `playbook-`, `u-selfheal-`,
+`u-retry-`, `u-quota-reset-`, or any origin but `user` — are one-line events; the person's own
+messages are user turns. The agent's `assistant_text` makes assistant turns (one message id's blocks
+joined by a newline), `thinking` a reasoning turn, and each `tool_call` a call `{name, format, path,
+input, output, status, exit_code}` settled by its `tool_result` (a background launch ack is
+skipped). A background subagent's last words, at its `subagent_end`, are its call's output
+(`completed` → `ok`, `failed` → `error`, `stopped` → `interrupted`); its own steps are dropped. A
+`question` is an assistant turn listing the questions and options; `question_answered` is a user
+turn when the person answered and the event `Answered automatically: …` otherwise. A `turn_end` in
+error, a system `verification`, a `finding` and a `loop_stop` are one-line events. Deltas, log
+lines, status changes, boundaries and memory proposals are dropped.
+
+Then, in the CLI's order: the detail level (what it leaves out is never touched again), home
+elision, the 256 KiB per-message clip, redaction of every string value on its own, the size cap
+(768 KiB raw, 992 KiB once JSON-escaped: the opening turn stays, the oldest after it go, and an
+event says how many), and one more redaction pass over the serialised body. Nothing in the record is
+read from the clock, so one colony in one state is one byte string and the brain's
+`(scope, sha256(body))` key dedupes a resend.
+
+Redaction is the mothership's: the home directory becomes `~`, every saved secret's value becomes
+`[REDACTED:secret]`, and the shared detectors (`colonizer-redact`) run over every string value. The brain redacts again on arrival. The mapping lives in one file,
+`living_brain/record.rs`; the note in `living_brain/note.rs`.
 
 ## The queue
 
@@ -108,5 +133,5 @@ All owner-only.
 | `PUT /api/living-brain/token` | `{token}`: a personal access token; 400 when the brain refuses it. |
 | `DELETE /api/living-brain/connection` | Revokes and forgets the token, empties the queue; `revoke_error` says when the brain could not be told. |
 | `POST /api/living-brain/queue/retry` | Every failed colony back to pending. |
-| `POST /api/living-brain/backfill` | `{org, dry_run}` → `{eligible, already_sent, to_send, queued, not_opted_in, still_running}`; 409 while disconnected. |
+| `POST /api/living-brain/backfill` | `{org, dry_run}` → `{eligible, already_sent, to_send, queued, not_opted_in, still_running}` (`still_running`: not settled yet); 409 while disconnected. |
 | `GET /api/living-brain/colonies/{id}` | `{state: "none"\|"pending"\|"sent"\|"failed", note_url, sent_at, last_error, sessions_url}`; the colony page links `note_url`. |

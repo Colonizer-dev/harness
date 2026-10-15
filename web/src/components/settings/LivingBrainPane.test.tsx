@@ -50,7 +50,7 @@ describe("DeviceCode", () => {
 describe("RuleRow", () => {
   it("offers the send switch, the detail level and the MCP switch, and names the agents that get it", () => {
     const html = renderToStaticMarkup(
-      <RuleRow rule={{ target: "World-360", send: true, detail: "messages", mcp: true, since: "2026-10-15T00:00:00Z" }} mcpAgents={["claude-code", "codex"]} busy={false} onChange={() => {}} onRemove={() => {}} />,
+      <RuleRow rule={{ target: "World-360", send: true, detail: "full", mcp: true, since: "2026-10-15T00:00:00Z" }} mcpAgents={["claude-code", "codex"]} busy={false} onChange={() => {}} onRemove={() => {}} />,
     );
     expect(html).toContain("World-360");
     expect(html).toContain(">org<");
