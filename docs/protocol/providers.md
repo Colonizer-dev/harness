@@ -39,7 +39,7 @@ wire itself reads it to know which routes serve its own paths untranslated (issu
 - **Fallback.** When a routed request returns 502, 503 or 504 with an `x-colonizer-fallback` header and
   the route has `fallback_model`, resend the same request to Anthropic (as for unrouted models, with the
   headers Claude Code sent) with `model` set to `fallback_model`, and emit
-  `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require.
+  `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require, and the provider's `thinking`, `redacted_thinking` and `reasoning` blocks are left out of the history, since Anthropic refuses a thinking block another provider signed (§6.1). A gateway that cannot be reached is first retried for `COLONIZER_ROUTER_GATEWAY_GRACE_SECS` (default 20), so a mothership restart does not move the request to the fallback.
   Without `fallback_model`, return the gateway's response unchanged.
 
 **Gateway endpoint** `POST /providers/{id}/v1/messages`, plus `POST
