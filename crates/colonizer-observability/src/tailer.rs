@@ -75,14 +75,17 @@ pub(crate) struct Tailed {
     pub gone: Vec<String>,
     /// Drop counts by reason (`backlog`, `malformed`, `gap_<reason>`).
     pub drops: BTreeMap<String, u64>,
+    /// The same drops per signal: the health snapshot's `records_dropped`.
+    pub drops_by_signal: BTreeMap<Signal, u64>,
     /// Bytes read from the ledgers this tick.
     pub bytes_read: u64,
 }
 
 impl Tailed {
-    fn drop(&mut self, reason: &str, n: u64) {
+    fn drop(&mut self, signal: Signal, reason: &str, n: u64) {
         if n > 0 {
             *self.drops.entry(reason.to_string()).or_default() += n;
+            *self.drops_by_signal.entry(signal).or_default() += n;
         }
     }
 }
@@ -310,7 +313,8 @@ impl Tailer {
                         None,
                         Some(archived(inputs.data_dir, id)),
                     ));
-                    out.drop("gap_deleted", 1);
+                    // The gap record travels with the logs signal, so the count does too.
+                    out.drop(Signal::Logs, "gap_deleted", 1);
                     out.gone.push(id.clone());
                     self.drained.remove(id);
                 }
@@ -448,7 +452,7 @@ impl Tailer {
         let logs = file.signal == Signal::Logs;
         let colony = file.colony.as_deref();
         for gap in &batch.gaps {
-            out.drop(&format!("gap_{}", gap.reason.as_str()), 1);
+            out.drop(file.signal, &format!("gap_{}", gap.reason.as_str()), 1);
             if logs && gap.reason != GapReason::StateReset {
                 out.gaps.push(gap_record(
                     inputs.now_unix_nanos,
@@ -461,11 +465,11 @@ impl Tailer {
                 ));
             }
         }
-        out.drop("malformed", batch.malformed);
+        out.drop(file.signal, "malformed", batch.malformed);
         let run_key = file.relative.clone();
         for ((line, digest), size) in batch.lines.iter().zip(&batch.digests).zip(&batch.sizes) {
             if cutoff > 0 && crate::map::ts_nanos(line).is_some_and(|ts| ts < cutoff) {
-                out.drop("backlog", 1);
+                out.drop(file.signal, "backlog", 1);
                 if logs {
                     let run = self.skipping.entry(run_key.clone()).or_default();
                     run.0 += size;
