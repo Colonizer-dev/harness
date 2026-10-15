@@ -21,6 +21,8 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [Environment configuration](observability/configuration.md): the `OTEL_*` variables, their precedence, and what an upgrade changes.
 - [Mothership log](observability/mothership-log.md): the process's own JSON lines, what is rotated,
   redacted, filtered, and dropped when the disk is behind.
+- [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
+  provisioning they assume, and the lint that keeps their queries honest.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 
@@ -111,7 +113,7 @@ overrides its one field of the saved module; it never turns export on by itself,
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. gRPC only behind the add-on's `otlp-grpc` feature ([gRPC](observability/grpc.md)). |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` (default) or `none`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | Milliseconds. |
-| `OTEL_SERVICE_NAME` | `service.name`, default `colonizer`. |
+| `OTEL_SERVICE_NAME` | `service.name`, default `colonizer-mothership`. |
 | `OTEL_RESOURCE_ATTRIBUTES` | Extra resource attributes, `k=v,k2=v2`. |
 
 The endpoint rules of a save apply to the effective value too: `http://` only to a loopback or
