@@ -1,7 +1,8 @@
 //! The mothership's half of the exporter (#850, #854): it writes the contract
 //! (`<data>/observability/exporter.json`), spawns the `colonizer-observability` add-on with the
 //! headers on its stdin, restarts it with backoff, stops it when export is switched off, and serves
-//! `GET /api/observability/status` and `POST /api/observability/test`.
+//! `GET /api/observability/status`, `POST /api/observability/test`, and the history backfill's
+//! start/cancel routes (#858).
 //!
 //! Off by default: with no saved+enabled module and no `COLONIZER_OBSERVABILITY=on`, nothing is
 //! written and nothing is spawned. The add-on is a separate binary (docs/design/observability.md):
@@ -11,6 +12,7 @@
 use super::env::{self, Resolved};
 use crate::{ApiResult, App, Shared, client_error, util};
 use axum::{Json, extract::State, http::StatusCode};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
@@ -207,6 +209,14 @@ fn runtimes() -> &'static Mutex<BTreeMap<PathBuf, Runtime>> {
     R.get_or_init(Mutex::default)
 }
 
+/// The backfills in flight, the same one-per-data-dir pattern (`runtimes()` above): one running
+/// backfill per install. A slot holding `None` is a backfill between its cancel and its child's
+/// exit — a second one may not start beside a child that is still stopping.
+fn backfills() -> &'static Mutex<BTreeMap<PathBuf, Option<Child>>> {
+    static B: OnceLock<Mutex<BTreeMap<PathBuf, Option<Child>>>> = OnceLock::new();
+    B.get_or_init(Mutex::default)
+}
+
 fn set_runtime(data_dir: &Path, f: impl FnOnce(&mut Runtime)) {
     if let Ok(mut map) = runtimes().lock() {
         f(map.entry(data_dir.to_path_buf()).or_default());
@@ -277,6 +287,17 @@ impl Supervisor {
                     r.restarts += 1;
                     r.error = Some(format!("the add-on exited ({status}); restarting in {}s", delay.as_secs()));
                 });
+            }
+        }
+
+        // A backfill that finished or failed leaves no stale slot behind to refuse the next one.
+        if let Ok(mut jobs) = backfills().lock() {
+            let done = jobs
+                .get_mut(&data_dir)
+                .and_then(|slot| slot.as_mut())
+                .is_some_and(|job| job.child.try_wait().is_ok_and(|s| s.is_some()));
+            if done {
+                jobs.remove(&data_dir);
             }
         }
 
@@ -431,7 +452,7 @@ pub(crate) fn start_tasks(app: &Shared) {
 }
 
 /// `GET /api/observability/status`: whether export is on, why not, where each setting came from,
-/// the header *names*, and the add-on's own health. Never a header value.
+/// the header *names*, the add-on's own health, and any backfill's progress. Never a header value.
 async fn status(State(app): State<Shared>) -> ApiResult<Value> {
     let data_dir = app.cfg.data_dir.clone();
     let runtime = runtimes()
@@ -443,6 +464,11 @@ async fn status(State(app): State<Shared>) -> ApiResult<Value> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(Value::Null);
+    // The backfill's own progress file, the same read: absent until one has run.
+    let backfill: Value = std::fs::read(data_dir.join("observability").join("backfill.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
     let addon = locate(&data_dir);
     let mut out = json!({
         "state": if runtime.state.is_empty() { "off" } else { runtime.state },
@@ -450,6 +476,7 @@ async fn status(State(app): State<Shared>) -> ApiResult<Value> {
         "restarts": runtime.restarts,
         "addon": {"path": addon.or(runtime.binary), "version": runtime.version},
         "exporter": exporter,
+        "backfill": backfill,
     });
     match resolve(&app).await {
         Resolved::On(e) => {
@@ -521,11 +548,209 @@ async fn run_test(binary: &Path, contract: &Path, headers: &str, timeout: Durati
     serde_json::from_slice(&out.stdout).map_err(|_| "the add-on gave no result".to_string())
 }
 
+/// The `POST /api/observability/backfill` body: the window and the limits, passed through to the
+/// add-on verbatim — it parses the dates and reports a bad one itself (`state: "failed"` with an
+/// `error` in its progress file), so nothing is validated here.
+#[derive(Deserialize)]
+struct BackfillRequest {
+    /// Only records written at or after this: RFC3339, `YYYY-MM-DDTHH:MM:SS` or `YYYY-MM-DD`.
+    since: Option<String>,
+    /// Only records written before this, the same forms (a bare date means its end).
+    until: Option<String>,
+    /// Only colonies of this repository, `owner/name`.
+    repo: Option<String>,
+    /// Send at most this many records per second.
+    rate: Option<u64>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `backfill --contract …` with the request's flags, each only when it was given.
+fn backfill_command(binary: &Path, contract: &Path, body: &BackfillRequest) -> tokio::process::Command {
+    let mut cmd = command(binary);
+    cmd.arg("backfill").arg("--contract").arg(contract);
+    if let Some(v) = &body.since {
+        cmd.arg("--since").arg(v);
+    }
+    if let Some(v) = &body.until {
+        cmd.arg("--until").arg(v);
+    }
+    if let Some(v) = &body.repo {
+        cmd.arg("--repo").arg(v);
+    }
+    if let Some(v) = body.rate {
+        cmd.arg("--rate").arg(v.to_string());
+    }
+    if body.dry_run {
+        cmd.arg("--dry-run");
+    }
+    cmd
+}
+
+/// A dry run, synchronously like [`run_test`]: counts only, sends nothing, writes no state — so
+/// it registers no job — and answers the add-on's summary JSON from its stdout.
+async fn run_backfill(
+    binary: &Path,
+    contract: &Path,
+    headers: &str,
+    body: &BackfillRequest,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let mut child = backfill_command(binary, contract, body)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", binary.display()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let line = format!("{}\n", json!({"headers": headers}));
+        let _ = stdin.write_all(line.as_bytes()).await;
+    }
+    let out = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| "the dry run timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    serde_json::from_slice(&out.stdout).map_err(|_| "the add-on gave no result".to_string())
+}
+
+/// The real backfill: a long-running child like [`spawn`] — the headers line on a stdin held open
+/// (closing it is the cancel signal), no stdout, stderr forwarded redacted.
+async fn spawn_backfill(binary: &Path, contract: &Path, headers: &str, body: &BackfillRequest) -> Result<Child, String> {
+    let mut cmd = backfill_command(binary, contract, body);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", binary.display()))?;
+    let mut stdin = child.stdin.take();
+    if let Some(pipe) = stdin.as_mut() {
+        let line = format!("{}\n", json!({"headers": headers}));
+        pipe.write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("cannot hand the add-on its headers: {e}"))?;
+    }
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // The add-on never prints a header value; redact anyway, as every log line is.
+                tracing::debug!("{}", crate::redact::redact_text(&line));
+            }
+        });
+    }
+    Ok(Child {
+        child,
+        stdin,
+        started: Instant::now(),
+    })
+}
+
+/// `POST /api/observability/backfill` (#858): replay the history the live exporter never sent.
+/// A dry run runs the one-shot count synchronously and answers its summary; otherwise the child
+/// runs beside the exporter, at a bounded rate, and its progress — written by the add-on to
+/// `<data>/observability/backfill.json` — is carried by `GET /api/observability/status`.
+async fn backfill_start(State(app): State<Shared>, Json(body): Json<BackfillRequest>) -> ApiResult<Value> {
+    let effective = match resolve(&app).await {
+        Resolved::On(e) => e,
+        Resolved::Off(why) | Resolved::Invalid(why) => return Err(client_error(StatusCode::CONFLICT, &why)),
+    };
+    let data_dir = app.cfg.data_dir.clone();
+    let Some(binary) = locate(&data_dir) else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "the {BINARY} add-on is not installed; build it and put it beside the colonizer binary, or name it with {BINARY_ENV}"
+            ),
+        ));
+    };
+    check_version(&binary)
+        .await
+        .map_err(|e| client_error(StatusCode::SERVICE_UNAVAILABLE, &e))?;
+    let path = contract_path(&data_dir);
+    write_contract(&path, &contract(&app, &effective.settings).await).await?;
+    if body.dry_run {
+        // A dry run is a count: it sends nothing and writes no state, so it registers no job.
+        let answer = run_backfill(&binary, &path, &effective.headers, &body, Duration::from_secs(600))
+            .await
+            .map_err(|e| client_error(StatusCode::BAD_GATEWAY, &e))?;
+        if answer["ok"].as_bool() == Some(false) {
+            let why = answer["error"].as_str().unwrap_or("the dry run failed");
+            return Err(client_error(StatusCode::BAD_GATEWAY, why));
+        }
+        return Ok(Json(answer));
+    }
+    // One backfill per install: hold the slot before the child starts, so two posts cannot start
+    // two children; a job whose child has already exited (reconcile reaps it within a tick) does
+    // not refuse a restart.
+    {
+        let Ok(mut jobs) = backfills().lock() else {
+            return Err(client_error(StatusCode::CONFLICT, "a backfill is already running"));
+        };
+        let finished = jobs
+            .get_mut(&data_dir)
+            .and_then(|slot| slot.as_mut())
+            .is_some_and(|job| job.child.try_wait().is_ok_and(|s| s.is_some()));
+        if finished {
+            jobs.remove(&data_dir);
+        }
+        if jobs.contains_key(&data_dir) {
+            return Err(client_error(StatusCode::CONFLICT, "a backfill is already running"));
+        }
+        jobs.insert(data_dir.clone(), None);
+    }
+    match spawn_backfill(&binary, &path, &effective.headers, &body).await {
+        Ok(job) => {
+            if let Ok(mut jobs) = backfills().lock() {
+                jobs.insert(data_dir.clone(), Some(job));
+            }
+        }
+        Err(e) => {
+            if let Ok(mut jobs) = backfills().lock() {
+                jobs.remove(&data_dir);
+            }
+            return Err(client_error(StatusCode::BAD_GATEWAY, &e));
+        }
+    }
+    Ok(Json(json!({"started": true, "progress": "GET /api/observability/status"})))
+}
+
+/// `DELETE /api/observability/backfill`: close the child's stdin — it finishes its current tick,
+/// writes `state: "cancelled"` to its progress file and exits — and kill it if 15 seconds is not
+/// enough. The wait runs as its own task so the slot is freed even if this request goes away
+/// mid-wait.
+async fn backfill_cancel(State(app): State<Shared>) -> ApiResult<Value> {
+    let data_dir = app.cfg.data_dir.clone();
+    let job = backfills()
+        .lock()
+        .ok()
+        .and_then(|mut jobs| jobs.get_mut(&data_dir).and_then(|slot| slot.take()));
+    let Some(job) = job else {
+        return Err(client_error(StatusCode::CONFLICT, "no backfill is running"));
+    };
+    let done = tokio::spawn(async move {
+        let mut job = job;
+        drop(job.stdin.take());
+        if tokio::time::timeout(Duration::from_secs(15), job.child.wait()).await.is_err() {
+            let _ = job.child.kill().await;
+        }
+    });
+    let _ = done.await;
+    if let Ok(mut jobs) = backfills().lock() {
+        jobs.remove(&data_dir);
+    }
+    Ok(Json(json!({"cancelled": true})))
+}
+
 pub(crate) fn routes() -> axum::Router<Shared> {
     use axum::routing;
     axum::Router::new()
         .route("/api/observability/status", routing::get(status))
         .route("/api/observability/test", routing::post(test))
+        .route(
+            "/api/observability/backfill",
+            routing::post(backfill_start).delete(backfill_cancel),
+        )
 }
 
 #[cfg(test)]
@@ -585,5 +810,35 @@ mod tests {
         let contract = contract(&app, &Map::new()).await;
         assert!(!contract.to_string().contains(&secret), "headers never go in the contract");
         assert_eq!(contract["contract"], json!(CONTRACT));
+    }
+
+    #[tokio::test]
+    async fn backfill_routes_refuse_an_unconfigured_backend_and_status_carries_the_slot() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        // No backfill has ever run: the status slot is there, and null.
+        let Json(status) = status(State(app.clone())).await.unwrap();
+        assert_eq!(status["backfill"], json!(null), "{status}");
+        // Export off: a dry run is refused like the test event, and nothing is registered.
+        let err = backfill_start(
+            State(app.clone()),
+            Json(BackfillRequest {
+                since: None,
+                until: None,
+                repo: None,
+                rate: None,
+                dry_run: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT, "nothing to backfill while export is off");
+        // And there is nothing to cancel.
+        let err = backfill_cancel(State(app.clone())).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT, "no backfill is running");
+        assert!(
+            backfills().lock().unwrap().get(&app.cfg.data_dir).is_none(),
+            "no job was registered"
+        );
     }
 }

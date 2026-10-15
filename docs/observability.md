@@ -15,9 +15,12 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [OTLP/gRPC](observability/grpc.md): the tonic transport behind the add-on's `otlp-grpc` feature,
   for collectors that only speak gRPC on 4317.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
+- [Backfill](observability/backfill.md): replaying the history a destination never received — the window, the rate, the dry run, duplicates and backend limits.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
   serve, how to scrape it, and what a series is allowed to name.
+- [Metrics push](observability/metrics-push.md): the metric catalogue the exporter pushes, its
+  interval and failure semantics, and how its names map to the pull catalogue.
 - [Environment configuration](observability/configuration.md): the `OTEL_*` variables, their precedence, and what an upgrade changes.
 - [Mothership log](observability/mothership-log.md): the process's own JSON lines, what is rotated,
   redacted, filtered, and dropped when the disk is behind.
@@ -79,7 +82,9 @@ It also carries `endpoint`, `last_error` (redacted, header values cut out), `las
 bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `last_partial_success`, and `signals`: per signal (`logs`, `traces`, `metrics`) its `state` (`ok`,
 `backing_off`, `auth_failed`, `off`), `endpoint`, `consecutive_failures`, `last_error`,
-`last_success_unix`, `records_sent` and `bytes_sent`.
+`last_success_unix`, `records_sent` and `bytes_sent`. While a backfill
+([Backfill](observability/backfill.md)) runs, the same route also carries its progress as
+`backfill`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
 `<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
@@ -169,8 +174,11 @@ it.
 
 ### Metrics
 
-Cumulative, pushed every 30 seconds while **Metrics** is on. The sums survive a restart: they are
-committed with the read offsets that produced them.
+Cumulative, pushed every **Metrics push interval (seconds)** (30 by default) while **Metrics** is on.
+The sums survive a restart: they are committed with the read offsets that produced them. The one
+live gauge is `colonizer.observability.backlog`, a reading taken at each push; the interval, the
+failure semantics and the pull-endpoint name mapping are on
+[the metrics push page](observability/metrics-push.md).
 
 | Metric | Type | Unit | Attributes |
 | :--- | :--- | :--- | :--- |
@@ -186,6 +194,9 @@ committed with the read offsets that produced them.
 | `colonizer.observability.exported` | counter | `{record}` | — |
 | `colonizer.observability.dropped` | counter | `{record}` | `colonizer.drop.reason`: `backlog`, `refused`, `rejected`, `oversized`, `malformed`, `series_limit`, `state_reset`, `gap_*` (`gap_deleted` once per deleted colony or file) |
 | `colonizer.observability.export_failures` | counter | `{request}` | — |
+| `colonizer.observability.bytes` | counter | `{By}` | `colonizer.signal`: `logs`, `traces`, `metrics` |
+| `colonizer.observability.last_success` | gauge | `s` | `colonizer.signal` |
+| `colonizer.observability.backlog` | gauge | `{By}` | `colonizer.signal` |
 
 ### Traces
 

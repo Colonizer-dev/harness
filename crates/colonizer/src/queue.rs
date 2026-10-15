@@ -454,9 +454,13 @@ async fn waiter_remote_conflict(app: &Shared, waiter: &Session, sessions: &[Sess
     let info = match crate::claims::check_remote_claim(app, &waiter.repo, issue).await {
         Ok(info) => info,
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                waiter = %waiter.id,
+                repo = %waiter.repo,
+                issue = issue,
                 "claims: remote claim check for waiter {} on {}#{issue} failed ({e:#}); the local guard decides",
-                waiter.id, waiter.repo
+                waiter.id,
+                waiter.repo
             );
             return None;
         }

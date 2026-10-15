@@ -369,7 +369,7 @@ pub async fn snapshot(
         .await
         .unwrap_or_default();
     if skipped > 0 {
-        tracing::warn!( skipped = skipped, "public feed: skipped {skipped} unreadable activity lines" );
+        tracing::warn!(skipped = skipped, "public feed: skipped {skipped} unreadable activity lines");
     }
     let limit = cfg.history_limit();
     // A snapshot reads the whole log in one call, so a fresh tick map thins exactly as it did:

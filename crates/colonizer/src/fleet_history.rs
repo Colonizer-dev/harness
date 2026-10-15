@@ -521,7 +521,8 @@ pub(crate) async fn prune_tick(app: &Shared) {
             rows = pruned.rows,
             payloads = pruned.payloads,
             "fleet history: retention removed {} rows and {} payloads",
-            pruned.rows, pruned.payloads
+            pruned.rows,
+            pruned.payloads
         );
     }
 }

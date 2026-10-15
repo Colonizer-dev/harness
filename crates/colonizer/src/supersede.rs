@@ -346,7 +346,7 @@ async fn close_superseded_pr(app: &crate::Shared, id: &str, pr_url: &str, merged
     )
     .await;
     if let Err(e) = &result {
-        eprintln!("supersede: could not close the superseded pull request {pr_url} of colony {id}: {e:#}");
+        tracing::warn!( id = %id, pr = %pr_url, error = %format!("{e:#}"), "supersede: could not close the superseded pull request {pr_url} of colony {id}: {e:#}" );
         app.session_log(
             id,
             "warn",

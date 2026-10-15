@@ -9,7 +9,9 @@ read it. The wire contract is in [the protocol page](../protocol/observability.m
 decisions are in [the ADR](../design/observability.md).
 
 This is the pull endpoint, and it is not the metric set the exporter pushes: it needs no exporter,
-no collector and no configuration, and nothing leaves the machine unless something scrapes it.
+no collector and no configuration, and nothing leaves the machine unless something scrapes it. The
+exception is the five `colonizer_export_*` families at the bottom of the catalogue, which mirror the
+add-on exporter's own health file when an exporter runs — see [Metrics push](metrics-push.md).
 
 ## Turning it on
 
@@ -27,26 +29,36 @@ a mirror of a file.
 
 ## The catalogue
 
-| Metric | Type | Labels | What it is |
-| --- | --- | --- | --- |
-| `colonizer_colonies` | gauge | `status`, `org`, `agent` | Colonies right now, by status (the snake_case wire name), organisation and agent module. |
-| `colonizer_colonies_started_total` | counter | — | Colonies started since this install's counters were seeded. |
-| `colonizer_colonies_finished_total` | counter | `outcome` | Colonies finished, by outcome: `pr_opened`, `merged`, `closed`, `no_changes`, `stopped`, `failed`, `question`, `suspended`, `restored`. |
-| `colonizer_gateway_requests_total` | counter | `provider`, `outcome` | Gateway requests, split `ok` and `error` (`ok` is requests minus failures, never below zero). |
-| `colonizer_gateway_fallbacks_total` | counter | `provider` | Gateway answers that will fall back to another model. |
-| `colonizer_gateway_in_flight` | gauge | `provider` | Requests streaming right now. |
-| `colonizer_gateway_queued` | gauge | `provider` | Requests waiting for a provider slot. |
-| `colonizer_gateway_request_duration_seconds` | histogram | `provider` | Request duration, buckets at 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 and 300 seconds, plus `+Inf`, `_sum` and `_count`. A request slower than 300 s lands in no finite bucket: it is in `+Inf`, in `_count` and in `_sum` only. A `rate()` over a bucket therefore answers "how many finished inside this bound", not "how many were still running at it". |
-| `colonizer_tokens_total` | counter | `org`, `model`, `type` | Tokens spent. Two shapes: `model="all"` with `type` in `input`, `output`, `cache_read`, `cache_write`, and a named model with `type="total"`. |
-| `colonizer_cost_usd_total` | counter | `org`, `model` | Cost in US dollars. A model nothing has priced yet has no series at all. |
-| `colonizer_questions_open` | gauge | — | Colonies waiting for an answer. |
-| `colonizer_attention` | gauge | `reason` | Colonies flagged for attention, by reason. The set is closed — a reason outside it is reported as `other`, because the flag itself is free-form JSON and a sentence must never become a series. |
-| `colonizer_queue_depth` | gauge | — | Colonies waiting for a free slot. |
-| `colonizer_storage_alert` | gauge | — | `1` while a write or config-read alert is showing, else `0`. |
-| `colonizer_disk_free_bytes` | gauge | — | Free bytes on the data volume. **No sample at all** while it has never been measured — an absent series, not a zero. |
+| Metric | Type | Labels | What it is | OTLP name |
+| --- | --- | --- | --- | --- |
+| `colonizer_colonies` | gauge | `status`, `org`, `agent` | Colonies right now, by status (the snake_case wire name), organisation and agent module. | `colonizer.colonies` |
+| `colonizer_colonies_started_total` | counter | — | Colonies started since this install's counters were seeded. | — |
+| `colonizer_colonies_finished_total` | counter | `outcome` | Colonies finished, by outcome: `pr_opened`, `merged`, `closed`, `no_changes`, `stopped`, `failed`, `question`, `suspended`, `restored`. | — |
+| `colonizer_gateway_requests_total` | counter | `provider`, `outcome` | Gateway requests, split `ok` and `error` (`ok` is requests minus failures, never below zero). | `colonizer.gateway.requests` |
+| `colonizer_gateway_fallbacks_total` | counter | `provider` | Gateway answers that will fall back to another model. | — |
+| `colonizer_gateway_in_flight` | gauge | `provider` | Requests streaming right now. | — |
+| `colonizer_gateway_queued` | gauge | `provider` | Requests waiting for a provider slot. | — |
+| `colonizer_gateway_request_duration_seconds` | histogram | `provider` | Request duration, buckets at 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120 and 300 seconds, plus `+Inf`, `_sum` and `_count`. A request slower than 300 s lands in no finite bucket: it is in `+Inf`, in `_count` and in `_sum` only. A `rate()` over a bucket therefore answers "how many finished inside this bound", not "how many were still running at it". | `colonizer.gateway.duration` |
+| `colonizer_tokens_total` | counter | `org`, `model`, `type` | Tokens spent. Two shapes: `model="all"` with `type` in `input`, `output`, `cache_read`, `cache_write`, and a named model with `type="total"`. | `colonizer.spend.input_tokens`, `.output_tokens` |
+| `colonizer_cost_usd_total` | counter | `org`, `model` | Cost in US dollars. A model nothing has priced yet has no series at all. | `colonizer.spend.cost` |
+| `colonizer_questions_open` | gauge | — | Colonies waiting for an answer. | — |
+| `colonizer_attention` | gauge | `reason` | Colonies flagged for attention, by reason. The set is closed — a reason outside it is reported as `other`, because the flag itself is free-form JSON and a sentence must never become a series. | — |
+| `colonizer_queue_depth` | gauge | — | Colonies waiting for a free slot. | `colonizer.queue.depth` |
+| `colonizer_storage_alert` | gauge | — | `1` while a write or config-read alert is showing, else `0`. | — |
+| `colonizer_disk_free_bytes` | gauge | — | Free bytes on the data volume. **No sample at all** while it has never been measured — an absent series, not a zero. | — |
+| `colonizer_export_backlog_bytes` | gauge | `signal` | The exporter's ledger bytes not yet acknowledged, per signal. No series while no exporter runs. | `colonizer.observability.backlog` |
+| `colonizer_export_records_total` | counter | `signal`, `result` | Records the exporter has had acknowledged, per signal (`result="sent"`); records lost, the non-`gap_*` drop reasons summed (`signal="all"`, `result="dropped"`). | `colonizer.observability.exported`, `.dropped` |
+| `colonizer_export_bytes_total` | counter | `signal` | Wire bytes the exporter has had acknowledged, per signal. | `colonizer.observability.bytes` |
+| `colonizer_export_last_success_timestamp_seconds` | gauge | `signal` | When the exporter last had a request acknowledged, per signal, unix seconds. No series for a signal that has never succeeded. | `colonizer.observability.last_success` |
+| `colonizer_export_gaps_total` | counter | `reason` | Holes in what the exporter could read, one series per `gap_*` drop reason. | `colonizer.observability.dropped` |
 
 Every metric is declared with `# HELP` and `# TYPE` on every scrape, even when it has no series
 that scrape, so a dashboard that has never seen a sample still knows the metric exists.
+
+The **OTLP name** column is the metric's counterpart in the catalogue the exporter pushes, where
+there is one: a `—` is a pull-only series, an export of the mothership's own state that the exporter
+cannot see. The pairing, and the families that exist only on the push side, are tabulated on
+[the metrics push page](metrics-push.md).
 
 ### The two token shapes
 

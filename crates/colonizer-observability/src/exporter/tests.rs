@@ -5,6 +5,7 @@
 use super::*;
 use crate::contract::{ColonyPolicy, Settings};
 use crate::proto::collector::logs::v1::ExportLogsServiceRequest;
+use crate::proto::collector::metrics::v1::ExportMetricsServiceRequest;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use prost::Message;
@@ -316,6 +317,62 @@ async fn old_lines_past_the_backlog_limit_are_dropped_and_counted() {
     assert_eq!(x.aggregates.dropped.get("backlog"), Some(&1));
 }
 
+/// Every number point of a push as `(metric, colonizer.signal, value)`: the exporter's own
+/// families are per signal, so a test has to see the attribute, not just the metric's name.
+fn pushed_points(req: &ExportMetricsServiceRequest) -> Vec<(&str, String, i64)> {
+    use crate::proto::common::v1::any_value;
+    use crate::proto::metrics::v1::{metric, number_data_point};
+    let mut out = Vec::new();
+    for resource in &req.resource_metrics {
+        for scope in &resource.scope_metrics {
+            for m in &scope.metrics {
+                let points = match m.data.as_ref() {
+                    Some(metric::Data::Sum(s)) => &s.data_points,
+                    Some(metric::Data::Gauge(g)) => &g.data_points,
+                    _ => continue,
+                };
+                for p in points {
+                    let signal = p
+                        .attributes
+                        .iter()
+                        .find(|kv| kv.key == "colonizer.signal")
+                        .and_then(|kv| kv.value.as_ref().and_then(|v| v.value.as_ref()))
+                        .and_then(|v| match v {
+                            any_value::Value::StringValue(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if let Some(number_data_point::Value::AsInt(value)) = p.value.as_ref() {
+                        out.push((m.name.as_str(), signal, *value));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every data point's start time. The series are cumulative, so one push's points all start
+/// together and the push after it starts where the first did — or the backend sees a reset on
+/// every interval.
+fn pushed_start_times(req: &ExportMetricsServiceRequest) -> Vec<u64> {
+    use crate::proto::metrics::v1::metric;
+    let mut out = Vec::new();
+    for resource in &req.resource_metrics {
+        for scope in &resource.scope_metrics {
+            for m in &scope.metrics {
+                match m.data.as_ref() {
+                    Some(metric::Data::Sum(s)) => out.extend(s.data_points.iter().map(|p| p.start_time_unix_nano)),
+                    Some(metric::Data::Gauge(g)) => out.extend(g.data_points.iter().map(|p| p.start_time_unix_nano)),
+                    Some(metric::Data::Histogram(h)) => out.extend(h.data_points.iter().map(|p| p.start_time_unix_nano)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
 #[tokio::test]
 async fn metrics_are_pushed_from_the_gateway_ledger() {
     let root = root("metrics");
@@ -329,22 +386,176 @@ async fn metrics_are_pushed_from_the_gateway_ledger() {
     x.tick().await;
     let metrics = collector.seen("/v1/metrics");
     assert_eq!(metrics.len(), 1);
-    let text = format!(
-        "{:?}",
-        crate::proto::collector::metrics::v1::ExportMetricsServiceRequest::decode(metrics[0].body.as_slice()).unwrap()
-    );
+    let first = ExportMetricsServiceRequest::decode(metrics[0].body.as_slice()).unwrap();
+    let text = format!("{first:?}");
     for name in [
         "colonizer.gateway.requests",
         "colonizer.gateway.duration",
         "colonizer.colonies",
         "colonizer.queue.depth",
+        // The exporter's own families: this tick's log export is accounted already, and every
+        // discovered signal has a backlog series, a live zero included.
+        "colonizer.observability.bytes",
+        "colonizer.observability.last_success",
+        "colonizer.observability.backlog",
     ] {
         assert!(text.contains(name), "{name} missing");
     }
+    let points = pushed_points(&first);
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.bytes" && s == "logs" && *v > 0),
+        "{points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.last_success" && s == "logs" && *v > 0),
+        "{points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, _)| *n == "colonizer.observability.backlog" && s == "metrics"),
+        "{points:?}"
+    );
+    // The next interval's push carries the first one's success, and the same start.
+    x.last_metrics = None;
+    x.tick().await;
+    let metrics = collector.seen("/v1/metrics");
+    assert_eq!(metrics.len(), 2);
+    let second = ExportMetricsServiceRequest::decode(metrics[1].body.as_slice()).unwrap();
+    let points = pushed_points(&second);
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.bytes" && s == "metrics" && *v > 0),
+        "{points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.last_success" && s == "metrics" && *v > 0),
+        "{points:?}"
+    );
+    let mut starts = pushed_start_times(&first);
+    starts.extend(pushed_start_times(&second));
+    assert!(!starts.is_empty());
+    assert!(starts.iter().all(|t| *t == starts[0]), "the cumulative stream never restarts");
+
     // Restarted, the series continue from what was committed rather than starting over.
     x.shutdown();
     let y = Exporter::new(&path, Vec::new()).unwrap();
     assert_eq!(y.aggregates.gateway.values().next().unwrap().requests, 1);
+    assert!(
+        y.aggregates.sent_bytes.values().all(|b| *b > 0),
+        "the self-metrics survived the restart: {:?}",
+        y.aggregates.sent_bytes
+    );
+}
+
+#[tokio::test]
+async fn a_failing_metrics_push_does_not_hold_up_logs() {
+    let root = root("metrics-fail");
+    // The first metrics push is refused; everything else, before and after, is accepted.
+    let calls = Arc::new(Mutex::new(0u32));
+    let counter = calls.clone();
+    let collector = Collector::start(Arc::new(move |path, _| {
+        if path == "/v1/metrics" {
+            let mut n = counter.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                return (503, b"no".to_vec());
+            }
+        }
+        (200, Vec::new())
+    }))
+    .await;
+    harness(&root, "hello");
+    let path = contract(&root, &collector.url, |s| s.stream_metrics = true);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+
+    // The refused push holds nothing back: the tick answers TICK and the log line is delivered.
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(collector.accepted(), ["hello"]);
+    assert_eq!(collector.seen("/v1/metrics").len(), 1, "the push was attempted");
+    assert_eq!(x.aggregates.export_failures, 1, "the failure is counted");
+    assert!(
+        x.aggregates.dropped.is_empty(),
+        "nothing was dropped for it: {:?}",
+        x.aggregates.dropped
+    );
+    assert!(
+        *x.aggregates.sent_bytes.get("logs").unwrap() > 0,
+        "the log export is accounted"
+    );
+    assert!(x.aggregates.last_success.contains_key("logs"));
+    assert_eq!(committed_offset(&root), Some(file_size(&root)), "the cursors still commit");
+
+    // The next interval's push succeeds, and its own accounting lands with it.
+    x.last_metrics = None;
+    assert_eq!(x.tick().await, TICK);
+    assert!(
+        *x.aggregates.sent_bytes.get("metrics").unwrap() > 0,
+        "the push is accounted too"
+    );
+    assert!(x.aggregates.last_success.contains_key("metrics"));
+    assert_eq!(x.aggregates.export_failures, 1, "a failed push is superseded, never retried");
+    assert_eq!(collector.seen("/v1/logs").len(), 1, "the log line was never held or resent");
+
+    // A restart resends nothing: the cursors of the acknowledged line are committed.
+    x.shutdown();
+    let mut y = Exporter::new(&path, Vec::new()).unwrap();
+    y.tick().await;
+    assert_eq!(collector.accepted(), ["hello"]);
+
+    // The per-signal backlog reaches the status page: a line written and not yet read is logs'.
+    harness(&root, "written but unread");
+    y.write_status(true);
+    let status: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(status_path(&root.0)).unwrap()).unwrap();
+    assert!(status["signals"]["logs"]["backlog_bytes"].as_u64().unwrap() > 0, "{status}");
+    assert_eq!(
+        status["backlog_bytes"], status["signals"]["logs"]["backlog_bytes"],
+        "{status}"
+    );
+}
+
+/// A restart between flushes must not rewind the sums the backend already saw: with the ledgers
+/// quiet, only the interval's pushes touch the aggregates, so their own accounting has to reach
+/// `state.json` on its own — not wait for a flush that has nothing to commit.
+#[tokio::test]
+async fn the_pushs_own_accounting_survives_a_restart_with_nothing_to_flush() {
+    let root = root("metrics-restart");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "hello");
+    let path = contract(&root, &collector.url, |s| s.stream_metrics = true);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK);
+    // A second interval passes with no new lines: the only change is the push's own accounting.
+    x.last_metrics = None;
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(collector.seen("/v1/metrics").len(), 2, "two pushes went out");
+    let start = x.aggregates.start_unix_nanos;
+    let logs = x.aggregates.sent_bytes.get("logs").copied().unwrap();
+    let metrics = x.aggregates.sent_bytes.get("metrics").copied().unwrap();
+    assert!(logs > 0, "{:?}", x.aggregates.sent_bytes);
+    assert!(metrics > 0, "{:?}", x.aggregates.sent_bytes);
+    x.shutdown();
+    let y = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(y.aggregates.start_unix_nanos, start, "the cumulative stream does not restart");
+    assert_eq!(y.aggregates.sent_bytes.get("logs"), Some(&logs), "the flush's bytes survive");
+    assert_eq!(
+        y.aggregates.sent_bytes.get("metrics"),
+        Some(&metrics),
+        "the pushes' own bytes were committed, not only the flush's: {:?}",
+        y.aggregates.sent_bytes
+    );
+    assert_eq!(
+        y.aggregates.last_success.get("metrics"),
+        x.aggregates.last_success.get("metrics"),
+        "the last push's success survives too"
+    );
 }
 
 #[tokio::test]

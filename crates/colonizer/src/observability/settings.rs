@@ -48,6 +48,10 @@ fn shared_properties() -> Map<String, Value> {
         json!({"type": "boolean", "title": "Metrics", "description": "Counters and durations: colonies, tokens and requests.", "default": true}),
     );
     m.insert(
+        "metrics_interval_secs".into(),
+        json!({"type": "integer", "title": "Metrics push interval (seconds)", "description": "How often the metric catalogue is pushed to the endpoint.", "minimum": 5, "maximum": 86400, "default": 30}),
+    );
+    m.insert(
         "conversation_content".into(),
         json!({"type": "boolean", "title": "Conversation content", "description": "Off by default, and the loudest switch here: it sends the words you and the agent exchanged. Switching it on needs the same save to carry \"confirm_content\": true.", "default": false}),
     );
@@ -179,6 +183,7 @@ pub struct ExporterConfig {
     pub stream_activity: bool,
     pub stream_traces: bool,
     pub stream_metrics: bool,
+    pub metrics_interval_secs: u64,
     pub conversation_content: bool,
     pub conversation_thinking: bool,
     pub trace_sample_ratio: f64,
@@ -222,6 +227,7 @@ impl ExporterConfig {
             stream_activity: bool_at(s, "stream_activity", true),
             stream_traces: bool_at(s, "stream_traces", true),
             stream_metrics: bool_at(s, "stream_metrics", true),
+            metrics_interval_secs: u64_at(s, "metrics_interval_secs", 30),
             conversation_content: bool_at(s, "conversation_content", false),
             conversation_thinking: bool_at(s, "conversation_thinking", false),
             trace_sample_ratio: f64_at(s, "trace_sample_ratio", 1.0),
@@ -262,6 +268,7 @@ impl std::fmt::Debug for ExporterConfig {
             .field("stream_activity", &self.stream_activity)
             .field("stream_traces", &self.stream_traces)
             .field("stream_metrics", &self.stream_metrics)
+            .field("metrics_interval_secs", &self.metrics_interval_secs)
             .field("conversation_content", &self.conversation_content)
             .field("conversation_thinking", &self.conversation_thinking)
             .field("trace_sample_ratio", &self.trace_sample_ratio)
@@ -431,6 +438,7 @@ mod tests {
                 ("stream_activity", json!(true)),
                 ("stream_traces", json!(true)),
                 ("stream_metrics", json!(true)),
+                ("metrics_interval_secs", json!(30)),
                 ("conversation_content", json!(false)),
                 ("conversation_thinking", json!(false)),
                 ("trace_sample_ratio", json!(1)),
