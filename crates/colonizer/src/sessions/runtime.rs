@@ -34,6 +34,10 @@ pub struct Runtime {
     /// origin). In memory only: after a mothership restart the set is empty, so a judge answer still
     /// in flight reads as the person's — a mislabelled line, never a wrong decision.
     pub(crate) judged_questions: Mutex<HashSet<String>>,
+    /// Question ids the watchdog playbook has answered and whose `question_answered` echo has not
+    /// come back yet — [`judged_questions`] in reverse: playbook.rs writes, events.rs spends one
+    /// entry resolving that echo's origin as `watchdog`. In memory only, same terms.
+    pub(crate) playbook_questions: Mutex<HashSet<String>>,
     /// Jev visibility-ladder watch state (#475, jev_ladder.rs): what each recent tool call looked
     /// like, and which pending decisions still await their reread. In memory only, like
     /// `judged_questions`: after a mothership restart the watchlist is empty, so rereads that would
@@ -58,6 +62,17 @@ pub struct Runtime {
     /// is retrying logs once per final answer rather than once per tick (issue #878). In memory,
     /// like the two above.
     pub(crate) final_text_logged: Mutex<Option<DateTime<Utc>>>,
+    /// The Task calls of the background subagents a turn has in flight (issue #1266), so
+    /// `events.rs` `note_turn_shape` can tell a settlement it launched from one this run never
+    /// tracked. In memory only, like `open_tool_calls`: after a restart the set is empty, so a
+    /// settlement reads as untracked and arms nothing — a missed recovery, never a wrong one.
+    pub(crate) open_subagents: Mutex<HashSet<String>>,
+    /// When the last in-flight background subagent settled with no resumption of the turn behind
+    /// it (issue #1266): the runner emits `subagent_end` but pushes nothing into the SDK input
+    /// queue, and the settlement itself counts as progress. Armed by `note_turn_shape`, spent by
+    /// any sign of the orchestrator's own output, read by the watchdog's re-drive. In memory only,
+    /// like `open_subagents`: a restart forgets the window, losing at worst one recovery.
+    pub(crate) turn_lost_since: Mutex<Option<DateTime<Utc>>>,
     /// Set once a run has been told its agent cannot resume a session, so the queue's suspension
     /// tick says so once instead of every 5 s (issue #562). In memory like the other cursors: a
     /// restart saying it again is a minor repeat, a per-tick drumbeat is the leak.
@@ -312,6 +327,7 @@ impl Runtime {
             ),
             question_holds_tool_call: std::sync::atomic::AtomicBool::new(open_question.is_some() && holds_tool_call),
             judged_questions: Mutex::new(HashSet::new()),
+            playbook_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
             pr_mark: Mutex::new(if resumed { None } else { github::pr_description_mark(out_dir) }),
@@ -319,6 +335,8 @@ impl Runtime {
             final_text_at: Mutex::new(None),
             open_tool_calls: Mutex::new(HashSet::new()),
             final_text_logged: Mutex::new(None),
+            open_subagents: Mutex::new(HashSet::new()),
+            turn_lost_since: Mutex::new(None),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
             judge_skip_logged: Mutex::new(None),
             restart_resume_until: std::sync::Mutex::new(None),

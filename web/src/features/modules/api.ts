@@ -12,6 +12,9 @@ export interface SaveModuleRequest {
    * unless this is true: the "Save anyway" the pane offers alongside the provider's error.
    */
   save_anyway?: boolean;
+  /** PUT /api/modules/observability refuses to turn on conversation content or thinking unless the
+   *  pane showed the confirmation and the operator accepted (#855). Validated, never persisted. */
+  confirm_content?: boolean;
 }
 
 export interface ModulesApi {

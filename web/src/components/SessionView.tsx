@@ -6,6 +6,7 @@ import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
 import { ContinueLocally } from "../features/handoff/ContinueLocally";
+import { LivingBrainLink } from "../features/livingBrain/LivingBrainLink";
 import type { Session } from "../types";
 import { BoundaryRow } from "./BoundaryRow";
 import { ChatPanel } from "./ChatPanel";
@@ -26,7 +27,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, autoFixLine, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle, useMediaQuery } from "./ui";
+import { AttentionBadge, Badge, autoFixLine, operatorLine, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle, useMediaQuery } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -331,6 +332,9 @@ export function SessionView({
               {autoFixLine(session) && (
                 <span title={(session.auto_fixes ?? []).map((fix) => `${fix.signature}: ${fix.detail}`).join("\n")}>{autoFixLine(session)}</span>
               )}
+              {operatorLine(session) && (
+                <span title={(session.operator ?? []).at(-1)?.diagnosis}>{operatorLine(session)}</span>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -345,6 +349,7 @@ export function SessionView({
                 <IconGitPR size={15} /> View PR <IconExternal size={12} />
               </a>
             )}
+            <LivingBrainLink id={session.id} status={session.status} />
             {!session.pr_url && (
               <Button
                 variant="primary"

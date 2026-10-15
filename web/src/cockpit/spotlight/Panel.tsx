@@ -111,7 +111,7 @@ export interface FrameProps {
   anchor?: RefObject<HTMLElement | null>;
   /** Which edge of the anchor the panel lines up with. */
   align?: "start" | "end";
-  /** Anchored panels open under their anchor, or over it (the composer's, at the foot of the page). */
+  /** Anchored panels open under their anchor, or over it (Ask's, from its button at the foot of the page). */
   side?: "below" | "above";
   /** The desktop width in px. */
   width?: number;
@@ -126,7 +126,7 @@ export interface FrameProps {
   modeless?: boolean;
 }
 
-/** Backdrop, placement and the frosted surface. Everything else lives inside it. */
+/** Backdrop, placement and the solid surface. Everything else lives inside it. */
 export function PanelFrame({ label, placement, anchor, align = "end", side = "below", width, onClose, onEscape, testId, children, sheet = true, modeless = false }: FrameProps): ReactElement {
   const phone = usePhone();
   const asSheet = sheet && phone;

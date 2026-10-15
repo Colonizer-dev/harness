@@ -782,10 +782,60 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
         .await?;
     }
     log.info("fetching origin").await;
-    exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    fetch_with_mirror_repair(app, repo, bare, log).await?;
     // Issue #765: a fetch may have brought a force-push of a colony branch; re-point the links of
     // any colony here whose branch tip moved (one `rev-parse` each, and only colonies with links).
     crate::commit_links::after_sync(app, repo).await;
+    Ok(())
+}
+
+/// The mirror's fetch, with the repair ladder behind it (`mirror_health`): a fetch whose stderr
+/// names a corrupt object first gets its corrupt loose objects cleaned and is retried, then, still
+/// corrupt, a full re-clone of the mirror and a third try. Any other failure — and a corruption
+/// both rungs could not fix — comes back unchanged for the boot-retry machinery above to count.
+/// A rung that lands announces one `mirror_repaired` line for the repository and re-queues the
+/// colonies the corruption had already failed; a ladder that runs out — a failed re-clone
+/// included — announces `mirror_needs_attention`.
+async fn fetch_with_mirror_repair(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger) -> Result<()> {
+    async fn fetch(app: &App, bare: &FsPath) -> Result<String> {
+        exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await
+    }
+    if let Err(err) = fetch(app, bare).await {
+        if !crate::mirror_health::is_corruption_error(&err.to_string()) {
+            return Err(err);
+        }
+        log.warn("fetching origin failed on what looks like a corrupt object; cleaning loose objects and retrying")
+            .await;
+        let cleaned = match crate::mirror_health::clean_corrupt_loose_objects(app, bare, log).await {
+            Ok(removed) => Some(removed),
+            Err(e) => {
+                log.warn(format!("cleaning the mirror's corrupt loose objects failed: {e:#}"))
+                    .await;
+                None
+            }
+        };
+        if let Err(err) = fetch(app, bare).await {
+            if !crate::mirror_health::is_corruption_error(&err.to_string()) {
+                return Err(err);
+            }
+            log.warn("fetching origin still fails on corruption; re-cloning the mirror")
+                .await;
+            let old = match crate::mirror_health::reclone_mirror(app, repo, bare, log).await {
+                Ok(old) => old,
+                Err(err) => {
+                    crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
+                    return Err(err);
+                }
+            };
+            if let Err(err) = fetch(app, bare).await {
+                crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
+                return Err(err);
+            }
+            crate::mirror_health::repaired_by_recloning(app, repo, &old).await;
+        } else {
+            crate::mirror_health::repaired_by_cleaning(app, repo, cleaned).await;
+        }
+    }
     Ok(())
 }
 
@@ -985,9 +1035,11 @@ pub(crate) fn neutralize_close(text: &str, close: &str) -> String {
     out
 }
 
-/// The brief's line about the path policy's placeholders (issue #1169).
-pub(crate) const PLACEHOLDER_NOTE: &str =
-    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: don't inspect, gitignore or edit them.";
+/// The brief's line about the path policy's placeholders (issue #1169): harness-managed, hidden
+/// from `git status` (#1279), and nothing an agent needs to look at.
+pub(crate) const PLACEHOLDER_NOTE: &str = "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: hidden from \
+     git status and managed by the harness, they need no `ls` or `git check-ignore` — don't \
+     inspect, gitignore or edit them.";
 
 pub fn build_prompt(
     s: &Session,
@@ -1186,9 +1238,10 @@ pub fn build_prompt(
             and the reason.\n\
          4. If the change is growing because a second problem was found, that is a separate issue: file it \
             with the findings tool rather than folding it into this change.\n\
-         5. Do not run `git commit`, `git push` or create branches: git metadata is read-only in this sandbox \
-            (`git status`, `git diff` and `git log` work). The harness commits every working-tree change that \
-            .gitignore doesn't exclude and opens the pull request.\n\
+         5. `.git` is read-only by design: never run `git add`, `git commit`, `git stash` or `git push`, and do not \
+            create branches. A \"Read-only file system\" error on `.git` is expected — don't debug it (`git status`, \
+            `git diff` and `git log` work). Leave your changes in the working tree; the harness commits every \
+            working-tree change that .gitignore doesn't exclude and opens the pull request.\n\
          6. Don't leave build artifacts, logs or scratch files in /workspace unless .gitignore covers them.\n\
          7. When you're done, write the pull request description to /harness/out/pr.md: the first line is a concise \
             PR title (no leading '#'), then a blank line, then a Markdown body covering what changed and why, how you \
@@ -2448,7 +2501,14 @@ impl PublishOps for GitPublishOps<'_> {
             .settings
             .get("draft")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            // Issue #1055: a pre-publish check that fails on the base branch as well opens the
+            // pull request as a draft, never ready-for-review with known-red checks.
+            || self
+                .s
+                .verification
+                .as_ref()
+                .is_some_and(|v| !v.pre_publish_red.is_empty());
         let mut create = self.app.gh([
             "pr",
             "create",
@@ -2662,7 +2722,14 @@ pub async fn publish(
         .await;
     }
     let screen = ScreenGate::of(app.clone(), s).await;
-    run_publish_with(&ops, screen.as_ref(), grant).await
+    let published = run_publish_with(&ops, screen.as_ref(), grant).await;
+    // A loop colony's template may have asked for labels on its pull request (`out/pr-labels`,
+    // issue #1037): applied once the pull request exists — opened just now, or found already
+    // open — best effort, and never the publish's failure.
+    if let Ok(Published::PullRequest(url)) = &published {
+        crate::loops::pr_labels::apply(app, s, log, url).await;
+    }
+    published
 }
 
 /// The tree a publish approval binds (issue #98): what `stage_all` + `commit` would produce from
@@ -3624,7 +3691,28 @@ mod tests {
         assert!(prompt.contains("leave the changelog file itself alone"), "{prompt}");
     }
 
-    /// Issue #1169: the brief says the empty dotfiles are harness placeholders, to leave alone.
+    /// Issue #1258: the brief says `.git` is read-only by design, so a "Read-only file system"
+    /// error there reads as the intended wall and not something to debug or ask about.
+    #[test]
+    fn the_prompt_says_git_is_read_only_by_design() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        for resumed in [false, true] {
+            let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
+            assert!(prompt.contains("`.git` is read-only by design"), "{prompt}");
+            assert!(
+                prompt.contains("never run `git add`, `git commit`, `git stash` or `git push`"),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains("A \"Read-only file system\" error on `.git` is expected"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("the harness commits every working-tree change"), "{prompt}");
+        }
+    }
+
+    /// Issue #1169, #1279: the brief says the empty dotfiles are harness placeholders, hidden from
+    /// git status and in need of no investigation.
     #[test]
     fn the_prompt_names_the_empty_dotfiles_as_placeholders_to_leave_alone() {
         let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
@@ -3632,8 +3720,9 @@ mod tests {
             let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
             assert!(
                 prompt.contains(
-                    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: \
-                     don't inspect, gitignore or edit them."
+                    "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: hidden from \
+                     git status and managed by the harness, they need no `ls` or `git check-ignore` — don't inspect, \
+                     gitignore or edit them."
                 ),
                 "{prompt}"
             );

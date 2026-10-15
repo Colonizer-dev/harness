@@ -24,6 +24,8 @@ export function defaultMergeLoopSettings(): MergeLoopSettings {
     local_checks: [],
     resolve_conflicts: false,
     resolve_attempts: 3,
+    fix_red: false,
+    fix_attempts: 2,
   };
 }
 
@@ -63,13 +65,26 @@ export function setRepoCap(settings: MergeLoopSettings, repo: string, cap: numbe
   return { ...settings, repo_max_merges: caps };
 }
 
+/** The settings with one repository switched in or out of the local-checks list, once (issue #969). */
+export function setRepoLocalChecks(settings: MergeLoopSettings, repo: string, on: boolean): MergeLoopSettings {
+  const r = repo.toLowerCase();
+  const rest = settings.local_checks.filter((t) => t.toLowerCase() !== r);
+  return { ...settings, local_checks: on ? [...rest, r] : rest };
+}
+
+/** Whether the local-checks list covers a repository: its own entry, or its owner's. */
+export function repoWantsLocalChecks(settings: MergeLoopSettings, repo: string): boolean {
+  const r = repo.toLowerCase();
+  return settings.local_checks.some((t) => t.toLowerCase() === r || t.toLowerCase() === r.split("/")[0]);
+}
+
 /** The comma-separated field the form edits, read back as a list. */
 export function parseNames(text: string): string[] {
   return [...new Set(text.split(",").map((t) => t.trim()).filter(Boolean))];
 }
 
 /** The order the report lists pull requests in: what moved first, then what needs a person, then the rest. */
-const ORDER: MergeLoopAction[] = ["merged", "updated", "rebased", "resolving", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
+const ORDER: MergeLoopAction[] = ["merged", "updated", "rebased", "resolving", "fixing", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
 
 /** The words an action reads as, for a real run or a dry one. */
 export function actionLabel(action: MergeLoopAction, dry: boolean): string {
@@ -82,6 +97,7 @@ export function actionLabel(action: MergeLoopAction, dry: boolean): string {
     needs_redo: "needs redo",
     redo_dispatched: "redo dispatched",
     resolving: "resolving conflicts",
+    fixing: "fixing checks",
     waiting: "waiting",
     skipped: "skipped",
   };
@@ -92,6 +108,7 @@ export function actionLabel(action: MergeLoopAction, dry: boolean): string {
     rerun: "would re-run",
     redo_dispatched: "would dispatch a redo",
     resolving: "would resolve conflicts",
+    fixing: "would fix checks",
   };
   return dry ? (would[action] ?? real[action]) : real[action];
 }
@@ -104,6 +121,28 @@ export interface ReportRow {
   action: MergeLoopAction;
   label: string;
   reason: string;
+  /** The colony behind this pull request, for an "Open colony" link. */
+  session: string;
+  /** Which pass of the resolve loop this is, pulled out of the reason (issue #968). */
+  attempt?: { n: number; m: number };
+}
+
+/** Whether a row is a plain "not opted in" skip: the repository is simply not in the train, so the
+ * report hides the rows behind one quiet line instead of listing every pull request (issue #1224). */
+export function isNotOptedIn(row: ReportRow): boolean {
+  return row.action === "skipped" && /not opted in/i.test(row.reason);
+}
+
+/** Lifts "attempt 1/3" out of a resolving reason so the line can show it as a pill, not prose. */
+function attemptOf(reason: string): { reason: string; attempt?: { n: number; m: number } } {
+  const m = reason.match(/\battempt (\d+)\/(\d+)\b/);
+  if (!m) return { reason };
+  const text = reason
+    .replace(/\s*\(?attempt \d+\/\d+\)?/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.,;:]$/, "");
+  return { reason: text, attempt: { n: Number(m[1]), m: Number(m[2]) } };
 }
 
 /** Every pull request of a report as one sorted row, `#N` for its number. */
@@ -116,7 +155,8 @@ export function reportRows(report: MergeLoopReport): ReportRow[] {
       title: i.title,
       action: i.action,
       label: actionLabel(i.action, report.dry_run),
-      reason: i.reason,
+      ...attemptOf(i.reason),
+      session: i.session,
     })),
   );
   return rows.sort((a, b) => ORDER.indexOf(a.action) - ORDER.indexOf(b.action) || a.repo.localeCompare(b.repo) || a.pr.localeCompare(b.pr));

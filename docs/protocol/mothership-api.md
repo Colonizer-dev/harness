@@ -169,7 +169,7 @@ something is pinned above it). `null` inherits.
 object with a `rules` array, at most 64 KiB — the cap both runners put on a layer, so a larger one is
 refused at save time rather than dropped at boot. (The API counts UTF-16 units, as the runners do.)
 Every rule must be one the runner would keep whole: a `deny`/`ask`/`allow` decision with at least one
-usable `command`, `script`, `touches` or `writes_outside` predicate — a policy the runner would trim
+usable `command`, `script`, `touches`, `writes_outside` or `writes_git` predicate — a policy the runner would trim
 is refused rather than saved with a rule the operator believes holds
 (`crates/colonizer/src/exec_policy.rs`, which shares its fixture with the runner's `parsePolicy`; a
 pattern's regex syntax is the one thing it cannot check). It narrows the install agent module's
@@ -322,7 +322,7 @@ on by default; setting `require_review` = true; off lets only `repo` notes skip 
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|idle_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|turn_lost_after_subagent|autopilot_held|provider_quota_exhausted|hold_timeout|idle_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -386,6 +386,11 @@ as they would have. A later real `turn_end` for the same turn publishes nothing 
 is unchanged), and a synthetic end carries no cost, so no spend is double-counted. If agentd does
 not answer, the watchdog keeps the final answer for the next tick to retry, logs once that it could
 not finish the turn, and leaves the colony to the stall handling above rather than restarting it.
+A third wedge is a turn whose continuation after its last background subagent settled never came
+(issue #1266): the runner reports the settlement but nothing wakes the orchestrator, so past a
+two-minute grace the watchdog interrupts the dead turn, sends the agent a `user_message` telling it
+to recover the subagent's outcome from the repository state, and flags `turn_lost_after_subagent`
+dated from the settlement.
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
@@ -483,6 +488,14 @@ log gets a `warn` line (`autopilot: not publishing, external writes are blocked
 (COLONIZER_NO_EXTERNAL_EFFECTS); press Create PR when writes are enabled`) and the colony's
 `attention` is left as it was. Opening pull requests as drafts (`publish.settings.draft`) does not
 change this: a draft PR is still an external write, refused the same way as a ready one.
+
+**Pull-request labels.** A loop colony may write `/harness/out/pr-labels` — one label per line, at
+most 10, each ≤ 50 characters and without a comma (a comma would split at `--add-label`). At
+publish the mothership creates the labels that do not exist yet
+and adds them to the pull request, best effort: a label that cannot be created or applied is logged
+and dropped, never a reason to hold the publish. Only a loop colony's file is read; the data-refresh
+template writes `data-refresh:auto` or `data-refresh:review` from its policy command
+([data-refresh](../loops/data-refresh.md)).
 
 **Done-verification (issue #328).** Before a completion claim is published, the mothership verifies it
 on its own. It snapshots the colony's work — commits and uncommitted files — without touching the

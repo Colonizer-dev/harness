@@ -275,6 +275,8 @@ pub(crate) async fn status(
     let stall = diagnosis::status_stall(&app).await;
     // The provider-out-of-quota cards (issue #767), so the cockpit's attention list needs no second poll.
     let quota_cards = crate::quota_cards::cards(&app).await;
+    // Findings queued with no model to judge them (issue #1154), on the same poll.
+    let findings_cards = crate::findings_queue::cards(&app).await;
     // Claude accounts in trouble (issue #984), each with how many colonies are parked waiting on it,
     // so the cockpit's banner and `colonizer list` need no second poll. Empty when all is well.
     let account_alerts = {
@@ -332,6 +334,7 @@ pub(crate) async fn status(
             "provider_details": quota.details.iter().map(providers::QuotaProviderDetail::to_json).collect::<Vec<_>>(),
         }),
         "quota_cards": quota_cards,
+        "findings_cards": findings_cards,
         "account_alerts": account_alerts,
         // The Nest frontier badge (issue #1144): open issues, not pull requests, in the repositories
         // of the orgs Colonizer works in. The last counts, `null` until the first refresh lands; a

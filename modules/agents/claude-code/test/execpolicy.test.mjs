@@ -98,7 +98,7 @@ test('the default layer asks when a command writes outside the repository, and n
 // a colony whose microVM root filesystem is discarded, with only these host-backed mounts writable.
 const vmWrites = JSON.parse(readFileSync(new URL('./fixtures/execpolicy-vm-writes.json', import.meta.url), 'utf8'));
 
-test('with the boot’s host mounts, a host-backed, read-only or .git write asks; a VM-local one does not (#877, #750)', () => {
+test('with the boot’s host mounts, a host-backed or read-only write asks, a .git write denies, a VM-local one does not (#877, #750, #1258)', () => {
   const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
   const policy = loadExecPolicy({}, {
     cwd: vmWrites.cwd,
@@ -120,7 +120,7 @@ test('without a host-mount list, every write outside the repository still asks (
   assert.equal(decide(policy, 'echo x > /usr/local/bin/tool', '/workspace')?.decision, 'ask');
 });
 
-test('the ask names why: a read-only mount, the .git internals or a host-backed path (#750)', () => {
+test('the ask names why: a read-only mount, or a host-backed path (#750)', () => {
   const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
   const policy = loadExecPolicy({}, {
     cwd: vmWrites.cwd,
@@ -129,13 +129,51 @@ test('the ask names why: a read-only mount, the .git internals or a host-backed 
   const question = (command) => execPolicyQuestion(decide(policy, command, vmWrites.cwd), command).questions[0].question;
   assert.match(question('echo x > /opt/colonizer/agent/runner.mjs'), /writes to a read-only mount \(\/opt\/colonizer\)/);
   assert.match(question('echo x > /colonizer/memory/repo/notes.json'), /read-only mount \(\/colonizer\)/);
-  assert.match(question('echo x > /workspace/.git/config'), /into the repository's \.git internals/);
-  assert.match(question('echo x > /workspace/sub/../.git/x'), /into the repository's \.git internals/);
-  assert.match(question('echo x > .git/HEAD'), /into the repository's \.git internals/);
   assert.match(question('echo x > /opt/node/bin/node'), /read-only mount \(\/opt\/node\/bin\/node\)/);
-  assert.match(question('cp a /harness/out/z'), /to a host-backed path outside the repository/);
+  assert.match(question('cp a /root/.claude/projects/x'), /to a host-backed path outside the repository/);
+  // The colony's own output dir is not one of them (#1153).
+  assert.equal(decide(policy, 'cp a /harness/out/z', vmWrites.cwd), null);
   // A nested writable bind of the read-only /colonizer is host-backed, not read-only.
   assert.match(question('echo x > /colonizer/services/s.json'), /host-backed path outside the repository/);
+});
+
+// #1258: `.git` is read-only by design. The invocations that must write it, and any write under
+// it, deny instead of asking — the agent is hitting the intended wall, so the reason it sees is
+// the instruction to leave its changes in the working tree.
+test('the default layer denies git add/commit/stash and writes under .git; reads still pass (#1258)', () => {
+  const policy = loadExecPolicy({}, { readFile: () => null });
+  const deny = (command) => {
+    const hit = decide(policy, command, '/workspace');
+    assert.equal(hit?.decision, 'deny', command);
+    assert.equal(hit.rule, 'git-read-only', command);
+    assert.equal(hit.layer, 'default', command);
+    assert.match(hit.reason, /read-only by design/, command);
+    assert.match(hit.reason, /harness commits them/, command);
+  };
+  for (const command of ['git add .', 'git add -A', 'git add modules/agents/x.mjs', 'git commit -m wip',
+    'git commit --amend', 'git stash', 'git stash pop', 'git stash drop', 'git -C /workspace add -A',
+    'git -c core.pager=cat commit -m wip', 'git --no-pager stash', 'make && git add -A',
+    'git status; git commit -m x', 'sudo git add .', 'touch .git/objects/testwrite', 'echo x > .git/HEAD',
+    'echo x > /workspace/.git/HEAD', 'rm .git/index.lock', 'mkdir -p .git/refs/heads/wip',
+    'printf x | tee /workspace/.git/HEAD']) {
+    deny(command);
+  }
+  for (const command of ['git status', 'git diff HEAD~1', 'git log -p -- modules/agents/x.mjs',
+    'git status && git diff --stat', 'git show HEAD:README.md', 'cat .git/HEAD', 'ls .git',
+    'ls -la .git/objects', 'git check-ignore -v .env', 'git diff > /tmp/patch.diff',
+    'git stash list', 'git stash show', 'git --no-pager stash list']) {
+    assert.equal(decide(policy, command, '/workspace'), null, command);
+  }
+  // The wall is the design, so a later layer cannot wave it through: the strictest decision wins
+  // across layers, and an allow is the loosest there is.
+  const widened = {
+    layers: [
+      ...policy.layers,
+      { name: 'repo', rules: parsePolicy({ rules: [{ id: 'allow-git', decision: 'allow', writes_git: true }] }).rules },
+    ],
+  };
+  assert.equal(decide(widened, 'git commit -m wip', '/workspace').decision, 'deny');
+  assert.equal(decide(widened, 'git commit -m wip', '/workspace').rule, 'git-read-only');
 });
 
 test('an org-layer `"writes_outside": "strict"` rule restores the pre-#877 asks (#750)', () => {
@@ -150,12 +188,14 @@ test('an org-layer `"writes_outside": "strict"` rule restores the pre-#877 asks 
   assert.equal(local.rule, 'strict-writes');
   assert.equal(local.reason, 'this org asks about every write outside the repository');
   // A host-backed write still asks, but the default layer names it first (and more precisely).
-  const host = decide(strict, 'echo x > /harness/out/z', vmWrites.cwd);
+  const host = decide(strict, 'echo x > /var/cache/colonizer-shared/x', vmWrites.cwd);
   assert.equal(host.decision, 'ask');
   assert.equal(host.layer, 'default');
   assert.match(host.reason, /host-backed path outside the repository/);
-  // /tmp and a write inside the repository never ask, even strict.
+  // /tmp, a write inside the repository and the colony's own output dir never ask, even strict
+  // (#1153: the harness itself tells the agent to write /harness/out).
   assert.equal(decide(strict, 'echo x > /tmp/x', vmWrites.cwd), null);
+  assert.equal(decide(strict, 'echo x > /harness/out/pr.md', vmWrites.cwd), null);
   assert.equal(decide(strict, 'echo x > inside.txt', vmWrites.cwd), null);
   // Without the strict rule, the same VM-local write is the default: allowed.
   assert.equal(decide(org([]), 'mkdir -p /root/tmp/x', vmWrites.cwd), null);
@@ -234,7 +274,7 @@ function keptWhole(text) {
   if (policy.rules.length !== raw.length) return false;
   const named = (rule) =>
     ['command', 'script', 'touches'].filter((key) => key in rule).length +
-    (rule.writes_outside !== undefined && rule.writes_outside !== false ? 1 : 0);
+    ['writes_outside', 'writes_git'].filter((key) => rule[key] !== undefined && rule[key] !== false).length;
   return policy.rules.every((rule, i) => rule.predicates.length === named(raw[i]));
 }
 
@@ -263,7 +303,7 @@ test('a malformed layer is ignored with a warning; the default keeps enforcing',
   assert.deepEqual(rules.map((rule) => rule.id), ['fine']);
   const emptied = loadExecPolicy({ COLONIZER_EXEC_POLICY: '{"rules": [{"decision": "deny"}]}' });
   assert.deepEqual(emptied.warnings, []);
-  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 3], ['install', 0]]);
+  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 4], ['install', 0]]);
   assert.equal(decide(emptied, 'cat .env', '/repo').rule, 'secret-paths');
 });
 
@@ -305,7 +345,7 @@ test('the question carries the rule, Allow and Deny options', () => {
   assert.match(questions[0].question, /Exec policy rule `writes-outside-repo` \(default\)/);
   assert.match(questions[0].question, /echo x > \/etc\/foo/);
   assert.deepEqual(questions[0].options.map((option) => option.label), ['Allow', 'Deny']);
-  assert.equal(defaultPolicy().rules.length, 3);
+  assert.equal(defaultPolicy().rules.length, 4);
 });
 
 test('the installed hook denies with the rule named, and logs every decision', async () => {
@@ -834,4 +874,57 @@ test('git <rev>:<path> object specs naming a secret path are refused; other path
     'git diff HEAD~1 -- src/',
   ];
   for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
+});
+
+// #1279: the harness seeds empty placeholder dotfiles (.env, .envrc, .npmrc, .netrc,
+// .git-credentials, .pypirc, .mcp.json, .gitmodules) at the checkout root, and an agent that ran
+// `git status` and then asked about their names was denied three times over and held. The whole
+// investigation is name-only, and so is each shape it takes.
+test('the placeholder investigation sequence is allowed end to end (#1279)', () => {
+  const policy = policyIn('/workspace');
+  const names = '.env .envrc .netrc .git-credentials .npmrc .pypirc .mcp.json .gitmodules';
+  // The exact sequence the issue held over: status, then check-ignore across all eight names,
+  // then ls — one call each, and the -C spelling of the same check.
+  for (const command of ['git status', `git check-ignore -v ${names}`, `ls -la ${names}`,
+    `git -C /workspace check-ignore -v ${names}`]) {
+    assert.equal(decide(policy, command, '/workspace'), null, command);
+  }
+});
+
+test('the investigation shapes the placeholders bring out are name-only; reads through them are not (#1279)', () => {
+  const policy = policyIn('/workspace');
+  const allowed = [
+    'cd /workspace && ls -la .env',
+    'cd /workspace && git check-ignore -v .env',
+    'for f in .env .netrc; do test -e "$f" && echo "$f"; done',
+    'for f in .env .netrc; do git check-ignore -q "$f" || echo "$f"; done',
+    'git check-ignore -v .env 2>&1; echo $?',
+    'ls -la .env 2>/dev/null || echo missing',
+    'wc -c .env && echo $?',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/workspace'), null, command);
+  // Each allowance keeps its read-shaped twin refused: a `cd` or loop-glued read, a bare `|`, `&`
+  // or `;` handing one loop part to another, and `$?` tacked onto a read.
+  const reads = [
+    'cd /workspace && cat .env',
+    'cd /tmp && ls .env',
+    'cd /tmp && git check-ignore .env',
+    'for f in .env; do cat "$f" && echo x; done',
+    'for f in .env; do echo x || cat "$f"; done',
+    'for f in .env; do test -e "$f" || cat "$f"; done',
+    'for f in .env; do wc -c "$f" && cat "$f"; done',
+    'for f in .env; do ls "$f" & cat "$f"; done',
+    'for f in .env; do git check-ignore "$f" | head; done',
+    'for f in .env; do test -e "$f"; cat "$f"; done',
+    'for f in .env; do ls "$f"; done; cat .env',
+    'for f in .env; do cat "$f"; done; echo $?',
+    'cat .env; echo $?',
+    'cat .env && echo $?',
+    'git check-ignore -v .env 2>&1; echo $(cat .env)',
+    // `file` opens the file and reads bytes to guess its type, and `git log` subsumes spellings
+    // that print contents (`-p`, `--format=`) the flag vetting cannot separate. Both stay refused.
+    'file .env',
+    'git log --oneline -- .env',
+  ];
+  for (const command of reads) assert.equal(decide(policy, command, '/workspace')?.rule, 'secret-paths', command);
 });

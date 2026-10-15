@@ -225,6 +225,7 @@ pub(crate) fn from_merge_loop(report: &crate::merge_loop::Report) -> RunRecord {
         ("rerun", A::Rerun),
         ("redo_dispatched", A::RedoDispatched),
         ("resolving", A::Resolving),
+        ("fixing", A::Fixing),
         ("red", A::Red),
         ("needs_redo", A::NeedsRedo),
         ("waiting", A::Waiting),
@@ -233,11 +234,15 @@ pub(crate) fn from_merge_loop(report: &crate::merge_loop::Report) -> RunRecord {
         count(&mut counts, key, n(action));
     }
     for i in &items {
-        if matches!(i.action, A::RedoDispatched | A::Resolving) && !i.session.is_empty() && !colonies.contains(&i.session) {
+        if matches!(i.action, A::RedoDispatched | A::Resolving | A::Fixing)
+            && !i.session.is_empty()
+            && !colonies.contains(&i.session)
+        {
             colonies.push(i.session.clone());
         }
     }
-    let moved = n(A::Merged) + n(A::Updated) + n(A::Rebased) + n(A::Rerun) + n(A::RedoDispatched) + n(A::Resolving);
+    let moved =
+        n(A::Merged) + n(A::Updated) + n(A::Rebased) + n(A::Rerun) + n(A::RedoDispatched) + n(A::Resolving) + n(A::Fixing);
     let stuck = n(A::Red) + n(A::NeedsRedo) + usize::from(report.stopped.is_some());
     let outcome = if stuck == 0 && moved == 0 {
         Outcome::Skipped

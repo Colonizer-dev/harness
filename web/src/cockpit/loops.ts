@@ -1,5 +1,5 @@
 // The pure half of loops (loops.rs): the operator's local schedule choice as the UTC cadence the
-// mothership stores, a cadence back in words, the Composer's `/loop <interval> <prompt>` shorthand,
+// mothership stores, a cadence back in words, Colonize's `/loop <interval> <prompt>` shorthand,
 // the map loops that keep architecture maps fresh, and the prompt templates the "New loop" dialog
 // offers. Kept apart from the view so it is testable.
 import type { Loop, LoopCadence, ModuleInfo, ModuleProviderInfo, NewLoop, OrgInfo } from "../types";
@@ -134,7 +134,7 @@ export function parseInterval(raw: string): number | null {
 }
 
 /**
- * The Composer's `/loop` shorthand, like Claude Code's: `/loop 1h check CI on main` runs every hour;
+ * Colonize's `/loop` shorthand, like Claude Code's: `/loop 1h check CI on main` runs every hour;
  * `/loop check CI on main` (no interval) is self-paced; `/loop 14d …` runs every 14 days, anchored
  * at this UTC time of day. Null when the text is not a `/loop` command.
  */
@@ -280,6 +280,35 @@ export const LOOP_TEMPLATES: { label: string; prompt: string; choice: LoopChoice
     prompt:
       "Read /colonizer/github/merged-prs.json for the pull requests merged since the last run. For every one that has no changelog entry yet, write a user-facing one the way this repository keeps its changelog: one fragment file per change when it has a fragments directory such as changelog.d/ (follow its README, and leave CHANGELOG.md alone), otherwise under Unreleased in CHANGELOG.md in the file's existing style. Open one pull request.",
     choice: { every: "daily", time: "06:00" },
+    needsGithub: true,
+  },
+  {
+    // The same text `loop create --template data-refresh` builds; the inputs are the repository's
+    // to edit (docs/loops/data-refresh.md). Joined lines: the prompt is full of backticks.
+    label: "Refresh data files from their sources",
+    prompt: [
+      "Refresh this repository's data files from their external sources, and open one pull request with the evidence.",
+      "",
+      "Inputs (paths and commands of this repository):",
+      '- Sources file: `data/sources.json`, a JSON list of `{"id", "url", "method", "cadence" or "volatility"}`. This loop also keeps `verified_on` (a date) and `failures` (a count) on each entry.',
+      "- Extract command: `npm run extract -- <id>`, with `<id>` replaced by the source id. It reads the fetched evidence and prints the source's changed values as JSON.",
+      "- Validate command: `npm run validate`.",
+      '- Policy command: `npm run --silent refresh-policy`. Given the change set as JSON on stdin, it prints `auto` or `review`.',
+      "- Evidence directory: `evidence/`.",
+      "",
+      "Each run:",
+      "1. Load the sources file and choose the due shard: the entries whose cadence or volatility class makes them due since their `verified_on`. When this run's parameters name `only` sources, the shard is exactly those ids, due or not.",
+      "2. Fetch each source by its `method`: `http` with curl, `browser` with a headless browser for JS-rendered pages (install Playwright's Chromium in the VM if it is missing).",
+      "3. Save what you fetched to `evidence/<id>/<UTC timestamp>.<ext>` with its sha256 next to it as `.sha256`, then run the extract command.",
+      '4. When a value changed, fetch and extract that source again at least 2 minutes later, and keep the change only when the two results agree. Leave an unconfirmed change out of the pull request and list it (source id, both values) under "Not confirmed" in the description.',
+      "5. Apply the confirmed changes and run the validate command; drop any change it rejects and say why. Write the pull request description: a change table (source, field, old → new, % change for numbers) and, for each changed source, its URL, fetch time, evidence path with its sha256, and the extractor version (what the extractor prints, else `git log -1 --format=%h` of its files).",
+      "6. Run the policy command and write `data-refresh:auto` or `data-refresh:review`, from its output, to `/harness/out/pr-labels`; the harness labels the pull request with it.",
+      "",
+      'Unchanged sources: set their `verified_on` to today. These bumps go into the same pull request as the changes or, when nothing changed, into one "verified on <date>" pull request; never more than one pull request per run.',
+      "",
+      "Failures: when a source cannot be fetched or extracted, add 1 to its `failures` in the sources file (set it back to 0 after a success) and list the error in the description. When `failures` reaches 3, report it with the finding tool, titled exactly `source-broken:<id>`, with the error and the last evidence path; if `/colonizer/github/issues.json` lists an open issue with that title, comment on it instead.",
+    ].join("\n"),
+    choice: { every: "daily", time: "05:00" },
     needsGithub: true,
   },
 ];

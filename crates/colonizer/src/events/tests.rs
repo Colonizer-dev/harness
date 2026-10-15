@@ -854,13 +854,18 @@ async fn a_re_ask_and_a_new_turn_are_not_a_finished_turn() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// Every branch of the origin resolver, against the line and the two things that cannot be read
-/// off it: the session's launch tag, and whether the judge sent the answer.
+/// Every branch of the origin resolver, against the line and the things that cannot be read
+/// off it: the session's launch tag, and which machine answerer sent the answer, if either.
 #[test]
 fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
     // A subagent's `agent` ref is the tell, whatever the event type.
     assert_eq!(
-        resolve_origin(&json!({"type":"tool_call","agent":{"id":"a","name":"Explore"}}), None, false),
+        resolve_origin(
+            &json!({"type":"tool_call","agent":{"id":"a","name":"Explore"}}),
+            None,
+            false,
+            false
+        ),
         Origin::Subagent
     );
     // The message echo tells its senders apart by id.
@@ -868,6 +873,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"watchdog-a1","text":"Watchdog check"}),
             None,
+            false,
             false
         ),
         Origin::Watchdog
@@ -876,6 +882,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"initial","text":"Fix the issue"}),
             None,
+            false,
             false
         ),
         Origin::User,
@@ -885,6 +892,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"initial","text":"Fix the issue"}),
             Some("burn_down"),
+            false,
             false
         ),
         Origin::BurnDown
@@ -893,6 +901,7 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"initial","text":"Hunt"}),
             Some(crate::redteam::REDTEAM_ORIGIN),
+            false,
             false
         ),
         Origin::Redteam
@@ -901,16 +910,18 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"user_message","id":"m1","text":"try X"}),
             Some("burn_down"),
+            false,
             false
         ),
         Origin::User
     );
-    // The judge's answer reads as autonomy only while the record spent on it says so.
+    // A machine answer reads as its answerer only while the record spent on it says so.
     assert_eq!(
         resolve_origin(
             &json!({"type":"question_answered","question_id":"q1","answers":{}}),
             None,
-            true
+            true,
+            false
         ),
         Origin::Autonomy
     );
@@ -918,19 +929,36 @@ fn runner_lines_resolve_to_the_subsystem_that_caused_them() {
         resolve_origin(
             &json!({"type":"question_answered","question_id":"q1","answers":{}}),
             None,
+            false,
+            true
+        ),
+        Origin::Watchdog,
+        "the playbook's answer reads as the watchdog's"
+    );
+    assert_eq!(
+        resolve_origin(
+            &json!({"type":"question_answered","question_id":"q1","answers":{}}),
+            None,
+            false,
             false
         ),
         Origin::User
     );
     // Everything else the runner said is the agent's own.
     assert_eq!(
-        resolve_origin(&json!({"type":"question","question_id":"q1","questions":[]}), None, false),
+        resolve_origin(
+            &json!({"type":"question","question_id":"q1","questions":[]}),
+            None,
+            false,
+            false
+        ),
         Origin::Agent
     );
     assert_eq!(
         resolve_origin(
             &json!({"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}),
             None,
+            false,
             false
         ),
         Origin::Agent
@@ -1187,6 +1215,87 @@ async fn a_judge_answer_is_not_watchdog_progress() {
         rt.activity.lock().await.last > stalled_since,
         "a person's answer resets the stall"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1247: a question the operator has already answered is answered from the record. The
+/// stored label goes back down keyed by the question as re-asked, no question opens for the
+/// person, and the colony log says where the answer came from. A reworded question under the
+/// same AskUserQuestion header is the same decision; a note the operator wrote rides along.
+#[tokio::test]
+async fn a_reasked_question_is_answered_from_the_record() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    app.update_session("abc", |x| {
+        x.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            Some("the short one"),
+        );
+    })
+    .await;
+    let reasked = r#"{"seq":1,"type":"question","question_id":"q9","questions":[{"question":"Which file name should the config use?","header":"File","options":[{"label":"hi.txt"}]}],"risk":"read_only"}"#;
+    handle_agent_event(&app, "abc", &rt, reasked).await;
+    assert!(rt.open_question().await.is_none(), "nobody is asked: the record answered");
+    assert!(rt.activity.lock().await.question_since.is_none());
+    let answer = rx.try_recv().unwrap();
+    assert_eq!(answer["type"], "answer");
+    assert_eq!(answer["question_id"], "q9");
+    assert_eq!(
+        answer["answers"],
+        json!({"Which file name should the config use?": "hello.txt"}),
+        "the stored label, keyed by the question as re-asked: {answer}"
+    );
+    assert_eq!(answer["response"], "the short one");
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(log.contains("answered from the record") && log.contains("File"), "{log}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1247, the guards: an exec-policy ask is a blocked tool call, not a decision re-asked —
+/// it waits for its person even under a recorded header. So does anything credential-shaped, and
+/// a question whose inner questions do not all match the record stays open whole.
+#[tokio::test]
+async fn an_ask_that_must_not_be_answered_from_the_record_still_opens() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    app.update_session("abc", |x| {
+        x.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            None,
+        );
+    })
+    .await;
+
+    // An exec-policy ask under the same header: the person decides, always.
+    let ask = r#"{"seq":1,"type":"question","question_id":"call_1","questions":[{"question":"Allow rm -rf dist?","header":"File"}],"kind":"exec_policy","blocking":true,"risk":"workspace_write"}"#;
+    handle_agent_event(&app, "abc", &rt, ask).await;
+    assert!(rt.open_question().await.is_some(), "a blocked call waits for its person");
+    assert!(rt.question_holds_tool_call.load(Ordering::SeqCst));
+    assert!(rx.try_recv().is_err(), "nothing went down the link");
+    *rt.open_question.lock().await = None;
+
+    // Credential-adjacent under the same header: never decided for the operator.
+    let secret = r#"{"seq":2,"type":"question","question_id":"q2","questions":[{"question":"Paste the token?","header":"File"}],"risk":"credential_adjacent"}"#;
+    handle_agent_event(&app, "abc", &rt, secret).await;
+    assert!(
+        rt.open_question().await.is_some(),
+        "a credential question waits for its person"
+    );
+    assert!(rx.try_recv().is_err());
+    *rt.open_question.lock().await = None;
+
+    // Half the inner questions are on the record, half are not: the whole question opens, rather
+    // than an answer that only covers what the operator actually decided.
+    let mixed = r#"{"seq":3,"type":"question","question_id":"q3","questions":[{"question":"Which file name now?","header":"File"},{"question":"Deploy to prod?","header":"Ship"}],"risk":"read_only"}"#;
+    handle_agent_event(&app, "abc", &rt, mixed).await;
+    assert!(rt.open_question().await.is_some(), "a mixed question waits whole");
+    assert!(rx.try_recv().is_err());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1715,5 +1824,109 @@ async fn autopilot_waiting_on_a_question_exposes_it_on_the_record() {
     let end = r#"{"seq":2,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
     handle_agent_event(&app, "abc", &rt, end).await;
     assert_eq!(app.session("abc").await.unwrap().status, SessionStatus::WaitingForAnswer);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1266: the settlement of the last in-flight background subagent arms the turn-lost
+/// window, the orchestrator's own output stands it down, and everything else — a subagent's
+/// relayed lines, a settlement for an id this run never tracked, a `status` heartbeat — leaves it
+/// as it stands.
+#[tokio::test]
+async fn the_last_settling_subagent_arms_the_turn_lost_window() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let task = |id: &str| json!({"type": "tool_call", "tool_call_id": id, "name": "Task"});
+    let settled = |id: &str, status: &str| json!({"type": "subagent_end", "tool_call_id": id, "status": status});
+
+    // Two background Tasks in flight: nothing is armed while one is still outstanding.
+    note_turn_shape(&rt, &task("t1")).await;
+    note_turn_shape(&rt, &task("t2")).await;
+    assert_eq!(rt.open_subagents.lock().await.len(), 2, "both Task calls are tracked");
+    assert!(!rt.turn_lost_since.lock().await.is_some());
+    note_turn_shape(&rt, &settled("t2", "completed")).await;
+    assert!(!rt.turn_lost_since.lock().await.is_some(), "t1 is still in flight");
+    // Completed, failed or stopped all mean the continuation should now happen: the last one to
+    // settle arms the window whatever its status was.
+    note_turn_shape(&rt, &settled("t1", "failed")).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "the window is armed");
+
+    // A subagent's own text carries the `agent` ref and is its own turn's, not the continuation.
+    let relayed = json!({"type": "assistant_text", "text": "done", "agent": {"id": "t1", "name": "explore"}});
+    note_turn_shape(&rt, &relayed).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "a relayed line does not disarm");
+    // A settlement for an id this run never tracked — launched before a mothership restart —
+    // changes nothing: it neither re-arms the window nor disarms it.
+    note_turn_shape(&rt, &settled("ghost", "completed")).await;
+    assert!(
+        rt.turn_lost_since.lock().await.is_some(),
+        "an untracked settlement leaves the armed window alone"
+    );
+    // The orchestrator's own output is the lost continuation arriving: stand the re-drive down.
+    let lead = json!({"type": "assistant_text", "text": "both reports are in"});
+    note_turn_shape(&rt, &lead).await;
+    assert!(!rt.turn_lost_since.lock().await.is_some());
+    // And now, with the set empty and the window down, that same untracked settlement arms
+    // nothing — the case a restart leaves behind.
+    note_turn_shape(&rt, &settled("ghost", "completed")).await;
+    assert!(
+        !rt.turn_lost_since.lock().await.is_some(),
+        "an untracked settlement never arms"
+    );
+    // `status` is lifecycle telemetry, and even `working` must not mask a dead turn: a heartbeat
+    // cannot stall-proof a lost continuation.
+    note_turn_shape(&rt, &task("t3")).await;
+    note_turn_shape(&rt, &settled("t3", "completed")).await;
+    assert!(rt.turn_lost_since.lock().await.is_some());
+    note_turn_shape(&rt, &json!({"type": "status", "state": "working"})).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "a status line does not disarm");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1266: only the lead's own calls move the window. A Task call relayed from inside a
+/// subagent neither tracks a subagent nor stands the re-drive down, and a lead Task relaunched
+/// after a settlement both disarms the window and is tracked again — the continuation and the
+/// next wait, in that order.
+#[tokio::test]
+async fn a_relayed_task_call_neither_tracks_nor_disarms_a_relaunch_does_both() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let task = |id: &str| json!({"type": "tool_call", "tool_call_id": id, "name": "Task"});
+    let settled = |id: &str, status: &str| json!({"type": "subagent_end", "tool_call_id": id, "status": status});
+
+    note_turn_shape(&rt, &task("t1")).await;
+    note_turn_shape(&rt, &settled("t1", "completed")).await;
+    assert!(rt.turn_lost_since.lock().await.is_some(), "armed by the settlement");
+
+    // The subagent of a later turn making its own Task call: not the lead's, so it tracks nothing
+    // and disarms nothing.
+    let relayed = json!({"type": "tool_call", "tool_call_id": "t9", "name": "Task", "agent": {"id": "t1", "name": "explore"}});
+    note_turn_shape(&rt, &relayed).await;
+    assert!(
+        !rt.open_subagents.lock().await.contains("t9"),
+        "a subagent's own Task call is not tracked"
+    );
+    assert!(rt.turn_lost_since.lock().await.is_some(), "and it does not disarm");
+
+    // The lead calling Task again is the continuation arriving: the window is spent, and the new
+    // subagent is tracked so its own settlement is judged against it later.
+    note_turn_shape(&rt, &task("t2")).await;
+    assert!(rt.turn_lost_since.lock().await.is_none(), "the relaunch disarmed the window");
+    assert!(
+        rt.open_subagents.lock().await.contains("t2"),
+        "and the new subagent is tracked"
+    );
+    note_turn_shape(&rt, &settled("t2", "stopped")).await;
+    assert!(
+        rt.turn_lost_since.lock().await.is_some(),
+        "its settlement arms the window again"
+    );
+    // A lead call that is not a Task is the continuation too, and tracks no subagent.
+    let bash = json!({"type": "tool_call", "tool_call_id": "t4", "name": "Bash"});
+    note_turn_shape(&rt, &bash).await;
+    assert!(rt.turn_lost_since.lock().await.is_none());
+    assert!(
+        !rt.open_subagents.lock().await.contains("t4"),
+        "only a Task tracks a subagent"
+    );
     let _ = std::fs::remove_dir_all(root);
 }

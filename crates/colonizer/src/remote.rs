@@ -9,7 +9,7 @@
 //! signing the relay's handshake challenge. The wire frames, caps and encodings are written down
 //! in docs/protocol.md §6.10.
 
-use crate::{ApiResult, AppError, Shared, activity, client_error, util};
+use crate::{ApiResult, App, AppError, Shared, activity, client_error, util};
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Extension, Json, Router,
@@ -244,6 +244,12 @@ impl Remote {
         self.saved.read().await.enabled
     }
 
+    /// The install identity the relay registered, when remote access was ever enabled: what the
+    /// signed install calls are addressed to (cratefield_push.rs rides them too).
+    pub(crate) async fn install_id(&self) -> Option<String> {
+        self.saved.read().await.install_id.clone()
+    }
+
     /// The tunnel host (`<install_id>.my.colonizer.dev`) while remote access is on, and whether the
     /// link is connected right now — the `https://` origin a phone is offered first (phone.rs).
     pub(crate) async fn link(&self) -> Option<(String, bool)> {
@@ -378,8 +384,15 @@ impl Remote {
     /// The test relay's base URL (`COLONIZER_REMOTE_URL` is read once at construction, and
     /// ambient env vars must not leak into a parallel test run).
     #[cfg(test)]
-    async fn set_relay(&self, url: String) {
+    pub(crate) async fn set_relay(&self, url: String) {
         *self.relay.write().await = url.trim_end_matches('/').to_string();
+    }
+
+    /// A test's install identity, as a registration would have left it: the signed install calls
+    /// are addressed to it (cratefield_push.rs's flush test).
+    #[cfg(test)]
+    pub(crate) async fn set_install_id(&self, install_id: &str) {
+        self.saved.write().await.install_id = Some(install_id.to_string());
     }
 }
 
@@ -741,8 +754,14 @@ async fn signed_call(
 }
 
 /// The same signed call, for this install: its identity and key, or a 409 when remote access has
-/// never been switched on (no link, so nothing to pair).
-async fn install_call(app: &Shared, method: Method, suffix: &str, body: Option<&Value>) -> Result<(StatusCode, Value), AppError> {
+/// never been switched on (no link, so nothing to pair). `pub(crate)` because the Cratefield
+/// delivery channel (cratefield_push.rs, issue #1085) rides the same install endpoints.
+pub(crate) async fn install_call(
+    app: &App,
+    method: Method,
+    suffix: &str,
+    body: Option<&Value>,
+) -> Result<(StatusCode, Value), AppError> {
     let Some(install_id) = app.remote.saved().await.install_id else {
         return Err(client_error(
             StatusCode::CONFLICT,

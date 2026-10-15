@@ -26,7 +26,7 @@ Both providers share the second table.
 | OTLP endpoint | Default | What it is |
 | :--- | :--- | :--- |
 | Endpoint URL | *(empty)* | `http://` or `https://`. Required while the module is on (an enabled OTLP module with no endpoint is refused; leave it empty only while the module is off). It must carry no credentials (`user:pass@`) and no query string — those go in the **Observability headers** secret. |
-| Protocol | `http/protobuf` | `http/protobuf`, `http/json`, or `grpc`. `grpc` is refused in this build; a later issue adds it. |
+| Protocol | `http/protobuf` | `http/protobuf`, `http/json`, or `grpc`. The mothership refuses `grpc` at save (it links no gRPC stack); an add-on built with `--features otlp-grpc` speaks it ([OTLP/gRPC](grpc.md)). |
 | Backend | `custom` | Names the header the backend expects: Honeycomb `x-honeycomb-team`, Datadog `dd-api-key`, New Relic `api-key`, Grafana Cloud `Authorization` (Basic), Elastic `Authorization` (ApiKey); SigNoz and a local collector usually want none. The value is in the secret. |
 | Compression | `gzip` | `gzip` or `none`. |
 | Request timeout (seconds) | `10` | 1 to 120. |
@@ -43,6 +43,7 @@ Both providers share the second table.
 | Colony activity | on | Stages, tool use and status changes. |
 | Traces | on | One trace per colony: its turns, tool calls and subagents as spans ([Traces](traces.md)). |
 | Metrics | on | Counters and durations. |
+| Metrics push interval (seconds) | `30` | 5 to 86400; how often the metric catalogue is pushed ([Metrics push](metrics-push.md)). |
 | Conversation content | off | The words you and the agent exchanged. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Agent thinking | off | The agent's reasoning. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Trace sample ratio | `1` | 0 to 1; the share of colonies traced, chosen per colony so a trace is always whole. Logs and metrics are never sampled. |

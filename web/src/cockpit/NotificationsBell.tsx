@@ -155,7 +155,7 @@ export function InboxPanel({
           </span>
         ),
         leading: <DotTile color="var(--warn)" />,
-        trailing: <span className="rounded-full bg-warn-soft px-2 py-0.5 text-meta-lg font-medium text-warn">{questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}</span>,
+        trailing: <span className="rounded-full bg-warn-soft px-2 py-0.5 text-meta-lg font-medium text-text">{questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}</span>,
         verb: questions[session.id] || expectsAnswer(session) ? "answer" : "open",
         onPick: () => onOpenColony(session.id),
       }));

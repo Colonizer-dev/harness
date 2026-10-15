@@ -76,7 +76,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, or a model provider starting to fail, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
 | `burn_down` | `default` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured; see [burn-down](burn-down.md) |
 | `screen` | `promptdecode` | Screens the colony's final diff and pull request body for hidden code points (tag runs, bidi controls, variation selectors) at publish time, before the push: `warn` annotates the pull request, `block` holds it. Local and deterministic — no network, no model; see [prompt-screening](prompt-screening.md) |
-| `voice` | `browser`, `openai`, `groq`, `deepgram`, `elevenlabs`, `openai_compatible` | Speech-to-text for the cockpit composer's microphone. `browser` (the default, also what an absent entry reads as) is the browser's own recogniser and nothing server-side. Any other provider is a transcription API the mothership calls: the browser records a clip, posts it to `/api/voice/transcribe`, and the mothership forwards it with the key (`voice-keys/<provider>`, 0600, or the provider's env var, or a configured OpenAI / Groq model provider's key) and returns the text. Audio goes browser → mothership → service and is not kept; nothing reaches a colony but the words you send |
+| `voice` | `browser`, `openai`, `groq`, `deepgram`, `elevenlabs`, `openai_compatible` | Speech-to-text for the microphone in the cockpit's Colonize pane. `browser` (the default, also what an absent entry reads as) is the browser's own recogniser and nothing server-side. Any other provider is a transcription API the mothership calls: the browser records a clip, posts it to `/api/voice/transcribe`, and the mothership forwards it with the key (`voice-keys/<provider>`, 0600, or the provider's env var, or a configured OpenAI / Groq model provider's key) and returns the text. Audio goes browser → mothership → service and is not kept; nothing reaches a colony but the words you send |
 
 Two settings layers sit next to the modules:
 
@@ -115,7 +115,7 @@ Two settings layers sit next to the modules:
 | `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](burn-down.md)) | — |
 | `observability` | Sends logs, traces and metrics over OTLP to Grafana Cloud, a local collector, Datadog, Honeycomb, Elastic, SigNoz, New Relic or any OpenTelemetry backend — or writes them to capped local files. Off until configured ([docs/observability/settings.md](observability/settings.md)) | gRPC, more backends `PLANNED` |
 | `screen` | Screens the final diff and pull request body for hidden code points at publish time, warning or blocking; local, no model ([docs/prompt-screening.md](prompt-screening.md)) | — |
-| `voice` | Speech-to-text for the composer's microphone: the browser's own recogniser by default, or OpenAI, Groq, Deepgram, ElevenLabs or any OpenAI-compatible transcription server | — |
+| `voice` | Speech-to-text for the Colonize pane's microphone: the browser's own recogniser by default, or OpenAI, Groq, Deepgram, ElevenLabs or any OpenAI-compatible transcription server | — |
 
 Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
 parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
@@ -866,19 +866,22 @@ runner exist, leaving no reader for its key that the agent can reach once the se
 **Layer 3 — the agent process** (runner and every descendant), applied by agentd in `pre_exec`
 before exec, fail-closed — a step that fails fails the spawn:
 
-- Capability bounding set: 21 caps dropped — `SYS_ADMIN`, `SYS_PTRACE`, `SYS_RESOURCE`,
-  `SYS_MODULE`, `BPF`, `PERFMON`, `NET_ADMIN`, `SYSLOG`, `MKNOD`, audit, MAC and the rest —
-  while `CHOWN`/`DAC_OVERRIDE`/`SETUID`/`SETGID`/`NET_RAW` stay for package managers.
+- Capability bounding set: 22 caps dropped — `SYS_ADMIN`, `SYS_PTRACE`, `SYS_RESOURCE`,
+  `SYS_MODULE`, `BPF`, `PERFMON`, `NET_ADMIN`, `NET_RAW`, `SYSLOG`, `MKNOD`, audit, MAC and the
+  rest — while `CHOWN`/`DAC_OVERRIDE`/`SETUID`/`SETGID` stay for package managers. `NET_RAW` is
+  dropped (#932) because a raw socket could read agentd's bearer token off the wire; package
+  managers do not use raw sockets, and unprivileged ICMP (a `ping_group_range` guest) still works.
 - `RLIMIT_CORE` 0/0, unraisable without `CAP_SYS_RESOURCE`; `no_new_privs`.
-- A seccomp denylist (51 rules, default allow) turning the dangerous surface — io_uring,
+- A seccomp denylist (52 rules, default allow) turning the dangerous surface — io_uring,
   userfaultfd, BPF, perf, mount and the fsopen family, namespaces (`unshare`, `setns`, `clone`
   with a namespace flag), ptrace and `process_vm_*`, kernel modules, kexec, keys, reboot, swap,
   syslog, fanotify — into `EPERM`, so a denial is an ordinary tool failure, not a kill. `clone3`
-  returns `ENOSYS` so libc falls back to plain `clone`; `prctl(PR_SET_DUMPABLE)` and the
-  `TIOCSTI`/`TIOCLINUX` terminal-injection ioctls are arg-gated. `SECCOMP_FILTER_FLAG_LOG` puts
+  returns `ENOSYS` so libc falls back to plain `clone`; `prctl(PR_SET_DUMPABLE)`, the
+  `TIOCSTI`/`TIOCLINUX` terminal-injection ioctls and `socket(AF_PACKET)` (#932) are arg-gated.
+  `SECCOMP_FILTER_FLAG_LOG` puts
   denials in the kernel log where one exists. The terminal PTY is deliberately not filtered — it is
   the human's terminal, and the seal closes the token-file route to it for the agent (Layer 2).
-- agentd logs `hardening: seccomp denylist 51 rules fnv64=<fingerprint>, caps dropped 21, core
+- agentd logs `hardening: seccomp denylist 52 rules fnv64=<fingerprint>, caps dropped 22, core
   dumps off` to the event store before the first spawn, so a colony's log shows what guarded it.
 
 What it does not do: the agent stays root — DAC still gives it every file in the guest, the
@@ -889,7 +892,7 @@ yet (`EPERM` in the tool, a kernel-log line); network is [sandbox-network.md](sa
 Verification and re-verification: `cargo test -p colonizer-agentd` runs a behavioural probe that
 spawns a hardened child and asserts the `EPERM` classes — no KVM needed.
 `colonizer-agentd --seccomp-profile` prints the profile and its fingerprint (x86_64:
-`eb59b1ba4184ce70`); `colonizer-agentd --exec-hardened -- sh` in a colony terminal reproduces the
+`d9bb83a2c59b1178`); `colonizer-agentd --exec-hardened -- sh` in a colony terminal reproduces the
 agent's view for the manual matrix (`unshare -U`, io_uring, `mount`, `cat /proc/kallsyms`, strace
 of agentd), and `scripts/seccomp-evidence.sh -- <workload>` straces a workload and lists any
 denylisted syscall it made. Re-run on a `crates/colonizer/claude-code.lock` bump, an `images.lock` digest

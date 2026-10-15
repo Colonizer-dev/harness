@@ -22,7 +22,7 @@ the runner contract body (§2). The vocabulary is closed:
 - `user` — a person drove it: a message typed into the colony, or their answer to a question.
 - `agent` — the colony's orchestrator agent: most runner lines, its questions included.
 - `subagent` — a subagent inside the colony; the line also carries the `agent` ref (§2 rules).
-- `watchdog` — the watchdog nudging a stalled colony (§6.3).
+- `watchdog` — the watchdog nudging a stalled colony (§6.3), or answering a colony's question through the playbook (#1258).
 - `autonomy` — the autonomy judge answering a question in autonomous mode (§6.2b).
 - `burn_down` — the burn-down scheduler, on a colony it launched (§6.2c).
 - `redteam` — a red-team hunter colony (§6.7).

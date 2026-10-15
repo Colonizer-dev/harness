@@ -100,7 +100,7 @@ pub(crate) enum Started {
     Failed(String),
 }
 
-fn worktree_git(app: &Shared, admin: &str, wt: &str) -> tokio::process::Command {
+pub(super) fn worktree_git(app: &Shared, admin: &str, wt: &str) -> tokio::process::Command {
     let mut c = app.git(Path::new(admin));
     c.arg("--work-tree").arg(wt);
     c
@@ -237,7 +237,7 @@ pub(super) async fn reset(app: &Shared, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn restore(app: &Shared, id: &str) {
+pub(super) async fn restore(app: &Shared, id: &str) {
     app.update_session(id, |x| {
         if matches!(
             x.status,

@@ -95,6 +95,16 @@ pub const RECOVERY_PATH: Point = Point {
     budget: Duration::from_millis(1800),
 };
 
+/// The verifier's focused-check point (verify_focus.rs, #584): which focused check the verifier
+/// runs first, before the full suite. Its options are built per diff by `verify_focus::focus_candidates`
+/// plus `full` for "full suite only". Asked in shadow only — the pick is recorded and graded against
+/// what the checks found, never applied, and the same 1800 ms ceiling the other points use.
+pub const VERIFY_FOCUS: Point = Point {
+    id: "verify.focus",
+    question: "verify_focus",
+    budget: Duration::from_millis(1800),
+};
+
 /// Point-id prefixes the harness refuses outright: a destructive, security or publish decision is
 /// never handed to an external classifier, whatever a future point is called. Checked in [`decide`]
 /// before any network call, so a refused point costs nothing.
@@ -178,6 +188,28 @@ pub async fn decide<C: Serialize>(
     .await
 }
 
+/// [`decide`] for a caller that carries its `App` along: the same ask on the same endpoint and key —
+/// except in a test build, where the `App` under test can carry a redirect to a loopback mock
+/// (`App::test_ask`), so an integration test can answer a point without touching the process
+/// environment or the secrets store, and without any other test's ask seeing its mock.
+pub(crate) async fn decide_for<C: Serialize>(
+    app: &App,
+    point: &Point,
+    mode: Mode,
+    org_allows: bool,
+    options: &[&str],
+    context: &C,
+) -> Result<Decision, Miss> {
+    #[cfg(test)]
+    let redirected = app.test_ask.lock().expect("test ask lock").clone();
+    #[cfg(test)]
+    if let Some((base_url, api_key)) = redirected {
+        return decide_at(point, mode, org_allows, options, context, Some(api_key), base_url).await;
+    }
+    let _ = app; // release builds carry no redirect, so the app is otherwise unread
+    decide(point, mode, org_allows, options, context).await
+}
+
 /// [`decide`] with the key and endpoint passed in, so a test can point it at a loopback mock and
 /// choose whether a key exists.
 async fn decide_at<C: Serialize>(
@@ -231,8 +263,8 @@ async fn decide_at<C: Serialize>(
 /// One `decisions.jsonl` row: what one point asked, what came back, and what the harness did about
 /// it. `did` is the point's own word for the end state — routing writes `jev` when the answer was
 /// applied and `rule` otherwise. `outcome` grades a decision against what actually happened; only
-/// the recovery point fills it today (a second, `kind: "outcome"` row), so it is null wherever a
-/// point does not grade.
+/// the recovery point (a second, `kind: "outcome"` row) and the verifier's focused-check point (in
+/// the decision row itself) fill it today, so it is null wherever a point does not grade.
 #[derive(Clone, Debug, Serialize)]
 pub struct Row {
     pub kind: &'static str,
@@ -254,7 +286,8 @@ pub struct Row {
     /// `rule`, `jev` or `cap` for recovery).
     pub did: &'static str,
     /// How the decision actually turned out, graded by the point that fills it (recovery writes it
-    /// to a later `kind: "outcome"` row). Null unless a point grades.
+    /// to a later `kind: "outcome"` row; the verifier's focused-check point fills it in the decision
+    /// row itself). Null unless a point grades.
     pub outcome: Option<Value>,
 }
 

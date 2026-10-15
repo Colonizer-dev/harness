@@ -5,8 +5,8 @@
 // `ask` as a colony question the operator (or the autonomy judge) answers. See README.md for the
 // full picture; in short: a policy is `{ "rules": [...] }`, a rule matches when ALL its
 // predicates hold (`command` regex, `touches` path globs, `script` regex over the script's
-// contents, `writes_outside`), the first match in a layer wins, and across layers the STRICTEST
-// decision wins (deny > ask > allow), so a later layer can only ever narrow. Layers: default
+// contents, `writes_outside`, `writes_git`), the first match in a layer wins, and across layers
+// the STRICTEST decision wins (deny > ask > allow), so a later layer can only ever narrow. Layers: default
 // (built in), install (`COLONIZER_EXEC_POLICY`), org (`COLONIZER_EXEC_POLICY_ORG`) and repo
 // (`.colonizer/exec-policy.json`, read once at start); a malformed layer is dropped with a
 // warning, so the policy fails closed on the default.
@@ -47,7 +47,14 @@ const SYNTAX_ONLY = new Map([
 const WRITE_WORDS = new Set(['cp', 'mv', 'rm', 'touch', 'mkdir', 'tee', 'truncate', 'install']);
 const WRITE_TARGET_FLAGS = /^(-|--|[a-zA-Z]=)/;
 // Write targets that are never "outside the repository": scratch space and the kernel's own sinks.
-const NEVER_OUTSIDE = [/^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/, /^\/dev\/(?:null|stdout|stderr|fd)\b/, /^\/run\/user\//];
+// /harness/out is the colony's own output directory — pr.md, the verify logs — and the harness
+// itself tells the agent to write there, so a write at or under it is the brief being followed,
+// not an escape (#1153). Matched on the normalized target, so /harness/out/../x, the /harness the
+// directory sits in, still reads as outside, and /harness/outthing never matches.
+const NEVER_OUTSIDE = [
+  /^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/, /^\/dev\/(?:null|stdout|stderr|fd)\b/, /^\/run\/user\//,
+  /^\/harness\/out(\/|$)/,
+];
 
 // Some of the guest's read-only host mounts (boot.rs): the mothership's vm_dir at `/colonizer` and
 // the agent's binaries, runner and plugins at `/opt/colonizer`. A write onto one is still the
@@ -82,10 +89,13 @@ const SCRIPT_EGRESS = [
 
 // The first layer, present for every colony. It mirrors the path policy's DEFAULT_MASKED
 // (crates/colonizer/src/path_policy.rs): ~/.ssh and the credential files the path policy masks are
-// denied in the command and in any script it runs; writing to a host-backed path outside the
+// denied in the command and in any script it runs; `git add`/`git commit`/`git stash` and a write
+// into the checkout's own `.git` are denied — `.git` is read-only by design, so the agent that
+// tries is hitting the intended wall, and asking the operator (or letting the tries pile into a
+// control-defeat signature) would both be wrong (#1258); writing to a host-backed path outside the
 // repository asks (a write into the microVM's discarded root filesystem does not — see #877), as
-// does a write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) or into the checkout's
-// own `.git` (#750). A layer can restore the pre-#877 strictness with `"writes_outside": "strict"`.
+// does a write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) (#750). A layer can
+// restore the pre-#877 strictness with `"writes_outside": "strict"`.
 export function defaultPolicy() {
   return {
     rules: [
@@ -101,6 +111,12 @@ export function defaultPolicy() {
         decision: 'deny',
         reason: 'the script this command runs talks to the network',
         script: SCRIPT_EGRESS,
+      },
+      {
+        id: 'git-read-only',
+        decision: 'deny',
+        reason: '`.git` is read-only by design: never run `git add`, `git commit` or `git stash`, and don\'t write under `.git/` or debug the read-only mount. Leave your changes in the working tree; the harness commits them and opens the pull request when you finish.',
+        writes_git: true,
       },
       {
         id: 'writes-outside-repo',
@@ -167,7 +183,8 @@ export function parsePolicy(input) {
       rule.predicates.push({ kind: 'writes_outside', strict });
       rule.writes = strict ? 'strict' : 'outside'; // which per-path reason the hit reports
     }
-    // A rule with none of the four known predicates would match every command by accident, so it
+    if (raw.writes_git === true) rule.predicates.push({ kind: 'writes_git' });
+    // A rule with none of the known predicates would match every command by accident, so it
     // is dropped; a deliberate catch-all is `"command": "."` (or `""`).
     if (rule.predicates.length) rules.push(rule);
   }
@@ -218,7 +235,7 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
   const add = (name, raw) => {
     const policy = parsePolicy(raw);
     if (!policy) {
-      warnings.push(`ignoring the ${name} exec policy: expected {"rules": [{"id", "decision", "reason", "command"|"script"|"touches"|"writes_outside"}]}`);
+      warnings.push(`ignoring the ${name} exec policy: expected {"rules": [{"id", "decision", "reason", "command"|"script"|"touches"|"writes_outside"|"writes_git"}]}`);
       return;
     }
     layers.push({ name, rules: policy.rules });
@@ -398,6 +415,9 @@ function ruleMatches(rule, ctx, layer) {
       case 'writes_outside':
         if (p.strict ? !ctx.writesOutsideAny : !ctx.writesOutside) return false;
         break;
+      case 'writes_git':
+        if (!ctx.writesGit) return false;
+        break;
     }
   }
   return true;
@@ -499,6 +519,34 @@ function commandWords(segment) {
   while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++; // env assignments
   if (['sudo', 'env', 'command', 'exec'].includes(ws[i])) i++;
   return ws.slice(i);
+}
+
+// The `git` subcommands that must write into the checkout's `.git`, so the read-only mount makes
+// them fail (#1258). The `git-read-only` rule denies the invocation itself, not only the write
+// targets the command visibly names: `git commit` writes heads and the index however it is spelled.
+const GIT_MUTATIONS = new Set(['add', 'commit', 'stash']);
+// The `git stash` subcommands that only read the stash, so they pass; every other stash form —
+// bare `git stash` included — pushes, pops or drops entries and must write the stash file.
+const GIT_STASH_READS = new Set(['list', 'show']);
+
+/** True when one segment invokes `git add`, `git commit` or a writing `git stash`: the first
+ * non-flag word after `git` is the subcommand, with room for git's global options — `git -C dir
+ * add`, `git -c key=val commit`, `git --no-pager stash` (`-C` and `-c` are the ones taking their
+ * value as the next word, which [`words`] keeps unless it is one character, as in `-C .`). A
+ * mention inside another command is not an invocation — `grep "git commit" log` has `grep` first —
+ * and an indirection the segment does not spell out (`bash -c 'git commit'`, a script body) is not
+ * seen, like the `script` predicate's own blind spot. `git stash list` and `git stash show` only
+ * read, so they are not mutations. */
+function isGitMutation(segment) {
+  const ws = commandWords(segment);
+  if (basename(ws[0] ?? '') !== 'git') return false;
+  let i = 1;
+  while (i < ws.length && ws[i].startsWith('-')) {
+    if ((ws[i] === '-C' || ws[i] === '-c') && !GIT_MUTATIONS.has(ws[i + 1] ?? '')) i++; // the flag's value
+    i++;
+  }
+  if (!GIT_MUTATIONS.has(ws[i])) return false;
+  return !(ws[i] === 'stash' && GIT_STASH_READS.has(ws[i + 1] ?? ''));
 }
 
 /** What a segment names as the script it runs: `bash x.sh`, `python -O x.py`, `./x.sh`, `/opt/x.rb`. */
@@ -662,6 +710,11 @@ const UNSAFE_SHELL = /[|<>`$(){}\\]/;
 const UNSAFE_SHELL_PIPED = /[<>`$(){}\\]/;
 // Redirects that move no bytes into or out of a file: stderr onto stdout, or output thrown away.
 const HARMLESS_REDIRECT = /(^|\s)(?:2>&1|[12]?>\s*\/dev\/null|&>\s*\/dev\/null)(?=\s|;|\||&|$)/g;
+// Shell parameters that expand to a number or the shell's own name (`$?`, `$!`, `$$`, `$#`,
+// `$0`-`$9`), never to file bytes: `git check-ignore -v .env 2>&1; echo $?` is how an agent reads
+// a check's outcome (#1279), so these count as literal words. Any other `$…` expansion carries
+// data the environment holds and keeps the command unsafe.
+const NUMBER_PARAMS = /\$\{?[?!$#0-9]\}?/g;
 
 /** True when one segment (already split on `;`, `&&` and the like) only asks about path names. */
 function isNameOnlySegment(segment, cwd) {
@@ -682,6 +735,14 @@ function isNameOnlySegment(segment, cwd) {
     }
     if (!['check-ignore', 'status'].includes(ws[i])) return false;
     return flags(ws.slice(i + 1));
+  }
+  // `cd` only re-homes the segments after it, and those are still vetted one by one. Like git's
+  // `-C` above (#1079 follow-up), the directory must be the repository the command already runs
+  // in: another checkout's config and hooks are not this policy's to vet.
+  if (ws[0] === 'cd') {
+    const rest = ws.slice(1).filter((w) => !(SHORT_FLAGS.test(w) || LONG_FLAGS.test(w)));
+    return !rest.length || (rest.length === 1 && (rest[0] === '.' || (cwd && rest[0].startsWith('/') &&
+      posix.normalize(rest[0]).replace(/\/+$/, '') === posix.normalize(cwd).replace(/\/+$/, ''))));
   }
   if (ws[0] === 'ls') return flags(ws.slice(1));
   // `echo` of literal words (the caller already refused every expansion) only prints its own text.
@@ -730,12 +791,17 @@ function isStdinFilter(segment) {
 function nameOnlyFiltered(command, segments, cwd) {
   if (/\.ssh/.test(command)) return segments;
   // One line only: a newline inside the body would hide a second command (`hash -p /bin/cat ls`).
-  const loop = !/[\r\n]/.test(command.trim()) && command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;|&<>`(){}\\]+?);?\s*done$/);
+  const loop = !/[\r\n]/.test(command.trim()) && command.trim().match(/^for\s+([A-Za-z_]\w*)\s+in\s+([^;|&<>`$(){}\\]+);\s*do\s+([^;<>`(){}\\]+?);?\s*done$/);
   if (loop) {
     const [, name, , body] = loop;
     const ref = new RegExp(`"?\\$(?:${name}|\\{${name}\\})"?`, 'g');
     const plain = body.replace(ref, 'X');
-    return !UNSAFE_SHELL.test(plain) && isNameOnlySegment(plain, cwd) ? [] : segments;
+    // The body may glue name-only parts with `&&` and `||` (`test -e "$f" && echo "$f"`, the shape
+    // the placeholder checks take, #1279). A bare `|`, `&` or `;` left once the pairs come off
+    // would feed one part's output into another or run one behind another's back, so any of those
+    // keeps the command counted as a read; every part must be name-only on its own.
+    if (/[;|&]/.test(plain.replace(/&&|\|\|/g, ' '))) return segments;
+    return plain.split(/\s*(?:&&|\|\|)\s*/).every((part) => part.trim() && isNameOnlySegment(part, cwd)) ? [] : segments;
   }
   if (!UNSAFE_SHELL.test(command)) {
     // All or nothing: one other segment (`alias ls=cat`, `export PATH=...`, `hash -p /bin/cat ls`)
@@ -745,9 +811,10 @@ function nameOnlyFiltered(command, segments, cwd) {
   }
   // The shape agents reach for to keep output short: `git check-ignore -v .env 2>&1 | head; wc -c
   // .env 2>&1 | head`. With `2>&1` and `>/dev/null` gone, and no other redirect, substitution or
-  // escape left, every segment must be name-only or a stdin filter with no path of its own (`head`,
-  // not `head .env`, and never `cat` or `xargs`), so what crosses a pipe is names and sizes.
-  const plain = command.replace(HARMLESS_REDIRECT, '$1');
+  // escape left (the number-only parameters count as literals, so a trailing `echo $?` passes),
+  // every segment must be name-only or a stdin filter with no path of its own (`head`, not
+  // `head .env`, and never `cat` or `xargs`), so what crosses a pipe is names and sizes.
+  const plain = command.replace(HARMLESS_REDIRECT, '$1').replace(NUMBER_PARAMS, 'N');
   if (/[\r\n]/.test(plain.trim()) || UNSAFE_SHELL_PIPED.test(plain)) return segments;
   const parts = splitCommands(plain);
   return parts.length && parts.every((segment) => isNameOnlySegment(segment, cwd) || isStdinFilter(segment)) ? [] : segments;
@@ -796,6 +863,9 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     scripts,
     writesOutside: outside !== null,
     writesOutsideAny: strict !== null,
+    // A write into the checkout's `.git`, named or not: a classified target under it, or a `git
+    // add`/`git commit`/`git stash` invocation whose writes no target names (#1258).
+    writesGit: writes.some((w) => w.kind === 'git') || segments.some(isGitMutation),
     writeReason: outside?.reason ?? null,
     strictWriteReason: strict?.reason ?? null,
   };

@@ -110,6 +110,13 @@ pub fn classify(message: &str) -> FailureClass {
         // runner's own wording for it is "502 model router: <provider> is unreachable" (issue #980),
         // which carries no "network" and so is not `github::is_transient`'s "network is unreachable".
         "unreachable",
+        // A git mirror gone corrupt (issue #1072) fails the boot's sync with git's own wording —
+        // "object file … is empty", "loose object … is corrupt", "bad object refs/…" — but the
+        // mirror repairs itself and a later attempt syncs, so the boot rides the retry schedule.
+        // Asked after PERMANENT, so a verdict that happens to name a corrupt store still holds.
+        "corrupt",
+        "object file",
+        "bad object",
     ];
     if TRANSIENT.iter().any(|m| text.contains(m)) || crate::github::is_transient(message) {
         return FailureClass::TransientInfra;
@@ -409,6 +416,22 @@ mod tests {
             FailureClass::Permanent
         );
         assert_eq!(classify("resume refused: not authorized"), FailureClass::Permanent);
+    }
+
+    /// Issue #1072: a boot that died syncing against a corrupt mirror is a blip the mirror's own
+    /// repair ladder can fix, not a verdict — the colony rides the boot-retry schedule instead of
+    /// failing for good. The incident's exact message leads.
+    #[test]
+    fn a_corrupt_mirror_sync_failure_is_retried() {
+        for message in [
+            "syncing the local clone of acme/repo failed after 3 attempts over 20m (budget spent); last error: `git fetch` failed (exit status: 128): fatal: object file .git/objects/f3/698d1e218e39e6e21d6ec2c1ff4a67cea954b73 is empty",
+            "syncing the local clone of acme/repo failed after 3 attempts over 20m (budget spent); last error: `git --git-dir /data/repos/acme/repo.git fetch --quiet --prune origin` failed (exit code: 1): fatal: bad object refs/heads/colonizer/issue-7-c1",
+            "fetching origin failed: fatal: loose object f3698d1e218e39e6e21d6ec2c1ff4a67cea954b73 (stored in ./objects/f3/698d1e218e39e6e21d6ec2c1ff4a67cea954b73) is corrupt",
+        ] {
+            assert_eq!(classify(message), FailureClass::TransientInfra, "{message:?}");
+        }
+        // A verdict that happens to name a corrupt store still holds: PERMANENT is asked first.
+        assert_eq!(classify("resume refused: the mirror is corrupt"), FailureClass::Permanent);
     }
 
     /// The backoff runs 1, 5, 15 minutes and then runs out — three retries, four attempts.

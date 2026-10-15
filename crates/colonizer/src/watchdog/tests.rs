@@ -1075,6 +1075,45 @@ fn repeated_denials_of_one_control_within_the_window_fire_with_their_evidence() 
     );
 }
 
+// Issue #1258: `.git` is read-only by design, and `git-read-only` denies the attempts with a reason
+// saying so — an agent retrying `git add` is hitting the intended wall, not defeating a control.
+#[test]
+fn repeated_git_read_only_denials_never_flag_control_defeat() {
+    let mut trail = BoundaryTrail::default();
+    let deny = |attempt: &str| Boundary {
+        detail: format!("deny (default): {attempt}"),
+        ..denial("exec_policy_deny", "exec_policy:git-read-only", Some(".git/index"))
+    };
+    for minute in 0..REPEATED_DENIALS as i64 + 2 {
+        assert_eq!(
+            note_boundary(&mut trail, deny(&format!("git add -A (try {minute})")), at(minute)),
+            None,
+            "the read-only .git wall is by design, so the retries never add up"
+        );
+    }
+    // A different exec-policy control in the same window still counts as before: the exemption is
+    // the rule, not the kind.
+    let mut other = BoundaryTrail::default();
+    for minute in 0..REPEATED_DENIALS as i64 - 1 {
+        assert_eq!(
+            note_boundary(
+                &mut other,
+                denial("exec_policy_deny", "exec_policy:script-egress", None),
+                at(minute)
+            ),
+            None
+        );
+    }
+    assert!(
+        note_boundary(
+            &mut other,
+            denial("exec_policy_deny", "exec_policy:script-egress", None),
+            at(9)
+        )
+        .is_some()
+    );
+}
+
 #[test]
 fn an_ask_bypass_attempt_and_a_publish_rewrite_fire_at_once() {
     let mut trail = BoundaryTrail::default();
@@ -1190,6 +1229,13 @@ fn a_call_naming_only_an_ancestor_of_the_refused_path_is_not_a_reach() {
         "/harness/out/pr.md"
     ));
     assert!(!reaches(r#"{"command":"ls /harness/out"}"#, "/harness/out"));
+    // #1153: the output dir is the colony's to write, so a path under it is never a reached
+    // target, and writing there does not reach a target refused elsewhere.
+    assert!(!reaches(
+        r#"{"file_path":"/harness/out/verify/log","content":"x"}"#,
+        "/harness/out/verify/log"
+    ));
+    assert!(!reaches(r#"{"command":"cat > /harness/out/verify/log"}"#, "/etc/foo"));
 }
 
 #[test]
@@ -1248,6 +1294,42 @@ fn deny_then_reach_skips_the_workspace_root_and_fires_on_the_file() {
     assert_eq!(note_reach_result(&mut trail, "ls", false), None);
 }
 
+/// #1153: `/harness/out` is the colony's own output directory — the harness itself tells the agent
+/// to write `pr.md` and the verify logs there — so a refusal on a host path followed by a
+/// successful write into the output dir is the brief being followed, not a defeat. A call that
+/// reaches the refused path itself still is one.
+#[test]
+fn a_write_into_the_output_dir_after_a_refusal_is_not_a_deny_then_reach() {
+    let mut trail = BoundaryTrail::default();
+    note_boundary(
+        &mut trail,
+        denial("exec_policy_deny", "exec_policy:writes-outside-repo", Some("/etc/foo")),
+        at(0),
+    );
+    note_reach_call(&mut trail, "pr", &json!({"command": "cat > /harness/out/pr.md"}), at(1));
+    assert_eq!(
+        note_reach_result(&mut trail, "pr", false),
+        None,
+        "the pull request description is the colony's to write"
+    );
+    note_reach_call(
+        &mut trail,
+        "log",
+        &json!({"file_path": "/harness/out/verify/log", "content": "ok"}),
+        at(2),
+    );
+    assert_eq!(
+        note_reach_result(&mut trail, "log", false),
+        None,
+        "a path under the output dir is the colony's too"
+    );
+
+    note_reach_call(&mut trail, "etc", &json!({"file_path": "/etc/foo"}), at(3));
+    let defeat = note_reach_result(&mut trail, "etc", false).expect("the refused file written another way");
+    assert_eq!(defeat.signature, "deny_then_reach");
+    assert_eq!(defeat.evidence[0].target.as_deref(), Some("/etc/foo"));
+}
+
 /// The flag is the attention item with the evidence, and the log says why; the watchdog's own
 /// tick does not nudge over it or take it down.
 #[tokio::test]
@@ -1285,5 +1367,72 @@ async fn the_control_defeat_flag_carries_its_evidence_and_holds_against_the_tick
             .any(|l| l["message"].as_str().is_some_and(|m| m.contains("nudged the agent"))),
         "and no nudge was sent over it"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---- The lost-continuation re-drive (issue #1266) ----
+
+/// Acceptance (issue #1266): once the last in-flight subagent's settlement has stood past the
+/// grace, the turn is re-driven — the interrupt first, so the re-drive message starts a fresh
+/// turn instead of queueing behind the wedged one — and the claim is spent on the send.
+#[tokio::test]
+async fn a_turn_lost_after_the_last_subagent_is_redriven() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut commands = rt.commands_rx.lock().await.take().expect("the command channel");
+    let armed = at(0);
+    *rt.turn_lost_since.lock().await = Some(armed);
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(3)).await;
+
+    let interrupt = commands.try_recv().expect("the interrupt went out");
+    assert_eq!(interrupt["type"], "interrupt");
+    let message = commands.try_recv().expect("the re-drive message behind it");
+    assert_eq!(message["type"], "user_message");
+    assert!(
+        message["id"].as_str().is_some_and(|id| id.starts_with("watchdog-")),
+        "a watchdog id, so its echo is not progress: {message}"
+    );
+    assert!(commands.try_recv().is_err(), "and nothing else");
+
+    let attention = app.session("abc").await.unwrap().attention.expect("flagged");
+    assert_eq!(attention["reason"], TURN_LOST_REASON);
+    assert_eq!(since_of(&attention), armed, "dated from the settlement, not the re-drive");
+    assert!(
+        rt.turn_lost_since.lock().await.is_none(),
+        "the claim is spent on the send, so the next tick cannot repeat it"
+    );
+    let logs = rt.logs.lock().await.clone();
+    assert!(
+        logs.iter().any(|l| l["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("the turn never resumed; interrupting the dead turn"))),
+        "{logs:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Inside the grace the window is left to the continuation it waits for, and with the watchdog
+/// off nothing is re-driven at all.
+#[tokio::test]
+async fn a_fresh_subagent_settlement_is_not_redriven_early() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut commands = rt.commands_rx.lock().await.take().expect("the command channel");
+    let armed = at(0);
+    *rt.turn_lost_since.lock().await = Some(armed);
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(0) + Duration::seconds(30)).await;
+    assert!(commands.try_recv().is_err(), "inside the grace nothing is sent");
+    assert_eq!(*rt.turn_lost_since.lock().await, Some(armed), "the window stands");
+    assert!(app.session("abc").await.unwrap().attention.is_none(), "and no flag went up");
+
+    // A disabled watchdog leaves the turn alone whatever the window says.
+    let settings = WatchdogSettings {
+        enabled: false,
+        ..SETTINGS
+    };
+    maybe_redrive_subagent_turn(&app, &s, &rt, &settings, at(30)).await;
+    assert!(commands.try_recv().is_err(), "a disabled watchdog does not re-drive");
     let _ = std::fs::remove_dir_all(root);
 }

@@ -18,8 +18,10 @@ pub(crate) const PLACEHOLDERS_FILE: &str = "path-policy.placeholders";
 
 /// Sibling of [`POLICY_FILE`]: a gitignore-syntax list of the placeholders, which the guest's git
 /// reads as `core.excludesFile` (boot.rs), so `git status` never lists them as untracked (#1169).
-/// Per colony and guest-side only: no shared `info/exclude` to clean up, and nothing tracked is
-/// affected, since an exclude never applies to a file git already tracks.
+/// The boot copies the same list into the repository's shared `info/exclude` too
+/// ([`write_repo_exclude`], #1279), so a git that strips the environment — the host's own calls, an
+/// agent's startup snapshot — stays quiet as well. Nothing tracked is affected by either, since an
+/// exclude never applies to a file git already tracks.
 pub(crate) const EXCLUDE_FILE: &str = "path-policy.exclude";
 /// Where the guest sees [`EXCLUDE_FILE`]: the colony's vm dir is mounted at `/colonizer`.
 pub(crate) const GUEST_EXCLUDE_FILE: &str = "/colonizer/path-policy.exclude";
@@ -479,6 +481,50 @@ pub(crate) fn ua_exclude_lines(skillsets: &[String]) -> Vec<String> {
     }
     // `.understand-anything/` is the name upstream used before it renamed the directory.
     ["/.ua/", "/.understand-anything/"].map(String::from).to_vec()
+}
+
+/// The two marker lines around the block [`write_repo_exclude`] maintains.
+const REPO_EXCLUDE_BEGIN: &str = "# colonizer path policy (#1279): begin";
+const REPO_EXCLUDE_END: &str = "# colonizer path policy (#1279): end";
+
+/// Writes `lines` — the placeholder lines of [`exclude_lines`] — into a marked block of
+/// `<common_dir>/info/exclude`. For a linked worktree (every colony worktree is
+/// one, off the bare mirror) git reads `info/exclude` from the common dir, not the per-worktree
+/// admin dir, and unlike the guest's shells a git that strips its environment — the host's own
+/// calls, an agent's startup snapshot — sees only this file, so the placeholders must hide here too
+/// or read as untracked credential files (#1279). Replaces any block between the markers and keeps
+/// every line a user wrote outside them; idempotent; written through a unique temp file and a
+/// rename, so two colonies booting the same repository cannot tear the file. An exclude never
+/// applies to a file git already tracks, so a repository that carries a listed path on purpose (a
+/// committed `.mcp.json`) is unaffected.
+pub(crate) fn write_repo_exclude(common_dir: &Path, lines: &str) -> io::Result<()> {
+    let dir = common_dir.join("info");
+    std::fs::create_dir_all(&dir)?;
+    let mut next = String::new();
+    let mut in_block = false;
+    for line in std::fs::read_to_string(dir.join("exclude")).unwrap_or_default().lines() {
+        match line.trim() {
+            REPO_EXCLUDE_BEGIN => in_block = true,
+            REPO_EXCLUDE_END => in_block = false,
+            _ if in_block => {}
+            _ => {
+                next.push_str(line);
+                next.push('\n');
+            }
+        }
+    }
+    next.push_str(REPO_EXCLUDE_BEGIN);
+    next.push('\n');
+    next.push_str(lines.trim_end_matches('\n'));
+    next.push('\n');
+    next.push_str(REPO_EXCLUDE_END);
+    next.push('\n');
+    let tmp = dir.join(format!(".exclude.{}.tmp", crate::util::short_id()));
+    if let Err(e) = std::fs::write(&tmp, next) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, dir.join("exclude"))
 }
 
 /// Creates what [`plan`] decided on — and only after the boot has written the intended placeholder
@@ -1230,6 +1276,103 @@ mod tests {
         );
         assert_eq!(status.replace("?? exclude.list", "").trim(), "?? src.rs");
         wt.close();
+    }
+
+    /// [`write_repo_exclude`]: its block is replaced on the next write, the lines a user wrote
+    /// around it survive untouched, a repeat write is a no-op, nothing is left beside the file, and
+    /// a repository whose `info/` does not exist yet gets one.
+    #[test]
+    fn the_repo_exclude_block_is_replaced_and_keeps_the_users_own_lines() {
+        let dir = tempfile("repo_exclude_block");
+        let info = dir.path.join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), "# a user's own ignore rules\n*.o\n").unwrap();
+        write_repo_exclude(&dir.path, "/.env\n").unwrap();
+        write_repo_exclude(&dir.path, "/.env\n/.netrc\n").unwrap();
+        let text = std::fs::read_to_string(info.join("exclude")).unwrap();
+        assert!(text.starts_with("# a user's own ignore rules\n*.o\n"), "{text}");
+        assert_eq!(text.matches(REPO_EXCLUDE_BEGIN).count(), 1, "{text}");
+        assert!(text.contains("/.netrc\n"), "{text}");
+        write_repo_exclude(&dir.path, "/.env\n/.netrc\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(info.join("exclude")).unwrap(),
+            text,
+            "a repeat write is a no-op"
+        );
+        let names: Vec<String> = std::fs::read_dir(&info)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["exclude".to_string()], "no temp file left behind");
+        let fresh = tempfile("repo_exclude_fresh");
+        write_repo_exclude(&fresh.path, "/.env").unwrap();
+        assert!(fresh.path.join("info/exclude").is_file(), "a missing info/ is created");
+        fresh.close();
+        dir.close();
+    }
+
+    /// A git run the way the host's own calls and an agent's startup snapshot arrive: `GIT_DIR` and
+    /// every `GIT_CONFIG_*` stripped, so only the repository's own `info/exclude` can hide anything.
+    fn git_clean(dir: &Path, args: &[&str]) -> std::process::Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_CONFIG_COUNT");
+        for i in 0..10 {
+            cmd.env_remove(format!("GIT_CONFIG_KEY_{i}"));
+            cmd.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
+        }
+        cmd.args(args).output().expect("could not run git")
+    }
+
+    /// The #1279 regression: a git that stripped its environment — the host's own calls in the
+    /// worktree, an agent's startup snapshot — never sees the guest's `core.excludesFile`, and for
+    /// a linked worktree it reads `info/exclude` from the bare repo's common dir. With
+    /// [`write_repo_exclude`] having put the placeholders there, its `git status` is clean and
+    /// `check-ignore` names them, while the agent's own new files still show.
+    #[test]
+    fn the_repo_exclude_hides_the_placeholders_from_a_git_without_the_env_1279() {
+        use crate::verify::tests::{git, git_commit};
+        let seed = tempfile("repo_exclude_seed");
+        git(&seed.path, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.path.join("README.md"), "x").unwrap();
+        git(&seed.path, &["add", "-A"]);
+        git_commit(&seed.path, "base");
+        let bare = tempfile("repo_exclude_bare");
+        let bare_repo = bare.path.join("repo.git");
+        let target = bare_repo.display().to_string();
+        git(&seed.path, &["clone", "-q", "--bare", ".", &target]);
+        let wt = tempfile("repo_exclude_wt");
+        let wt_path = wt.path.display().to_string();
+        git(&bare_repo, &["worktree", "add", "-q", "-b", "colony", &wt_path, "main"]);
+        std::fs::write(wt.path.join(".env"), "").unwrap();
+        std::fs::write(wt.path.join(".netrc"), "").unwrap();
+        // Without the shared exclude the placeholders read as the colony's new work.
+        assert!(
+            String::from_utf8_lossy(&git_clean(&wt.path, &["status", "--porcelain", "-uall"]).stdout).contains(".env"),
+            "without it they show"
+        );
+        write_repo_exclude(&bare_repo, "/.env\n/.netrc\n").unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&git_clean(&wt.path, &["status", "--porcelain", "-uall"]).stdout),
+            "",
+            "clean for a git that never saw the env"
+        );
+        assert!(
+            git_clean(&wt.path, &["check-ignore", "-q", ".env"]).status.success(),
+            ".env is ignored"
+        );
+        // The agent's own new files still show.
+        std::fs::write(wt.path.join("src.rs"), "").unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&git_clean(&wt.path, &["status", "--porcelain", "-uall"]).stdout).trim_end(),
+            "?? src.rs"
+        );
+        wt.close();
+        bare.close();
+        seed.close();
     }
 
     /// The host resolves symlinks while the VM is down, so the guest never has to follow one: a

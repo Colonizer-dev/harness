@@ -39,10 +39,10 @@ boundary crossing — but it is still recorded here.
 `/colonizer` mounts.
 
 *Result / mechanism.* The runner child cannot call the mount family at all:
-`crates/colonizer-agentd/src/harden.rs:79-85` denies `mount`, `umount2`,
+`crates/colonizer-agentd/src/harden.rs:83-88` denies `mount`, `umount2`,
 `open_tree`, `move_mount`, `fsopen`/`fsconfig`/`fsmount`/`fspick`,
 `mount_setattr`, `pivot_root`, `chroot`; `CAP_SYS_ADMIN` is dropped
-(`harden.rs:61-68`) and `PR_SET_NO_NEW_PRIVS` set (`harden.rs:297-299`). The RO
+(`harden.rs:64-71`) and `PR_SET_NO_NEW_PRIVS` set (`harden.rs:310-312`). The RO
 mount set is built with `:ro` in `crates/colonizer/src/util.rs:565-576` (separator
 injection rejected, tested `util.rs:766-769`) and requested per-mount in
 `crates/colonizer/src/boot.rs:1243-1274`. Path-policy masks are applied in-guest and
@@ -64,8 +64,8 @@ way.
 observe whether a secret placeholder or RO git object becomes writable/visible.
 
 *Result / mechanism.* `umount2` is denied for the runner child
-(`crates/colonizer-agentd/src/harden.rs:81`; legacy `umount` on x86_64 at
-`harden.rs:103`), and `unshare`/`setns` are denied so the masks cannot be undone in
+(`crates/colonizer-agentd/src/harden.rs:84`; legacy `umount` on x86_64 at
+`harden.rs:106`), and `unshare`/`setns` are denied so the masks cannot be undone in
 a new namespace; the boot-script ordering guarantee (masks applied before
 `exec agentd`, runner then filtered) is asserted at `boot.rs:1927-1929` and tested
 `boot.rs:2712-2735`.
@@ -82,7 +82,9 @@ end to end in `colonizer-agentd`'s `seal_token_hides_the_token_from_the_runner_a
 which also asserts the hardened child cannot `umount` the seal). The PTY itself
 stays unfiltered — it is the human's terminal, and the human holds the token
 outside the guest. The *network* route to the same token — a raw socket sniffing
-agentd's plaintext HTTP — is not closed by the seal; see the open verdict below.
+agentd's plaintext HTTP — is closed for the runner too (`CAP_NET_RAW` dropped and
+`socket` arg-gated to `AF_PACKET`, #932; see Closed follow-ups); what is left of
+that route — a replayable plaintext header — is its own follow-up issue.
 
 ### 3. Procfs / sysfs re-mount
 
@@ -90,7 +92,7 @@ agentd's plaintext HTTP — is not closed by the seal; see the open verdict belo
 `kallsyms`, `sysrq-trigger`); write `/proc/sys` knobs; reach `/sys/kernel/debug`.
 
 *Result / mechanism.* A fresh `proc`/`sys` mount needs the mount family +
-`unshare`, all denied for the runner child (`harden.rs:79-85`). At boot,
+`unshare`, all denied for the runner child (`harden.rs:84-88`). At boot,
 `BOOT_SCRIPT` sets `dmesg_restrict`/`kptr_restrict` (`boot.rs:1930-1931`), remounts
 `/proc` `hidepid=invisible` with a `hidepid=2` fallback (`:1932-1934`), binds
 `/dev/null` over `kcore kallsyms keys timer_list sched_debug sysrq-trigger cmdline
@@ -141,14 +143,17 @@ the port-scoped `allow@host:tcp:{port}` (`boot.rs:477-479`, default
 (`policy_json`, `crates/colonizer/src/mesh.rs:535-553`, "VMs cannot reach each other") with
 single-use join keys (`mesh.rs:374-403`) and per-colony node deletion
 (`lifecycle.rs:105`). In-guest, `iptables`/`nftables` need `CAP_NET_ADMIN`
-(dropped, `harden.rs:62`); `CAP_NET_RAW` is deliberately kept for package managers
-(`harden.rs:5`), but the host policy still decides what leaves the VM, and breaking
-`resolv.conf` only breaks the colony's own name resolution.
+(dropped, `harden.rs:65`), and `CAP_NET_RAW` is dropped too (#932) — no raw socket
+survives to sniff or inject frames (`harden.rs:3-6`, with the arg-gated `socket`
+rule at `harden.rs:169-174` as defence in depth) — but the host policy still
+decides what leaves the VM, and breaking `resolv.conf` only breaks the colony's
+own name resolution.
 
 *Verdict.* **Blocked** at the host edge (msb egress policy is authoritative and
 allow-cannot-reopen-block; inter-colony blocked by ACL + single-use keys). Actual
-msb enforcement is **KVM-verified**. Retained `CAP_NET_RAW` is a documented
-trade-off, not an escape (host policy gates the wire).
+msb enforcement is **KVM-verified**. The in-guest half of the raw-socket attempt
+is **Blocked** too: `CAP_NET_RAW` is no longer a retained trade-off but dropped
+(#932), with the `AF_PACKET` seccomp denial behind it.
 
 ### 6. Supervisor / process-injection paths
 
@@ -156,10 +161,10 @@ trade-off, not an escape (host policy gates the wire).
 read `/proc/<pid>/{mem,environ,maps}` of host-reaching processes; signal abuse.
 
 *Result / mechanism.* The runner child is denied `ptrace`,
-`process_vm_readv`/`writev`, `pidfd_getfd`, `kcmp` (`harden.rs:86-88`);
-`CAP_SYS_PTRACE` is dropped (`:61-68`); `PR_SET_DUMPABLE` is gated (`:154-159`) and
-`RLIMIT_CORE` is 0 (`:265-276`). `agentd` self-guards non-dumpable + core-0 at
-startup (`crates/colonizer-agentd/src/main.rs:176-181`, `harden.rs:357-363`), and
+`process_vm_readv`/`writev`, `pidfd_getfd`, `kcmp` (`harden.rs:89-91`);
+`CAP_SYS_PTRACE` is dropped (`:64-71`); `PR_SET_DUMPABLE` is gated (`:157-162`) and
+`RLIMIT_CORE` is 0 (`:278-289`). `agentd` self-guards non-dumpable + core-0 at
+startup (`crates/colonizer-agentd/src/main.rs:176-181`, `harden.rs:370-376`), and
 `/proc` runs `hidepid` (vector 3), so the agent cannot read the daemon's
 `mem`/`environ`. `tailscaled`/`headscale` live on the host (a different kernel),
 unreachable from the VM.
@@ -167,8 +172,9 @@ unreachable from the VM.
 *Verdict.* **Blocked** for the runner child (ptrace-family denial + non-dumpable +
 hidepid; regression via the `harden.rs` probe tests and `agentd --exec-hardened`,
 `main.rs:172-175`). The seal closes the token-file route into the unfiltered PTY
-(vector 2); the network route to the same token — raw-socket sniffing of agentd's
-plaintext traffic — is tracked separately (open verdicts). The shell stays
+(vector 2), and the raw-socket route to the same token is closed with it (#932,
+Closed follow-ups); the header that route carried stays replayable — a follow-up
+issue of its own. The shell stays
 unfiltered — it is the human's terminal.
 
 ### 7. Credential-path abuse
@@ -233,31 +239,42 @@ procedure.
 
 ## Open verdicts (follow-ups)
 
-- **The network route to the agentd token.** The seal (#640) closes the file:
-  once it is down, `/colonizer/token` has no reader the agent can reach. With the
-  default mesh, though, `tailscaled` runs inside the guest, so the mothership's
-  HTTP to agentd — plaintext, bearer token in the `Authorization` header —
-  crosses the guest's own interfaces, and the runner keeps `CAP_NET_RAW`
-  (`harden.rs:61-68`) while the seccomp filter does not deny `socket`
-  (`harden.rs:75-97`): an `AF_PACKET` raw socket can sniff the token off the wire
-  and open `/v1/pty` with it, an unhardened root shell. Filed as a follow-up
-  ([#932](https://github.com/Colonizer-dev/harness/issues/932)); a
-  Layer-3 hardening-completeness gap, not a microVM-boundary crossing.
+None. The nearest gap sits behind the closed verdicts: agentd's plaintext bearer
+token remains replayable by anything that can see the traffic, so non-replayable
+agentd auth (a per-request MAC or TLS) is filed as its own follow-up issue.
 
 ## Closed follow-ups
 
+- **The network route to the agentd token (closed by #932).** The seal (#640)
+  closes the file: once it is down, `/colonizer/token` has no reader the agent
+  can reach. With the default mesh, though, `tailscaled` runs inside the guest,
+  so the mothership's HTTP to agentd — plaintext, bearer token in the
+  `Authorization` header — crosses the guest's own interfaces, and the runner
+  kept `CAP_NET_RAW` while the seccomp filter did not deny `socket`: an
+  `AF_PACKET` raw socket could sniff the token off the wire and open `/v1/pty`
+  with it, an unhardened root shell. Two layers now close the raw-socket route:
+  `CAP_NET_RAW` is dropped from the runner child's bounding set
+  (`crates/colonizer-agentd/src/harden.rs:64-71`) — closing `AF_PACKET` and
+  `SOCK_RAW`-over-IP alike — and the filter denies `socket` for `AF_PACKET`
+  (`harden.rs:169-174`, arg-gated so every other family passes), so the deny
+  holds even if the cap is ever re-granted; the `harden.rs` probe asserts both
+  against a real hardened child. What remains is the header itself, still
+  replayable by anything that can see the traffic: non-replayable agentd auth (a
+  per-request MAC or TLS) is the real fix and is filed as its own follow-up
+  issue. A Layer-3 hardening-completeness gap, not a microVM-boundary crossing.
+
 - **Vectors 2 & 6 — the unfiltered PTY's token file (closed by #640).** `agentd`
   filters only the runner child, and the `/v1/pty` shell is deliberately
-  unfiltered for the human's terminal (`harden.rs:12-14`, `docs/architecture.md`
+  unfiltered for the human's terminal (`harden.rs:13-15`, `docs/architecture.md`
   In-guest hardening); nothing about the shell changed. What changed is who can
   open it by file: a runner used to be able to read `/colonizer/token` and
   connect to `ws://127.0.0.1:7070/v1/pty` for an unhardened root shell, shedding
   its own seccomp/cap profile. `crates/colonizer-agentd/src/seal.rs::seal_token_path`
   (applied under `--seal-token` before agentd binds its listener) closes that
   route — no reader the agent can reach is left for the file, and the runner
-  profile cannot `umount` the seal. What remains is the network route to the same
-  token (the open verdict above); the file route was a Layer-3
-  hardening-completeness gap, not a microVM-boundary crossing.
+  profile cannot `umount` the seal. What remained — the network route to the same
+  token — is closed in its own turn by #932 (the entry above); the file route was
+  a Layer-3 hardening-completeness gap, not a microVM-boundary crossing.
 
 ## Manual KVM procedure
 
@@ -276,6 +293,7 @@ a scratch issue). Attach to the colony PTY and run each block from inside the gu
 | 1 | `mount --bind /dev/null /colonizer/token; cat /colonizer/token` (as the runner user, not the PTY) | `mount`: `Operation not permitted` (seccomp) |
 | 2 | `umount2`/`umount /run/... mask` | `Operation not permitted` |
 | 2 | `cat /colonizer/token` as the runner (`agentd --exec-hardened -- cat /colonizer/token`), then open `ws://127.0.0.1:7070/v1/pty` with what it prints | empty read; the connection gets `401` (the token is sealed: a read-only bind of `/dev/null` over the path, `seal.rs`) |
+| 2 | an `AF_PACKET` socket as the runner (`agentd --exec-hardened -- python3 -c 'import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW)'`) | `socket`: `Operation not permitted` — seccomp denies `AF_PACKET` and `CAP_NET_RAW` is dropped (#932) |
 | 3 | `mount -t proc proc /tmp/p && cat /tmp/p/1/mem` | `mount` fails; if forced, `kcore`/`kallsyms` empty, `hidepid` hides pid 1 |
 | 5 | `curl -sS https://example.com` (not on the egress allowlist) | connection refused / blocked by msb policy |
 | 5 | from colony A, `ping`/`curl` colony B's mesh IP | no route / blocked by Headscale ACL |
@@ -297,4 +315,4 @@ or gateway change, `harden.rs` change), then add a row.
 
 | Release | colonizer rev | Date | Signed-off-by | KVM host | Result | Notes |
 |---|---|---|---|---|---|---|
-| v0.1.3 | (this PR) | — | _pending_ | — | code-derived only | Verdicts above are read from the implementation with mechanisms cited; the live KVM run has not yet been executed. Vectors 2 & 6 carry an open follow-up (the PTY hardening-shed). |
+| v0.1.3 | (this PR) | — | _pending_ | — | code-derived only | Verdicts above are read from the implementation with mechanisms cited; the live KVM run has not yet been executed. No open verdicts; the residual gap (non-replayable agentd auth) is filed as its own follow-up issue. |

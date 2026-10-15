@@ -358,6 +358,19 @@ export function mcpArgs({ url, token, env }) {
   return Object.entries(server).flatMap(([key, value]) => ['-c', `mcp_servers.colonizer.${key}=${JSON.stringify(value)}`]);
 }
 
+/** The `-c` overrides that register Living Brain's remote MCP server (crates/colonizer/src/living_brain)
+ * when the mothership granted it: codex's streamable-HTTP keys `url` and `bearer_token_env_var`. The
+ * variable holds msb's placeholder for the token, swapped for the value only on TLS to the MCP host;
+ * codex reads it at connect time, so the value never sits in the config. Nothing without both. */
+export function livingBrainArgs(env = {}) {
+  const url = String(env.COLONIZER_LIVINGBRAIN_MCP_URL ?? '').trim();
+  if (!url.startsWith('https://') || !String(env.COLONIZER_LIVINGBRAIN_TOKEN ?? '').trim()) return [];
+  return [
+    '-c', `mcp_servers.livingbrain.url=${JSON.stringify(url)}`,
+    '-c', 'mcp_servers.livingbrain.bearer_token_env_var="COLONIZER_LIVINGBRAIN_TOKEN"',
+  ];
+}
+
 /** The `-c` override that switches a module.json `disabled_tools` name off (upstream config
  * reference: the `features.*` keys are flags, `web_search` a mode whose "disabled" rides as a TOML
  * string, like the other quoted values). The harness validated each name against the manifest's
@@ -658,7 +671,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   // An ask_user call parks on it (createBridge), so question routing needs nothing beyond the
   // registration that was already unconditional: ask_user is on whenever the runner is.
   const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true', setStatus, isWorking: () => turn !== null });
-  const mcp = mcpArgs({ url: bridge.url, token: bridge.token, env });
+  const mcp = [...mcpArgs({ url: bridge.url, token: bridge.token, env }), ...livingBrainArgs(env)];
 
   const pump = async () => {
     if (pumping) return;

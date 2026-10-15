@@ -25,7 +25,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_ACCOUNT_ROUTE` | none | JSON `{url, headers}` of the mothership's `GET /account-route` (set when the module's `account_fallback_model` is): before a request that would go to Anthropic, the router asks whether the Claude account is out and, if so, sends it to the fallback model's route instead (issue #1130) |
 | `COLONIZER_MEMORY_DIR` | unset | Mounted shared memory; enables the memory tools (§6.2) |
 | `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
-| `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
+| `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the built-in crew pack's ants (sarge, silka, mellie) and the first-party read-only `repo-explorer` are added either way; other plugin agents keep the orchestrator's |
 | `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
 | `COLONIZER_DELEGATE` | `enforce` | `enforce`, `encourage` or `off`: how far the orchestrator hands work to subagents (see above) |
 | `COLONIZER_DISABLED_TOOLS` | none | Comma-separated Claude Code tool names the colony never gets |
@@ -177,10 +177,12 @@ it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly
 Predicates: `command` (regex over the command), `touches` (path globs matched against the path-like
 tokens of the command and its scripts; `~` is $HOME; components at any depth, `*` never crosses
 `/`; an entry starting with `!` excludes the tokens it matches), `script` (regex over script
-contents) and `writes_outside` (a redirect or cp/mv/rm/tee-style target that is an absolute path
+contents), `writes_outside` (a redirect or cp/mv/rm/tee-style target that is an absolute path
 outside the repository *and on a host-backed mount*, or a write onto a read-only host mount
 (`/colonizer`, `/opt/colonizer`) or into the checkout's own `.git` — `/tmp`, the `/dev` sinks and
-the microVM's own root filesystem don't count). `writes_outside` is `true` for that set; the string
+the microVM's own root filesystem don't count) and `writes_git` (a write into the checkout's own
+`.git`, named or not, or a `git add`/`git commit`/`git stash` invocation, #1258).
+`writes_outside` is `true` for that set; the string
 `"strict"` widens it to *every* absolute path outside the repository, as before issue #877 (see
 below). The reason on the card says which: a host-backed path, a read-only mount by name, or the
 `.git` internals.
@@ -191,7 +193,10 @@ stays the egress policy's business. A syntax check (`bash -n`, `node --check`, `
 nothing and is not read, and the repository's own scripts, byte for byte as the base commit has
 them (the boot writes their object ids to `/colonizer/tracked-scripts`, #1239), are left to the
 egress policy too; a script the colony adds or edits is read as before, and other layers still see
-every script; ask `writes-outside-repo`), **install** (the agent module's
+every script; deny `git-read-only` — `git add`/`git commit`/`git stash` and any write under the
+checkout's `.git`, since the mount is read-only by design and the denial carries the instruction
+to leave the changes in the working tree (#1258); ask `writes-outside-repo` — every host-backed
+write outside the repository, except the colony's own `/harness/out` output dir (#1153)), **install** (the agent module's
 `exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (the org's workspace settings → Exec
 policy, stored as `exec_policy` in `orgs.json` and passed as `COLONIZER_EXEC_POLICY_ORG`) and
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
@@ -208,13 +213,17 @@ this is guidance in front of the model, like the delegation gate — not a bound
 `COLONIZER_HOST_MOUNTS`, a file path). The microVM's root filesystem is discarded when the colony
 stops, so a write there — `mkdir -p /root/target`, a rustup install under `/root/.cargo`, an install
 under `/usr`, a `CARGO_TARGET_DIR` like `/root/colonizer-target` — is not the host's to protect:
-only a path at, under or above a listed mount (`/workspace`, `/harness/out`, the resume directory,
-`/colonizer/services`) asks. A write *above* a mount asks too, so `rm -rf /root` still asks while
-`/root/.claude/projects` is mounted. The guest's own read-only host mounts — `/colonizer` (the
+only a path at, under or above a listed mount (`/workspace`, the resume directory,
+`/colonizer/services`) asks. One mount is carved out: `/harness/out`, the colony's own output
+directory (`pr.md`, the verify logs), never counts as outside at or under it, since the harness
+itself tells the agent to write there (#1153) — while a write *above* it still asks, so
+`rm -rf /harness` asks, as does `rm -rf /root` while `/root/.claude/projects` is mounted. The
+guest's own read-only host mounts — `/colonizer` (the
 mothership's `host-mounts`, memory scopes, the services mount point) and `/opt/colonizer` (the
-agent's binaries, runner and plugins), the vendored runtime binaries (`/opt/node/bin/node`,
-`/opt/claude/bin/claude`), plus a write into the checkout's `.git` — ask regardless of the list,
-since a write there is the host's even though the mount refuses it. When the list is
+agent's binaries, runner and plugins) and the vendored runtime binaries (`/opt/node/bin/node`,
+`/opt/claude/bin/claude`) — ask regardless of the list, since a write there is the host's even
+though the mount refuses it; a write into the checkout's `.git` is not an ask but the `git-read-only`
+deny, whatever the list says (#1258). When the list is
 absent — an older mothership, or a runner outside a VM — every absolute path outside the repository
 asks, as before.
 
@@ -222,7 +231,8 @@ An org (or install, or repo) layer can restore that conservative behaviour with 
 predicate is the string `"strict"`, e.g.
 `{ "id": "strict-writes", "decision": "ask", "writes_outside": "strict" }`: it asks for a write to
 any absolute path outside the repository — the microVM's owned root filesystem included — even with
-the mount list present. `/tmp` and a write inside the repository never ask, strict or not, and the
+the mount list present. `/tmp`, the colony's own `/harness/out` (#1153) and a write inside the
+repository never ask, strict or not, and the
 layering is unchanged (a stricter decision still wins, and a later layer still cannot widen).
 
 Coverage: Claude Code and the ACP runner apply the policy. Codex, Grok Build, Hermes, OpenCode and

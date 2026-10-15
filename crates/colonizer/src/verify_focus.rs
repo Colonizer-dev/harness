@@ -9,9 +9,16 @@
 //! Shadow and act append one row per verification that ran checks to the data-dir-wide
 //! `jev_focus.jsonl` (outliving per-colony cleanup like `jev_ladder.jsonl`): the candidates, the
 //! choice, whether it would have caught the failure, and time-to-first-failure with and without.
+//! Beside the rule, the decision layer (#582) asks Jev the same question at the `verify.focus`
+//! point — shadow only, its answer recorded to `decisions.jsonl` with the same grading, never
+//! applied ([`ask`]).
 
-use crate::{App, util::append_line, verify::Check, verify::Verdict};
+use crate::decide;
+use crate::sessions::Session;
+use crate::{App, Shared, util::append_line, verify::Check, verify::Verdict};
 use serde::Serialize;
+use serde_json::json;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,9 +76,10 @@ pub(crate) fn focus_candidates(checks: &[Check], changed: &[String]) -> Vec<Cand
         .collect()
 }
 
-/// Which candidate runs first, or `None` for "full suite only". A deterministic stand-in for Jev:
-/// the check owning the most changed files, the first on a tie. #582's decision layer replaces
-/// this chooser; the candidates, the act/shadow split and the ledger stay.
+/// Which candidate runs first, or `None` for "full suite only". The deterministic rule the verifier
+/// acts on: the check owning the most changed files, the first on a tie. Jev is asked the same
+/// question beside it, in shadow ([`ask`]) — its pick is recorded and graded, never applied. A
+/// confident pick taking over the order would be #582's act mode, measured first.
 pub(crate) fn choose(candidates: &[Candidate]) -> Option<usize> {
     let best = candidates.iter().map(|c| c.owned).max().filter(|&n| n > 0)?;
     candidates.iter().position(|c| c.owned == best)
@@ -182,6 +190,71 @@ pub(crate) async fn record(
         ),
     )
     .await;
+}
+
+/// Asks the `verify.focus` decision point (#584) which focused check Jev would run first, in shadow:
+/// the ask goes through the shared layer in `decide.rs` with the candidate labels plus `full`, and
+/// the pick is graded against the runs that happened — never applied. Detached, so the verification
+/// pays nothing for it; the ask is best-effort, a lost one a lost measurement, never a failed
+/// verification.
+pub(crate) fn ask(app: Shared, session: Session, candidates: &[Candidate], changed: &[String], runs: &[Run], total_ms: u64) {
+    let candidates = candidates.to_vec();
+    let changed = changed.to_vec();
+    let runs = runs.to_vec();
+    tokio::spawn(async move {
+        let mut options: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
+        options.push("full");
+        // Metadata only, built by the harness: how many files the diff touches, their extensions,
+        // and per candidate how many of those files it owns.
+        let mut extensions: BTreeMap<&str, usize> = BTreeMap::new();
+        for path in &changed {
+            if let Some((_, ext)) = path.rsplit_once('.') {
+                *extensions.entry(ext).or_default() += 1;
+            }
+        }
+        let context = json!({
+            "changed_files": changed.len(),
+            "extensions": extensions,
+            "candidates": candidates
+                .iter()
+                .map(|c| json!({"check": c.label, "changed_files": c.owned}))
+                .collect::<Vec<_>>(),
+        });
+        let org_allows = app.org_settings(&session.org).jev != Some(false);
+        let result = decide::decide_for(
+            &app,
+            &decide::VERIFY_FOCUS,
+            decide::Mode::Shadow,
+            org_allows,
+            &options,
+            &context,
+        )
+        .await;
+        // The pick is stored spelled exactly as an option (the layer matches a reply's spelling and
+        // keeps the declared one), so mapping it back is an exact match; `full` is no pick.
+        let pick = match result.as_ref().ok().map(|d| d.pick.as_str()) {
+            Some("full") | None => None,
+            Some(label) => candidates.iter().position(|c| c.label == label),
+        };
+        let (would_catch, actual, focused) = measure(pick, &runs);
+        let mut row = decide::row(
+            &decide::VERIFY_FOCUS,
+            &session,
+            decide::Mode::Shadow,
+            &options,
+            &result,
+            "rule",
+        );
+        if result.is_ok() {
+            row.outcome = Some(json!({
+                "would_catch": would_catch,
+                "actual_first_failure_ms": actual,
+                "focused_first_failure_ms": focused,
+                "total_ms": total_ms,
+            }));
+        }
+        decide::record(&app, &row).await;
+    });
 }
 
 #[cfg(test)]

@@ -59,6 +59,10 @@ export function Header(props: {
   onOpenRemote: () => void;
   /** The autonomy judge's health (issue #875); a chip appears once it has failed repeatedly. */
   judge?: AutonomyStatus | null;
+  /** The observability exporter's degraded line (issue #855); a chip appears once a signal has failed for ten minutes. */
+  observabilityAlert?: string | null;
+  /** Opens Settings → Modules → Observability from the chip. */
+  onOpenObservability?: () => void;
   /** Opens Settings → Your cockpit: the address to bookmark (issue #867). */
   onOpenCockpit?: () => void;
   /** The model switcher's chip and popover (issue #1051); absent in static tests, which have no API. */
@@ -66,7 +70,7 @@ export function Header(props: {
   /** Spotlight's "Ask or search…" pill (issue #1218), centred in the bar; absent in static tests. */
   search?: ReactElement;
 }): ReactElement {
-  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit, models, search } =
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, observabilityAlert, onOpenObservability, onOpenCockpit, models, search } =
     props;
 
   return (
@@ -109,6 +113,21 @@ export function Header(props: {
           <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />
           Judge failing
         </span>
+      )}
+      {/* The observability exporter failing for a long stretch (issue #855): louder than the judge
+          chip — telemetry has been silently missing for ten minutes — and a click opens the pane. */}
+      {observabilityAlert && onOpenObservability && (
+        <button
+          type="button"
+          onClick={onOpenObservability}
+          aria-label="Observability degraded"
+          title={`${observabilityAlert} — opens the observability settings`}
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-err-soft px-2 py-0.5 text-small font-medium text-err"
+        >
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-err" />
+          <span className="max-sm:hidden">Observability degraded</span>
+          <span className="sm:hidden">Degraded</span>
+        </button>
       )}
 
       <div className="flex min-w-0 flex-1 justify-center">{search}</div>
@@ -176,7 +195,7 @@ export function UserMenu({ login, name, avatarUrl, onOpenSettings, onOpenSecrets
         <div role="menu" className="absolute right-0 top-10 z-50 w-56 rounded-xl border border-border-strong bg-panel p-1.5 shadow-[0_16px_48px_rgb(0_0_0/0.35)]">
           <div className="border-b border-border px-2.5 pb-2 pt-1">
             <div className="truncate text-body-sm font-medium text-text">{name || login || "Not signed in"}</div>
-            {login && <div className="truncate text-small text-faint">@{login} · GitHub</div>}
+            {login && <div className="truncate text-small text-muted">@{login} · GitHub</div>}
           </div>
           <div className="pt-1">
             <button type="button" role="menuitem" className={item} onClick={() => (setOpen(false), onOpenSettings())}>

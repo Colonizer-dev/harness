@@ -7,6 +7,7 @@
     { "policy": "{\"rules\": [{\"decision\": \"deny\", \"script\": \"curl\"}]}", "valid": true },
     { "policy": "{\"rules\": [{\"decision\": \"deny\", \"touches\": [\"secrets/**\", \"!secrets/README.md\"]}]}", "valid": true },
     { "policy": "{\"rules\": [{\"decision\": \"ask\", \"writes_outside\": true}, {\"decision\": \"ask\", \"writes_outside\": \"strict\"}]}", "valid": true },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"writes_git\": true}]}", "valid": true, "note": "the default layer's git-read-only rule (#1258)" },
     { "policy": "{\"rules\": [{\"decision\": \"allow\", \"command\": \"make\", \"writes_outside\": false}]}", "valid": true, "note": "writes_outside false is off, not a dropped predicate" },
     { "policy": "{\"rules\": [{\"decision\": \"allow\", \"command\": \".\"}], \"note\": \"unknown keys are ignored\"}", "valid": true },
 
@@ -29,6 +30,7 @@
     { "policy": "{\"rules\": [{\"decision\": \"deny\", \"touches\": \".env\"}]}", "valid": false, "note": "touches is a list" },
     { "policy": "{\"rules\": [{\"decision\": \"deny\", \"touches\": [\"!*.example\"]}]}", "valid": false, "note": "exclusions alone include nothing" },
     { "policy": "{\"rules\": [{\"decision\": \"ask\", \"writes_outside\": \"loose\"}]}", "valid": false },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"writes_git\": \"sometimes\"}]}", "valid": false, "note": "writes_git accepts only true; the runner would drop the rule" },
     { "policy": "{\"rules\": [{\"decision\": \"allow\", \"command\": \"make\"}, {\"decision\": \"deny\"}]}", "valid": false, "note": "one bad rule refuses the whole policy" }
   ]
 }

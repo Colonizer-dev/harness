@@ -1,4 +1,4 @@
-import type { QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
+import type { FindingsCard, QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
 import type { MergeStewardStatus } from "../orgs/types";
 import type { AccountAlert, GitHubPause, ModelProviderStatus, StatusQuota } from "../providers/types";
 
@@ -85,6 +85,8 @@ export interface HarnessStatus {
   quota?: StatusQuota | null;
   /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
   quota_cards?: QuotaCard[];
+  /** The "Findings and judge are off" card (issue #1154), the same list GET /api/attention serves; empty when every colony has a callable model, and omitted by older builds. */
+  findings_cards?: FindingsCard[];
   /** Claude accounts that need the owner (issue #984): a rejected sign-in or an exhausted plan, with the colonies waiting on each. Empty when everything is fine; older mothership builds omit it. */
   account_alerts?: AccountAlert[];
   /** The Nest frontier badge's counts (issue #1144); null until the first count lands, omitted by older mothership builds. */

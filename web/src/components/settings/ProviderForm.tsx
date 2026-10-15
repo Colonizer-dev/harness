@@ -4,10 +4,12 @@ import { fillTemplate } from "../../providerCatalog";
 import { providerTestToast } from "../../providerHealth";
 import type { ModelProvider, ProviderAuth, ProviderPricing, ProviderPreset } from "../../types";
 import { useModels } from "../../useModels";
-import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass } from "../ui";
+import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass, timeAgo } from "../ui";
 import { IconCheck, IconChevron, IconX } from "../icons";
 import { ProviderMark } from "../providerMark";
+import { modelChoices, offeredModels, toggleModel } from "./providerOverview";
 import { Row, Code } from "./ui";
+import { FeedPrices, ModelPricingEditor } from "./providerPricing";
 import {
   AUTH_LABEL,
   CATALOG_BY_ID,
@@ -18,7 +20,10 @@ import {
   limitLabels,
   limitText,
   modelMapCanonicals,
+  modelPricingChanged,
+  modelPricingRowsOf,
   parseLimit,
+  parseModelPricing,
   parsePrice,
   presetDraft,
   presetLabel,
@@ -29,6 +34,7 @@ import {
   uniqueDraft,
   type LimitKey,
   type ModelMapRow,
+  type ModelPricingRow,
   type PricingDraft,
   providerNeedsKey,
 } from "./providerCatalog";
@@ -127,11 +133,18 @@ export function ProviderForm({
   // The saved rates sit in the fields; `pricing` only goes on the save once they differ from them, the
   // same convention as the key: omitted keeps what is saved, so a save never silently rezeros a rate.
   const [pricingDraft, setPricingDraft] = useState<PricingDraft>(() => pricingDraftOf(start.pricing));
+  // Per-model prices (#1038) and the price feed's provider id follow the same keep/clear convention:
+  // each rides the save only when the operator changed it, so a save never silently rezeros a rate.
+  const [modelPricingRows, setModelPricingRows] = useState<ModelPricingRow[]>(() => modelPricingRowsOf(initial?.model_pricing));
+  const [feedIdDraft, setFeedIdDraft] = useState(initial?.price_feed_id ?? "");
   // The quota probe (issue #199) always goes on the save: an empty URL clears it, the way an empty
-  // key string removes the key, so no keep/clear dance is needed for two plain text fields.
-  const [quotaUrl, setQuotaUrl] = useState(initial?.quota?.url ?? "");
-  const [quotaPointer, setQuotaPointer] = useState(initial?.quota?.pointer ?? "");
-  const [quotaReset, setQuotaReset] = useState(initial?.quota?.reset_pointer ?? "");
+  // key string removes the key, so no keep/clear dance is needed for two plain text fields. A
+  // catalogue entry's preset (#1223) prefills these on create — `start` is the saved provider when
+  // editing, so a saved probe always wins.
+  const [quotaUrl, setQuotaUrl] = useState(start.quota?.url ?? "");
+  const [quotaPointer, setQuotaPointer] = useState(start.quota?.pointer ?? "");
+  const [quotaLimit, setQuotaLimit] = useState(start.quota?.limit_pointer ?? "");
+  const [quotaReset, setQuotaReset] = useState(start.quota?.reset_pointer ?? "");
   // The connection policy (#295, #472): all three prefill from GET /api/providers and go on the save
   // as given; the model map's blank rows are dropped by `providerSaveBody`.
   const [trusted, setTrusted] = useState(initial?.trusted ?? false);
@@ -163,10 +176,12 @@ export function ProviderForm({
     fallback: useId(),
     quotaUrl: useId(),
     quotaPointer: useId(),
+    quotaLimit: useId(),
     quotaReset: useId(),
     trusted: useId(),
     modelMap: useId(),
     disabledTools: useId(),
+    feedId: useId(),
   };
   const limits = {
     timeout_secs: parseLimit("timeout_secs", limitDraft.timeout_secs),
@@ -191,6 +206,15 @@ export function ProviderForm({
     (pricing.output_per_mtok.value ?? 0) !== (savedPricing?.output_per_mtok ?? 0) ||
     (pricing.cache_read_per_mtok.value ?? 0) !== (savedPricing?.cache_read_per_mtok ?? 0) ||
     (pricing.cache_write_per_mtok.value ?? 0) !== (savedPricing?.cache_write_per_mtok ?? 0);
+  const modelPricing = parseModelPricing(modelPricingRows);
+  const pricingBad = pricingInvalid || Boolean(modelPricing.error);
+  // `model_pricing` and `price_feed_id` go on the save only when the operator changed them (#1038):
+  // omitted keeps the saved value, `{}` clears the prices, `""` clears the feed mapping.
+  const modelPricingDiffers = modelPricingChanged(modelPricing.value, initial?.model_pricing);
+  const feedIdDiffers = feedIdDraft.trim() !== (initial?.price_feed_id ?? "");
+  // The feed's prices are read-only and marked where an operator price wins (server precedence:
+  // per-model, then the connection's, then the feed's).
+  const connectionPriced = Boolean(initial && Object.values(initial.pricing ?? {}).some((rate) => rate != null));
   const advancedSummary = limitLabels({
     timeout_secs: limits.timeout_secs.value ?? undefined,
     max_concurrent: limits.max_concurrent.value,
@@ -245,7 +269,7 @@ export function ProviderForm({
     originMoved && (keyMode === "keep" || auth === "none")
       ? "Changing the base URL to another origin requires entering the API key again — or removing the saved key"
       : null;
-  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingInvalid || mapError || !name.trim());
+  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingBad || mapError || !name.trim());
   const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url.trim());
 
   const save = async (event: FormEvent) => {
@@ -276,7 +300,9 @@ export function ProviderForm({
                 cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
               }
             : undefined,
-          quota: { url: quotaUrl, pointer: quotaPointer, reset_pointer: quotaReset },
+          model_pricing: modelPricingDiffers ? modelPricing.value : undefined,
+          price_feed_id: feedIdDiffers ? feedIdDraft.trim() : undefined,
+          quota: { url: quotaUrl, pointer: quotaPointer, limit_pointer: quotaLimit, reset_pointer: quotaReset },
           timeout_secs: limits.timeout_secs.value,
           max_concurrent: limits.max_concurrent.value,
           queue_timeout_secs: limits.queue_timeout_secs.value,
@@ -316,6 +342,84 @@ export function ProviderForm({
       setBusy(null);
     }
   };
+
+  // The Pricing section is the same element in the short and full forms, so it is built once.
+  const pricingSection = (
+    <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+        <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+        <span className="font-medium">Pricing</span>
+        <span className={cx("min-w-0 flex-1 truncate text-small", pricingBad ? "text-err" : "text-faint")}>
+          {pricingBad
+            ? "Some values are out of range"
+            : pricingSummary.length
+              ? `${pricingSummary.join(" · ")} per million tokens`
+              : "Optional — unset counts as $0 spent"}
+        </span>
+      </summary>
+      <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
+        <PriceField
+          label="Input ($ per million tokens)"
+          value={pricingDraft.input_per_mtok}
+          onChange={(v) => setPricing("input_per_mtok", v)}
+          error={pricing.input_per_mtok.error}
+          help="What a million fresh input tokens cost."
+        />
+        <PriceField
+          label="Output ($ per million tokens)"
+          value={pricingDraft.output_per_mtok}
+          onChange={(v) => setPricing("output_per_mtok", v)}
+          error={pricing.output_per_mtok.error}
+          help="What a million output tokens cost."
+        />
+        <PriceField
+          label="Cache read ($ per million tokens)"
+          value={pricingDraft.cache_read_per_mtok}
+          onChange={(v) => setPricing("cache_read_per_mtok", v)}
+          error={pricing.cache_read_per_mtok.error}
+          help="What a million tokens read back from the provider's prompt cache cost."
+        />
+        <PriceField
+          label="Cache write ($ per million tokens)"
+          value={pricingDraft.cache_write_per_mtok}
+          onChange={(v) => setPricing("cache_write_per_mtok", v)}
+          error={pricing.cache_write_per_mtok.error}
+          help="What a million tokens written to the provider's prompt cache cost."
+        />
+        <p className="text-small leading-snug text-faint sm:col-span-2">
+          Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
+          provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
+          spend — the budget then only sees Claude's cost.
+        </p>
+        <ModelPricingEditor rows={modelPricingRows} onChange={setModelPricingRows} error={modelPricing.error} />
+        <FormField
+          id={ids.feedId}
+          label="Price feed provider id"
+          className="sm:col-span-2"
+          info={
+            <p>
+              Which provider's prices a price feed lists for this connection, when the feed knows it under another id.
+              Left empty the feed is looked up by the catalogue id, then by the connection id.
+            </p>
+          }
+          hint={isNew ? undefined : initial?.price_feed_id ? `Maps to ${initial.price_feed_id}` : "Defaults to the catalogue id"}
+        >
+          <input
+            id={ids.feedId}
+            value={feedIdDraft}
+            onChange={(e) => setFeedIdDraft(e.target.value)}
+            placeholder="Defaults to the catalogue id"
+            spellCheck={false}
+            autoComplete="off"
+            className={cx(inputClass, "font-mono text-body-sm")}
+          />
+        </FormField>
+        {initial?.feed_prices?.length ? (
+          <FeedPrices prices={initial.feed_prices} modelPricing={initial.model_pricing} connectionPriced={connectionPriced} />
+        ) : null}
+      </div>
+    </details>
+  );
 
   return (
     <form onSubmit={save} className="space-y-3 rounded-xl border border-accent/40 bg-panel p-3.5">
@@ -391,6 +495,7 @@ export function ProviderForm({
           info={<p>Model IDs as the endpoint expects them. Enter or a comma adds one; leave empty to type IDs where you pick a model.</p>}
         >
           <ChipsInput id={ids.models} values={models} onChange={setModels} placeholder={models.length ? "Add another" : "deepseek-flash, qwen3-coder, …"} />
+          <ModelChecklist provider={initial} models={models} onChange={setModels} />
         </FormField>
             <details open={detailsOpen} onToggle={(e) => setDetailsOpen(e.currentTarget.open)} className="group min-w-0 rounded-lg border border-border sm:col-span-2">
               <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
@@ -633,54 +738,7 @@ export function ProviderForm({
             </FormField>
           </div>
         </details>
-        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
-            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
-            <span className="font-medium">Pricing</span>
-            <span className={cx("min-w-0 flex-1 truncate text-small", pricingInvalid ? "text-err" : "text-faint")}>
-              {pricingInvalid
-                ? "Some values are out of range"
-                : pricingSummary.length
-                  ? `${pricingSummary.join(" · ")} per million tokens`
-                  : "Optional — unset counts as $0 spent"}
-            </span>
-          </summary>
-          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
-            <PriceField
-              label="Input ($ per million tokens)"
-              value={pricingDraft.input_per_mtok}
-              onChange={(v) => setPricing("input_per_mtok", v)}
-              error={pricing.input_per_mtok.error}
-              help="What a million fresh input tokens cost."
-            />
-            <PriceField
-              label="Output ($ per million tokens)"
-              value={pricingDraft.output_per_mtok}
-              onChange={(v) => setPricing("output_per_mtok", v)}
-              error={pricing.output_per_mtok.error}
-              help="What a million output tokens cost."
-            />
-            <PriceField
-              label="Cache read ($ per million tokens)"
-              value={pricingDraft.cache_read_per_mtok}
-              onChange={(v) => setPricing("cache_read_per_mtok", v)}
-              error={pricing.cache_read_per_mtok.error}
-              help="What a million tokens read back from the provider's prompt cache cost."
-            />
-            <PriceField
-              label="Cache write ($ per million tokens)"
-              value={pricingDraft.cache_write_per_mtok}
-              onChange={(v) => setPricing("cache_write_per_mtok", v)}
-              error={pricing.cache_write_per_mtok.error}
-              help="What a million tokens written to the provider's prompt cache cost."
-            />
-            <p className="text-small leading-snug text-faint sm:col-span-2">
-              Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
-              provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
-              spend — the budget then only sees Claude's cost.
-            </p>
-          </div>
-        </details>
+        {pricingSection}
         <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
           <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
             <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
@@ -712,6 +770,17 @@ export function ProviderForm({
                 className={cx(inputClass, "font-mono text-body-sm")}
               />
             </FormField>
+            <FormField id={ids.quotaLimit} label="Limit JSON pointer" hint="Optional: the plan's total, for % used">
+              <input
+                id={ids.quotaLimit}
+                value={quotaLimit}
+                onChange={(e) => setQuotaLimit(e.target.value)}
+                placeholder="/data/total_tokens"
+                spellCheck={false}
+                autoComplete="off"
+                className={cx(inputClass, "font-mono text-body-sm")}
+              />
+            </FormField>
             <FormField id={ids.quotaReset} label="Reset JSON pointer" hint="Optional: when the plan refills">
               <input
                 id={ids.quotaReset}
@@ -726,7 +795,8 @@ export function ProviderForm({
             <p className="text-small leading-snug text-faint sm:col-span-2">
               The provider's own credential is sent to that URL, so it must be on the same origin as the base URL —
               scheme, host and port; the Mothership refuses anything else. The pointer picks the remaining-token number
-              out of the answer, shown on the health line, and must start with /. The reset pointer names a time, as unix seconds or an RFC 3339 string, and puts "resets in …" on the provider's row.
+              out of the answer, shown on the health line, and must start with /. The limit pointer names the plan's total
+              in the same answer, and puts the percent used on the model switcher's bar. The reset pointer names a time, as unix seconds or an RFC 3339 string, and puts "resets in …" on the provider's row.
             </p>
           </div>
         </details>
@@ -864,6 +934,7 @@ export function ProviderForm({
           info={<p>Model IDs as the endpoint expects them. Enter or a comma adds one; leave empty to type IDs where you pick a model.</p>}
         >
           <ChipsInput id={ids.models} values={models} onChange={setModels} placeholder={models.length ? "Add another" : "deepseek-flash, qwen3-coder, …"} />
+          <ModelChecklist provider={initial} models={models} onChange={setModels} />
         </FormField>
         <details
           open={advancedOpen}
@@ -1028,54 +1099,7 @@ export function ProviderForm({
             </FormField>
           </div>
         </details>
-        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
-            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
-            <span className="font-medium">Pricing</span>
-            <span className={cx("min-w-0 flex-1 truncate text-small", pricingInvalid ? "text-err" : "text-faint")}>
-              {pricingInvalid
-                ? "Some values are out of range"
-                : pricingSummary.length
-                  ? `${pricingSummary.join(" · ")} per million tokens`
-                  : "Optional — unset counts as $0 spent"}
-            </span>
-          </summary>
-          <div className="grid gap-3 border-t border-border px-3 pb-3 pt-3 sm:grid-cols-2">
-            <PriceField
-              label="Input ($ per million tokens)"
-              value={pricingDraft.input_per_mtok}
-              onChange={(v) => setPricing("input_per_mtok", v)}
-              error={pricing.input_per_mtok.error}
-              help="What a million fresh input tokens cost."
-            />
-            <PriceField
-              label="Output ($ per million tokens)"
-              value={pricingDraft.output_per_mtok}
-              onChange={(v) => setPricing("output_per_mtok", v)}
-              error={pricing.output_per_mtok.error}
-              help="What a million output tokens cost."
-            />
-            <PriceField
-              label="Cache read ($ per million tokens)"
-              value={pricingDraft.cache_read_per_mtok}
-              onChange={(v) => setPricing("cache_read_per_mtok", v)}
-              error={pricing.cache_read_per_mtok.error}
-              help="What a million tokens read back from the provider's prompt cache cost."
-            />
-            <PriceField
-              label="Cache write ($ per million tokens)"
-              value={pricingDraft.cache_write_per_mtok}
-              onChange={(v) => setPricing("cache_write_per_mtok", v)}
-              error={pricing.cache_write_per_mtok.error}
-              help="What a million tokens written to the provider's prompt cache cost."
-            />
-            <p className="text-small leading-snug text-faint sm:col-span-2">
-              Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
-              provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
-              spend — the budget then only sees Claude's cost.
-            </p>
-          </div>
-        </details>
+        {pricingSection}
         <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
           <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
             <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
@@ -1196,6 +1220,38 @@ function PriceField({
         className={cx(inputClass, "font-mono text-body-sm", error && "border-err")}
       />
     </FormField>
+  );
+}
+
+/**
+ * The models the endpoint offers as checkboxes beneath the free-typed chips (issue #1167): ticked is
+ * enabled, "new" just appeared upstream, "gone" is enabled though the endpoint no longer names it —
+ * nothing leaves `models` unless the user unticks it. Hidden while there is nothing to offer, for a
+ * provider that is not saved yet (no discovery) and no catalogue list.
+ */
+function ModelChecklist({ provider, models, onChange }: { provider?: ModelProvider; models: string[]; onChange: (models: string[]) => void }) {
+  if (!provider || offeredModels(provider).length === 0) return null;
+  return (
+    <div className="min-w-0 space-y-1.5 rounded-lg border border-border px-2.5 py-2">
+      <p className="text-small text-faint">
+        {provider.discovered_at
+          ? `Available on the endpoint, discovered ${timeAgo(provider.discovered_at)} — tick one to enable it.`
+          : "Available as the provider catalogue lists them; this endpoint serves no model list of its own."}
+      </p>
+      {modelChoices(provider, models).map((choice) => (
+        <label key={choice.model} className="flex min-w-0 items-center gap-2 font-mono text-body-sm">
+          <input
+            type="checkbox"
+            checked={choice.enabled}
+            onChange={(e) => onChange(toggleModel(models, choice.model, e.target.checked))}
+            className="size-4 shrink-0 cursor-pointer accent-[var(--accent)]"
+          />
+          <span className="truncate">{choice.model}</span>
+          {choice.isNew && <Badge tone="info">new</Badge>}
+          {choice.gone && <Badge tone="warn">gone</Badge>}
+        </label>
+      ))}
+    </div>
   );
 }
 

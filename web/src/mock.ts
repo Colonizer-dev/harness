@@ -20,6 +20,7 @@ import { historyMock } from "./features/history/mock";
 import { handoffMock } from "./features/handoff/mock";
 import { decisionsMock } from "./features/decisions/mock";
 import { modelsMock } from "./features/models/mock";
+import { livingBrainMock } from "./features/livingBrain/mock";
 
 export { mockSplitLabels, mockDrafts, DEMO_MAP } from "./features/repos/mock";
 
@@ -45,5 +46,6 @@ export function createMockApi(): Api {
     ...handoffMock(ms),
     ...decisionsMock(ms),
     ...modelsMock(ms),
+    ...livingBrainMock(),
   };
 }

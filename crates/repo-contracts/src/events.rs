@@ -19,7 +19,8 @@ fn fixture_lines_resolve_to_real_origins_not_the_system_catch_all() {
         let system = lines
             .iter()
             .filter(|line| {
-                serde_json::from_str::<Value>(line).is_ok_and(|event| resolve_origin(&event, None, false) == Origin::System)
+                serde_json::from_str::<Value>(line)
+                    .is_ok_and(|event| resolve_origin(&event, None, false, false) == Origin::System)
             })
             .count();
         assert!(

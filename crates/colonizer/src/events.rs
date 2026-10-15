@@ -8,7 +8,7 @@
 use crate::{Shared, findings, github, memory, orgs, provider_quota, spend};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -260,9 +260,10 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
 /// Which subsystem a runner line came from: the closed `origin` the host stamps onto it before
 /// persisting (docs/protocol.md §3). Pure, so every branch is pinned by a test; what cannot be read
 /// off the line is handed in — the session's launch tag as `launch`, and, for a `question_answered`,
-/// whether the judge is the one who answered as `judged`. Anything unrecognisable stays a runner
-/// line (`agent`): an origin is provenance, never a contract a line can fail.
-pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
+/// whether the judge answered it as `judged` or the watchdog's playbook did as `playbook`.
+/// Anything unrecognisable stays a runner line (`agent`): an origin is provenance, never a contract
+/// a line can fail.
+pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool, playbook: bool) -> Origin {
     // A subagent's events carry the `agent` ref (§2 rules); the ref is the tell, whatever the type.
     if event.get("agent").is_some() {
         return Origin::Subagent;
@@ -275,10 +276,12 @@ pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Orig
             Some("initial") => launch_origin(launch),
             _ => Origin::User,
         },
-        // The judge's answer and a person's arrive as the same echo, so the judge records the ids it
-        // answered (autonomy.rs) and the handler spends that record here. Spent: a replay of the
-        // same echo — or one still in flight across a mothership restart — reads as the person's.
+        // A machine answer and a person's arrive as the same echo, so each answerer records the ids
+        // it sent (autonomy.rs, playbook.rs) and the handler spends that record here. Spent: a
+        // replay of the same echo — or one still in flight across a mothership restart — reads as
+        // the person's.
         Some("question_answered") if judged => Origin::Autonomy,
+        Some("question_answered") if playbook => Origin::Watchdog,
         Some("question_answered") => Origin::User,
         _ => Origin::Agent,
     }
@@ -305,7 +308,8 @@ fn is_watchdog_progress(origin: Origin, kind: &str) -> bool {
 }
 
 /// Tracks the shape of the turn the runner is in, for the watchdog's turn-end recovery (issue #878):
-/// when it last spoke its final answer, and which tool calls it has opened and not answered. Read off
+/// when it last spoke its final answer, and which tool calls it has opened and not answered — and,
+/// for issue #1266, which background subagents are in flight and when the last settled. Read off
 /// the raw line, like [`resolve_origin`], because most of these types never reach the dispatch below.
 /// A final `assistant_text` is the colony's "it's done"; every later sign of work clears it, so a
 /// stale one means the runner said it was finished and then went quiet. Only the lead agent's own
@@ -318,13 +322,50 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
             if let Some(id) = event["tool_call_id"].as_str() {
                 rt.open_tool_calls.lock().await.insert(id.to_string());
             }
+            // Issue #1266: only the lead's own calls count — a relayed one carries the `agent` ref
+            // and is the subagent's own turn's. The lead calling Task again is the continuation
+            // arriving: the call disarms the window and its subagent is tracked for its settlement.
+            if event.get("agent").is_none() {
+                *rt.turn_lost_since.lock().await = None;
+                if matches!(event["name"].as_str(), Some("Task") | Some("Agent"))
+                    && let Some(id) = event["tool_call_id"].as_str()
+                {
+                    rt.open_subagents.lock().await.insert(id.to_string());
+                }
+            }
         }
         "tool_result" => {
             if let Some(id) = event["tool_call_id"].as_str() {
                 rt.open_tool_calls.lock().await.remove(id);
             }
         }
-        "turn_end" => rt.open_tool_calls.lock().await.clear(),
+        "turn_end" => {
+            rt.open_tool_calls.lock().await.clear();
+            *rt.turn_lost_since.lock().await = None;
+        }
+        // A background subagent settled (issue #1266): the runner emits this and pushes nothing
+        // into the SDK input queue, so the continuation it owes can go missing. When the last
+        // in-flight one settles the clock starts; a settlement for an untracked id arms nothing,
+        // and completed, failed and stopped all settle it the same.
+        "subagent_end" => {
+            let settled = if let Some(id) = event["tool_call_id"].as_str() {
+                rt.open_subagents.lock().await.remove(id)
+            } else {
+                false
+            };
+            if settled && rt.open_subagents.lock().await.is_empty() {
+                *rt.turn_lost_since.lock().await = Some(Utc::now());
+            }
+        }
+        _ => {}
+    }
+    // Issue #1266: the orchestrator's own output is the lost continuation arriving — the same
+    // lines that clear `final_text_at` stand the re-drive down. Deliberately narrow: even a
+    // `working` status must not mask a dead turn, or the settlement would stall-proof itself.
+    match kind {
+        "assistant_text" | "thinking" | "tool_result" | "question" | "turn_end" if event.get("agent").is_none() => {
+            *rt.turn_lost_since.lock().await = None;
+        }
         _ => {}
     }
     let mut final_text = rt.final_text_at.lock().await;
@@ -373,6 +414,7 @@ pub(crate) async fn close_question(app: &Shared, id: &str, rt: &Arc<Runtime>, on
     let Some(question_id) = closed else { return false };
     rt.question_holds_tool_call.store(false, Ordering::SeqCst);
     rt.judged_questions.lock().await.remove(&question_id);
+    rt.playbook_questions.lock().await.remove(&question_id);
     {
         let mut activity = rt.activity.lock().await;
         activity.question_since = None;
@@ -439,14 +481,18 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // are never stamped — an absent body origin must stay absent (it reads as the orchestrator's),
     // and the dispatch below reads the proposer, not a stamp.
     let launch = app.session(id).await.and_then(|s| s.origin.clone());
-    let judged = match event["type"].as_str() {
+    let (judged, by_playbook) = match event["type"].as_str() {
         Some("question_answered") => match event["question_id"].as_str() {
-            Some(question_id) => rt.judged_questions.lock().await.remove(question_id),
-            None => false,
+            Some(question_id) => {
+                let judged = rt.judged_questions.lock().await.remove(question_id);
+                let by_playbook = !judged && rt.playbook_questions.lock().await.remove(question_id);
+                (judged, by_playbook)
+            }
+            None => (false, false),
         },
-        _ => false,
+        _ => (false, false),
     };
-    let origin = resolve_origin(&event, launch.as_deref(), judged);
+    let origin = resolve_origin(&event, launch.as_deref(), judged, by_playbook);
     if event["type"] != "memory_proposal" {
         // A line arriving with an `origin` of its own is speaking outside its contract: the envelope
         // is the host's, and the resolved stamp below overwrites whatever it carried. The carried
@@ -702,8 +748,79 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             );
             // A new question retires the old one's notification answer tokens (issue #742).
             app.answer_tokens.revoke(id).await;
-            *rt.open_question.lock().await = Some((question_id, questions, risk));
-            rt.activity.lock().await.question_since = Some(Utc::now());
+            // A question the operator has already answered (issue #1247) is answered from the
+            // record instead of the person — the session restarted, the agent lost the answer, the
+            // decision stands. Only when it is safe to decide for them: never an exec-policy ask
+            // (a blocked tool call, not a decision re-asked) and never anything credential-shaped.
+            // Applied only when every inner question has a recorded answer — a mixed bag leaves
+            // the whole question standing, the simpler truth about what the operator actually saw.
+            let recorded: Vec<(String, AnsweredQuestion)> = if kind.as_deref() != Some(crate::protocol::EXEC_POLICY_QUESTION_KIND)
+                && risk != QuestionRisk::CredentialAdjacent
+            {
+                let matches = app.session(id).await;
+                matches
+                    .map(|s| {
+                        questions
+                            .iter()
+                            .filter_map(|q| {
+                                let header = q["header"].as_str().unwrap_or_default();
+                                let key = if header.trim().is_empty() {
+                                    q["question"].as_str()?.trim()
+                                } else {
+                                    header.trim()
+                                };
+                                let answer = s.answer_for_header(key)?;
+                                Some((q["question"].as_str().unwrap_or_default().to_string(), answer.clone()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !questions.is_empty() && recorded.len() == questions.len() {
+                let answers = recorded
+                    .iter()
+                    .map(|(text, a)| (text.clone(), a.answer.clone()))
+                    .collect::<Map<String, Value>>();
+                let response = recorded.iter().find_map(|(_, a)| a.response.clone()).unwrap_or_default();
+                let asked = recorded
+                    .iter()
+                    .map(|(_, a)| {
+                        if a.header.is_empty() {
+                            a.question.as_str()
+                        } else {
+                            a.header.as_str()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                app.session_log(
+                    id,
+                    "info",
+                    format!(
+                        "answered from the record: the operator already decided '{asked}', so their earlier answer goes back down"
+                    ),
+                )
+                .await;
+                rt.send_command(json!({
+                    "type": "answer",
+                    "question_id": question_id,
+                    "answers": answers,
+                    "response": response,
+                }));
+                // The runner's `question_answered` echo closes a question this run never tracked:
+                // clearing the in-flight flag here keeps a later turn end from closing it again.
+                rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                // Cloned for the playbook call below: the slot keeps its own copy, as the cockpit and
+                // the judge read theirs back from the slot.
+                *rt.open_question.lock().await = Some((question_id.clone(), questions.clone(), risk));
+                rt.activity.lock().await.question_since = Some(Utc::now());
+                // The playbook's question rows (issue #1258): an ask the table knows — a git write on a
+                // read-only `.git` — is answered as it opens, before it can hold the slot for a person.
+                crate::playbook::on_question(app, id, rt, &question_id, kind.as_deref(), &questions).await;
+            }
         }
         AgentEvent::QuestionAnswered { question_id, .. } => {
             // Only the question we are actually tracking closes here (issue #981). The slot holds one
@@ -1427,6 +1544,13 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             return;
         }
     };
+    // Issue #1154: with no model the host can call, the finding is queued in the colony's out/
+    // and retried when one becomes callable; one install-level card says findings are off, so
+    // there is no warn line per finding here.
+    if crate::autonomy::host_model(&app).await.is_none() {
+        crate::findings_queue::queue(&app, &id, &event, &finding).await;
+        return;
+    }
     let decision = match crate::validation::validate(&app, &s, &finding).await {
         Ok(decision) => decision,
         Err(e) => {

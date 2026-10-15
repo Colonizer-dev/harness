@@ -5,6 +5,7 @@
   "description": "The Pi coding agent driven over its RPC mode. Pi reaches models only through the provider gateway, so it needs a provider configured under Settings → Providers and no Claude login.",
   "protocol": "colonizer-runner/1",
   "loop_tools": true,
+  "skill_packs": true,
   "entry": [
     "node",
     "runner.mjs"

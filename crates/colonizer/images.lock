@@ -8,7 +8,7 @@
 # the index covers both architectures, and `url` is the image reference the digest pins: a colony boots
 # `<url>@sha256:<sha256>`. scripts/update-runtime-pins.mjs proposes new digests by pull request, the way the
 # vendored plugins are updated.
-node      24-bookworm   any  image  64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4  node:24-bookworm
-python    3.13-bookworm any  image  ab62bdaec8f090e565b8c76a8cac990229c28a42725f356cc32d9f4dea29806d  python:3.13-bookworm
-rust      1-bookworm    any  image  59037199c44290f2befcdd58dcc540164763fc296950255aaefeef096a1866b0  rust:1-bookworm
-go        1-bookworm    any  image  69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195  golang:1-bookworm
+node      24-bookworm   any  image  3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0  node:24-bookworm
+python    3.13-bookworm any  image  073ffebb96ae4d0ed73ccad59f08c47bd84af8a79f5258130f8458ac50ad9ff4  python:3.13-bookworm
+rust      1-bookworm    any  image  114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6  rust:1-bookworm
+go        1-bookworm    any  image  8d48e12ec56735e9358640898b9d9b9fcca110612ed8a5567438c0a1baa24e66  golang:1-bookworm

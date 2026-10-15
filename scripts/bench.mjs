@@ -12,6 +12,7 @@
 //   node scripts/bench.mjs jev bench-before.json bench-after.json   # grade Jev compaction across the runs
 //   node scripts/bench.mjs brief bench-before.json bench-after.json  # grade Jev's boot brief picks against use
 //   node scripts/bench.mjs routing [--threshold 0.8] [--json]       # the tier rule against Jev's second opinion
+//   node scripts/bench.mjs focus [--data <dir>] [--json]      # what focused-first verification (#584) is worth
 //   node scripts/bench.mjs rate bench-*.json [--json]         # resolved rate by harness · model, stage by stage
 //   node scripts/bench.mjs clean --repo owner/bench-repo    # close the bench's PRs and delete their branches
 //
@@ -904,6 +905,57 @@ export function formatRoutingReport(report) {
   return out.join('\n');
 }
 
+// ------------------------------------------------------------------------------------------------ focus
+
+// What focused-first verification (#584) is worth, from the ledgers it already writes: one
+// `jev_focus.jsonl` row per verification that had a choice (the rule's pick, whether it would have
+// caught the failure, time-to-first-failure as ran and focused), and one `verify.focus` row in
+// `decisions.jsonl` per verification where Jev was asked the same question in shadow. Milliseconds;
+// medians over the rows that have them — a green verification has no time-to-first-failure.
+
+/** The focus summary. `focus` rows are jev_focus.jsonl's; `decisions` every decisions.jsonl row, of
+ *  which only the `verify.focus` ones count. */
+export function focusReport(focus, decisions) {
+  const nums = (rows, key) => rows.map((r) => r?.[key]).filter(Number.isFinite);
+  const rows = focus.filter((r) => r?.kind === 'focus');
+  const failed = rows.filter((r) => r.would_catch === true || r.would_catch === false);
+  const asked = decisions.filter((r) => r?.kind === 'decision' && r?.point === 'verify.focus');
+  const answered = asked.filter((r) => r.pick);
+  return {
+    verifications: rows.length,
+    by_mode: Object.fromEntries(['shadow', 'act'].map((m) => [m, rows.filter((r) => r.mode === m).length])),
+    failed: failed.length,
+    rule_would_catch: failed.length ? failed.filter((r) => r.would_catch).length / failed.length : null,
+    median_actual_first_failure_ms: median(nums(rows, 'actual_first_failure_ms')),
+    median_focused_first_failure_ms: median(nums(rows, 'focused_first_failure_ms')),
+    median_total_ms: median(nums(rows, 'total_ms')),
+    asked: asked.length,
+    answered: answered.length,
+    jev_would_catch: answered.length ? answered.filter((r) => r.outcome?.would_catch === true).length / answered.length : null,
+    median_jev_latency_ms: median(nums(answered, 'latency_ms')),
+  };
+}
+
+/** The human report, in the style of formatRoutingReport. */
+export function formatFocusReport(r) {
+  const ms = (v) => (v == null ? '–' : `${Math.round(v)} ms`);
+  // Focused-first is only interesting where it was actually faster; a slower or flat median says so.
+  const delta = r.median_actual_first_failure_ms > 0 && r.median_focused_first_failure_ms != null
+    ? Math.round((1 - r.median_focused_first_failure_ms / r.median_actual_first_failure_ms) * 100)
+    : null;
+  const faster = delta == null ? '' : delta > 0 ? `, ${delta}% faster focused` : delta < 0 ? `, ${-delta}% slower focused` : ', no gain focused';
+  return [
+    '# Verify focus (#584): which check runs first — the rule decides, Jev is asked in shadow',
+    '',
+    `verifications with a choice: ${r.verifications} (shadow ${r.by_mode.shadow}, act ${r.by_mode.act}); the rule's pick caught ${pct(r.rule_would_catch)} of ${r.failed} failures`,
+    `median time-to-first-failure: ${ms(r.median_actual_first_failure_ms)} as ran vs ${ms(r.median_focused_first_failure_ms)} focused${faster}`,
+    `median whole verification: ${ms(r.median_total_ms)}`,
+    `Jev asked in shadow: ${r.asked}, answered ${r.answered} (median ask ${ms(r.median_jev_latency_ms)}); its pick would have caught ${pct(r.jev_would_catch)}`,
+    '',
+    'A verification where nothing failed has no time-to-first-failure and stays out of the would-catch rates. Jev is shadow only: nothing it picked ever ran.',
+  ].join('\n');
+}
+
 // ------------------------------------------------------------------------------------------------ clean
 
 function clean(repo) {
@@ -1116,6 +1168,14 @@ async function main() {
     console.log(args.json ? JSON.stringify(report, null, 2) : formatRoutingReport(report));
     return;
   }
+  if (args.command === 'focus') {
+    // The focused-first measurement (#584): the rule's own rows, plus the verify.focus decisions Jev
+    // was asked in shadow. Both ledgers live in the mothership's data dir.
+    const dataDir = dataDirOf(args);
+    const report = focusReport(readJsonLines(join(dataDir, 'jev_focus.jsonl')), readJsonLines(join(dataDir, 'decisions.jsonl')));
+    console.log(args.json ? JSON.stringify(report, null, 2) : formatFocusReport(report));
+    return;
+  }
   if (args.command === 'rate') {
     // Two sources, read separately and never mixed: the colony session store, and any bench run files
     // named on the command line. With no files it reads the sessions alone.
@@ -1154,7 +1214,7 @@ async function main() {
     }
     return;
   }
-  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, brief, routing, rate or clean');
+  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, brief, routing, focus, rate or clean');
   if (!args.repo) throw new Error('run needs --repo owner/name');
 
   const issues = benchIssues(args.repo);

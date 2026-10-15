@@ -213,6 +213,11 @@ pub struct OrgSettings {
     /// branch another colony's pull request is stacked on is always kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_branch: Option<bool>,
+    /// Whether the merge steward verifies a pull request locally while GitHub Actions is billing-blocked
+    /// (issue #1245), and merges it on a local pass. `None` — the default — is off; a billing block is
+    /// never treated as green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_locally_when_ci_blocked: Option<bool>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -715,6 +720,12 @@ pub fn deletes_merged_branch(org: &OrgSettings) -> bool {
     org.delete_branch.unwrap_or(false)
 }
 
+/// Whether the merge steward may verify locally while Actions is blocked (issue #1245); off unless
+/// the org opted in.
+pub fn verifies_locally_when_ci_blocked(org: &OrgSettings) -> bool {
+    org.verify_locally_when_ci_blocked.unwrap_or(false)
+}
+
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
 /// unlike cpus or memory there is no dollar figure the harness can pick for someone else's deployment,
 /// and a default that silently stopped running colonies on upgrade would be a surprise.
@@ -1188,6 +1199,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("delete_branch") {
         incoming.delete_branch = saved.delete_branch;
+    }
+    if !named("verify_locally_when_ci_blocked") {
+        incoming.verify_locally_when_ci_blocked = saved.verify_locally_when_ci_blocked;
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;

@@ -22,6 +22,8 @@ export type AttentionReason =
   | "stalled"
   | "waiting_for_answer"
   | "nudges_exhausted"
+  /** The turn's continuation after its last background subagent settled never came (issue #1266); the watchdog interrupted and re-drove it. */
+  | "turn_lost_after_subagent"
   | "autopilot_held"
   | "provider_quota_exhausted"
   | "hold_timeout"
@@ -37,17 +39,34 @@ export type AttentionReason =
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
   | "provider_retry"
   /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
-  | "looping";
+  | "looping"
+  /** The operator turn (issue #1192) diagnosed a stall no playbook row matched and needs a person; `detail` carries its diagnosis. */
+  | "operator_escalation";
 
 /** One thing the watchdog's remediation playbook fixed on a colony by itself (issue #1191). */
 export interface AutoFix {
   /** The signature that matched, e.g. `pr_md_write`, `toolchain_installer`, `idle_verified`; `looping` for a stop. */
   signature: string;
-  /** `send_message`, `publish`, `switch_fallback_and_resume` or `stop_looping`. */
+  /** `send_message`, `publish`, `answer_deny`, `switch_fallback_and_resume` or `stop_looping`. */
   action: string;
   at: string;
   /** One line for a person. */
   detail: string;
+}
+
+/** One operator turn on a colony (issue #1192): the diagnosis, the action taken, and how it ended. */
+export interface OperatorNote {
+  /** The stable key the trigger derives — the attention reason plus the denial kind, e.g. `stalled+secret-paths`. */
+  signature: string;
+  /** The model's diagnosis, in its own words. */
+  diagnosis: string;
+  /** `message`, `publish`, `resume`, `stop`, `switch_model` or `escalate`. */
+  action: string;
+  /** What the model said, 0 to 1. */
+  confidence: number;
+  at: string;
+  /** One line for a person: what the turn did. */
+  outcome: string;
 }
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
@@ -113,6 +132,26 @@ export interface QuotaCardColony {
   waiting: boolean;
   /** When a Wait scheduled it back; null otherwise. */
   resume_unix: number | null;
+}
+
+/** One colony on the "Findings and judge are off" card. */
+export interface FindingsCardColony {
+  id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string | null;
+  /** Findings sitting queued in this colony's out/. */
+  count: number;
+}
+
+/** GET /api/attention `findings_cards` (issue #1154): the one install-level card raised while no model can host-validate findings. */
+export interface FindingsCard {
+  title: string;
+  detail: string;
+  /** How many findings sit queued across the colonies. */
+  count: number;
+  colonies: FindingsCardColony[];
 }
 
 /** GET /api/attention `quota_cards` (issue #767): one card per provider that ran out of quota. */
@@ -294,6 +333,8 @@ export interface Session {
   attention?: Attention | null;
   /** What the watchdog playbook fixed here by itself (issue #1191), oldest first; absent when nothing. */
   auto_fixes?: AutoFix[];
+  /** What the operator turn did here by itself (issue #1192), oldest first; absent when nothing. */
+  operator?: OperatorNote[];
   /**
    * True while the colony is `failed` and nobody has opened it since (issue #744): the badge and
    * the mothership's attention count include it until POST /api/sessions/{id}/seen marks it looked
@@ -483,7 +524,8 @@ export interface FindingRecord {
   session: string;
   repo?: string;
   title: string;
-  state: "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
+  /** `queued` waits for a model the host can call (issue #1154); it files once one is callable. */
+  state: "queued" | "validated" | "rejected" | "filed" | "duplicate" | "fix_colony" | "review" | "merged" | "blocked" | "error";
   ts?: string;
   reason?: string;
   severity?: "low" | "medium" | "high" | "critical";

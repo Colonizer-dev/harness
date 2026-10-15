@@ -134,6 +134,33 @@ fn a_broken_agent_manifest_is_reported_by_path_and_cause_instead_of_vanishing() 
     std::fs::remove_dir_all(root).ok();
 }
 
+#[test]
+fn a_non_boolean_skill_packs_is_a_manifest_problem_but_true_parses() {
+    let root = std::env::temp_dir().join(format!("colonizer-skill-packs-{}", crate::util::short_id()));
+    let agents = root.join("modules/agents");
+    for (dir, manifest) in [
+        ("string-flag", r#"{"id": "x", "entry": ["node"], "skill_packs": "yes"}"#),
+        ("true-flag", r#"{"id": "x", "entry": ["node"], "skill_packs": true}"#),
+    ] {
+        std::fs::create_dir_all(agents.join(dir)).unwrap();
+        std::fs::write(agents.join(dir).join("module.json"), manifest).unwrap();
+    }
+    let (modules, problems) = discover_agents(Some(&root));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(
+        problems[0],
+        format!(
+            "{}: \"skill_packs\" must be a boolean",
+            agents.join("string-flag").join("module.json").display()
+        )
+    );
+    assert_eq!(
+        modules.iter().map(|m| (m.id.as_str(), m.skill_packs)).collect::<Vec<_>>(),
+        [("x", true)]
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[tokio::test]
 async fn an_agent_setting_naming_an_unknown_skillset_is_refused_at_save_time() {
     let root = std::env::temp_dir().join(format!("colonizer-plugin-dirs-{}", crate::util::short_id()));

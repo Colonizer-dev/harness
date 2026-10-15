@@ -5,7 +5,10 @@ Part of the [Colonizer protocol](../protocol.md).
 `COLONIZER_PLUGIN_DIRS` names directories the mothership resolves in two places, in order: what the
 operator put in `<data>/plugins/<name>`, then what shipped with the app in `<COLONIZER_HOME>/plugins/<name>`.
 A local copy therefore overrides a vendored one of the same name. Each is a plain name, never a path,
-and each is mounted read-only at `/opt/colonizer/plugins/<name>`.
+and each is mounted read-only at `/opt/colonizer/plugins/<name>`. The same mounts reach every agent
+module whose manifest declares the `skill_packs` capability — the mothership rewrites
+`COLONIZER_PLUGIN_DIRS` for those runners too, and each loads the packs in its own way
+([skill-packs.md](../skill-packs.md)).
 
 `scripts/fetch-vendor.sh` stages vendored plugins at `dist/plugins/<name>`, which `install.sh` copies to
 `<COLONIZER_HOME>/plugins/<name>`, and `install.sh` fails if a `plugin` entry in `vendor/vendor.lock` didn't

@@ -569,9 +569,13 @@ export interface MergeLoopSettings {
   /** Issue #968: resolve a conflicted pull request by merging the base in and resuming its colony. */
   resolve_conflicts: boolean;
   resolve_attempts: number;
+  /** Issue #1054: resume a red pull request's own colony to fix its failing checks. */
+  fix_red: boolean;
+  /** At most this many fix attempts per pull request (1–10); one attempt per head commit. */
+  fix_attempts: number;
 }
 
-export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "resolving" | "waiting" | "skipped";
+export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "resolving" | "fixing" | "waiting" | "skipped";
 
 export interface MergeLoopItem {
   session: string;

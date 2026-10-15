@@ -249,7 +249,13 @@ pub(crate) async fn command() -> Result<()> {
             // No KVM off Linux: nothing is missing, since colonies are KVM microVMs elsewhere.
             None => Ok("(not required on this platform)".to_string()),
             Some(kvm) if kvm.ok => Ok(String::new()),
-            Some(kvm) => Err(kvm_failure(&kvm.error.unwrap_or_default())),
+            Some(kvm) => {
+                let error = kvm.error.unwrap_or_default();
+                // WSL answers to Windows, not to the table: on WSL2 an absent `/dev/kvm` is
+                // nested virtualization, on WSL1 there is no kvm at all — neither is a module
+                // nobody loaded.
+                Err(wsl_kvm_failure(on_wsl(), Path::new("/dev/kvm").exists()).unwrap_or_else(|| kvm_failure(&error)))
+            }
         },
     );
 
@@ -390,17 +396,101 @@ fn kvm_failure(error: &str) -> String {
     format!("{error}. {}", diagnosis.check)
 }
 
-/// The platform, plus the distribution's own name when `/etc/os-release` happens to be readable.
-/// Only that file: the kernel version needs a probe, and `doctor` must not invent one it did not
-/// run.
-fn kernel_line() -> String {
-    let mut line = std::env::consts::OS.to_string();
-    if let Ok(release) = std::fs::read_to_string("/etc/os-release")
-        && let Some(pretty) = release.lines().find_map(|l| l.strip_prefix("PRETTY_NAME="))
-    {
-        line.push_str(&format!(" ({})", pretty.trim_matches('"')));
+/// Which WSL a kernel release says it is. The distinction decides the kvm row's words: WSL2 is a
+/// VM that can pass virtualization through, WSL1 is a syscall translation layer, not a VM, and
+/// has no `/dev/kvm` on any setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wsl {
+    /// The WSL1 kernel: a translation layer, so no microVM can run here at all.
+    One,
+    /// The WSL2 kernel: a real VM, and nested virtualization is the knob.
+    Two,
+}
+
+impl Wsl {
+    /// How the kernel row names it.
+    fn label(&self) -> &'static str {
+        match self {
+            Wsl::One => "WSL1",
+            Wsl::Two => "WSL2",
+        }
+    }
+}
+
+/// Which WSL a kernel release names, if it names one: the release carries `microsoft`, and WSL2's
+/// also carries `microsoft-standard` (or `wsl2`), as in `5.15.153.1-microsoft-standard-WSL2`. Any
+/// other `microsoft` release is WSL1's, as in `4.4.0-19041-Microsoft`. A stock Linux kernel,
+/// including a generic Ubuntu one, carries neither.
+fn wsl_kernel(osrelease: &str) -> Option<Wsl> {
+    let release = osrelease.to_lowercase();
+    if !release.contains("microsoft") {
+        return None;
+    }
+    if release.contains("microsoft-standard") || release.contains("wsl2") {
+        Some(Wsl::Two)
+    } else {
+        Some(Wsl::One)
+    }
+}
+
+/// [`wsl_kernel`] against this machine's own `/proc/sys/kernel/osrelease`, read the way
+/// [`kernel_line`] reads `/etc/os-release`: one file, no probe invented. `None` where the file
+/// does not exist, which is everywhere [`runtime::probe_kvm`] has no kvm question for anyway.
+fn on_wsl() -> Option<Wsl> {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .and_then(|release| wsl_kernel(&release))
+}
+
+/// What the failing kvm row says on WSL. On WSL2 a `/dev/kvm` that is simply absent is nested
+/// virtualization being off — the WSL2 kernel carries kvm built in, so there is no module to load
+/// and the fix lives in Windows. On WSL1 there is no setting at all: the distro has to move to
+/// WSL2. Either gets one line carrying the whole fix, in place of the table's `ls -l /dev/kvm`
+/// answer. A `/dev/kvm` that exists but refused this user is an ordinary permission problem, and
+/// keeps the table's own sentence; `None` says so. Pure, so the branch is decided the same way
+/// the tests check it.
+fn wsl_kvm_failure(wsl: Option<Wsl>, kvm_exists: bool) -> Option<String> {
+    let wsl = wsl?;
+    if kvm_exists {
+        return None;
+    }
+    Some(match wsl {
+        Wsl::One => {
+            "this is WSL1, which cannot run microVMs: convert the distro with `wsl --set-version <distro> 2` from Windows, then enable nested virtualization"
+                .to_string()
+        }
+        Wsl::Two => {
+            "/dev/kvm is missing inside WSL2: nested virtualization is off. Add `nestedVirtualization=true` under `[wsl2]` in %UserProfile%\\.wslconfig, run `wsl --shutdown` from Windows, and reopen the shell (needs Windows 11 and a CPU with VT-x or AMD-V)"
+                .to_string()
+        }
+    })
+}
+
+/// [`kernel_line`]'s text, pure: the platform, the distribution's own name when there is one, and
+/// the WSL note when the kernel is a WSL one — Linux to every other check, but a machine whose
+/// kvm answer is Windows's to give, and the row above the kvm one says which WSL.
+fn platform_line(os: &str, pretty: Option<&str>, wsl: Option<Wsl>) -> String {
+    let mut line = os.to_string();
+    if let Some(pretty) = pretty {
+        line.push_str(&format!(" ({pretty})"));
+    }
+    if let Some(wsl) = wsl {
+        line.push_str(&format!(" ({})", wsl.label()));
     }
     line
+}
+
+/// The platform, plus the distribution's own name when `/etc/os-release` happens to be readable,
+/// plus the WSL note. Only those two files: the kernel version needs a probe, and `doctor` must
+/// not invent one it did not run.
+fn kernel_line() -> String {
+    let pretty = std::fs::read_to_string("/etc/os-release").ok().and_then(|release| {
+        release
+            .lines()
+            .find_map(|l| l.strip_prefix("PRETTY_NAME="))
+            .map(|pretty| pretty.trim_matches('"').to_string())
+    });
+    platform_line(std::env::consts::OS, pretty.as_deref(), on_wsl())
 }
 
 /// Where the `msb` setting points: the configured value when it is a path, else the first `PATH`
@@ -702,5 +792,53 @@ mod tests {
             .collect();
         assert_eq!(missing, ["headscale", "tailscale", "tailscaled"]);
         assert!(!mesh::binaries_present(assets));
+    }
+
+    /// A WSL kernel names itself in its release; WSL2's also names the standard build, and any
+    /// other `microsoft` release is WSL1's. A stock Linux kernel names neither, whichever
+    /// distribution named it.
+    #[test]
+    fn a_wsl_kernel_release_names_microsoft_and_a_stock_linux_one_does_not() {
+        assert_eq!(wsl_kernel("5.15.153.1-microsoft-standard-WSL2"), Some(Wsl::Two));
+        assert_eq!(wsl_kernel("4.4.0-19041-Microsoft"), Some(Wsl::One));
+        assert_eq!(wsl_kernel("6.12.109"), None);
+        assert_eq!(wsl_kernel("6.8.0-45-generic"), None);
+    }
+
+    /// On WSL2 an absent `/dev/kvm` is nested virtualization, and the one line carries the whole
+    /// fix: the key, the file it lives in, the restart. On WSL1 there is no setting — the line
+    /// says the distro has to convert. A `/dev/kvm` that exists but refuses the user stays the
+    /// table's ordinary permission problem, as does anything off WSL.
+    #[test]
+    fn the_wsl_kvm_lines_name_the_fix_in_one_line() {
+        let two = wsl_kvm_failure(Some(Wsl::Two), false).expect("a missing /dev/kvm on WSL2 is explained");
+        assert!(!two.contains('\n'), "one line: {two}");
+        assert!(two.contains("nestedVirtualization=true"), "{two}");
+        assert!(two.contains(".wslconfig"), "{two}");
+        assert!(two.contains("wsl --shutdown"), "{two}");
+        let one = wsl_kvm_failure(Some(Wsl::One), false).expect("a missing /dev/kvm on WSL1 is explained");
+        assert!(!one.contains('\n'), "one line: {one}");
+        assert!(one.contains("WSL1"), "{one}");
+        assert!(one.contains("cannot run microVMs"), "{one}");
+        assert!(one.contains("wsl --set-version"), "{one}");
+        assert!(
+            wsl_kvm_failure(Some(Wsl::Two), true).is_none(),
+            "a permission problem stays the table's"
+        );
+        assert!(wsl_kvm_failure(None, false).is_none(), "not WSL, not this line");
+    }
+
+    /// The kernel row names the WSL it found, so an operator reading `linux (Ubuntu) (WSL2)` knows
+    /// the kvm row below it is Windows's to fix — and one reading `(WSL1)` knows no setting will
+    /// do — without a WSL kernel to ask.
+    #[test]
+    fn the_kernel_line_notes_the_wsl_and_keeps_the_distribution_name() {
+        assert_eq!(
+            platform_line("linux", Some("Ubuntu 24.04 LTS"), Some(Wsl::Two)),
+            "linux (Ubuntu 24.04 LTS) (WSL2)"
+        );
+        assert_eq!(platform_line("linux", None, Some(Wsl::One)), "linux (WSL1)");
+        assert_eq!(platform_line("linux", None, None), "linux");
+        assert_eq!(platform_line("macos", Some("macOS 15.0"), None), "macos (macOS 15.0)");
     }
 }

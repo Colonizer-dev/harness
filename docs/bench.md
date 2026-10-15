@@ -266,6 +266,25 @@ never what Jev's would have done, so the real test is the bench run both ways: `
 `jev_routing_act` off, `run --label jev` with it on, then `compare bench-rule.json bench-jev.json` for the
 cost, working time, clean-resolved rate and gap per run.
 
+## Measuring verify focus
+
+Focused-first verification (#584) writes its own evidence, so it needs no bench run to read. Every
+verification that had a choice among checks appends a row to `<data dir>/jev_focus.jsonl` — the candidates,
+the check the rule ran first, whether it would have caught the failure, and time-to-first-failure as ran
+versus focused — and every ask at the `verify.focus` point appends a row to `decisions.jsonl`
+([jev.md](jev.md#points)). `focus` reads both:
+
+```sh
+node scripts/bench.mjs focus              # --data <dir> names a non-default mothership
+node scripts/bench.mjs focus --json       # the same report as JSON
+```
+
+It reports the number of verifications with a choice (by mode), how often the rule's own pick would have
+caught the failure, the median time-to-first-failure as ran versus focused, the median whole verification,
+and the same would-catch rate for Jev's shadow pick with its median ask latency. A green verification has
+no time-to-first-failure and stays out of the rates; Jev is shadow only, so nothing it picked ever ran —
+the report is the case for (or against) a later act mode, not a change in behavior.
+
 ## Held-out suite
 
 A change tuned on repeated runs of the visible checks — or a colony that has somehow seen them — can pass

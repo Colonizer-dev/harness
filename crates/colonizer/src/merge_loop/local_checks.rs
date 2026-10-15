@@ -272,7 +272,9 @@ pub(super) async fn head_unavailable(app: &App, repo: &str, sha: &str, no_checks
 }
 
 /// The repository's local-check config, read from the base branch of the mothership's bare clone.
-pub(super) async fn config(app: &Shared, repo: &str, base: &str, opted_in: bool) -> Result<LocalChecks, String> {
+/// Callers that pass `opted_in: false` (the merge steward's local verification does) only ever get
+/// the commands a repository's own `.colonizer/merge.toml` declares.
+pub(crate) async fn config(app: &Shared, repo: &str, base: &str, opted_in: bool) -> Result<LocalChecks, String> {
     let bare = crate::code::ensure_bare(app, repo).await.map_err(|e| format!("{e:#}"))?;
     let show = |path: &str| {
         let mut c = app.git(&bare);
@@ -305,8 +307,9 @@ pub(super) async fn config(app: &Shared, repo: &str, base: &str, opted_in: bool)
 
 /// Fetches the base and the pull request's head into the bare clone, merges them on the host with
 /// `git merge-tree` (objects only: nothing checked out, no hook or filter runs), exports the merged
-/// tree and runs [`guest_script`] over it in a one-shot microVM with the colony image.
-pub(super) async fn run(app: &Shared, repo: &str, pr: u64, head: &str, base: &str, commands: &[String]) -> LocalRun {
+/// tree and runs [`guest_script`] over it in a one-shot microVM with the colony image. The merge
+/// steward's local verification of a billing-blocked pull request (issue #1245) runs this too.
+pub(crate) async fn run(app: &Shared, repo: &str, pr: u64, head: &str, base: &str, commands: &[String]) -> LocalRun {
     let fail = |what: &str, e: anyhow::Error| LocalRun::Unrunnable(format!("{what}: {}", truncate(&format!("{e:#}"), 300)));
     let bare = match crate::code::ensure_bare(app, repo).await {
         Ok(b) => b,

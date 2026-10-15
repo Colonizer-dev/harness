@@ -8,6 +8,7 @@ use chrono::TimeZone;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod fix;
 mod local;
 mod quiet_head;
 mod resolve;
@@ -41,6 +42,14 @@ struct Fake {
     local_runs: RefCell<VecDeque<LocalRun>>,
     /// Issue #968: what starting a resolve answers (resuming on `src/shared.rs` when unset).
     resolves: RefCell<VecDeque<super::resolve::Started>>,
+    /// Issue #1054: what resuming a colony for a fix answers (resumed when unset), and the checks
+    /// failing on a pull request's base branch (none when unset).
+    fixes: RefCell<VecDeque<super::fix::Started>>,
+    base_red: RefCell<Vec<String>>,
+    /// Issue #1054: the brief each fix resume carried, last first.
+    fix_notes: RefCell<Vec<String>>,
+    /// Issue #1054: why dispatching fails, once each, in order (never when unset).
+    dispatch_err: RefCell<VecDeque<String>>,
     /// Issue #1075: each head's own checks and push time (green, pushed an hour before `t0`, when
     /// unset), the merge answers in order (merged when none), the branch tips after a merge (the
     /// merged head when unset), and the quiet period in minutes (10 when unset).
@@ -193,9 +202,13 @@ impl Ops for Fake {
         let what = match &d {
             Dispatch::Redo { session, .. } => format!("redo {}", session.id),
             Dispatch::Fix { log, .. } => format!("fix ({log})"),
+            Dispatch::FixRed { session, .. } => format!("fix-redo {}", session.id),
             Dispatch::Revert { merged, .. } => format!("revert {}", merged.sha.clone().unwrap_or_default()),
         };
         self.say(format!("dispatch {what}"));
+        if let Some(e) = self.dispatch_err.borrow_mut().pop_front() {
+            return Err(e);
+        }
         Ok("c0lony".to_string())
     }
     async fn local_config(&self, _repo: &str, _base: &str, opted_in: bool) -> Result<LocalChecks, String> {
@@ -229,6 +242,19 @@ impl Ops for Fake {
     async fn label_needs_human(&self, s: &Session) -> Result<(), String> {
         self.say(format!("label {} needs-human", s.id));
         Ok(())
+    }
+    async fn fix(&self, s: &Session, note: String) -> super::fix::Started {
+        self.say(format!("fix {}", s.id));
+        self.fix_notes.borrow_mut().push(note);
+        let mut q = self.fixes.borrow_mut();
+        if q.is_empty() {
+            return super::fix::Started::Resumed;
+        }
+        next(&mut q)
+    }
+    async fn branch_failing(&self, repo: &str, branch: &str) -> Result<Vec<String>, String> {
+        self.say(format!("branch-failing {repo} {branch}"));
+        Ok(self.base_red.borrow().clone())
     }
 }
 
@@ -1197,6 +1223,7 @@ fn the_settings_default_to_off_hourly_and_gentle_and_refuse_unsafe_values() {
         json!({"revert_on_red": true}),
         json!({"cadence": {"every": "interval", "minutes": 1}}),
         json!({"repo_max_merges": {"acme": 2}}),
+        json!({"fix_attempts": 0}),
     ] {
         let s: Settings = serde_json::from_value(bad.clone()).unwrap();
         assert!(normalize(s).is_err(), "{bad} should be refused");

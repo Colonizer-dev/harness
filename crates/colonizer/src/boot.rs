@@ -102,6 +102,23 @@ async fn resume_digest(store: &dyn SessionStore, id: &str) -> Option<String> {
     Some(block)
 }
 
+/// What a brief closes with beyond the task itself (issue #876, issue #1247): the one-shot note an
+/// automatic resume carries — the hold-timeout backoff's "choose for yourself", or an answer that
+/// arrived while the colony was parked — and, on a resume only, the decisions the operator has
+/// already answered, so a restarted colony does not put the same question to the person twice.
+/// Pure, so tests pin what the agent reads.
+pub(crate) fn resume_extras(s: &Session, resume: bool) -> String {
+    let mut extras = String::new();
+    if let Some(note) = s.resume_note.as_deref() {
+        extras.push_str(&format!("\n## What to do now\n\n{note}\n"));
+    }
+    if resume && let Some(decisions) = s.answered_questions_note() {
+        extras.push_str(&decisions);
+        extras.push('\n');
+    }
+    extras
+}
+
 /// One subagent a run ended with still in flight (issue #756): the name its Task call gave it, the
 /// task prompt it was handed, and its last event digested. Built from the archived log at resume
 /// and reported in the brief, so a resumed orchestrator knows the pinned runner's "stopped by the
@@ -824,6 +841,35 @@ async fn resolve_sensitivity_model(
     }
 }
 
+/// The Skillsets setting: the install's Claude Code module's `plugins` setting with the org's
+/// overrides — the same value a claude-code colony's own env mapping produces, computed for
+/// colonies on any module, so every module that loads packs draws from one list
+/// (docs/skill-packs.md).
+fn global_skillsets(
+    modules: &ModulesConfig,
+    org_settings: &orgs::OrgSettings,
+    agents: &[crate::modules::AgentModule],
+) -> Vec<String> {
+    let Some(claude) = agents.iter().find(|a| a.id == "claude-code") else {
+        return Vec::new();
+    };
+    let choice = orgs::effective_agent(modules, org_settings);
+    agent_env(claude, &choice)
+        .get("COLONIZER_PLUGIN_DIRS")
+        .and_then(Value::as_str)
+        .map(crate::plugins::parse_list)
+        .unwrap_or_default()
+}
+
+/// Whether a module's own schema carries a setting boot hands the runner as plugin directories
+/// (`format: "plugin-dirs"`, as the claude-code `plugins` setting declares): such a module is on
+/// the generic path already, whatever its `skill_packs` flag says.
+fn declares_plugin_dirs(agent: &crate::modules::AgentModule) -> bool {
+    agent.schema["properties"]
+        .as_object()
+        .is_some_and(|props| props.values().any(|spec| spec["format"].as_str() == Some("plugin-dirs")))
+}
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -1086,10 +1132,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // A one-shot note an automatic resume carries (issue #876) — the hold-timeout backoff's "choose
     // for yourself" or an answer that arrived while the colony was parked — rides the brief. Cleared
-    // once the runner is up, below; a warm resume hands it over on its own prompt instead.
-    if let Some(note) = s.resume_note.as_deref() {
-        prompt.push_str(&format!("\n## What to do now\n\n{note}\n"));
-    }
+    // once the runner is up, below; a warm resume hands it over on its own prompt instead. So do the
+    // colony's standing decisions (issue #1247): a resume's brief lists what the operator already
+    // answered, so a re-asked question never waits on the person twice.
+    prompt.push_str(&resume_extras(&s, resume));
     app.store().write_private(id, "vm/token", random_token().as_bytes()).await?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
@@ -1240,8 +1286,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         };
         if tokens != crate::routing::RoutingCostTokens::default() {
             let provider_list = app.providers();
-            let direct_pricing = providers::pricing_for(&provider_list, &module_model);
-            let routed_pricing = providers::pricing_for(&provider_list, routed_model);
+            let feed = app.price_feed.entries();
+            let direct_pricing = providers::pricing_for(&provider_list, &module_model, Some(&feed));
+            let routed_pricing = providers::pricing_for(&provider_list, routed_model, Some(&feed));
             if let (Some(direct_pricing), Some(routed_pricing)) = (direct_pricing, routed_pricing) {
                 let estimate = crate::routing::estimate_cost(direct_pricing, routed_pricing, tokens);
                 gated = setting(&agent_choice, &agent.schema, "route_cost_gate")
@@ -1718,21 +1765,46 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         target: crate::services::GUEST_DIR.into(),
         read_only: false,
     });
-    // Claude Code plugin directories, mounted read-only from the mothership.
+    // Skill packs (docs/skill-packs.md), mounted read-only from the mothership. A module that
+    // loads packs reads its own runner env first — how a claude-code colony's `plugins` setting
+    // arrives — and, when it declares `skill_packs` but carries no list of its own, draws from the
+    // Skillsets setting computed for any module (`global_skillsets`).
     //
-    // Outside /workspace on purpose: publish runs `git add -A`, so a plugin
+    // Outside /workspace on purpose: publish runs `git add -A`, so a pack
     // staged inside the worktree would be committed into the pull request.
     // Read-only so one colony cannot edit what the next one loads — the same
     // reason memory scopes are read-only.
     //
     // A setting names a directory, never a path: it is resolved under the
     // mothership's plugins folder, so it cannot reach an arbitrary host path.
-    let plugin_names = crate::plugins::parse_list(
+    let mut enabled = global_skillsets(&modules, &org_settings, &app.agents);
+    if s.origin.as_deref().is_some_and(crate::maps::is_map_origin) {
+        // A mapping colony draws with archify whatever its org has switched on (maps.rs) — the
+        // force-append every claude-code map already gets through its own settings, extended to
+        // any module that loads packs.
+        enabled = crate::plugins::parse_list(&crate::maps::with_archify(&enabled.join(",")));
+    }
+    let mut plugin_names = crate::plugins::parse_list(
         runner_env
             .get("COLONIZER_PLUGIN_DIRS")
             .and_then(Value::as_str)
             .unwrap_or_default(),
     );
+    if plugin_names.is_empty() && agent.skill_packs {
+        plugin_names = enabled.clone();
+    }
+    // A module that loads no packs leaves the setting inert: name the packs being skipped, so an
+    // operator who switches a skillset on for, say, a codex colony is not left guessing why it
+    // never loads. A module that declares its own plugin-dirs setting loads them itself and stays
+    // off this warning.
+    if !agent.skill_packs && !declares_plugin_dirs(&agent) && !enabled.is_empty() {
+        let names = enabled.iter().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", ");
+        log.warn(format!(
+            "skillsets {names} are switched on, but the {} module doesn't load skill packs; skipping them",
+            agent.id
+        ))
+        .await;
+    }
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         let mut resolved = Vec::new();
@@ -1760,6 +1832,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // Two packs answering to the same skill name are ambiguous by
         // construction (docs/skill-packs.md): bail naming both packs.
         crate::plugins::check_skill_uniqueness(&resolved)?;
+        // So are two packs defining the same ant (issue #1163): Claude Code
+        // loads `agents/<file>.md` by name.
+        crate::plugins::check_ant_uniqueness(&resolved)?;
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its
@@ -1932,6 +2007,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 .await
         }
     }
+    // Living Brain (living_brain.rs): a colony whose repository's rule asks for the brain gets its
+    // MCP server. The runner registers the URL; the token is handed to msb below as a secret for the
+    // MCP host alone, so the guest only ever holds the placeholder.
+    let living_brain = match crate::living_brain::colony_mcp(app, &s.repo, &agent.id) {
+        Some(Ok((secret, url))) => {
+            runner_env.insert(crate::living_brain::MCP_URL_ENV.into(), Value::String(url));
+            log.info(format!(
+                "Living Brain: the brain's MCP server is wired in ({})",
+                secret.hosts.join(", ")
+            ))
+            .await;
+            Some(secret)
+        }
+        Some(Err(why)) => {
+            log.warn(format!(
+                "Living Brain: this colony starts without the brain's MCP server ({why})"
+            ))
+            .await;
+            None
+        }
+        None => None,
+    };
     let mut session_json = json!({
         "session_id": id,
         "workspace": "/workspace",
@@ -2041,6 +2138,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     }
     secrets.extend(crate::colony_secrets::boot_secrets(&colony_secrets));
+    secrets.extend(living_brain);
     let mut publish = None;
     // The mesh half of the network fence is captured here — `direct_path_rules` is async (it
     // shells out to `ip`/`ifconfig`) — and the fence itself is decided, purely, in
@@ -2154,9 +2252,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
     // credential files about to be committed, and the agent goes to ignore or inspect them. The
     // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise.
-    let mut excludes = crate::path_policy::exclude_lines(&planned);
+    let placeholders = crate::path_policy::exclude_lines(&planned);
+    let mut excludes = placeholders.clone();
     excludes.extend(crate::path_policy::ua_exclude_lines(&plugin_names));
     crate::path_policy::write_list(&vm_dir.join(crate::path_policy::EXCLUDE_FILE), &excludes)?;
+    // The placeholders into the repository's shared `info/exclude` (#1279): a git that strips the
+    // environment — the host's own calls, an agent's startup snapshot — never sees the
+    // `core.excludesFile` above, and for a linked worktree it reads `info/exclude` from the common
+    // dir, which is the bare repo. Only the placeholders: the understand-anything lines are a
+    // per-colony view (see `ua_exclude_lines`), so they stay guest-side. Best effort: the env arm
+    // still covers the guest's own shells.
+    if let Err(e) = crate::path_policy::write_repo_exclude(&bare, &placeholders.join("\n")) {
+        log.warn(format!("path policy: could not update the repository's info/exclude: {e}"))
+            .await;
+    }
     crate::path_policy::apply(&wt, &planned)?;
     log.info(crate::path_policy::summary(&policy, &planned)).await;
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
@@ -2534,6 +2643,33 @@ mod tests {
         assert!(!story.contains("the new run"), "the live log is not the story");
         assert!(!story.contains("assistant_text_delta"), "delta noise is digested away");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resume's brief closes with the operator's standing decisions (issue #1247), so a colony
+    /// that restarts reads what was already answered instead of asking again; a fresh boot's brief
+    /// carries none — there is nothing to be continuing. The one-shot resume note rides both.
+    #[test]
+    fn a_resumed_brief_carries_the_decisions_already_made() {
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
+        s.resume_note = Some("pick either and carry on".into());
+        assert!(
+            !resume_extras(&s, false).contains("Decisions already made"),
+            "a fresh boot does not replay decisions: {}",
+            resume_extras(&s, false)
+        );
+        s.record_answered_question(
+            "q1",
+            &[json!({"question": "Which file name?", "header": "File"})],
+            &json!({"Which file name?": "hello.txt"}),
+            Some("the short one"),
+        );
+        let resumed = resume_extras(&s, true);
+        assert!(
+            resumed.contains("## What to do now") && resumed.contains("pick either and carry on"),
+            "{resumed}"
+        );
+        assert!(resumed.contains("## Decisions already made"), "{resumed}");
+        assert!(resumed.contains("- File: hello.txt, note: the short one"), "{resumed}");
     }
 
     /// A run's log: a Task still in flight (its Bash line is the last it emitted), a Task that
@@ -3719,5 +3855,177 @@ mod tests {
             jev_compaction(payload, None).unwrap_err(),
             "Jev compaction is switched on, but the mothership has no TypeSafe key (save it on the Secrets page, or set JEV_API_KEY); running without it"
         );
+    }
+
+    // -- skill packs through the whole boot (issue #1164) ---------------------------------------
+    //
+    // The full boot path, driven offline: a resume skips the mirror sync and the GitHub fetch, and
+    // the boot's first hard failure is the microVM start itself (no `msb` here) — after the pack
+    // mounts, session.json and the session log are already written, which is what these tests read
+    // back. The durable record of a mount is the env rewrite: the runner env only ever carries the
+    // in-VM path once `resolve` succeeded and the read-only mount was pushed.
+
+    /// A pi-shaped module with or without the `skill_packs` flag: model and effort settings only,
+    /// no plugins property of its own, everything else neutral (`AgentModule::test`).
+    fn pi_module(skill_packs: bool) -> crate::modules::AgentModule {
+        let mut module = crate::modules::AgentModule::test("pi").schema(json!({
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "title": "Model", "default": "", "env": "COLONIZER_MODEL"},
+                "effort": {"type": "string", "title": "Thinking level", "default": "", "env": "COLONIZER_EFFORT"},
+            }
+        }));
+        module.skill_packs = skill_packs;
+        module
+    }
+
+    /// A claude-code-shaped module carrying the Skillsets setting: the plugins property with the
+    /// `archify` default, the same declaration the real manifest makes.
+    fn claude_module() -> crate::modules::AgentModule {
+        crate::modules::AgentModule::test("claude-code").schema(json!({
+            "type": "object",
+            "properties": {
+                "plugins": {
+                    "type": "string", "format": "plugin-dirs", "title": "Skillsets",
+                    "default": "archify", "env": "COLONIZER_PLUGIN_DIRS"
+                },
+            }
+        }))
+    }
+
+    /// A minimal pack on disk: a manifest and one skill, the shape `plugins::validate` accepts.
+    fn pack(data_dir: &std::path::Path, name: &str, skill: &str) {
+        let dir = data_dir.join("plugins").join(name);
+        std::fs::create_dir_all(dir.join("skills").join(skill)).unwrap();
+        std::fs::write(dir.join("plugin.json"), "{}").unwrap();
+        std::fs::write(dir.join("skills").join(skill).join("SKILL.md"), "---\n").unwrap();
+    }
+
+    /// An install whose assets carry the guest binary (an ELF-magic stand-in; `linux_binary` checks
+    /// nothing deeper) and a colony on the `pi` module prepared for a resume boot — it keeps a base
+    /// and a worktree, so the boot needs neither the mirror sync nor GitHub.
+    async fn pack_boot_app(root: &std::path::Path, agents: Vec<crate::modules::AgentModule>) -> Shared {
+        std::fs::create_dir_all(root.join("assets/bin")).unwrap();
+        std::fs::write(root.join("assets/bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
+        std::fs::create_dir_all(root.join("wt")).unwrap();
+        let app = crate::tests::test_app_with_agents(root, agents, |cfg| cfg.assets = Some(root.join("assets")));
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Starting);
+        s.id = "packs".into();
+        s.agent = "pi".into();
+        s.branch = "colonizer/issue-7".into();
+        s.base = Some("main".into());
+        s.worktree = root.join("wt").display().to_string();
+        s.git_admin_dir = Some("git".into());
+        s.sandbox = "vm-packs".into();
+        app.sessions.write().await.push(s);
+        std::fs::create_dir_all(app.session_dir("packs").join("vm")).unwrap();
+        app
+    }
+
+    /// A resume boot carrying the grant the operator's press mints (issue #98): without one the
+    /// authority refuses before any of the boot runs.
+    async fn resume_boot(app: Shared, id: &str) {
+        let s = app.session(id).await.unwrap();
+        let grant = crate::lifecycle::mint_resume_grant(&s, "operator");
+        boot(app, id.to_string(), true, Some(grant)).await;
+    }
+
+    /// The session record boot wrote, read back through the store.
+    async fn session_json(app: &Shared, id: &str) -> Value {
+        serde_json::from_slice(&app.store().read_file(id, "vm/session.json").await.unwrap().unwrap()).unwrap()
+    }
+
+    /// A colony on a module that declares `skill_packs` but carries no plugins setting of its own
+    /// draws from the Skillsets setting: the pack resolves, mounts read-only, and the runner env is
+    /// rewritten to the in-VM path the runner reads (issue #1164).
+    #[tokio::test]
+    async fn a_pack_capable_module_mounts_the_skillsets_setting() {
+        let root = crate::app::tests::temp_root();
+        let app = pack_boot_app(&root, vec![claude_module(), pi_module(true)]).await;
+        pack(&app.cfg.data_dir, "archify", "demo");
+        resume_boot(app.clone(), "packs").await;
+        let session = session_json(&app, "packs").await;
+        assert_eq!(session["agent"]["module"], "pi");
+        assert_eq!(
+            session["agent"]["env"]["COLONIZER_PLUGIN_DIRS"], "/opt/colonizer/plugins/archify",
+            "the runner sees the in-VM path, not the mothership's"
+        );
+        let info = said(&app, "packs", "info").await;
+        assert!(info.iter().any(|line| line == "loading 1 plugin directory"), "{info:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A module without the flag leaves the Skillsets setting inert: boot warns naming the packs it
+    /// skipped, and nothing is mounted (issue #1164).
+    #[tokio::test]
+    async fn a_module_that_loads_no_packs_warns_and_skips_the_skillsets_setting() {
+        let root = crate::app::tests::temp_root();
+        let app = pack_boot_app(&root, vec![claude_module(), pi_module(false)]).await;
+        pack(&app.cfg.data_dir, "archify", "demo");
+        resume_boot(app.clone(), "packs").await;
+        let warned = said(&app, "packs", "warn").await;
+        assert!(
+            warned
+                .iter()
+                .any(|line| line
+                    == "skillsets \"archify\" are switched on, but the pi module doesn't load skill packs; skipping them"),
+            "{warned:?}"
+        );
+        let session = session_json(&app, "packs").await;
+        assert!(
+            session["agent"]["env"].get("COLONIZER_PLUGIN_DIRS").is_none(),
+            "nothing mounted: {}",
+            session["agent"]["env"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two packs answering to the same skill name cannot both be enabled (docs/skill-packs.md): the
+    /// boot fails naming both packs, before any VM work. Both arrive through the org's skillset
+    /// override, the same merge `orgs::effective_agent` does for a claude-code colony.
+    #[tokio::test]
+    async fn two_packs_sharing_a_skill_name_fail_the_boot_naming_both() {
+        let root = crate::app::tests::temp_root();
+        let app = pack_boot_app(&root, vec![claude_module(), pi_module(true)]).await;
+        pack(&app.cfg.data_dir, "archify", "demo");
+        pack(&app.cfg.data_dir, "twin", "demo");
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/orgs.json"),
+            json!({"acme": {"agent": {"skillsets": {"archify": true, "twin": true}}}}).to_string(),
+        )
+        .unwrap();
+        resume_boot(app.clone(), "packs").await;
+        let s = app.session("packs").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        let error = s.error.expect("the failure is recorded");
+        assert!(error.contains("archify") && error.contains("twin"), "{error}");
+        assert!(error.contains("demo"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The org's own skillset overrides ride the shared setting: skillsets an org switches on load
+    /// for that org's colony on a pack-capable module (issue #1164).
+    #[tokio::test]
+    async fn an_orgs_skillset_override_loads_through_boot() {
+        let root = crate::app::tests::temp_root();
+        let app = pack_boot_app(&root, vec![claude_module(), pi_module(true)]).await;
+        pack(&app.cfg.data_dir, "archify", "demo");
+        pack(&app.cfg.data_dir, "twin", "other");
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/orgs.json"),
+            json!({"acme": {"agent": {"skillsets": {"archify": true, "twin": true}}}}).to_string(),
+        )
+        .unwrap();
+        resume_boot(app.clone(), "packs").await;
+        let session = session_json(&app, "packs").await;
+        assert_eq!(
+            session["agent"]["env"]["COLONIZER_PLUGIN_DIRS"],
+            "/opt/colonizer/plugins/archify,/opt/colonizer/plugins/twin"
+        );
+        let info = said(&app, "packs", "info").await;
+        assert!(info.iter().any(|line| line == "loading 2 plugin directories"), "{info:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

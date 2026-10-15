@@ -54,7 +54,8 @@ Each run follows the rules an operator would follow by hand:
    reverts the train's own last merge instead — never anything else. A red main whose tip is not the
    train's merge is left to people.
 7. **Red pull request CI** is re-run once when every failing check is on `flaky_checks` (a trailing
-   `*` matches a prefix); otherwise it is left red and reported.
+   `*` matches a prefix); otherwise it is left red and reported — or, with `fix_red` on, [sent back
+   to its own colony to fix](#fixing-red-checks-with-a-colony), up to `fix_attempts` attempts.
 8. **No attribution.** Merges are squashes titled `<pull request title> (#N)`, pinned to the head
    that was read (the merge API's `sha`; a push during the merge makes GitHub refuse it, and the pull
    request waits for checks on its new head); a pull request whose commits carry AI attribution is
@@ -99,6 +100,31 @@ run = "UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table"
 ```
 
 A resolved colony keeps autopilot on afterwards, so its later fixes publish to the same pull request.
+
+### Fixing red checks with a colony
+
+Rule 7's re-run only helps a flaky check; a real break leaves the pull request red and its log to a
+person. With `fix_red` on (`colonizer loop merge-train set --fix-red on --fix-attempts 2`; off by
+default), the loop sends it back to its own colony instead (issue #1054): the colony is resumed on
+its kept worktree with a one-shot brief carrying the failing jobs' names and the tail of each
+failing job's log, and instructed to fix the cause — never to skip, delete or weaken a test or
+check — to run the failing checks locally first, and to publish to the same pull request. The
+report shows **fixing checks (attempt 1/2): clippy, test** while it works.
+
+- **The base goes first**: a check that is red on the pull request's base branch too is not the
+  pull request's to fix. The pull request is skipped — a red base is main's problem, and
+  self-heal (rule 6) is what handles the train's own merges.
+- **CI that never ran is never briefed**: a job GitHub refused to start — a billing failure,
+  "…not acquired by Runner…" — is [CI unavailable](#when-github-ci-cannot-run), not a failing
+  check, and no colony is dispatched for it.
+- **One at a time**: one attempt per head commit (a new push is a new try), at most `fix_attempts`
+  (default 2, allowed 1–10) per pull request, and one fix per repository at once. When the colony's
+  worktree was reclaimed, a redo colony takes the brief only when redo is on; otherwise — and once
+  the last attempt has failed — the pull request is labelled `needs-human` and left open with the
+  reason.
+
+A fixed pull request merges like any other: fresh green CI on its new head, every other rule
+unchanged.
 
 ### When GitHub CI cannot run
 
@@ -150,6 +176,7 @@ colonizer loop merge-train set --every 120 --max-merges 2 --repo-cap acme/web=1 
 colonizer loop merge-train set --self-heal on --redo on
 colonizer loop merge-train set --local-checks acme # run acme's checks locally when GitHub CI cannot run
 colonizer loop merge-train set --resolve on --resolve-attempts 3   # resolve DIRTY pull requests with their colony
+colonizer loop merge-train set --fix-red on --fix-attempts 2       # send a red pull request back to its own colony
 colonizer loop merge-train run --dry-run           # what it would do, and why
 colonizer loop merge-train on                      # switch it on; `off` switches it off
 ```

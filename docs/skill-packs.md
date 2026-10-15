@@ -8,6 +8,7 @@ my-pack/
   plugin.json            manifest: what this pack is and what it ships
   mcp.json               tool servers the skills call (only when there are any)
   skills/<name>/SKILL.md one directory per skill
+  agents/<file>.md       one file per colony role (only when the pack ships ants)
 ```
 
 Settings → Skillsets switches packs on and off. It is the Claude Code module's `plugins` setting,
@@ -16,8 +17,23 @@ off for its own colonies. The runner receives the list as `COLONIZER_PLUGIN_DIRS
 ([protocol.md](protocol.md#plugin-directories)). Each name resolves to `<data>/plugins/<name>`,
 else the vendored `<COLONIZER_HOME>/plugins/<name>` (a local copy wins, and the colony log says
 so), mounts read-only at `/opt/colonizer/plugins/<name>`, and loads into Claude Code as one
-`{type: 'local', path}` plugin entry. Skill packs are a Claude Code feature: the other agent
-modules have no `plugins` setting and load none.
+`{type: 'local', path}` plugin entry.
+
+The packs are not Claude-Code-only. Every agent module's manifest declares a `skill_packs`
+capability — Claude Code, OpenCode and Pi have it — and the mothership computes the Skillsets
+setting once (this `plugins` setting with any org override), mounts the enabled packs read-only
+at `/opt/colonizer/plugins/<name>` for every module that declares the capability, and rewrites
+that module's `COLONIZER_PLUGIN_DIRS` to the in-VM paths. A module without the capability starts
+without the packs and logs a boot warning that names the ones it is skipping.
+
+Each runner loads the mounts its own way. OpenCode is given every pack skill as config
+`skills.paths` (one `<pack>/skills/<name>` per skill), behind a `permission.skill` allowlist that
+denies every other skill, with `OPENCODE_DISABLE_EXTERNAL_SKILLS=1` — so project-scope skills and
+anything outside the packs stay off. Pi keeps discovery off (`--no-skills`) and is handed each
+pack skill by explicit `--skill <pack>/skills/<name>` path. The boot-time cross-pack skill-name
+uniqueness check covers every module that loads packs, so a collision blocks any of them. Pack
+`mcp.json` tool servers remain a Claude Code plugin mechanism: validated for every pack, wired
+into Claude Code alone.
 
 One pack is also loaded by purpose: `archify` (vendored from
 [tt-a1i/archify](https://github.com/tt-a1i/archify), MIT) is on by default, and it is added to
@@ -83,6 +99,90 @@ Skill names must be unique across every enabled pack. A collision blocks the col
 boot with an error that names both packs: the model addresses a skill as `<pack>:<name>`,
 and two packs answering to the same name are ambiguous by construction.
 
+## Agents (ants)
+
+A pack can ship colony roles as well as skills. Each role is an *ant* defined in an agent
+file, `agents/<file>.md`: Claude Code's own agent-file format — a `---` frontmatter block,
+then a body that is the agent's system prompt — plus Colonizer's identity. Claude Code
+discovers `agents/*.md` in a mounted pack by itself and ignores the fields it does not know;
+the boot checker judges Colonizer's own.
+
+| Field | Meaning |
+| :--- | :--- |
+| `name` | Required, a plain name: it is the subagent type the orchestrator addresses. |
+| `description` | Required, non-empty: what the orchestrator sees when deciding to delegate. |
+| `tools`, `disallowedTools` | Optional inline arrays of Claude Code tool names. |
+| `model`, `effort` | Optional strings; `effort` is `low`, `medium` or `high`. `model` stays unset unless the file names one, so the subagent model setting keeps deciding it. |
+| `skillsets` | Optional inline array of pack names: the packs whose skills this ant draws on. |
+| `ant` | Optional nested block with the ant's identity, below. |
+
+The `ant:` block is two-space indented keys. `display_name` and `caste` are required — the
+caste one of `forager`, `soldier`, `weaver`, `honeypot`, `scout`, `worker`, `queen` — and
+`title`, `colors` and `move` are optional. `colors` is an inline map with exactly `body`,
+`dark` and `accent`, each a double-quoted `"#rrggbb"` hex string. Unknown keys inside the
+block are refused, because a typo'd field would silently strip the ant of its identity;
+unknown top-level keys are allowed, because Claude Code adds fields of its own over time.
+
+The parser reads a small YAML subset (`parse_agent_frontmatter` in
+`crates/colonizer/src/plugins.rs`): `key: value`
+scalars (bare or double-quoted), inline arrays `[a, b]`, inline maps `{ k: "v" }`, and one
+nested block level, which only `ant:` opens, indented exactly two spaces.
+
+```md
+---
+name: silka
+description: Use for design questions: how the parts fit, the trade-offs, and the simplest design that works.
+skillsets: [archify]
+ant:
+  display_name: Silka
+  caste: weaver
+  title: Architect
+  colors: { body: "#e09a2f", dark: "#a0661a", accent: "#7fd3c0" }
+  move: silk
+---
+You are a pragmatic software architect weaving the colony's parts together. …
+```
+
+`skillsets:` names the packs whose skills the ant draws on, and every name must be
+installed: a pack whose ant points at a skillset neither `<data>/plugins/` nor the vendored
+plugins have is refused at save time and blocks the boot. What is mounted stays colony-wide —
+the Skillsets switches and the org override decide which packs a colony gets — but what an ant
+may call is not: the Claude Code runner holds each Skill call up to the calling ant's list (a
+`matcher: 'Skill'` PreToolUse hook, `antSkillsetDenial` in the runner). The gate fails open on
+every miss, so only the whitelist violation itself is refused: an ant with no `skillsets` list
+carries everything mounted, a skill no mounted pack ships is not the colony's to refuse and
+passes, an ant the registry does not know passes, and with no packs mounted at all there is no
+gate. A call that names no subagent at all is the orchestrator's own, held to the queen's
+list. Nothing reads the ant's identity — `display_name`, `caste`, `colors` — yet
+([gaps.md](gaps.md)).
+
+### The built-in crew
+
+The Claude Code agent module ships its own crew as a pack inside the module,
+`modules/agents/claude-code/crew/` (`plugin.json` plus `agents/*.md`). It is not mounted as a
+plugin and never appears in the Skillsets switches: the whole module directory is mounted
+read-only at `/opt/colonizer/agent` in a colony, and the runner builds the session's `agents`
+entries from the files (`subagents.mjs`). The queen is the orchestrator's own caste — her file
+is an identity record, and she is never emitted as a subagent of herself. `general-purpose`
+and `Explore` carry the prompts of the Claude Code built-ins they stand in for, so the effort
+setting redefines only those two, and only when it is set; without one, the built-ins stay in
+place and inherit the session's. A first-party read-only `repo-explorer` is added either way
+([colonies.md](colonies.md#the-repo-explorer-subagent)).
+
+| Ant | Subagent type | Caste | Role |
+| :--- | :--- | :--- | :--- |
+| Queen | — (the main thread) | queen | Orchestrator: plans, delegates, judges what comes back |
+| Pip | `general-purpose` | forager | General work |
+| Scout | `Explore` | scout | Read-only search |
+| Sarge | `sarge` | soldier | Reviews a change before it ships |
+| Silka | `silka` | weaver | Architect; carries `[archify]` |
+| Mellie | `mellie` | honeypot | Release notes and pull-request descriptions, written to `/harness/out/pr.md` |
+
+**Giving a pack its own crew.** Drop `agents/<name>.md` into a local pack under
+`<data>/plugins/<pack>/` — the file is checked the next time the pack is validated, the
+pack's row in Settings → Skillsets counts its agents beside its skills, and a pack that
+breaks the rules below refuses to save or to boot, with the file and the problem named.
+
 ## Validation
 
 Two checkers, with different reach:
@@ -93,12 +193,22 @@ Two checkers, with different reach:
   as a JSON object, every `skills/<name>/` holding a `SKILL.md` must have a plain name,
   every skill the manifest lists must exist on disk, and an `mcp.json` must give every
   server a stdio `command` or a remote `url` with a non-empty `hosts`/`allowedHosts`
-  declaration (`mcp_hosts`, the reader the egress gate of #304 will consume). A pack that
-  fails blocks the colony's boot, and the save is refused, with the error naming the file.
-  Skill-name uniqueness across packs is checked at boot only.
+  declaration (`mcp_hosts`, the reader the egress gate of #304 will consume). Every
+  `agents/*.md` must parse into a well-formed ant — a required plain `name` and non-empty
+  `description`, plain `skillsets` names, and the `ant:` block judged field by field — and
+  two files answering to the same agent name in one pack are refused. An ant may only carry
+  skillsets that are installed (`check_carried_skillsets`), the same check `resolve` runs at
+  boot and `check_skillsets` at save, so a name is never accepted that boot would refuse.
+  A pack that fails blocks the colony's boot, and the save is refused, with the error naming
+  the file. Skill-name uniqueness across packs is checked at boot only, and so is agent-name
+  uniqueness: two enabled packs defining the same ant block the boot with both named. Both
+  checks run for every module that loads packs, not Claude Code alone.
 - **The full rule set** (`scripts/validate-plugins.mjs`): semver `version`, non-empty
   `description`, SKILL.md frontmatter, `mcp.json` shape and remote-host declarations,
-  and duplicate skill names within a pack (compared case-insensitively). It runs by hand
+  duplicate skill names within a pack (compared case-insensitively), and the same agent-file
+  rules the boot checker applies — frontmatter shape, a plain `name`, the `ant:` block field by
+  field, `skillsets` names, duplicate agent names within a pack (the cross-pack name check is
+  still boot-only). It runs by hand
   (`node scripts/validate-plugins.mjs <dir>...`), in CI and in the vendored-plugin
   updater's proposal workflow over the staged packs (`VENDOR_KINDS="plugin prompt" sh
   scripts/fetch-vendor.sh` stages `dist/plugins/*`, then the validator runs over them),
@@ -182,6 +292,48 @@ move as a pull request; see [Plugin directories](protocol/plugins.md). Its cost-
 upstream's own benchmark, not Colonizer's: see [Token savings](protocol/token-savings.md) and the
 bench protocol in [The bench](bench.md#measuring-a-skill-pack) for what has and has not been
 measured here.
+
+### security-audit
+
+[security-audit](https://github.com/cloudflare/security-audit-skill) (commit c1c8a8c, 2026-09-14,
+MIT, © Cloudflare) is a one-skill pack that makes a colony a security auditor: upstream's six-phase
+workflow — reconnaissance, coverage-led hunting, candidate validation, structured findings,
+independent record verification, target-neutral reporting. Loading the skill is guidance only; the
+skill runs the full workflow and writes its report artifacts only when a task explicitly asks for an
+audit or pen-test, and its full runs write under `~/security-audit-skill/<repo>/run-<N>` — outside
+the worktree under review.
+
+**What is staged.** One skill, `security-audit`: the `SKILL.md`, the attack-class references it
+reads by relative path, `report-schema.json` and the two dependency-free node validators the
+workflow runs on its own output (`validate-findings.cjs`, `validate-coverage-ledger.cjs`), plus
+upstream's LICENSE. Upstream ships no plugin manifest, hooks or MCP server, so staging generates
+both manifests and asserts the exact staged file set: a new upstream file fails staging until a
+maintainer adds it to `scripts/fetch-vendor.sh` and to the `vendor.lock` comment deliberately.
+Upstream's own tests for the validators (`*.test.cjs`) and its README are not staged.
+
+**Off by default.** An operator switches it on in Settings → Skillsets, by adding `security-audit`
+to the Claude Code module's `plugins` list (comma-separated names; `archify` is the default), or
+per-org with the workspace's `agent.skillsets` override. It is not in the default, and nothing
+turns it on by itself. In a colony the skill is addressed as `security-audit:security-audit`.
+
+**It runs target code only in a sandbox, by its own rule.** The skill instructs the agent to run
+target-controlled builds, tests, fuzzers and browsers only inside a sandbox that, among other
+controls, denies external network — and to skip the execution and record the finding as
+`needs_validation`, with the missing sandbox capability named, whenever a control cannot be
+enforced. A colony started with `--net-default-egress deny`
+([sandbox-network.md](sandbox-network.md#egress-policy-303)) provides that network control; the
+skill decides per check whether the rest are met, and a colony operator should expect
+`needs_validation` records for any check whose controls the colony does not provide.
+
+The red team's Security preset does not switch this pack on — nothing does, short of the operator.
+When the org has switched it on, the preset's hunters are briefed to use it: each runs the skill's
+full audit on its focus area instead of an open-ended hunt, writes the run outside the target,
+validates `findings.json` with the skill's own validator, and files only the records the skill marks
+`confirmed` ([red-team.md](red-team.md#the-security-preset)).
+
+**Its pin.** The upstream commit and archive sha256 live in `vendor/vendor.lock` as the
+`security-audit` plugin entry, like every other vendored pack, and the daily vendored-plugin updater
+proposes each upstream move as a pull request; see [Plugin directories](protocol/plugins.md).
 
 ## Downloadable skillsets
 

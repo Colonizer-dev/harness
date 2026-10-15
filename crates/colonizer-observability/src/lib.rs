@@ -20,14 +20,19 @@
 //! - [`map`] turns ledger lines into log records and [`metrics`] folds them into metric series;
 //!   `traces` rebuilds each colony's trace from its events (#846).
 //! - [`transport`] is OTLP/HTTP, and [`exporter`] is the loop: read, map, send, commit on ack.
+//! - [`backfill`] replays the ledgers' on-disk history to a destination in one shot (#858).
 //!
 //! No OpenTelemetry SDK runs here: the OTLP messages are built and encoded directly.
 
+pub mod backfill;
 pub mod batch;
 pub mod contract;
 pub(crate) mod cursor;
 pub mod encode;
 pub mod exporter;
+/// The OTLP/gRPC transport (#851), behind the `otlp-grpc` cargo feature.
+#[cfg(feature = "otlp-grpc")]
+pub mod grpc;
 pub mod hashing;
 pub mod health;
 pub mod map;

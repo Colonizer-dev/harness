@@ -24,7 +24,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   autonomy: { title: "Autonomy", description: "Who answers a colony's questions when you are not there" },
   burn_down: { title: "Burn-down", description: "Spend the weekly token plan down to a reserve before it resets" },
   screen: { title: "Prompt screening", description: "Screen the diff and PR body for hidden code points before publishing" },
-  voice: { title: "Voice", description: "Speech-to-text for the composer's microphone" },
+  voice: { title: "Voice", description: "Speech-to-text for the Colonize microphone" },
   observability: { title: "Observability", description: "Send logs, traces and metrics to Grafana or any OpenTelemetry backend" },
 };
 
@@ -256,7 +256,7 @@ export function VoiceKeyRow({ provider, name }: { provider: string; name: string
 }
 
 /** Records three seconds and runs them through the saved voice service, so a key and a microphone
- *  are proven together before the composer relies on them. */
+ *  are proven together before the Colonize microphone relies on them. */
 export function VoiceTestRow({ unsaved }: { unsaved: boolean }) {
   const api = useApi();
   const [state, setState] = useState<{ phase: "idle" | "recording" | "transcribing" } | { phase: "done"; text: string } | { phase: "failed"; error: string }>({

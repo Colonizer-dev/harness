@@ -437,11 +437,11 @@ const GUIDES: Record<string, Guide> = {
   },
   voice: {
     icon: "mic",
-    blurb: "Turns what you say into text in the composer.",
+    blurb: "Turns what you say into text in Colonize.",
     flow: [
       { icon: "mic", label: "Microphone" },
       { icon: "text", label: "Speech to text" },
-      { icon: "chat", label: "Composer" },
+      { icon: "chat", label: "Colonize" },
     ],
   },
   orgs: {

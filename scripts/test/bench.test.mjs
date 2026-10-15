@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { actTier, briefMetrics, briefReport, formatBriefReport, formatComparison, formatJevReport, formatRateReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, rateReport, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { actTier, briefMetrics, briefReport, focusReport, formatBriefReport, formatComparison, formatFocusReport, formatJevReport, formatRateReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, rateReport, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 import { loadSpend, readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -466,6 +466,40 @@ test('the routing table shows the counts, the disagreements and the verdict', ()
   assert.match(text, /Verdict: act is not yet justified: only 2 confident disagreements/);
   assert.equal(parseArgs(['routing']).threshold, 0.8, 'routing defaults to the act confidence');
   assert.equal(parseArgs(['routing', '--threshold', '0.7']).threshold, 0.7);
+});
+
+test('the focus report joins the rule measurement with Jev shadow asks, skipping green runs', () => {
+  const focus = [
+    { kind: 'focus', mode: 'shadow', would_catch: true, actual_first_failure_ms: 300, focused_first_failure_ms: 100, total_ms: 500 },
+    { kind: 'focus', mode: 'act', would_catch: false, actual_first_failure_ms: 200, focused_first_failure_ms: 250, total_ms: 400 },
+    { kind: 'focus', mode: 'shadow', would_catch: null, actual_first_failure_ms: null, focused_first_failure_ms: null, total_ms: 90 },
+    { kind: 'decision', point: 'routing.tier', pick: 'high', latency_ms: 99 },
+  ];
+  const decisions = [
+    ...focus,
+    { kind: 'decision', point: 'verify.focus', pick: 'b: cargo test', latency_ms: 30, outcome: { would_catch: true } },
+    { kind: 'decision', point: 'verify.focus', pick: null, miss: 'no_key', latency_ms: 0 },
+  ];
+  const r = focusReport(focus, decisions);
+  assert.deepEqual(r.by_mode, { shadow: 2, act: 1 });
+  assert.equal(r.verifications, 3);
+  assert.equal(r.failed, 2, 'a green verification has no would-catch to judge');
+  assert.equal(r.rule_would_catch, 0.5);
+  assert.equal(r.median_actual_first_failure_ms, 250);
+  assert.equal(r.median_focused_first_failure_ms, 175);
+  assert.equal(r.median_total_ms, 400);
+  assert.equal(r.asked, 2);
+  assert.equal(r.answered, 1);
+  assert.equal(r.jev_would_catch, 1, 'the one answer caught it');
+  assert.equal(r.median_jev_latency_ms, 30, 'the median ask is over the answers; a miss carries none');
+  const text = formatFocusReport(r);
+  assert.match(text, /median time-to-first-failure: 250 ms as ran vs 175 ms focused, 30% faster focused/);
+  assert.match(text, /Jev asked in shadow: 2, answered 1/);
+  const slower = formatFocusReport(focusReport(
+    [{ kind: 'focus', mode: 'shadow', would_catch: true, actual_first_failure_ms: 200, focused_first_failure_ms: 250, total_ms: 400 }],
+    [],
+  ));
+  assert.match(slower, /200 ms as ran vs 250 ms focused, 25% slower focused/, 'a slower focused median is not dressed up as a gain');
 });
 
 test('an empty ledger reports nothing to judge rather than failing', () => {

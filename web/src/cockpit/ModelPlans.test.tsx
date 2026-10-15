@@ -81,6 +81,67 @@ describe("planView", () => {
     expect(failed.usedPct).toBeNull();
   });
 
+  it("reads the account's window readings as the figure and one detail line per further window", () => {
+    const v = planView(
+      plan({
+        id: "anthropic",
+        name: "Claude",
+        kind: "claude",
+        used_by: ["orchestrator"],
+        windows: [
+          { label: "Session", used_pct: 62.4, reset_unix: NOW / 1000 + 3600 },
+          { label: "Week", used_pct: 31.6, reset_unix: NOW / 1000 + 3 * 86_400 },
+        ],
+      }),
+      NOW,
+      "UTC",
+    );
+    expect(v.tone).toBe("ok");
+    expect(v.usedPct).toBe(62);
+    expect(v.figure).toBe("Session: 62% used · resets 18:41");
+    expect(v.details).toEqual(["Week: 32% used · resets Thu"]);
+  });
+
+  it("leads the figure with the window nearest its cap, and says when the reading was taken", () => {
+    const v = planView(
+      plan({
+        id: "anthropic",
+        name: "Claude",
+        kind: "claude",
+        used_by: ["orchestrator"],
+        windows: [
+          { label: "Session", used_pct: 20.4, reset_unix: NOW / 1000 + 3600 },
+          { label: "Week", used_pct: 74.6, reset_unix: NOW / 1000 + 3 * 86_400 },
+        ],
+        windows_checked_at: NOW / 1000 - 120,
+      }),
+      NOW,
+      "UTC",
+    );
+    expect(v.tone).toBe("ok");
+    expect(v.usedPct).toBe(75);
+    expect(v.figure).toBe("Week: 75% used · resets Thu · checked 2 min ago");
+    expect(v.details).toEqual(["Session: 20% used · resets 18:41"]);
+    // A tie keeps the reading's order: Session still leads.
+    const tie = planView(
+      plan({ id: "anthropic", name: "Claude", kind: "claude", windows: [{ label: "Session", used_pct: 50, reset_unix: null }, { label: "Week", used_pct: 50, reset_unix: null }] }),
+      NOW,
+    );
+    expect(tie.figure).toBe("Session: 50% used");
+    expect(tie.details).toEqual(["Week: 50% used"]);
+  });
+
+  it("takes the warning tone as a window nears its limit, and keeps the honest unknown without a reading", () => {
+    const v = planView(plan({ windows: [{ label: "Session", used_pct: 87.2, reset_unix: null }] }), NOW);
+    expect(v.tone).toBe("warn");
+    expect(v.usedPct).toBe(87);
+    expect(v.figure).toBe("Session: 87% used");
+    expect(v.details).toEqual(["Nearly at the limit"]);
+    const empty = planView(plan({ id: "anthropic", name: "Claude", kind: "claude", windows: [] }), NOW);
+    expect(empty.figure).toBe("no limit reported");
+    expect(empty.details[0]).toBe("Claude reports its session and weekly limits only once one is hit");
+  });
+
   it("puts exhausted plans first, otherwise keeps the mothership's order", () => {
     const sorted = sortPlans([plan({ id: "a" }), plan({ id: "b", exhausted: true }), plan({ id: "c" })]);
     expect(sorted.map((p) => p.id)).toEqual(["b", "a", "c"]);

@@ -273,7 +273,7 @@ stays quiet for a month. **Keep fresh…** brings the offer back. See
 row, or **⌘K** (Ctrl+K on Linux and Windows) from any view.
 
 ⌘K opens Colonize everywhere in the cockpit, except inside the code editor or a terminal, which keep
-the key for themselves. It no longer opens the floating composer.
+the key for themselves.
 
 The pane has two parts.
 
@@ -305,13 +305,6 @@ Limits:
 - Colonize is disabled until GitHub is connected.
 - If the Source module has include labels, a new issue does not get them. The pane keeps it in its
   own list so you can dispatch it, but it will not show in the filtered list after a reload.
-
-### The floating composer
-
-On Overview, Nest, Inbox, History, Memory and Host, a composer pill floats at the bottom. Click it
-to open it. It has two modes: **Launch colony** starts a colony on the chosen repository (type `#123`
-or pick a suggested issue to link one), and **Ask** sends the text to Chat. It also accepts
-`/loop <interval> <task>` and dictation.
 
 ## Launch
 
@@ -775,6 +768,41 @@ colonies and log files — and how many bytes — turning it on would send to th
 never sent. **Send history to the owner** is the consent the history push waits for
 ([fleet.md](fleet.md#history-push)); **Stop sending history** withdraws it. Leaving and re-joining
 turns it off again.
+
+### Observability
+
+**Settings → Modules → Observability.** Sends the mothership's logs, traces and metrics to any
+OpenTelemetry backend; what exactly is carried is in [observability.md](observability.md).
+
+Turn it on with the endpoint and the protocol (`http/protobuf` suits almost every backend). The
+pane lists the common backends with their endpoint patterns and the header each wants — Grafana
+Cloud (`https://otlp-gateway-<zone>.grafana.net/otlp`, header `Authorization` carrying
+`Basic <base64 of instance-id:token>`), Honeycomb (`https://api.honeycomb.io`, header
+`x-honeycomb-team`), Datadog's local Agent (`http://127.0.0.1:4318`, header `DD-API-KEY`), a local
+collector (`http://127.0.0.1:4318`, usually no header). Header values never go in the settings:
+type them into the pane's **Headers** field, which stores the `k=v,k2=v2` list as the
+observability-headers secret and only ever names it back.
+
+Under the status line, the health card shows one row per signal — logs, traces, metrics — labelled
+**Sending** (with the age of the last record), **Backing off** (with the retry countdown and the
+last error), **Unauthorized** (the backend rejected the credentials — check the header in
+**Settings → Secrets**), or **Off**, with a summary of the backlog, records sent and the last
+success, and a line saying where each setting came from: the module settings, an environment
+variable, or the built-in default.
+
+**Send test** sends one log record and one metric point through the saved settings, and each
+failing signal comes back with a hint: compare the header name and value with what this backend
+expects, check the endpoint path and protocol when it answered an HTTP error, or check the host
+and port when it could not be reached.
+
+The **Conversation content** and **Conversation thinking** switches are the one save this pane
+asks about. The dialog says what would be sent (what you and the agent actually said, and the
+model's thinking), that each workspace must also opt in before any of it is sent, that restricted
+colonies — and colonies whose sensitivity was never recorded — never send content, and that it
+meaningfully increases data volume and backend cost.
+
+When a signal has been failing for ten minutes, a red **Observability degraded** badge appears in
+the top bar; clicking it opens this pane.
 
 ### Notifications and Web Push
 

@@ -9,6 +9,7 @@
 
 use crate::{
     Shared,
+    claude_login::{UsageReading, cached_usage},
     gateway::{ProviderUsage, QuotaState, probe_cached},
     providers::{self, Provider},
 };
@@ -36,6 +37,10 @@ pub(crate) struct PlanInput {
     /// The cached quota probe's answer (`{remaining, limit?, error}`) with its `checked_at`; `None`
     /// when the provider has no probe configured.
     pub balance: Option<Value>,
+    /// The Claude subscription's own caps (issue #1223): the last good read of Anthropic's OAuth
+    /// usage endpoint, with when it was read. `None` for providers, and for the account before the
+    /// first good read — the row then says nothing rather than calling the plan unlimited.
+    pub windows: Option<UsageReading>,
 }
 
 /// One plan as `GET /api/models/plans` lists it. `balance.remaining`/`balance.limit` are the
@@ -71,6 +76,10 @@ pub(crate) fn plan_json(input: &PlanInput) -> Value {
         "last_request_at": input.usage.as_ref().and_then(|u| u.last_request_at),
         "since": input.usage.as_ref().and_then(|u| u.since),
         "balance": balance,
+        // The subscription's windows (issue #1223), when a reading exists. Null means the usage
+        // endpoint has not answered — never "no limit".
+        "windows": input.windows.as_ref().map(|r| json!(r.windows)),
+        "windows_checked_at": input.windows.as_ref().map(|r| r.checked_at),
     })
 }
 
@@ -106,6 +115,7 @@ pub async fn plans(State(app): State<Shared>) -> Json<Value> {
             record: app.gateway.account_quota_state(),
             usage: None,
             balance: None,
+            windows: cached_usage(&app).await,
         }));
         // While the account is out and its fallback carries the work, the row says where it runs
         // (#1130) — the plan bars read "Claude out, running on MiniMax until 19:51".
@@ -143,6 +153,7 @@ pub async fn plans(State(app): State<Shared>) -> Json<Value> {
             record: app.gateway.quota_state(&provider.id),
             usage: Some(app.gateway.usage(&provider.id)),
             balance,
+            windows: None,
         }));
     }
     Json(json!({"plans": rows, "checked_at": Utc::now()}))
@@ -151,6 +162,7 @@ pub async fn plans(State(app): State<Shared>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_login::UsageWindow;
 
     fn input() -> PlanInput {
         PlanInput {
@@ -162,6 +174,7 @@ mod tests {
             record: None,
             usage: None,
             balance: None,
+            windows: None,
         }
     }
 
@@ -242,5 +255,48 @@ mod tests {
             Value::Null,
             "the gateway does not proxy the Claude account"
         );
+    }
+
+    #[test]
+    fn the_claude_row_carries_the_subscription_windows() {
+        let row = plan_json(&PlanInput {
+            kind: "claude",
+            windows: Some(UsageReading {
+                fingerprint: "fp".into(),
+                windows: vec![
+                    UsageWindow {
+                        label: "Session",
+                        used_pct: 7.0,
+                        reset_unix: Some(1_766_505_600),
+                    },
+                    UsageWindow {
+                        label: "Week",
+                        used_pct: 31.5,
+                        reset_unix: None,
+                    },
+                ],
+                checked_at: 1_791_229_918,
+            }),
+            ..input()
+        });
+        assert_eq!(row["windows"][0]["label"], "Session");
+        assert_eq!(row["windows"][0]["used_pct"], 7.0);
+        assert_eq!(row["windows"][0]["reset_unix"], 1_766_505_600);
+        assert_eq!(row["windows"][1]["label"], "Week");
+        assert_eq!(row["windows"][1]["reset_unix"], Value::Null);
+        assert_eq!(row["windows_checked_at"], 1_791_229_918);
+    }
+
+    #[test]
+    fn a_plan_without_a_reading_says_nothing_about_windows() {
+        let row = plan_json(&PlanInput {
+            kind: "claude",
+            ..input()
+        });
+        assert_eq!(row["windows"], Value::Null, "no reading is not 'no limit'");
+        assert_eq!(row["windows_checked_at"], Value::Null);
+        // The honest fields the card already drew are untouched.
+        assert_eq!(row["balance"], Value::Null);
+        assert_eq!(row["exhausted"], false);
     }
 }

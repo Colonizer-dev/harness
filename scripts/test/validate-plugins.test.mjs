@@ -13,6 +13,10 @@ const manifest = (over = {}) =>
 
 const skillMd = (name = 'hello', description = 'Says hello') => `---\nname: ${name}\ndescription: ${description}\n---\n\nBody.\n`;
 
+/** An agent file (issue #1163): name/description plus whatever `extra` spells, and a system prompt. */
+const agentMd = (name = 'sarge', extra = []) =>
+  ['---', `name: ${name}`, 'description: Runs the crew', ...extra, '---', '', 'Do the work.', ''].join('\n');
+
 /** A pack dir from {relative/path: content}; removed after the test. */
 function pack(t, files) {
   const dir = mkdtempSync(join(tmpdir(), 'validate-plugins-'));
@@ -127,4 +131,135 @@ test('a manifest that is valid JSON but not an object fails with manifest-shape,
     assert.equal(result.ok, false, `${body} should not validate`);
     assert.ok(rules(result).includes('manifest-shape'), `${body} should be a shape error, got ${rules(result)}`);
   }
+});
+
+test('a plain Claude Code agent file passes, and unknown top-level keys are Claude Code\'s to add', (t) => {
+  const result = validatePack(
+    pack(t, {
+      ...valid(),
+      'agents/planner.md': agentMd('planner', [
+        'tools: [Read, Grep]',
+        'disallowedTools: [Edit]',
+        'model: sonnet',
+        'effort: high',
+        'something-new: whatever Claude Code adds next',
+      ]),
+    }),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+});
+
+test('a full ant file passes', (t) => {
+  const result = validatePack(
+    pack(t, {
+      ...valid(),
+      'agents/sarge.md': agentMd('sarge', [
+        'skillsets: [ponytail, ecc]',
+        'ant:',
+        '  display_name: Sarge',
+        '  caste: soldier',
+        '  title: Sergeant of Skills',
+        '  colors: { body: "#112233", dark: "#445566", accent: "#778899" }',
+        '  move: scuttle',
+      ]),
+    }),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+});
+
+test('an agent file without frontmatter fails with agent-frontmatter', (t) => {
+  const none = validatePack(pack(t, { ...valid(), 'agents/broken.md': 'Just a body, no frontmatter.\n' }));
+  assert.equal(none.ok, false);
+  assert.ok(rules(none).includes('agent-frontmatter'));
+  const unterminated = validatePack(pack(t, { ...valid(), 'agents/broken.md': '---\nname: broken\n' }));
+  assert.ok(rules(unterminated).includes('agent-frontmatter'));
+});
+
+test('an agent missing name or description fails with agent-frontmatter', (t) => {
+  for (const body of ['---\ndescription: d\n---\n', '---\nname: x\n---\n', '---\nname: x\ndescription:   \n---\n']) {
+    const result = validatePack(pack(t, { ...valid(), 'agents/x.md': body }));
+    assert.ok(rules(result).includes('agent-frontmatter'), `${JSON.stringify(body)}: ${rules(result)}`);
+  }
+});
+
+test('an array where a string belongs fails, named by the field', (t) => {
+  const result = validatePack(pack(t, { ...valid(), 'agents/x.md': agentMd('x', ['model: [sonnet]']) }));
+  assert.ok(rules(result).includes('agent-frontmatter'));
+  assert.ok(result.errors.some((e) => e.message.includes('model: must be a string')));
+});
+
+test('a non-plain agent name fails with agent-name', (t) => {
+  const result = validatePack(pack(t, { ...valid(), 'agents/x.md': agentMd('../escape') }));
+  assert.equal(result.ok, false);
+  assert.ok(rules(result).includes('agent-name'));
+});
+
+test('an unknown caste, a typo\'d ant key and a missing display_name fail with agent-caste', (t) => {
+  const bad = validatePack(
+    pack(t, { ...valid(), 'agents/sarge.md': agentMd('sarge', ['ant:', '  display_name: Sarge', '  caste: general']) }),
+  );
+  assert.ok(rules(bad).includes('agent-caste'));
+  assert.ok(bad.errors.some((e) => e.message.includes('unknown ant caste "general"')));
+
+  const typo = validatePack(
+    pack(t, {
+      ...valid(),
+      'agents/sarge.md': agentMd('sarge', ['ant:', '  display_name: Sarge', '  caste: forager', '  colour: red']),
+    }),
+  );
+  assert.ok(typo.errors.some((e) => e.rule === 'agent-caste' && e.message.includes('unknown ant field "colour"')));
+
+  const noName = validatePack(pack(t, { ...valid(), 'agents/sarge.md': agentMd('sarge', ['ant:', '  caste: forager']) }));
+  assert.ok(noName.errors.some((e) => e.rule === 'agent-caste' && e.message.includes('display_name')));
+});
+
+test('ant.colors must be exactly body, dark and accent, double-quoted hex', (t) => {
+  const bare = validatePack(
+    pack(t, {
+      ...valid(),
+      'agents/painted.md': agentMd('painted', [
+        'ant:',
+        '  display_name: P',
+        '  caste: worker',
+        '  colors: { body: "#112233", dark: #445566, accent: "#778899" }',
+      ]),
+    }),
+  );
+  assert.ok(
+    bare.errors.some((e) => e.rule === 'agent-colors' && e.message.includes('ant.colors.dark must be a double-quoted #rrggbb hex string')),
+    bare.errors,
+  );
+
+  const missing = validatePack(
+    pack(t, {
+      ...valid(),
+      'agents/painted.md': agentMd('painted', [
+        'ant:',
+        '  display_name: P',
+        '  caste: worker',
+        '  colors: { body: "#112233", dark: "#445566" }',
+      ]),
+    }),
+  );
+  assert.ok(missing.errors.some((e) => e.rule === 'agent-colors' && e.message.includes('must list accent')), missing.errors);
+});
+
+test('a skillset an ant carries must be a plain name: agent-skillsets', (t) => {
+  const result = validatePack(pack(t, { ...valid(), 'agents/sarge.md': agentMd('sarge', ['skillsets: [../escape]']) }));
+  assert.equal(result.ok, false);
+  assert.ok(rules(result).includes('agent-skillsets'));
+});
+
+test('duplicate agent names in one pack fail with agent-duplicate', (t) => {
+  const result = validatePack(pack(t, { ...valid(), 'agents/sarge.md': agentMd('sarge'), 'agents/again.md': agentMd('sarge') }));
+  assert.equal(result.ok, false);
+  assert.ok(rules(result).includes('agent-duplicate'));
+});
+
+test('an unparseable frontmatter line is named with its number', (t) => {
+  const result = validatePack(
+    pack(t, { ...valid(), 'agents/junk.md': '---\nname: junk\ndescription: d\nnot a frontmatter line\n---\n' }),
+  );
+  assert.ok(rules(result).includes('agent-frontmatter'));
+  assert.ok(result.errors.some((e) => e.message.includes('line 4')), result.errors);
 });

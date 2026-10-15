@@ -1,4 +1,4 @@
-/* Spotlight (issue #1218): a frosted panel over the page, large type, and motion that settles
+/* Spotlight (issue #1218): a solid panel over the page, large type, and motion that settles
    rather than snaps. Colours come from the cockpit's tokens, so light and dark both work. */
 
 .spot-backdrop {
@@ -8,11 +8,12 @@
   animation: spot-fade 160ms ease-out both;
 }
 
-.spot-panel,
-.spot-surface {
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
-  backdrop-filter: blur(36px) saturate(1.9);
-  -webkit-backdrop-filter: blur(36px) saturate(1.9);
+/* Every panel (notifications, Ask, Colonize, the menus) is opaque: the page behind never shows
+   through. On the panel surface --faint falls short of AA for small text (3.2:1 light, 3.9:1 dark),
+   so inside a panel the faint lines (section titles, times, hints, the placeholder) use --muted. */
+.spot-panel {
+  --faint: var(--muted);
+  background: var(--panel);
   border: 1px solid var(--border-strong);
   box-shadow:
     0 36px 96px rgb(0 0 0 / 0.42),

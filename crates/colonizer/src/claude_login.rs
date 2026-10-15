@@ -30,6 +30,16 @@ const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 /// Both answers and failures are kept this long, so the status poll (every 30 s per open tab)
 /// never hammers Anthropic with a lookup that is going to fail again.
 const ACCOUNT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+/// The subscription's usage endpoint — what Claude Code's `/usage` reads (issue #1223). Subscription
+/// traffic never passes the gateway, so this is the only place the session and weekly caps show.
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// The usage endpoint allows only a handful of calls per token, so the read runs every third health
+/// tick — 15 minutes apart, the first right at startup (the interval's first tick fires
+/// immediately).
+const USAGE_EVERY_TICKS: u32 = 3;
+/// A usage reading older than this is dropped rather than drawn: after six hours without a good
+/// read the bars are no longer known, and the row says nothing instead.
+const USAGE_STALE_SECS: i64 = 6 * 60 * 60;
 
 #[derive(Clone, Serialize)]
 pub struct LoginView {
@@ -446,18 +456,144 @@ pub async fn check_accounts(app: &App) {
     *app.claude_health.lock().await = fresh;
 }
 
-/// Runs the per-account health check every five minutes (issue #983). Missed ticks are skipped, not
-/// queued: the check is a few seconds of network and the next tick is soon enough.
+/// Runs the per-account health check every five minutes (issue #983), and the subscription usage
+/// read with it every third tick (issue #1223). Missed ticks are skipped, not queued: both are a
+/// few seconds of network and the next tick is soon enough.
 pub fn start_tasks(app: &Shared) {
     let app = app.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(300));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut ticks: u32 = 0;
         loop {
             tick.tick().await;
             check_accounts(&app).await;
+            ticks += 1;
+            if ticks % USAGE_EVERY_TICKS == 1 {
+                refresh_usage(&app).await;
+            }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Claude subscription usage for the plan card (issue #1223)
+// ---------------------------------------------------------------------------
+
+/// One window of the subscription's cap, as the plan card draws it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageWindow {
+    /// `Session` (the five-hour window) or `Week` (the seven-day one).
+    pub label: &'static str,
+    /// Percent of the window used, 0-100.
+    pub used_pct: f64,
+    /// When the window resets, as unix seconds, when Anthropic named a moment.
+    pub reset_unix: Option<i64>,
+}
+
+/// The last good usage reading, cached on `App` so the plans handler never calls the rate-limited
+/// endpoint on the request path. Keyed on a fingerprint of the token it was read with, like
+/// [`AccountStatus`], so a switched account never shows the previous one's bars.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageReading {
+    pub(crate) fingerprint: String,
+    pub windows: Vec<UsageWindow>,
+    /// When the reading was taken, as unix seconds.
+    pub checked_at: i64,
+}
+
+/// Pure: the usage endpoint's JSON into windows. `utilization` is a percent and `resets_at` an
+/// RFC 3339 moment; a window that is null or carries no utilization is skipped — the card never
+/// draws a guess.
+fn parse_usage(body: &Value) -> Vec<UsageWindow> {
+    fn window(label: &'static str, body: &Value) -> Option<UsageWindow> {
+        let used_pct = body.get("utilization")?.as_f64()?.clamp(0.0, 100.0);
+        let reset_unix = body
+            .get("resets_at")
+            .and_then(Value::as_str)
+            .and_then(|at| DateTime::parse_from_rfc3339(at.trim()).ok())
+            .map(|at| at.timestamp());
+        Some(UsageWindow {
+            label,
+            used_pct,
+            reset_unix,
+        })
+    }
+    [("five_hour", "Session"), ("seven_day", "Week")]
+        .into_iter()
+        .filter_map(|(key, label)| body.get(key).filter(|w| !w.is_null()).and_then(|w| window(label, w)))
+        .collect()
+}
+
+/// Asks the usage endpoint for the subscription's windows. Bounded to five seconds like
+/// [`fetch_profile`]. `None` on any failure — logged at debug with the transport error or the HTTP
+/// status, never the token or the body — and the caller keeps the last good reading.
+async fn fetch_usage(token: &str) -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let response = match client
+        .get(USAGE_URL)
+        .bearer_auth(token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::debug!(error = %e, "claude usage: could not reach the usage endpoint ({e}); keeping the last good reading");
+            return None;
+        }
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        tracing::debug!(status = %status, "claude usage: the usage endpoint answered {status}; keeping the last good reading");
+        return None;
+    }
+    match response.json().await {
+        Ok(body) => Some(body),
+        Err(e) => {
+            tracing::debug!(error = %e, "claude usage: the usage answer did not parse ({e}); keeping the last good reading");
+            None
+        }
+    }
+}
+
+/// One pass of the usage read: the install default credential's windows, when it is a subscription
+/// token — an API key has none of these windows. Any failure keeps the last good reading: the
+/// endpoint rate-limits hard, and a slightly old bar beats no bar.
+async fn refresh_usage(app: &App) {
+    let Some(cred) = app.claude_cred().filter(|cred| !is_api_key(&cred.value)) else {
+        return;
+    };
+    let Some(body) = fetch_usage(&cred.value).await else {
+        return;
+    };
+    let windows = parse_usage(&body);
+    if windows.is_empty() {
+        return;
+    }
+    *app.claude_usage.lock().await = Some(UsageReading {
+        fingerprint: fingerprint(&cred.value),
+        windows,
+        checked_at: Utc::now().timestamp(),
+    });
+}
+
+/// The last good usage reading for the plan card: taken by [`refresh_usage`] on the background
+/// task, matched to the credential that is the install default now, and dropped once stale.
+/// `None` before the first good read — the row then says nothing rather than guessing.
+pub(crate) async fn cached_usage(app: &App) -> Option<UsageReading> {
+    let cred = app.claude_cred()?;
+    if is_api_key(&cred.value) {
+        return None;
+    }
+    let reading = app.claude_usage.lock().await.clone()?;
+    (reading.fingerprint == fingerprint(&cred.value) && Utc::now().timestamp() - reading.checked_at < USAGE_STALE_SECS)
+        .then_some(reading)
 }
 
 /// The cached health of the account the status payload's credential resolves to (the install
@@ -902,5 +1038,48 @@ mod tests {
         assert_eq!(fingerprint(token), fingerprint(token));
         assert_ne!(fingerprint(token), fingerprint("sk-ant-oat01-ABCDEF0123456789abcdeg"));
         assert!(!fingerprint(token).contains("ABCDEF"));
+    }
+
+    #[test]
+    fn usage_windows_read_both_cadences_as_percents() {
+        let body = serde_json::json!({
+            "five_hour": {"utilization": 7, "resets_at": "2025-12-23T16:00:00.000Z"},
+            "seven_day": {"utilization": 31.0, "resets_at": "2025-12-29T08:00:00Z"},
+            "seven_day_opus": null,
+            "extra_fields_are_ignored": true,
+        });
+        let windows = parse_usage(&body);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(
+            windows[0],
+            UsageWindow {
+                label: "Session",
+                used_pct: 7.0,
+                reset_unix: Some(1_766_505_600)
+            }
+        );
+        assert_eq!(
+            windows[1],
+            UsageWindow {
+                label: "Week",
+                used_pct: 31.0,
+                reset_unix: Some(1_766_995_200)
+            }
+        );
+    }
+
+    #[test]
+    fn usage_windows_skip_what_has_no_utilization() {
+        // A null window, and one without a utilization, are not readings.
+        assert!(
+            parse_usage(&serde_json::json!({"five_hour": null, "seven_day": {"resets_at": "2025-12-29T08:00:00Z"}})).is_empty()
+        );
+        assert_eq!(parse_usage(&Value::Null), Vec::new());
+        // A window that names no reset still draws: the reset is optional.
+        let windows = parse_usage(&serde_json::json!({"five_hour": {"utilization": 7}}));
+        assert_eq!(windows[0].reset_unix, None);
+        // Utilization is a percent, so a wild answer clamps rather than drawing past the bar.
+        let windows = parse_usage(&serde_json::json!({"seven_day": {"utilization": 140.0}}));
+        assert_eq!(windows[0].used_pct, 100.0);
     }
 }

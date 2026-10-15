@@ -71,7 +71,9 @@ impl BoundaryTrail {
 ///   matches the same rule each time. One denial, or two, is a wall the colony works around.
 ///
 /// A `path_policy_unbound` alone fires nothing — it is the host failing to apply a bind, normal
-/// off Linux — but its target joins the deny-then-reach watch like any other.
+/// off Linux — but its target joins the deny-then-reach watch like any other. So do denials of
+/// `exec_policy:git-read-only` (#1258): the wall is by design, so however many times the colony
+/// tries `git add`, that is not a defeat — but a target it then reaches another way still is.
 pub fn note_boundary(trail: &mut BoundaryTrail, boundary: Boundary, now: DateTime<Utc>) -> Option<Defeat> {
     trail.prune(now);
     trail.recent.push_back((now, boundary.clone()));
@@ -96,6 +98,11 @@ pub fn note_boundary(trail: &mut BoundaryTrail, boundary: Boundary, now: DateTim
             })
         }
         "path_policy_unbound" => None,
+        // A `git-read-only` denial is the sandbox working as designed (#1258): `.git` is read-only
+        // on purpose, the denial's reason says so, and an agent that keeps trying `git add` is
+        // hitting the intended wall, not defeating a control — so its denials never count toward
+        // `repeated_denial`. The event still joins the trail for the deny-then-reach watch.
+        "exec_policy_deny" if boundary.control == "exec_policy:git-read-only" => None,
         _ => {
             let since = now - Duration::minutes(CONTROL_DEFEAT_WINDOW_MINUTES);
             let evidence: Vec<Boundary> = trail

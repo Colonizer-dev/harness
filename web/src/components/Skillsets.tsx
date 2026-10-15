@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { errorMessage, useApi } from "../context";
-import type { DownloadableSkillset, PluginDir, PluginListing } from "../types";
+import type { DownloadableSkillset, ModuleInfo, PluginDir, PluginListing } from "../types";
 import { Badge, Button, InfoButton, Spinner, Switch, inputClass } from "./ui";
 
 /** The plugin directories a colony could load, listed when a dialog opens and again after a download lands. */
@@ -21,6 +21,27 @@ export function usePlugins(): { listing: PluginListing | null; error: string | n
   }, [api, round]);
   const reload = useCallback(() => setRound((n) => n + 1), []);
   return { listing, error, reload };
+}
+
+/**
+ * The module rows GET /api/modules lists, for the note about which modules load skill packs
+ * (issue #1164). Null while it loads and after a failure: the note then says nothing rather
+ * than the wrong thing.
+ */
+function usePackModules(): ModuleInfo[] | null {
+  const api = useApi();
+  const [modules, setModules] = useState<ModuleInfo[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .modules()
+      .then((list) => !cancelled && setModules(list))
+      .catch(() => !cancelled && setModules(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+  return modules;
 }
 
 /** What a downloadable skillset offers, for its row before it is downloaded (the listing has no manifest yet). */
@@ -166,6 +187,22 @@ export function pluginNames(value: unknown): string[] {
   return names;
 }
 
+/**
+ * The agent modules that load skill packs (issue #1164): the agent-kind rows' providers that
+ * declare `skill_packs`, by their display names, in listing order and without repeats. Empty
+ * while the modules have not loaded, so the line that renders them can stay out.
+ */
+export function packModuleNames(modules: ModuleInfo[] | null | undefined): string[] {
+  const names: string[] = [];
+  for (const module of modules ?? []) {
+    if (module.kind !== "agent") continue;
+    for (const provider of module.providers) {
+      if (provider.skill_packs && !names.includes(provider.name)) names.push(provider.name);
+    }
+  }
+  return names;
+}
+
 const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
 /** What switching a skillset on adds to every colony, e.g. "286 skills · 68 agents". */
@@ -188,6 +225,20 @@ export function PluginBadges({ plugin, downloaded = false }: { plugin: PluginDir
   );
 }
 
+/** "A, B and C" over the module names, for the sentence below. */
+const packList = (names: string[]): string =>
+  names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+
+/** The line under the skillset list that says which modules load the packs, and what the rest start without. */
+export function PackModulesLine({ names }: { names: string[] }) {
+  if (names.length === 0) return null;
+  return (
+    <p className="text-small text-faint">
+      {`Loaded by ${packList(names)}. Other modules start without them (the colony log says so at boot).`}
+    </p>
+  );
+}
+
 /**
  * The claude-code module's `plugins` setting as one switch per skillset. The value stays the same
  * comma-separated list of names the mothership reads, written in the listing's order so switching one off
@@ -205,6 +256,7 @@ export function SkillsetField({
   onChange: (value: string) => void;
 }) {
   const { listing, error, reload } = usePlugins();
+  const packs = usePackModules();
   const downloads = useSkillsetDownloads(listing?.downloadable, reload);
   const names = pluginNames(value);
   const known = new Set(listing?.plugins.map((p) => p.name) ?? []);
@@ -298,6 +350,7 @@ export function SkillsetField({
             Add your own by putting a Claude Code plugin directory in{" "}
             <code className="font-mono text-meta-lg [overflow-wrap:anywhere]">{listing.local_root}</code>.
           </p>
+          <PackModulesLine names={packModuleNames(packs)} />
         </>
       )}
     </div>

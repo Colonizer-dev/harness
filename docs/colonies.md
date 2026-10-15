@@ -253,6 +253,14 @@ GitHub itself calls mergeable. `GET /api/merge-steward` serves the list; `/api/s
 blocked orgs as `merge_steward.ci_blocked`. A pull request needs at least one check to report before
 the steward merges it.
 
+A blocked org is not silent: the steward announces one newly blocked org once, through the notify
+settings (desktop, webhook or Web Push), and keeps rebasing its pull requests in `green+rebase` — a
+billing block is not an excuse to let a branch go stale. An org that wants to keep merging through
+the block can opt into **Verify locally when CI is blocked** (`verify_locally_when_ci_blocked`): the
+steward then runs the repository's `.colonizer/merge.toml` merge gates in a build VM, one pull
+request at a time, comments the result on the pull request, and merges on a pass. A billing block is
+still never treated as green, and a repository that declares no gates just waits.
+
 ## Epics are refused
 
 An epic is a planning issue whose work lives in its sub-issues. A colony on the epic itself would
@@ -343,7 +351,7 @@ Across layers the strictest decision wins, so each layer can only narrow the one
 Only the owner can change an org's policy. The save is refused, with the reason under the box, unless
 the runner would keep every rule of it: valid JSON of at most 64 KiB, an object with a `rules` array,
 and every rule a `deny`, `ask` or `allow` decision with at least one usable `command`, `script`,
-`touches` or `writes_outside`. Leave the box empty for no org layer.
+`touches`, `writes_outside` or `writes_git`. Leave the box empty for no org layer.
 
 **Limits.** Claude Code and ACP apply the policy; Codex, Grok Build, Hermes, OpenCode and Pi do not.
 While any layer is set, a colony on one of those refuses to launch and names where the policy came
@@ -442,12 +450,16 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   `writes-outside-repo` now asks only for a write to a host-backed path outside the repository: a
   write to `/root`, `/usr`, a `CARGO_TARGET_DIR` such as `/root/colonizer-target`, or the rest of the
   microVM's own root filesystem — discarded with the VM — no longer asks, while a write to a host
-  mount outside the repository, such as `/harness/out` or the agent's transcript directory, still
-  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) or into the checkout's
-  own `.git` asks too, and the card says why. An org can restore the older, stricter behaviour — any
-  absolute write outside the repository asks, the microVM's root filesystem included — with a policy
-  rule whose predicate is `"writes_outside": "strict"`. The `secret-paths` and `script-egress` denies
-  are unchanged.
+  mount outside the repository, such as the agent's transcript directory, still does — with one
+  carve-out: `/harness/out`, the colony's own output directory (`pr.md`, the verify logs), never
+  counts as outside, since the harness itself tells the agent to write there (#1153). A write onto a
+  read-only host mount (`/colonizer`, `/opt/colonizer`) asks too, and the card
+  says why; a write into the checkout's own `.git`, or a `git add`/`git commit`/`git stash`, is
+  denied outright by the `git-read-only` rule (#1258). An org can restore the older, stricter
+  behaviour — any absolute write outside the repository asks, the microVM's root filesystem
+  included — with a policy rule whose predicate is `"writes_outside": "strict"`; the output dir is
+  carved out of that too. The `secret-paths`
+  and `script-egress` denies are unchanged.
 
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
   permission request: the tool call that asked is blocked in flight, and suspending the colony
@@ -718,7 +730,9 @@ shows "N left in plan". A failing balance check never marks the provider unhealt
   `api.anthropic.com` and does not pass the gateway, so it is not counted here.
 - Requests already in flight are not reserved against `budget_tokens`, so parallel requests can
   take a colony a little past it before it stops.
-- No provider comes with a plan-balance URL preset. You enter the URL yourself.
+- One provider comes with a plan-balance URL preset: MiniMax's international endpoint
+  (`api.minimax.io`), whose fields the add form prefills. For every other provider you enter the URL
+  yourself.
 
 The reference is in [configuration.md](configuration.md) and
 [architecture.md, Per-colony limits](architecture.md#per-colony-limits).
@@ -794,6 +808,20 @@ owning most of the changed files — and whether it would have caught the failur
 that check first and stops at its failure. `off` records nothing. A confirmed verdict always needs
 every check to pass.
 
+**Before publishing.** When autopilot is about to open the pull request, the repository's own fast
+checks run first, each in a fresh checkout like the rest: what the [merge train's local
+checks](loops/merge-train.md#when-github-ci-cannot-run) detect — `cargo fmt --check`, `clippy -D
+warnings`, a package's `typecheck` and `lint` — plus any `scripts/ci/check-*.sh` a
+`.github/workflows` file actually runs. Tests are the claim checks' job above, and builds and e2e
+runs are left to CI. The repository steers the pass from its **base branch's**
+`.colonizer/checks.toml` (never the colony's branch, so a colony cannot weaken its own gate):
+`pre_publish = ["cargo fmt --all --check", …]` lists exactly what runs, and `pre_publish = []`
+switches the pass off. A check that fails the way the base branch fails too is not the colony's:
+the pull request still opens, as a **draft** naming the failing checks. A check the base passes is
+the change's own: the colony gets its normal fix rounds, and nothing publishes until the checks
+are green. What ran is recorded in the pull request body — "Checks run before publishing: fmt ✓,
+clippy ✓ …".
+
 **Limits.** If the colony image lacks the tool a check needs, that check is unverifiable — every
 image carries a small toolbox and a repository can add its own with a `.colonizer/setup.sh` hook
 (see [Tools in the colony image and the setup hook](#tools-in-the-colony-image-and-the-setup-hook)).
@@ -809,13 +837,13 @@ The watchdog used to send a generic "no progress" nudge, and a person (or an out
 `harness.jsonl`) did the rest: recognise a known stall, send the colony the exact fix, publish,
 switch model. The playbook is that step done by the mothership. It is a table of **signature,
 action, tries**; each fix is logged as `auto-fixed: <signature>` in the colony's `harness.jsonl`,
-listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: pr_md_write").
+listed on the session as `auto_fixes`, and shown in the colony header ("auto-fixed: toolchain_installer").
 
 | Signature | Matches | Action | Tries |
 |---|---|---|---|
 | `placeholder_dotfiles` | a `secret-paths` denial whose target is a harness placeholder (`.env`, `.netrc`, ...) in the worktree and names no real credential path | message: the placeholders are harness mounts, leave them, continue the issue | 1 |
-| `pr_md_write` | a `writes-outside-repo` denial on `/harness/out/pr.md` | message: write `pr.md` with the file tool | 1 |
 | `toolchain_installer` | a `script-egress` denial on a toolchain installer (rustup, swift, ghcup, ...) | message: no toolchains, say in `pr.md` what was not compiled | 1 |
+| `git_read_only_ask` | an `exec_policy` question whose subject is a git write — the runner's `.git internals` reason, or a `git add`/`git commit`/`git stash` command in the ask | `answer_deny`: the question is answered Deny with the `.git`-is-read-only explanation | 1 |
 | `provider_unavailable` | a turn-error hold on `unrecognized_model`, or a provider quota flag, where the provider's `fallback_model` is a `<provider>/<model>` on a configured provider that is not itself out of quota | `switch_fallback_and_resume` | 2 |
 | `idle_verified` | idle, autopilot on, `pr.md` written, a confirmed verification of the tree as it stands now, nothing flagged, quiet for 10 minutes | `publish` | 1 |
 
@@ -824,6 +852,14 @@ the colony is stopped, its slot is freed, and it carries the attention reason `l
 signature. Between a fix and the next action on the same signature the playbook waits
 `settle_secs` (120 by default) for the agent to read the message. A person's resume gives a
 stopped colony fresh tries.
+
+The `answer_deny` action answers a question instead of sending a message: it picks the option
+whose label says Deny, and the entry's `message` rides along as the reason the agent reads. It
+fires the moment the question opens — an exec-policy ask holds the colony's slot until someone
+answers, and the only useful reply to a git write on a read-only `.git` is no. The answer's echo
+is stamped `watchdog` in the colony's events, the way the autonomy judge's is stamped `autonomy`.
+A question with no refusing option on offer is left alone, and so is a suspended colony's — its
+question is a person's by policy.
 
 Rows handled by their own mechanism are not repeated here: a contradicted verification is sent back
 to the agent in fix rounds, a `pr.md` that only redaction changed is published redacted, and an
@@ -847,8 +883,8 @@ is ignored with a line in the mothership's output.
 
 [[entry]]
 signature = "npm_registry_denied"       # what the cockpit shows as "auto-fixed: ..."
-trigger = "denial"                      # denial (default) | provider_failure | idle_verified
-action = "send_message"                 # send_message | publish | switch_fallback_and_resume | stop_looping
+trigger = "denial"                      # denial (default) | question | provider_failure | idle_verified
+action = "send_message"                 # send_message | publish | answer_deny | switch_fallback_and_resume | stop_looping
 message = "The npm registry is not reachable from here; use the vendored packages."
 max_tries = 2                           # fixes per colony before the signature counts as looping
 settle_secs = 120                       # wait this long after a fix before acting again
@@ -856,17 +892,40 @@ stop_when_exhausted = true              # stop the colony (attention `looping`) 
 # enabled = false                       # switch a default off by repeating its signature
 
 [entry.when]
-kind = "egress_denied"                  # the boundary kind; exec_policy_deny when absent
+kind = "egress_denied"                  # the boundary kind; exec_policy_deny when absent (a question row names the question's kind)
 control = "egress"                      # substring of the control
-text_any = ["registry.npmjs.org"]       # one of these in the denial's detail or target
+text_any = ["registry.npmjs.org"]       # one of these in the denial's detail or target, or in a question's text
 text_none = []                          # none of these
 target_in = []                          # target must be a relative path with one of these file names
 # error_any = ["unrecognized_model"]    # provider_failure: words in the hold's detail
 # quota = true                          # provider_failure: a quota flag matches too
 ```
 
-A stall that no row matches goes to `playbook::on_unmatched_stall`, which does nothing today; it is
-the hook for an operator agent (#1192).
+### The operator turn
+
+A stall that no row matches goes to `playbook::on_unmatched_stall` — called when the watchdog is
+about to send its generic nudge, and again when it raises the final `nudges_exhausted` flag. There
+the operator turn (#1192) takes over: the mothership builds a bounded digest of the colony's recent
+life (its task, status and attention reason, the last lines of `harness.jsonl`, the denials in the
+event log, the open question, the verification verdict and check output, the tail of `pr.md`, and
+the changed paths — every untrusted section quoted, so none of it can forge a heading), redacts it,
+and asks the judge model — the one configured for autonomous mode; with none, the operator does
+nothing — for a strict JSON verdict: a diagnosis, one of `message`, `publish`, `resume`, `stop`,
+`switch_model` or `escalate`, and a confidence.
+
+The guardrails are the playbook's, restated: a security hold is never turned on (the digest is not
+even built, and the colony is re-read fresh before anything acts), at most two turns per colony per
+rolling hour counted on the persisted notes so a restart does not reset the budget, `publish`
+re-checks the idle-verified preconditions above on a fresh read and goes through the same guarded
+publish, `switch_model` offers only the provider's fallback (the model never names one), and a low
+confidence, an unknown action or a reply that does not parse escalates instead of acting. If the
+world moves while the model thinks — a hold lands, a person stops the colony or answers it — the
+turn stands down: a note, no action, the attention flag untouched. An escalation raises the
+attention reason `operator_escalation` — the diagnosis rides in the flag, and the colony lands in
+Needs you; it never replaces a security hold. Every turn, whatever came of it, is recorded on the
+session and shown in the colony header as "operator: diagnosed …, did …", under a stable signature
+(the attention reason plus the most recent denial's kind) so identical stalls can later be grouped;
+proposing playbook rows from those groups is future work, not built here.
 
 ## Conditional instructions
 
@@ -1045,6 +1104,13 @@ about the code's structure, such as "where is Y defined" or "who calls Z". Befor
 
 It is always on, and there is no setting. It has the same write restrictions as the built-in
 `Explore` subagent.
+
+It is one member of a larger crew. The Claude Code module ships its default crew as agent
+files — Pip does general work, Scout is the read-only `Explore` search, Sarge reviews
+changes, Silka answers design questions, Mellie writes release notes and pull-request
+descriptions, and the queen, the orchestrator itself, is the main thread rather than a
+subagent of her own. [Skill packs](skill-packs.md#agents-ants) has the crew table, the agent
+file schema and the rules a pack's ants are held to.
 
 **Limits.** It only prefers graft when graft is installed. graft is a downloadable skillset, not
 part of the default install. Without it, `repo-explorer` searches the same way `Explore` does.

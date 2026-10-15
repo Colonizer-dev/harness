@@ -6,6 +6,7 @@
 import { isActive } from "../redTeam";
 import { CodeView } from "./CodeView";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { advanceFailureClock, observabilityDegraded } from "../components/settings/ObservabilityRows";
 
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
@@ -21,12 +22,11 @@ import { currentLocation, navigate as pushUrl, routerBase, subscribe } from "../
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { settlersOf, useSessionStream } from "../sessionStream";
-import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
+import type { AutonomyStatus, FleetHost, HarnessStatus, ObservabilityStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { AskProvider } from "./spotlight/Ask";
 import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
-import { Composer } from "./Composer";
 import { Header } from "./Header";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
@@ -209,6 +209,31 @@ export function Cockpit({
       window.clearInterval(id);
     };
   }, [api]);
+  // The observability exporter's health (issue #855): the same slow poll, feeding the header's
+  // degraded badge. The clock remembers when failing started, from this cockpit's own point of
+  // view, so the badge waits out short outages. Errors are swallowed the same way.
+  const [observability, setObservability] = useState<ObservabilityStatus | null>(null);
+  const [obsFailingSince, setObsFailingSince] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      void api
+        .observabilityStatus()
+        .then((status) => {
+          if (!live) return;
+          const nowSecs = Math.floor(Date.now() / 1000);
+          setObservability(status);
+          setObsFailingSince((prev) => advanceFailureClock(prev, status, nowSecs));
+        })
+        .catch(() => {});
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+    };
+  }, [api]);
+  const observabilityAlert = observabilityDegraded(observability, Math.floor(Date.now() / 1000), obsFailingSince);
   // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
   // The address names the view (issue #1180): `/nest`, `/settings/models/providers`, `/colonies/<id>`.
   // The bare root is the Overview, but a returning visitor's remembered view still wins there, so a
@@ -219,8 +244,6 @@ export function Cockpit({
     return isRootPath(pathname, routerBase()) ? null : parseRoute(pathname, search, routerBase());
   });
   const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? (bootRoute?.view === "colony" ? "home" : bootRoute?.view) ?? storedView());
-  // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
-  const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   // A conversation Spotlight expanded into the Chat page (or `null`: a fresh one), opened once.
   const [chatRequest, setChatRequest] = useState<{ id: string | null; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
@@ -724,8 +747,6 @@ export function Cockpit({
                 repos={repos}
                 sessions={sessions}
                 autopilotDefault={autopilotDefault}
-                initialPrompt={askPrompt}
-                onPromptTaken={() => setAskPrompt(null)}
                 openRequest={chatRequest}
                 onCreated={(session) => {
                   onCreated(session);
@@ -761,6 +782,7 @@ export function Cockpit({
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
             quotaCards={status?.quota_cards ?? []}
+            findingsCards={status?.findings_cards ?? []}
             onQuotaAction={(provider, body) =>
               runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
             }
@@ -896,6 +918,8 @@ export function Cockpit({
         connection={liveConnection}
         remoteOn={remoteOn}
         judge={judge}
+        observabilityAlert={observabilityAlert}
+        onOpenObservability={() => onOpenSettings("module:observability")}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
         models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}
@@ -979,26 +1003,6 @@ export function Cockpit({
               </button>
             )}
           </div>
-          {/* The composer floats over every overview-style view; the launch form, an open colony and
-              settings have their own inputs. */}
-          {(view === "overview" || view === "home" || view === "inbox" || view === "history" || view === "memory" || view === "host") && (
-            <Composer
-              org={selectedOrg}
-              repos={repos}
-              githubConnected={status?.github.connected ?? false}
-              autopilotDefault={autopilotDefault}
-              sessions={sessions}
-              shortcutTaken
-              onCreated={(session) => {
-                onCreated(session);
-                setView("home");
-              }}
-              onAsk={(text) => {
-                setAskPrompt({ text, n: Date.now() });
-                setView("chat");
-              }}
-            />
-          )}
         </div>
         {/* Only while something is picked: closing it (×) gives the nest the full width back, and
             clicking a chamber or the mothership opens it again. With nothing picked, the workspace

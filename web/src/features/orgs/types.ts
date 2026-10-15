@@ -46,6 +46,8 @@ export interface OrgSettings {
   merge_method?: MergeMethod | null;
   /** Whether the steward deletes the branch after merging; null keeps it. */
   delete_branch?: boolean | null;
+  /** Whether the steward verifies a pull request locally while Actions is blocked, and merges it on a pass (issue #1245); null is off. */
+  verify_locally_when_ci_blocked?: boolean | null;
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */

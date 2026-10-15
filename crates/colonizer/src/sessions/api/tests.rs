@@ -544,6 +544,84 @@ async fn a_failed_answer_send_is_not_a_204() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The issue #1247 loop end to end: an operator's answer is put on the record — question, choice,
+/// free-text note — and the brief a resume hands the agent after the restart carries the decision,
+/// so the question is never put to the person twice. A lost answer records nothing.
+#[tokio::test]
+async fn an_answer_is_recorded_and_handed_back_on_a_resume() {
+    let (app, root) = app_with_colony("abc", SessionStatus::WaitingForAnswer).await;
+    let rt = app.runtime("abc").await;
+    let mut rx = rt.commands_rx.lock().await.take().unwrap();
+    let questions = vec![json!({
+        "question": "Which file name?",
+        "header": "File",
+        "options": [{"label": "hello.txt"}, {"label": "hi.txt"}],
+    })];
+    *rt.open_question.lock().await = Some(("q1".into(), questions.clone(), QuestionRisk::ReadOnly));
+    let answer = |saw: &Vec<Value>| {
+        AnswerCommand::parse(&json!({
+            "question_id": "q1",
+            "answers": {"Which file name?": "hello.txt"},
+            "response": "the short one",
+            "questions": saw,
+        }))
+        .unwrap()
+    };
+
+    // An answer that is refused answers nothing, so it records nothing either.
+    let stale = AnswerCommand::parse(&json!({
+        "question_id": "qx",
+        "answers": {"Which file name?": "hello.txt"},
+        "questions": questions,
+    }))
+    .unwrap();
+    assert!(matches!(
+        submit_answer(&app, "abc", &rt, stale, None, None, true).await,
+        Err(AnswerError::Stale)
+    ));
+    assert!(
+        app.session("abc").await.unwrap().answered_questions.is_empty(),
+        "a refused answer is not a decision on the record"
+    );
+
+    // Live: the answer goes down and the decision lands on the record.
+    *rt.open_question.lock().await = Some(("q1".into(), questions.clone(), QuestionRisk::ReadOnly));
+    assert!(
+        submit_answer(&app, "abc", &rt, answer(&questions), None, None, true)
+            .await
+            .is_ok()
+    );
+    assert_eq!(rx.try_recv().unwrap()["answers"], json!({"Which file name?": "hello.txt"}));
+
+    let s = app.session("abc").await.unwrap();
+    let kept = s.answered_questions.as_slice();
+    assert_eq!(kept.len(), 1, "one question, one decision: {kept:?}");
+    assert_eq!(kept[0].question_id, "q1");
+    assert_eq!(kept[0].header, "File");
+    assert_eq!(kept[0].question, "Which file name?");
+    assert_eq!(kept[0].answer, json!("hello.txt"));
+    assert_eq!(kept[0].response.as_deref(), Some("the short one"));
+    assert!(
+        kept[0].answered_at > chrono::Utc::now() - chrono::Duration::minutes(1),
+        "stamped now"
+    );
+
+    // The restart, then the resume: the brief the resumed runner is launched with closes with the
+    // decision, in the same terms the answer prompts use.
+    let brief = format!(
+        "{}{}",
+        crate::github::build_prompt(&s, None, "main", true, &[], None, None),
+        crate::boot::resume_extras(&s, true),
+    );
+    assert!(brief.contains("## Decisions already made"), "{brief}");
+    assert!(brief.contains("- File: hello.txt, note: the short one"), "{brief}");
+    assert!(
+        !brief.contains("(no choice given)"),
+        "every recorded entry carries the choice that was made: {brief}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// An answer that arrives while a colony is parked by the hold timeout (issue #876) is kept as the
 /// resume note — the person's answer in place of the backoff's wording — and the colony resumes.
 #[tokio::test]
@@ -586,6 +664,11 @@ async fn an_answer_while_parked_resumes_the_colony_with_it() {
         "the parked wording: {note}"
     );
     assert!(note.contains("Push now?"), "the note replays the question: {note}");
+    // And the decision is on the record (issue #1247), so later resumes carry it too.
+    let kept = &s.answered_questions;
+    assert_eq!(kept.len(), 1, "the parked decision is on the record: {kept:?}");
+    assert_eq!(kept[0].header, "", "the question carried no header");
+    assert_eq!(kept[0].answer, json!("yes"));
     assert_eq!(
         s.status,
         SessionStatus::Queued,
@@ -870,6 +953,13 @@ async fn an_answer_to_a_suspended_colony_is_kept_and_the_question_closed() {
     assert_eq!(held.question_id, "q1");
     assert!(held.prompt.contains("Q: Which file name?\nA: hello.txt"), "{}", held.prompt);
     assert!(held.prompt.ends_with("Their note: go ahead"), "{}", held.prompt);
+    // A held answer is a decision all the same (issue #1247): it goes on the record now, so the
+    // resume delivers it even if the held delivery itself were lost.
+    let kept = &s.answered_questions;
+    assert_eq!(kept.len(), 1, "the held decision is on the record: {kept:?}");
+    assert_eq!(kept[0].header, "File");
+    assert_eq!(kept[0].answer, json!("hello.txt"));
+    assert_eq!(kept[0].response.as_deref(), Some("go ahead"));
     assert_eq!(
         s.status,
         SessionStatus::WaitingForAnswer,

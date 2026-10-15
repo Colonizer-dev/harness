@@ -4,8 +4,8 @@ import { notificationSupport, requestNotificationPermission, type NotificationPe
 import { deviceLabel, pushSupported, subscribeThisDevice, thisDeviceSubscriptions, unsubscribeThisDevice } from "../../push";
 import { PushDeviceList } from "../PushDevicePrefs";
 import { IosHomeScreenSheet, showIosInstallHint } from "../IosHomeScreenSheet";
-import type { OrgInfo, PushSubscriptionSummary } from "../../types";
-import { Button, Spinner, Switch } from "../ui";
+import type { CratefieldPushState, OrgInfo, PushSubscriptionSummary } from "../../types";
+import { Button, Spinner, Switch, cx, timeAgo } from "../ui";
 import { Pane, Row } from "./ui";
 
 // ---------------------------------------------------------------------------
@@ -55,6 +55,52 @@ export function NotificationsPane({
       cancelled = true;
     };
   }, [api, pushable]);
+
+  // The Cratefield delivery channel (issue #1085) is the mothership's own, not this browser's: its
+  // state loads whatever this browser can do, and its switch talks straight to the Api. A load
+  // that fails is said in the section rather than swallowed — the switch must not read as off
+  // when it may well be on.
+  const [cratefield, setCratefield] = useState<CratefieldPushState | null>(null);
+  const [cratefieldDown, setCratefieldDown] = useState(false);
+  const [cratefieldBusy, setCratefieldBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .cratefieldPush()
+      .then((state) => {
+        if (cancelled) return;
+        setCratefield(state);
+        setCratefieldDown(false);
+      })
+      .catch(() => !cancelled && setCratefieldDown(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  const switchCratefield = (enabled: boolean) => {
+    if (cratefieldBusy) return;
+    setCratefieldBusy(true);
+    void api
+      .setCratefieldPush(enabled)
+      .then((state) => {
+        setCratefield(state);
+        toast(enabled ? "Cratefield will hear about colonies that need you." : "Delivery through Cratefield is off.", "success");
+      })
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => setCratefieldBusy(false));
+  };
+
+  const testCratefield = () => {
+    if (cratefieldBusy) return;
+    setCratefieldBusy(true);
+    void api
+      .testCratefieldPush()
+      .then((state) => setCratefield(state))
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => setCratefieldBusy(false));
+  };
 
   const enrolThisDevice = () => {
     if (subscribing) return;
@@ -205,6 +251,8 @@ export function NotificationsPane({
           )}
         </div>
 
+        <CratefieldDelivery state={cratefield} loadFailed={cratefieldDown} busy={cratefieldBusy} onSwitch={switchCratefield} onTest={testCratefield} />
+
         <div>
           <h4 className="mb-1 text-small-lg font-semibold">Which events interrupt</h4>
           <p className="mb-1 text-small-lg text-muted">
@@ -250,5 +298,98 @@ export function NotificationsPane({
         </div>
       </div>
     </Pane>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Deliver through Cratefield (issue #1085): the same one-line notifications,
+// relayed to a Cratefield install through the mothership's signed install
+// calls — an opt-in second channel beside the web push above, with its own
+// queue for the stretches the relay is unreachable.
+// ---------------------------------------------------------------------------
+
+/** The line under the switch: what the delivery state says, in the queue's own words. */
+export function cratefieldStateText(state: CratefieldPushState): string {
+  switch (state.state) {
+    case "off":
+      return "Off. Notifications go only to the devices enrolled for web push.";
+    case "no_remote":
+      return "Waiting for remote access — switch remote access on first, so the relay calls can be signed.";
+    case "queued":
+      return `${state.queued} ${state.queued === 1 ? "notification" : "notifications"} queued for the relay.`;
+    case "unreachable":
+      return "The relay did not take the last delivery. It retries, and this clears when one goes through.";
+    case "ok":
+      return state.last_delivered ? `Delivered. The last batch went through ${timeAgo(state.last_delivered)}.` : "On. Nothing has been delivered yet.";
+  }
+}
+
+/** The section, on plain props so it renders (and tests) without the dialog around it. */
+export function CratefieldDelivery({
+  state,
+  loadFailed,
+  busy,
+  onSwitch,
+  onTest,
+}: {
+  /** Null while the state has not loaded: the switch waits, disabled. */
+  state: CratefieldPushState | null;
+  /** True when the state could not be loaded — said in the section, never read as off. */
+  loadFailed: boolean;
+  busy: boolean;
+  onSwitch: (enabled: boolean) => void;
+  onTest: () => void;
+}) {
+  const enabled = state?.enabled ?? false;
+  return (
+    <div>
+      <h4 className="mb-1 text-small-lg font-semibold">Deliver through Cratefield</h4>
+      <p className="mb-1 text-small-lg text-muted">
+        Relays the same short notifications to a Cratefield install, for when no phone is subscribed here. They queue on the mothership
+        while the relay is unreachable and ride the next delivery.
+      </p>
+      <Row
+        id="notifications-cratefield"
+        label="Deliver through Cratefield"
+        help="Needs remote access: the relay calls are signed with the mothership's install key."
+        info={
+          <p>
+            Up to 200 notifications wait in the queue, each for a day at most; past that the oldest is dropped, and a colony's question is
+            the last thing to go. What the relay receives is the one line and a link — never a question's text, an agent's output or
+            anything read from a repository.
+          </p>
+        }
+        inline
+      >
+        <Switch
+          id="notifications-cratefield"
+          labelledBy="notifications-cratefield-label"
+          label="Deliver through Cratefield"
+          checked={enabled}
+          disabled={state === null || busy}
+          onChange={onSwitch}
+        />
+      </Row>
+      {state !== null && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <p className={cx("min-w-0 flex-1 text-small-lg", state.last_error ? "text-err" : "text-muted")}>
+            {cratefieldStateText(state)}
+            {state.last_error && ` ${state.last_error}`}
+            {state.dropped > 0 && ` ${state.dropped} dropped, for the cap or a day's age.`}
+          </p>
+          {enabled && (
+            <Button variant="secondary" disabled={busy} onClick={onTest}>
+              {busy && <Spinner />}
+              Send test
+            </Button>
+          )}
+        </div>
+      )}
+      {state === null && loadFailed && (
+        <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
+          The delivery state could not be loaded, so the switch waits — it may well be on. Try opening the settings again.
+        </p>
+      )}
+    </div>
   );
 }

@@ -5,7 +5,7 @@ has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7
 colonies. The subcommands are everything else: a few run against this machine (`version`,
 `update`, `setup`, `doctor`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
-`resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
+`resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `observability backfill`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
@@ -215,7 +215,9 @@ Loops are saved prompts that launch a colony on a schedule; what they do is
 colonizer loop list                                              # every loop this token may see, with its next run
 colonizer loop create acme/app --name "Triage" --prompt "Triage new issues" daily@09:00
 colonizer loop create acme/app --name "Maps" --kind map 14d@03:00   # refresh the map; no prompt needed
+colonizer loop create acme/app --template data-refresh daily@05:00  # refresh the repository's data files; no prompt needed
 colonizer loop run loop_x1                                       # start the next run now (exit 5 while one is live)
+colonizer loop run loop_x1 --only fx-rates --only member-count   # run those sources only (the data-refresh template)
 colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
 colonizer loop start loop_x1                                     # enable a paused or ended loop again
 colonizer loop delete loop_x1                                    # delete it; its past colonies stay
@@ -242,6 +244,19 @@ other flags mirror `launch`: `--model`, `--subagent-model`, `--autopilot`/`--no-
 run that failed for an infrastructure reason it is run once more (default 60; `0` switches the
 re-run off) and `--disabled` creates it paused. Cadence ranges
 (15 minutes to a week, days 1–365) are the mothership's to refuse, with its message.
+
+`--template data-refresh` builds the prompt from the repository's inputs instead of `--prompt`
+(which, like `--prompt-file`, it conflicts with): `--sources PATH` (default `data/sources.json`),
+`--extract CMD` (default `npm run extract -- <id>`), `--validate CMD` (default `npm run validate`),
+`--policy CMD` (default `npm run --silent refresh-policy`), `--evidence DIR` (default `evidence/`)
+and `--max-failures N` (default 3) fill the Inputs lines the prompt opens with. Needs GitHub is
+switched on and the name defaults to "Data refresh"; what the loop does is
+[data-refresh](loops/data-refresh.md).
+
+`loop run` takes `--only SOURCE_ID`, repeated or comma-separated: the ids go out as the run-now body
+`{"params":{"only":[…]}}` and the run's brief tells the colony to work only on those sources, due or
+not. Without the flag no body is sent and the run covers every due source. As ever the run is
+refused (exit 5) while the loop's previous one is still live.
 
 `loop stop` and `loop start` are the cockpit's switch: the loop's own settings are sent back
 with `enabled` flipped, so pausing keeps everything and re-enabling books the next run from the
@@ -298,6 +313,29 @@ colonizer fleet sync --status   # consent_required, synced, backoff, unauthorize
 Without consent a plain `fleet sync` fails with the 409 and says how to give it. A manual
 `fleet sync` also retries a push that stopped on a 401 or a 403, or is waiting out a
 `Retry-After`. With the global `--json` both print the mothership's answer.
+
+### Observability backfill
+
+A destination starts at "now": the live exporter sends what is written from the moment it was
+configured (or, with **Start from = backlog**, only as far back as the backlog limit). The history
+before that line is on disk and never left the machine. `observability backfill` replays it through
+the same supervised add-on, at a bounded rate, with the same record and span ids the live exporter
+would have produced — and never touches the live exporter's cursors
+([Backfill](observability/backfill.md)).
+
+```sh
+colonizer observability backfill --since 2026-01-01 --until 2026-06-30 --dry-run   # counts only
+colonizer observability backfill --since 2026-01-01 --until 2026-06-30 --rate 500  # send it
+colonizer observability backfill --repo acme/widgets --dry-run                     # one repository
+```
+
+`--dry-run` prints the total records and ledger bytes, one line per signal and per org, and the
+estimated encoded volume on the wire — it sends nothing and writes nothing, so a window can be
+narrowed as often as needed. Without it the run starts on the mothership and prints where to watch
+it: the cockpit's Settings → Modules → Observability, or the `backfill` object `GET
+/api/observability/status` carries (`state`, `records_sent`, `bytes_sent`, …). `DELETE
+/api/observability/backfill` stops it within one tick, and a restart resumes where it stopped. With
+the global `--json` both print the mothership's answer.
 
 ## `--json`
 
