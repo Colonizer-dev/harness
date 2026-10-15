@@ -246,6 +246,14 @@ impl Policy {
 /// whatever it looks like, and an identifier or digest key (`tool_call_id`, `*.sha`) skips only the
 /// high-entropy layer, so a long provider id stays joinable while a known token shape is still caught.
 pub(crate) fn scrub_text(s: &str, key: Option<&str>, cap: usize) -> (String, bool) {
+    // The conformance run's `OTEL_CONFORMANCE_DEMO=leak-canary` toggle (#864): skips the
+    // export-time redaction pass so a seeded canary secret reaches the wire, which the
+    // conformance sweep must catch. Never set outside that test.
+    #[cfg(test)]
+    if SKIP_REDACTION_FOR_CONFORMANCE.load(std::sync::atomic::Ordering::SeqCst) {
+        let cut = s.len() > cap;
+        return (truncate(s, cap).into_owned(), cut);
+    }
     let unblobbed = scrub::blobs(s);
     let redacted = match key {
         None => redact_text(&unblobbed).into_owned(),
@@ -254,6 +262,10 @@ pub(crate) fn scrub_text(s: &str, key: Option<&str>, cap: usize) -> (String, boo
     let cut = redacted.len() > cap;
     (truncate(&redacted, cap).into_owned(), cut)
 }
+
+/// See the hook in [`scrub_text`].
+#[cfg(test)]
+pub(crate) static SKIP_REDACTION_FOR_CONFORMANCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `value` redacted as the field `key` of a JSON object: colonizer-redact's key-aware path.
 fn redact_under(key: &str, value: String) -> String {

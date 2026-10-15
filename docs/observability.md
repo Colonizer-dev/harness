@@ -26,6 +26,9 @@ colonizer.dev. Observability goes only to the endpoint you name.
   redacted, filtered, and dropped when the disk is behind.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
+- [Conformance](observability/conformance.md): the run against a real OpenTelemetry Collector that
+  CI starts, how to run it locally, and what it asserts (issue
+  [#864](https://github.com/Colonizer-dev/harness/issues/864)).
 
 ## How it runs
 
