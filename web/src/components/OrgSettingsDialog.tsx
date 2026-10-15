@@ -2,13 +2,13 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { execPolicyProblem } from "../execPolicy";
 import { HIDE_EMPTY_ORGS_KEY, orgEnabled, parseHideEmptyOrgs, serializeHideEmptyOrgs } from "../orgs";
-import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
+import type { ModuleInfo, OpenCodeReviewStatus, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
 import { Avatar } from "./Avatar";
 import { RepoMultiSelect } from "./RepoMultiSelect";
 import { chipLabel, entryError } from "./repoSelect";
 import { IconX } from "./icons";
-import { pluginCost, pluginNames, usePlugins } from "./Skillsets";
+import { downloadLine, pluginCost, pluginNames, usePlugins } from "./Skillsets";
 import { ModelPicker } from "./ModelPicker";
 import { PullRequestsSection } from "./PullRequests";
 import { Button, Spinner, Switch, cx, inputClass, stored, store } from "./ui";
@@ -29,6 +29,8 @@ type FieldKey =
   | "merge_method"
   | "delete_branch"
   | "verify_locally_when_ci_blocked"
+  | "open_code_review"
+  | "open_code_review_model"
   | "budget_usd"
   | "host_disk"
   | "stack"
@@ -43,7 +45,7 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos" | "priority";
+  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos" | "priority" | "text";
   min?: number;
   max?: number;
   unit?: string;
@@ -67,6 +69,8 @@ const FIELDS: FieldSpec[] = [
   { key: "merge_method", group: "Pull requests", label: "Merge method", hint: "How the steward merges", kind: "choice" },
   { key: "delete_branch", group: "Pull requests", label: "Delete branch", hint: "Remove the branch after the merge; one another pull request is stacked on is always kept", kind: "boolean" },
   { key: "verify_locally_when_ci_blocked", group: "Pull requests", label: "Verify locally when CI is blocked", hint: "While GitHub Actions is blocked (billing), run the repository's merge gates in a build VM and merge a pull request that passes, one at a time, with a report comment. Off unless set", kind: "boolean" },
+  { key: "open_code_review", group: "Open Code Review", label: "Mode", hint: "A host-side review of each colony's diff before it is published (issue #1274). Shadow records the findings in the colony log and the session's open-code-review.json; nothing else changes", kind: "choice" },
+  { key: "open_code_review_model", group: "Open Code Review", label: "Review model", hint: "The model reviews run on, as provider/model; empty follows the install's cheap summary route", kind: "text" },
   { key: "auto_colonize", group: "Colonies", label: "Auto-colonize", hint: "Start a colony on a new issue by itself, but only when an org member, a collaborator with write access or an allowlisted login wrote it and nobody outside the org edited it. Strangers' issues wait in review; an issue labelled no-colonize or needs-human is left to a person. Only issues filed after you turn it on are taken", kind: "choice" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
@@ -103,6 +107,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "merge_method":
     case "delete_branch":
     case "verify_locally_when_ci_blocked":
+    case "open_code_review":
+    case "open_code_review_model":
       return settings[key];
     case "budget_usd":
       return settings.budget_usd;
@@ -170,6 +176,11 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "verify_locally_when_ci_blocked":
       // Org-only: a billing block is never treated as green until the org opts in.
       return false;
+    case "open_code_review":
+      // Org-only: no colony is reviewed until the org opts in (issue #1274).
+      return "off";
+    case "open_code_review_model":
+      return undefined;
     case "budget_usd":
       return setting("sandbox", "budget_usd");
     case "host_disk":
@@ -227,6 +238,11 @@ const MERGE_METHOD_CHOICES: readonly (readonly [string, string])[] = [
   ["squash", "Squash"],
   ["merge", "Merge commit"],
   ["rebase", "Rebase"],
+];
+/** What the open-code-review mode select offers (issue #1274): shadow only — it records, it never acts. */
+const OPEN_CODE_REVIEW_CHOICES: readonly (readonly [string, string])[] = [
+  ["off", "Off"],
+  ["shadow", "Shadow — records findings"],
 ];
 
 /** The queue priority presets the select offers; any other saved integer shows as custom. */
@@ -294,7 +310,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     if (spec.kind === "boolean") return Boolean(field.value);
     if (spec.kind === "choice") return String(field.value).trim() || null;
     if (spec.kind === "priority") return Number.parseInt(String(field.value), 10) || 0;
-    if (spec.kind === "model") return String(field.value).trim() || null;
+    if (spec.kind === "model" || spec.kind === "text") return String(field.value).trim() || null;
     if (spec.kind === "size") {
       const text = parseSize(String(field.value));
       return text === "" ? null : text; // an override left empty is no override at all
@@ -327,6 +343,8 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     merge_method: pick("merge_method") as OrgSettings["merge_method"],
     delete_branch: pick("delete_branch") as boolean | null,
     verify_locally_when_ci_blocked: pick("verify_locally_when_ci_blocked") as boolean | null,
+    open_code_review: pick("open_code_review") as OrgSettings["open_code_review"],
+    open_code_review_model: pick("open_code_review_model") as OrgSettings["open_code_review_model"],
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
@@ -673,7 +691,7 @@ export function OrgSettingsForm({
                         value={String(draft[spec.key].value)}
                         onChange={(e) => set(spec.key, { value: e.target.value })}
                         aria-label={`${spec.label} for ${org}`}
-                        className={cx(inputClass, spec.key === "auto_colonize" ? "w-56" : "w-40")}
+                        className={cx(inputClass, spec.key === "auto_colonize" || spec.key === "open_code_review" ? "w-56" : "w-40")}
                       >
                         {(spec.key === "auto_merge"
                           ? AUTO_MERGE_CHOICES
@@ -681,17 +699,25 @@ export function OrgSettingsForm({
                             ? AUTO_COLONIZE_CHOICES
                           : spec.key === "merge_method"
                             ? MERGE_METHOD_CHOICES
-                            : spec.key === "agent_module"
-                              ? (modules?.find((m) => m.kind === "agent")?.providers ?? []).map((p) => [p.id, p.name] as const)
-                              : (
-                              modules?.find((m) => m.kind === "sandbox")?.schema?.properties?.preset?.enum?.map(String) ?? []
-                            ).map((id) => [id, id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1)] as const)
+                            : spec.key === "open_code_review"
+                              ? OPEN_CODE_REVIEW_CHOICES
+                              : spec.key === "agent_module"
+                                ? (modules?.find((m) => m.kind === "agent")?.providers ?? []).map((p) => [p.id, p.name] as const)
+                                : (
+                                modules?.find((m) => m.kind === "sandbox")?.schema?.properties?.preset?.enum?.map(String) ?? []
+                              ).map((id) => [id, id === "auto" ? "Automatic" : id.charAt(0).toUpperCase() + id.slice(1)] as const)
                         ).map(([id, label]) => (
                           <option key={id} value={id}>
                             {label}
                           </option>
                         ))}
                       </select>
+                    )}
+                    {spec.kind === "text" && (
+                      <input
+                        type="text" value={String(draft[spec.key].value)} onChange={(e) => set(spec.key, { value: e.target.value })}
+                        placeholder="cheap tier by default" aria-label={`${spec.label} for ${org}`} className={cx(inputClass, "w-56")}
+                      />
                     )}
                     {spec.kind === "priority" && (
                       <select
@@ -722,6 +748,7 @@ export function OrgSettingsForm({
                     )}
                   </OverrideRow>
                 ))}
+                {group === "Open Code Review" && <OpenCodeReviewBinary />}
               </div>
             </section>
             {group === "Pull requests" && <PullRequestsSection org={org} />}
@@ -831,6 +858,53 @@ export function ExecPolicyEditor({
         )}
       </div>
     </section>
+  );
+}
+
+/** The reviewer binary's row (issue #1274): the ocr CLI is not shipped — graft's download pattern, a status line and a Download button, polled while one runs. */
+function OpenCodeReviewBinary() {
+  const api = useApi();
+  const [status, setStatus] = useState<OpenCodeReviewStatus | null>(null);
+  const [starting, setStarting] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api.openCodeReview().then((s) => !cancelled && setStatus(s)).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+  const busy = starting || status?.state === "downloading" || status?.state === "unpacking";
+  useEffect(() => {
+    if (!busy) return;
+    const timer = window.setInterval(() => {
+      api.openCodeReview().then(setStatus).catch(() => {});
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [api, busy]);
+  const download = () => {
+    setStarting(true);
+    api
+      .openCodeReviewDownload()
+      .then(setStatus)
+      .catch((e) => setStatus((s) => (s ? { ...s, state: "failed", error: errorMessage(e) } : s)))
+      .finally(() => setStarting(false));
+  };
+  const canDownload = status?.state === "idle" || status?.state === "failed";
+  const line = !status ? "Checking…" : status.state === "installed" ? `Installed ${status.installed_release ?? ""}` : downloadLine(status);
+  return (
+    <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
+      <div className="min-w-0 flex-1 basis-44">
+        <div className="text-body font-medium">Reviewer binary</div>
+        <div className="text-small text-muted">The ocr CLI the mothership runs over the diff; downloaded on demand, checksum-checked.</div>
+        <div className={cx("mt-0.5 text-small [overflow-wrap:anywhere]", status?.state === "failed" ? "text-err" : "text-faint")}>{line}</div>
+      </div>
+      {(canDownload || busy) && (
+        <Button size="sm" variant={status?.state === "failed" ? "secondary" : "primary"} onClick={download} disabled={busy} aria-label="Download the ocr binary">
+          {busy ? <Spinner /> : null}
+          {busy ? "Downloading" : status?.state === "failed" ? "Retry" : "Download"}
+        </Button>
+      )}
+    </div>
   );
 }
 
