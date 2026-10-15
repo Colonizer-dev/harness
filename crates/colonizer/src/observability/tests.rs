@@ -39,11 +39,11 @@ fn observability_is_a_kind_and_it_stays_disablable() {
     assert!(KINDS.contains(&"observability"));
     assert!(!is_required("observability"), "exporting off the machine is opt-in by design");
     let ids: Vec<_> = providers("observability", &[]).into_iter().map(|p| p.id).collect();
-    assert_eq!(ids, vec!["otlp".to_string(), "file".to_string()]);
+    assert_eq!(ids, vec!["otlp".to_string(), "file".to_string(), "loki".to_string()]);
 }
 
 #[tokio::test]
-async fn observability_lists_both_providers_once_saved_and_persists_a_save() {
+async fn observability_lists_every_provider_once_saved_and_persists_a_save() {
     let root = crate::tests::temp_root();
     let app = crate::tests::test_app(&root);
     // Absent until saved, so it is not listed yet — that is what keeps an untouched install's
@@ -73,7 +73,7 @@ async fn observability_lists_both_providers_once_saved_and_persists_a_save() {
         .iter()
         .map(|p| p["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, vec!["otlp", "file"]);
+    assert_eq!(ids, vec!["otlp", "file", "loki"]);
     assert_eq!(obs["provider"], json!("otlp"));
 
     // The other provider saves too, on the same kind.

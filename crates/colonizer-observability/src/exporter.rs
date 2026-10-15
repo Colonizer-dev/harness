@@ -167,7 +167,16 @@ pub fn resource_for(policy: &Policy, contract: &Contract) -> ExportResource {
 /// limit), rather than skipping what the old one never received.
 pub(crate) fn destination_hash(contract: &Contract) -> String {
     let s = &contract.settings;
-    let key = format!("{}|{}|{}", s.endpoint, s.logs_endpoint.as_deref().unwrap_or(""), s.protocol);
+    // A Loki contract carries an empty `endpoint` (its destination rides in `url`), so keying on
+    // the endpoint alone would hash every Loki destination identically and a URL change would
+    // share cursor state. The effective push URL is the destination instead; the OTLP key below
+    // is untouched, so an existing OTLP install keeps its cursors.
+    let endpoint = if s.provider == "loki" {
+        crate::loki::push_url(&s.url)
+    } else {
+        s.endpoint.clone()
+    };
+    let key = format!("{}|{}|{}", endpoint, s.logs_endpoint.as_deref().unwrap_or(""), s.protocol);
     let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
     crate::map::hex(&digest.as_ref()[..8])
 }
@@ -752,7 +761,14 @@ pub async fn send_test(contract: &Contract, headers: Vec<(String, String)>) -> s
         .finish();
     let mut results = serde_json::Map::new();
     let mut ok = true;
-    for (name, item) in [("logs", log), ("metrics", metric)] {
+    // The Loki provider takes logs only (#865): its test sends the log line alone, or the metric
+    // point would be refused by the transport and fail an otherwise working configuration.
+    let signals = if contract.settings.provider == "loki" {
+        vec![("logs", log)]
+    } else {
+        vec![("logs", log), ("metrics", metric)]
+    };
+    for (name, item) in signals {
         let mut batcher = Batcher::new(
             &resource,
             BatchConfig {
