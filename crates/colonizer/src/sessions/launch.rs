@@ -858,7 +858,9 @@ pub async fn create(
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %e,
                     "sessions: could not remove the unused colony directory {}: {e}",
                     dir.display()
                 )

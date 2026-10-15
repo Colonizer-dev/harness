@@ -15,6 +15,8 @@
 //! stdin's end too, and its flags are parsed by [`colonizer_observability::backfill::Options`].
 //! It never prints a header value.
 
+#![allow(clippy::disallowed_macros)] // standalone add-on: no tracing subscriber; the mothership supervisor captures this stderr
+
 use colonizer_observability::backfill::{Backfill, Options};
 use colonizer_observability::contract::{self, CONTRACT, EXIT_REFUSED};
 use colonizer_observability::exporter::{self, Exporter};

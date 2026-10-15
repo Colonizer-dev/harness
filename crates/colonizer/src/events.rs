@@ -581,7 +581,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             .map(|s| crate::account_health::account_of(&s))
             .unwrap_or_else(|| "default".into());
         if let Some(line) = model_router_line(id, Some(&account), &event) {
-            eprintln!("{line}");
+            tracing::warn!("{line}");
         }
         // Issue #984: an upstream failure on the account's own Anthropic path marks the account, so
         // its colonies wait on it (finish_turn below) and the owner is told once. Gateway-routed

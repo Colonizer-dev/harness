@@ -440,7 +440,11 @@ pub async fn run(app: Shared) {
         // The owner's ingested fleet history (#762) ages out on the same tick, on its own window.
         crate::fleet_history::prune_tick(&app).await;
         if !report.is_empty() {
-            eprintln!(
+            tracing::info!(
+                reclaimed = report.reclaimed.len(),
+                failed = report.failed.len(),
+                orphans_removed = report.orphans_removed.len(),
+                orphans_held = report.orphans_held.len(),
                 "reclaim: reclaimed {}, failed {}, orphans removed {}, held {}",
                 report.reclaimed.len(),
                 report.failed.len(),
@@ -462,11 +466,17 @@ async fn refresh_disk_verdict(app: &Shared) -> FreeSpaceVerdict {
         let free = verdict.free_bytes.map(format_disk_size).unwrap_or_else(|| "unknown".into());
         let floor = format_disk_size(verdict.min_free_bytes);
         if verdict.admission_paused {
-            eprintln!(
+            tracing::warn!(
+                free = %free,
+                floor = %floor,
                 "queue admission paused: {free} free on the data dir's volume is below the {floor} floor; running colonies keep running"
             );
         } else {
-            eprintln!("queue admission resumed: {free} free on the data dir's volume is above the {floor} floor");
+            tracing::info!(
+                free = %free,
+                floor = %floor,
+                "queue admission resumed: {free} free on the data dir's volume is above the {floor} floor"
+            );
         }
     }
     *guard = verdict.clone();

@@ -698,16 +698,20 @@ impl Usage {
                 // send is not repeated on the next tick when the record cannot be written.
                 *self.last_sent.lock().await = Some(now);
                 if let Err(e) = (Sent { last_sent_at: now }).save(&self.sent) {
-                    eprintln!("could not record the usage send: {e:#}");
+                    tracing::error!(error = %format!("{e:#}"), "could not record the usage send: {e:#}");
                 }
                 true
             }
             Ok(response) => {
-                eprintln!("the usage batch was dropped: the collector answered {}", response.status());
+                tracing::error!(
+                    status = response.status().as_u16(),
+                    "the usage batch was dropped: the collector answered {}",
+                    response.status()
+                );
                 false
             }
             Err(e) => {
-                eprintln!("the usage batch was dropped: {e}");
+                tracing::error!(error = %e, "the usage batch was dropped: {e}");
                 false
             }
         }
@@ -718,6 +722,7 @@ impl Usage {
     /// sent — and record that it was shown, so later starts are quiet. Returns whether it printed. If
     /// the record's write fails, the next start shows the notice once more, which is the right
     /// failure mode.
+    #[allow(clippy::disallowed_macros)] // the first-start usage notice: docs/usage-data.md#what-the-first-start-prints promises exactly this stderr text
     async fn show_notice(&self, batch: &Batch) -> Result<bool> {
         if self.blocked.is_some() {
             return Ok(false);
@@ -837,6 +842,7 @@ pub async fn first_run_notice(app: &Shared) {
 /// to stdout, and nothing else. With no batch kept yet (a fresh install, or no mothership started),
 /// the empty batch is built instead, so the command always answers the only question it is asked:
 /// what exactly would be sent? Anything that is not the batch goes to stderr.
+#[allow(clippy::disallowed_macros)] // CLI output: the terminal is the destination
 pub fn cli_show(config_dir: &Path) -> Result<()> {
     let kept = config_dir.join(LAST_BATCH_FILE);
     if let Ok(bytes) = std::fs::read(&kept) {
@@ -855,6 +861,7 @@ pub fn cli_show(config_dir: &Path) -> Result<()> {
 /// so this takes effect in one that is already running. One line of confirmation on stderr, and a
 /// note when an environment switch is in force: the choice is still recorded, but it will not be
 /// what decides.
+#[allow(clippy::disallowed_macros)] // CLI output: the terminal is the destination
 pub fn cli_set(config_dir: &Path, enabled: bool) -> Result<()> {
     let path = config_dir.join(CHOICE_FILE);
     let mut choice = Choice::load(&path);

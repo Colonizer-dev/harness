@@ -33,7 +33,10 @@ pub async fn run(machine: Machine, requested: Option<Scope>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("cannot read this token's standing from the mothership: {e}"))?;
     let effective = effective_scope(&who, requested);
     let server = ColonyServer::new(machine, effective);
-    eprintln!(
+    tracing::info!(
+        served = ROLES.len() - withheld(effective).len(),
+        total = ROLES.len(),
+        scope = %effective.as_str(),
         "colonizer mcp: serving {} of {} tools at scope {}",
         ROLES.len() - withheld(effective).len(),
         ROLES.len(),
@@ -416,6 +419,7 @@ impl ServerHandler for ColonyServer {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_macros)] // tests may print to stderr
 mod tests {
     use super::*;
     use crate::cli::PendingQuestion;

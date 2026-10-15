@@ -222,7 +222,9 @@ impl Remote {
         // An unreadable file signs every link device out: the safe direction.
         let links = match std::fs::read(dir.join(LINKS_FILE)) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                eprintln!(
+                tracing::warn!(
+                    path = %dir.join(LINKS_FILE).display(),
+                    error = %e,
                     "remote: {} does not parse ({e}); no device is signed in to the link",
                     dir.join(LINKS_FILE).display()
                 );
@@ -311,7 +313,12 @@ impl Remote {
             .and_then(|()| Ok(serde_json::to_vec_pretty(links)?))
             .and_then(|bytes| util::write_private(&self.dir.join(LINKS_FILE), &bytes));
         if let Err(e) = saved {
-            eprintln!("remote: could not save {}: {e:#}", self.dir.join(LINKS_FILE).display());
+            tracing::error!(
+                path = %self.dir.join(LINKS_FILE).display(),
+                error = %format!("{e:#}"),
+                "remote: could not save {}: {e:#}",
+                self.dir.join(LINKS_FILE).display()
+            );
         }
     }
 
@@ -545,7 +552,8 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
             Ok(old_key) => {
                 if let Err(e) = retire_install(&relay, &old, &old_key).await {
                     if let Err(undo) = signed_call(&relay, &install_id, &key, Method::DELETE, "", None).await {
-                        eprintln!(
+                        tracing::error!(
+                            error = %undo.message(),
                             "remote: could not withdraw the unused new install at the relay: {}",
                             undo.message()
                         );
@@ -556,7 +564,10 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
                     ));
                 }
             }
-            Err(e) => eprintln!("remote: the old link cannot be retired at the relay, its key is unreadable: {e:#}"),
+            Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "remote: the old link cannot be retired at the relay, its key is unreadable: {e:#}"
+            ),
         }
     }
     util::write_private(&app.remote.dir.join(KEY_FILE), doc.as_ref())?;
@@ -1032,7 +1043,7 @@ pub async fn run(app: Shared, router: Router) {
                 // link straight back, and the two motherships would replace each other forever.
                 // Park until the operator acts — a re-enable or reset signals, which dials again
                 // (a fresh successful connect clears the status), a disable waits upstairs.
-                eprintln!(
+                tracing::warn!(
                     "remote: the relay gave this link to a newer tunnel; parked until remote access is re-enabled or reset"
                 );
                 app.remote.set_replaced(true).await;
@@ -1079,16 +1090,20 @@ async fn connect_and_serve(app: &Shared, router: &Router) -> (bool, bool) {
         return (false, false); // enabled without an identity cannot happen: enabling registers first
     };
     let Ok(key) = load_key(&app.remote.dir) else {
-        eprintln!("remote: cannot load the access key from {}", app.remote.dir.display());
+        tracing::warn!(
+            path = %app.remote.dir.display(),
+            "remote: cannot load the access key from {}",
+            app.remote.dir.display()
+        );
         return (false, false);
     };
     let relay = app.remote.relay().await;
     if let Err(e) = http_base(&relay) {
-        eprintln!("remote: not dialing: {e:#}");
+        tracing::warn!(error = %format!("{e:#}"), "remote: not dialing: {e:#}");
         return (false, false);
     }
     let Ok(request) = format!("{relay}/tunnel/{install_id}").into_client_request() else {
-        eprintln!("remote: bad relay URL {relay:?}");
+        tracing::warn!(relay = ?relay, "remote: bad relay URL {relay:?}");
         return (false, false);
     };
     let mut signal = app.remote.signal.subscribe();
@@ -1096,7 +1111,7 @@ async fn connect_and_serve(app: &Shared, router: &Router) -> (bool, bool) {
         ws = handshake(request, &key, &install_id) => match ws {
             Ok(ws) => ws,
             Err(e) => {
-                eprintln!("remote: dialing {relay} failed: {e:#}");
+                tracing::warn!(relay = %relay, error = %format!("{e:#}"), "remote: dialing {relay} failed: {e:#}");
                 return (false, false);
             }
         },
@@ -1105,7 +1120,9 @@ async fn connect_and_serve(app: &Shared, router: &Router) -> (bool, bool) {
     let (accepted, replaced) = serve_connection(app, router, ws, host).await;
     app.remote.set_connected(false).await;
     if !accepted && !replaced {
-        eprintln!("remote: the relay hung up before answering the hello (bad signature, or wrong install?); keeping the backoff");
+        tracing::warn!(
+            "remote: the relay hung up before answering the hello (bad signature, or wrong install?); keeping the backoff"
+        );
     }
     (accepted, replaced)
 }
@@ -1309,7 +1326,7 @@ async fn serve_connection(
     let ws_router = router.clone().layer(Extension(Tunnelled { host: conn.host.clone() }));
     conn.spawn(async move {
         if let Err(e) = axum::serve(InMemory { rx: conns_rx }, ws_router).await {
-            eprintln!("remote: tunnel websocket server stopped: {e}");
+            tracing::warn!(error = %e, "remote: tunnel websocket server stopped: {e}");
         }
     });
     // One writer owns the socket's sending half; everything sends frames through `conn.out`.
@@ -1352,7 +1369,7 @@ async fn serve_connection(
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last_frame + PING_EVERY)) => {
                 if last_frame.elapsed() >= DEAD_AFTER {
-                    eprintln!("remote: the relay went quiet; redialing");
+                    tracing::warn!("remote: the relay went quiet; redialing");
                     break;
                 }
                 conn.nudge(json!({"t": "ping"}).to_string());
@@ -1878,6 +1895,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_macros)] // tests may print to stderr
 mod tests {
     use super::*;
     use crate::tests::test_app;

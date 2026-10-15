@@ -1490,7 +1490,7 @@ async fn post_webhook(
     // unsigned URL says so once and stops rather than posting what it cannot sign.
     if secret(app).is_none() {
         if reasons.webhook.as_deref() != Some(NO_SIGNING_SECRET) {
-            eprintln!(
+            tracing::warn!(
                 "notify: the webhook stays off: no signing secret is set (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET)"
             );
             reasons.webhook = Some(NO_SIGNING_SECRET.to_string());

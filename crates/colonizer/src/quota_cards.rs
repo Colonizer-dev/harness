@@ -490,7 +490,10 @@ pub async fn quota_action(
                         )
                     })
                     .collect();
-                eprintln!(
+                tracing::warn!(
+                    provider = %id,
+                    model = %model,
+                    scope = %scope,
                     "quota-action: provider \"{id}\" out of quota: switched to {model} (scope {scope}): {}",
                     said.join("; ")
                 );

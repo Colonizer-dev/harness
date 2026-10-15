@@ -125,7 +125,7 @@ impl HistoryStore {
         let file = config_dir.join(FILE);
         let mut records: Vec<RunRecord> = match std::fs::read(&file) {
             Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-                eprintln!("loop history: could not parse {}: {e}; starting empty", file.display());
+                tracing::warn!( path = %file.display(), error = %e, "loop history: could not parse {}: {e}; starting empty", file.display() );
                 Vec::new()
             }),
             Err(_) => Vec::new(),
@@ -143,7 +143,7 @@ impl HistoryStore {
         let data = match serde_json::to_vec(&*self.records.read().await) {
             Ok(data) => data,
             Err(e) => {
-                eprintln!("loop history: could not encode: {e}");
+                tracing::error!( error = %e, "loop history: could not encode: {e}" );
                 return;
             }
         };
@@ -151,7 +151,7 @@ impl HistoryStore {
             let _ = tokio::fs::create_dir_all(dir).await;
         }
         if let Err(e) = write_atomic(&self.file, &data).await {
-            eprintln!("loop history: could not save {}: {e:#}", self.file.display());
+            tracing::error!( path = %self.file.display(), error = %format!("{e:#}"), "loop history: could not save {}: {e:#}", self.file.display() );
         }
     }
 

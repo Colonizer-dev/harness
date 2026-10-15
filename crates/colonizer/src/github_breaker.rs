@@ -416,7 +416,9 @@ pub(crate) fn observe(config_dir: &Path, identity: &str, output: &str, now: Date
             b.observe(identity, failure, output, now).then(|| b.open.clone())
         });
         if let Some(Some(open)) = opened {
-            eprintln!(
+            tracing::warn!(
+                cause = %open.cause.headline(),
+                next_probe = %open.next_probe.format("%H:%M UTC"),
                 "github: {} — pausing launches, publishes, merges and GitHub writes; next check at {}",
                 open.cause.headline(),
                 open.next_probe.format("%H:%M UTC")
@@ -473,7 +475,7 @@ where
         Ok(()) => {
             let closed = with(&app.cfg.config_dir, Breaker::close);
             if closed {
-                eprintln!("github: the account works again; the queue resumes and held publishes go out one at a time");
+                tracing::info!("github: the account works again; the queue resumes and held publishes go out one at a time");
                 *app.github_viewer.lock().await = None;
             }
             closed

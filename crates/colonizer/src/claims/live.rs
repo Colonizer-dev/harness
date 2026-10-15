@@ -279,7 +279,13 @@ pub(crate) async fn publish_with<G: ClaimGh>(
         Ok(comments) => find_claim_comment(&comments),
         Err(e) => {
             live.note(&Err(e.clone()), false, now);
-            eprintln!("claims: could not read the comments on {repo}#{}: {e}", view.issue);
+            tracing::warn!(
+                repo = %repo,
+                issue = view.issue,
+                error = %e,
+                "claims: could not read the comments on {repo}#{}: {e}",
+                view.issue
+            );
             None
         }
     };
@@ -298,7 +304,13 @@ pub(crate) async fn publish_with<G: ClaimGh>(
         match edited {
             Ok(()) => id = Some(existing_id),
             // Not editable (another account's comment): a fresh one below.
-            Err(e) => eprintln!("claims: could not edit the claim comment on {repo}#{}: {e}", view.issue),
+            Err(e) => tracing::warn!(
+                repo = %repo,
+                issue = view.issue,
+                error = %e,
+                "claims: could not edit the claim comment on {repo}#{}: {e}",
+                view.issue
+            ),
         }
     }
     if id.is_none() {
@@ -309,7 +321,13 @@ pub(crate) async fn publish_with<G: ClaimGh>(
             }
             Err(e) => {
                 live.note(&Err(e.clone()), true, now);
-                eprintln!("claims: could not leave the claim comment on {repo}#{}: {e}", view.issue);
+                tracing::warn!(
+                    repo = %repo,
+                    issue = view.issue,
+                    error = %e,
+                    "claims: could not leave the claim comment on {repo}#{}: {e}",
+                    view.issue
+                );
             }
         }
     }
@@ -327,12 +345,19 @@ pub(crate) async fn publish_with<G: ClaimGh>(
     if let Err(e) = gh.add_labels(repo, view.issue, &labels).await {
         live.note(&Err(e.clone()), false, now);
         if host_label && gh.add_labels(repo, view.issue, &[CLAIM_LABEL]).await.is_ok() {
-            eprintln!(
+            tracing::warn!(
+                label = %host.label,
+                repo = %repo,
+                issue = view.issue,
+                error = %e,
                 "claims: could not add {} to {repo}#{} ({e}); the claim is comment and claim label only",
                 host.label, view.issue
             );
         } else {
-            eprintln!(
+            tracing::warn!(
+                repo = %repo,
+                issue = view.issue,
+                error = %e,
                 "claims: could not label {repo}#{} as claimed ({e}); the claim is comment-only",
                 view.issue
             );
@@ -371,13 +396,23 @@ pub(crate) async fn release_with<G: ClaimGh>(gh: &G, live: &mut Live, release: R
         Ok(c) => c,
         Err(e) => {
             live.note(&Err(e.clone()), false, now);
-            eprintln!("claims: could not read the comments on {repo}#{issue} to release colony {colony}'s claim: {e}");
+            tracing::warn!(
+                repo = %repo,
+                issue = issue,
+                colony = %colony,
+                error = %e,
+                "claims: could not read the comments on {repo}#{issue} to release colony {colony}'s claim: {e}"
+            );
             return;
         }
     };
     let latest = find_claim_comment(&comments);
     if !ours_or_stale(latest.as_ref().map(|(_, c, _)| c), colony) {
-        eprintln!("claims: leaving the claim on {repo}#{issue} alone: it now names another colony");
+        tracing::warn!(
+            repo = %repo,
+            issue = issue,
+            "claims: leaving the claim on {repo}#{issue} alone: it now names another colony"
+        );
         live.issues.remove(&key);
         return;
     }

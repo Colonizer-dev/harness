@@ -878,7 +878,7 @@ impl MirroredStore {
                     self.lock().pending.remove(&item);
                 }
                 Err(e) => {
-                    eprintln!("session store: could not upload {item:?}: {e}");
+                    tracing::warn!( item = ?item, error = %e, "session store: could not upload {item:?}: {e}" );
                     failure = Some(e);
                 }
             }
@@ -943,7 +943,7 @@ impl MirroredStore {
                 if last_sweep.elapsed() >= SWEEP_INTERVAL {
                     last_sweep = tokio::time::Instant::now();
                     if let Err(e) = mirror.sweep().await {
-                        eprintln!("session store: the sweep failed: {e}");
+                        tracing::warn!( error = %e, "session store: the sweep failed: {e}" );
                     }
                 }
                 failures = match mirror.flush().await {

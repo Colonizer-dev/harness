@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_macros)] // tests may print to stderr
+
 use super::*;
 use crate::sessions::tests::colony;
 use std::process::Command;

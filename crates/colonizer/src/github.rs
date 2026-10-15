@@ -56,7 +56,7 @@ pub async fn gh_get(app: &App, path: &str, accept: Option<&str>) -> Result<(u16,
     if let Some(entry) = keep
         && let Err(e) = app.http_cache.store(&entry)
     {
-        eprintln!("gh api {path}: could not keep the response: {e:#}");
+        tracing::warn!( path = %path, error = %format!("{e:#}"), "gh api {path}: could not keep the response: {e:#}" );
     }
     Ok((status, body))
 }
@@ -90,7 +90,7 @@ pub async fn gh_list(app: &App, path: &str, jq: &str, limit: Duration, max_reuse
     let mut entry = crate::cache_store::DiskEntry::new(key, Value::String(listing.clone()));
     entry.fetched_at = started;
     if let Err(e) = app.http_cache.store(&entry) {
-        eprintln!("gh api {path}: could not keep the listing: {e:#}");
+        tracing::warn!( path = %path, error = %format!("{e:#}"), "gh api {path}: could not keep the listing: {e:#}" );
     }
     Ok(listing)
 }
@@ -3182,7 +3182,10 @@ pub async fn refresh_orgs(app: &App) {
         Err(e) => {
             // Logged once per attempt, and attempts are a minute apart, so a `gh` that stays broken
             // costs one line a minute rather than silence.
-            eprintln!("orgs: could not list the GitHub account's orgs, retrying in a minute: {e:#}");
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "orgs: could not list the GitHub account's orgs, retrying in a minute: {e:#}"
+            );
             *app.orgs_failed_at.lock().await = Some(Instant::now());
             return;
         }
@@ -3244,7 +3247,8 @@ pub async fn refresh_orgs(app: &App) {
     }
     *app.new_orgs.write().await = plan.awaiting;
     if plan.first_run_adopted > 0 {
-        eprintln!(
+        tracing::info!(
+            first_run_adopted = plan.first_run_adopted,
             "orgs: adopted {} workspace{} from the signed-in GitHub account; each can be switched off in its org settings",
             plan.first_run_adopted,
             if plan.first_run_adopted == 1 { "" } else { "s" }
@@ -3281,7 +3285,11 @@ pub async fn list_issues(State(app): State<Shared>, Path((owner, name)): Path<(S
     // read: without them the label and title still mark an epic, and the launch gate
     // (`sessions::create`, epic.rs) asks GitHub about the one issue either way.
     let totals = crate::epic::open_sub_issue_totals(&app, &repo).await.unwrap_or_else(|e| {
-        eprintln!("epic: could not read sub-issue totals for {repo} ({e:#}); marking epics by label and title only");
+        tracing::warn!(
+            repo = %repo,
+            error = %format!("{e:#}"),
+            "epic: could not read sub-issue totals for {repo} ({e:#}); marking epics by label and title only"
+        );
         Default::default()
     });
     // Each issue also carries `intake` (issue #1219): whether auto mode takes it or a person must

@@ -168,7 +168,12 @@ pub(crate) fn load(config_dir: &Path) -> Option<FleetPolicy> {
     match serde_json::from_slice::<FleetPolicy>(&bytes) {
         Ok(policy) => Some(policy),
         Err(e) => {
-            eprintln!("fleet policy: {} does not parse ({e}); ignoring it", path.display());
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "fleet policy: {} does not parse ({e}); ignoring it",
+                path.display()
+            );
             None
         }
     }

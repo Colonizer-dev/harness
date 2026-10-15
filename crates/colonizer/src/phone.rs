@@ -351,11 +351,21 @@ impl PhoneStore {
         let devices = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => {
-                eprintln!("phones: could not read {} ({e}); no phone is signed in", path.display());
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "phones: could not read {} ({e}); no phone is signed in",
+                    path.display()
+                );
                 Vec::new()
             }
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                eprintln!("phones: {} does not parse ({e}); no phone is signed in", path.display());
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "phones: {} does not parse ({e}); no phone is signed in",
+                    path.display()
+                );
                 Vec::new()
             }),
         };
@@ -375,7 +385,7 @@ impl PhoneStore {
             return;
         };
         if let Err(e) = util::write_private(&self.path, &bytes) {
-            eprintln!("phones: could not save {}: {e}", self.path.display());
+            tracing::error!( path = %self.path.display(), error = %e, "phones: could not save {}: {e}", self.path.display() );
         }
     }
 
@@ -620,7 +630,11 @@ async fn revoke(
 pub(crate) async fn forget(app: &crate::App, id: &str) -> Option<String> {
     let label = app.phones.revoke(id)?;
     if let Err(e) = crate::push::drop_phone(&app.cfg.config_dir, id) {
-        eprintln!("phones: the push subscriptions of {id} could not be dropped ({e:#})");
+        tracing::error!(
+            id = %id,
+            error = %format!("{e:#}"),
+            "phones: the push subscriptions of {id} could not be dropped ({e:#})"
+        );
     }
     app.answer_tokens.revoke_phone(id).await;
     Some(label)

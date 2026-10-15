@@ -484,7 +484,7 @@ pub fn discover_agents(assets: Option<&FsPath>) -> (Vec<AgentModule>, Vec<String
             Ok(module) => modules.push(module),
             Err(e) => {
                 let problem = format!("{}: {e}", path.display());
-                eprintln!("modules: {problem}");
+                tracing::warn!("modules: {problem}");
                 problems.push(problem);
             }
         }

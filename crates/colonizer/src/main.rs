@@ -35,6 +35,7 @@ mod chat_tools;
 mod claims;
 mod claude_accounts;
 mod claude_login;
+#[allow(clippy::disallowed_macros)] // the CLI is the user's terminal interface, not process diagnostics
 mod cli;
 mod code;
 mod colonize;

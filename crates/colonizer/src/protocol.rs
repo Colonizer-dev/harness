@@ -151,7 +151,10 @@ impl Origin {
             Some(wire) => match serde_json::from_value(json!(wire)) {
                 Ok(origin) => Some(origin),
                 Err(_) => {
-                    eprintln!("events: unknown origin \"{wire}\" on a stored line; reading it as legacy");
+                    tracing::warn!(
+                        wire = %wire,
+                        "events: unknown origin \"{wire}\" on a stored line; reading it as legacy"
+                    );
                     None
                 }
             },

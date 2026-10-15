@@ -507,6 +507,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
 
 /// The mothership itself: load state from the data dir, serve the API and the web UI, and run the
 /// background loops.
+#[allow(clippy::disallowed_macros)] // prints before the tracing log exists at boot (#856 keeps these raw)
 pub(crate) async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
     // A `cargo install` binary has no assets beside it; when an installed app is there, hand this

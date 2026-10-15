@@ -291,7 +291,10 @@ pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     let client = match client {
         Ok(client) => client,
         Err(e) => {
-            eprintln!("fleet: could not build an HTTP client, every peer reads as unreachable: {e:#}");
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "fleet: could not build an HTTP client, every peer reads as unreachable: {e:#}"
+            );
             for url in &peers {
                 hosts.push(unreachable_summary(app, url).await);
             }
