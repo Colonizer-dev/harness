@@ -5,12 +5,17 @@
 //! colonizer-observability --version [--json]
 //! colonizer-observability run --contract <data>/observability/exporter.json
 //! colonizer-observability send-test-event --contract <data>/observability/exporter.json
+//! colonizer-observability backfill --contract <data>/observability/exporter.json [--since <when>] [--until <when>] [--repo <owner/name>] [--rate <n>] [--dry-run]
 //! ```
 //!
 //! Both commands read one JSON line of secrets from stdin first (`{"headers": "k=v,…"}`). `run`
 //! then exports until its stdin closes — the mothership's death ends it without a heartbeat — and
-//! exits 78 when the contract or version is refused. It never prints a header value.
+//! exits 78 when the contract or version is refused. `backfill` (#858) replays the ledgers'
+//! on-disk history to the backend once, printing one JSON summary on stdout; it stops at its
+//! stdin's end too, and its flags are parsed by [`colonizer_observability::backfill::Options`].
+//! It never prints a header value.
 
+use colonizer_observability::backfill::{Backfill, Options};
 use colonizer_observability::contract::{self, CONTRACT, EXIT_REFUSED};
 use colonizer_observability::exporter::{self, Exporter};
 use std::path::PathBuf;
@@ -18,7 +23,9 @@ use std::process::ExitCode;
 use tokio::io::AsyncReadExt;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: colonizer-observability (--version [--json] | run --contract <path> | send-test-event --contract <path>)");
+    eprintln!(
+        "usage: colonizer-observability (--version [--json] | run --contract <path> | send-test-event --contract <path> | backfill --contract <path> [--since <when>] [--until <when>] [--repo <owner/name>] [--rate <n>] [--dry-run])"
+    );
     ExitCode::from(2)
 }
 
@@ -123,6 +130,58 @@ async fn main() -> ExitCode {
             }
             exporter.shutdown();
             ExitCode::SUCCESS
+        }
+        Some("backfill") => {
+            let Some(path) = contract_arg(&args) else {
+                return usage();
+            };
+            let opts = match Options::from_args(&args[1..]) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("backfill: {e}");
+                    return usage();
+                }
+            };
+            let headers = match read_headers() {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("observability: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut backfill = match Backfill::new(&path, headers, &opts) {
+                Ok(b) => b,
+                Err(e) if e.starts_with("refused") => {
+                    eprintln!("observability: {e}");
+                    return ExitCode::from(EXIT_REFUSED as u8);
+                }
+                Err(e) => {
+                    eprintln!("observability: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // The mothership holds our stdin open; its end is our cue to stop what is in flight.
+            let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+            tokio::spawn(async move {
+                let mut stdin = tokio::io::stdin();
+                let mut buf = [0u8; 256];
+                while matches!(stdin.read(&mut buf).await, Ok(n) if n > 0) {}
+                let _ = stop_tx.send(true);
+            });
+            while !backfill.done() {
+                let wait = backfill.tick().await;
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = stop_rx.changed() => backfill.cancel(),
+                }
+            }
+            let summary = backfill.summary();
+            println!("{summary}");
+            if summary["state"] == "failed" {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         _ => usage(),
     }

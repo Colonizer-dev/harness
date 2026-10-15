@@ -15,6 +15,7 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [OTLP/gRPC](observability/grpc.md): the tonic transport behind the add-on's `otlp-grpc` feature,
   for collectors that only speak gRPC on 4317.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
+- [Backfill](observability/backfill.md): replaying the history a destination never received — the window, the rate, the dry run, duplicates and backend limits.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
   serve, how to scrape it, and what a series is allowed to name.
@@ -79,7 +80,9 @@ It also carries `endpoint`, `last_error` (redacted, header values cut out), `las
 bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `last_partial_success`, and `signals`: per signal (`logs`, `traces`, `metrics`) its `state` (`ok`,
 `backing_off`, `auth_failed`, `off`), `endpoint`, `consecutive_failures`, `last_error`,
-`last_success_unix`, `records_sent` and `bytes_sent`.
+`last_success_unix`, `records_sent` and `bytes_sent`. While a backfill
+([Backfill](observability/backfill.md)) runs, the same route also carries its progress as
+`backfill`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
 `<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
