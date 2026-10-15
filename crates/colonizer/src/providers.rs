@@ -171,6 +171,17 @@ pub struct Provider {
     /// their tokens but cost, and spend, nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<Pricing>,
+    /// Dollars per million tokens for one model on this endpoint, keyed by the model id as the
+    /// client sends it — the canonical part after `<id>/` in a model setting, before any `model_map`
+    /// rename. Wins over the provider-level `pricing` for that model; a model the map lacks falls
+    /// back to `pricing` and then the price feed (price_feed.rs, issue #1038).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_pricing: BTreeMap<String, Pricing>,
+    /// The id this connection prices under in the price feed (price_feed.rs), for a custom
+    /// connection whose prices live under another catalogue's name. Unset means the catalogue id
+    /// (`preset`) it was added from, or — a hand-pointed endpoint — this connection's own id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_feed_id: Option<String>,
     /// Where to read what is left in a prepaid token plan (issue #199). Unset means no probe: the
     /// first sign of an exhausted plan stays the colonies failing over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,10 +253,28 @@ impl Provider {
         quirks
     }
 
-    /// What one routed response costs here: $0 when the provider has no pricing configured, whose tokens
-    /// are still counted.
-    pub fn cost_usd(&self, usage: Usage) -> f64 {
-        self.pricing.map_or(0.0, |pricing| pricing.cost_usd(usage))
+    /// What one routed response for `model` costs here, at the pricing precedence's last rung:
+    /// the operator's per-model price, then the provider-level price, then the price feed's price
+    /// for [`Provider::feed_provider_id`] and the model (`price_feed.rs`, issue #1038). `None` when
+    /// nothing prices it: tokens are still counted, dollars are not.
+    pub(crate) fn price_for(&self, model: &str, feed: Option<&crate::price_feed::FeedEntries>) -> Option<Pricing> {
+        self.model_pricing.get(model).copied().or(self.pricing).or_else(|| {
+            feed.and_then(|feed| feed.get(self.feed_provider_id())?.get(model))
+                .map(|entry| entry.pricing)
+        })
+    }
+
+    /// The id this connection prices under in the feed: the operator's explicit mapping
+    /// (`price_feed_id`), else the catalogue id it was added from (`preset`, once `resolved_preset`
+    /// has had its say — a hand-pointed `custom` endpoint names no catalogue entry, so its own id
+    /// stands in).
+    pub(crate) fn feed_provider_id(&self) -> &str {
+        self.price_feed_id.as_deref().filter(|id| !id.is_empty()).unwrap_or_else(|| {
+            match resolved_preset(&self.preset, &self.base_url) {
+                "custom" => self.id.as_str(),
+                preset => preset,
+            }
+        })
     }
 }
 
@@ -1013,11 +1042,13 @@ fn refusal_reason(sensitivity: Sensitivity, overrides: Option<&SensitivityOverri
 }
 
 /// The pricing the gateway would actually charge for `model`, if any provider's id prefixes it in
-/// `<provider>/<model>` form and that provider has pricing configured. `None` for a bare model name
-/// (no gateway involved) or a provider with no pricing on file.
-pub(crate) fn pricing_for(providers: &[Provider], model: &str) -> Option<Pricing> {
+/// `<provider>/<model>` form: [`Provider::price_for`] for the part after the prefix. `feed` is the
+/// price feed's table (price_feed.rs), the lowest rung of the precedence. `None` for a bare model
+/// name (no gateway involved) or a connection nothing prices.
+pub(crate) fn pricing_for(providers: &[Provider], model: &str, feed: Option<&crate::price_feed::FeedEntries>) -> Option<Pricing> {
     let prefix = provider_prefix(model)?;
-    providers.iter().find(|p| p.id == prefix)?.pricing
+    let provider = providers.iter().find(|p| p.id == prefix)?;
+    provider.price_for(&model[prefix.len() + 1..], feed)
 }
 
 pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
@@ -1148,6 +1179,8 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "context_tokens": provider.context_tokens,
         "fallback_model": provider.fallback_model,
         "pricing": provider.pricing,
+        "model_pricing": provider.model_pricing,
+        "price_feed_id": provider.price_feed_id,
         "model_map": provider.model_map,
         "disabled_tools": provider.disabled_tools,
         "trusted": provider.trusted,
@@ -1174,7 +1207,34 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         described["new_models"] = json!(found.new_models);
         described["discovered_at"] = json!(found.discovered_at);
     }
+    // The feed prices this connection resolves to (issue #1038), for the cockpit's pricing read-only
+    // column. Computed per answer from the feed's last good copy — never saved into providers.json.
+    let feed_prices = feed_prices(app, provider);
+    if !feed_prices.is_empty() {
+        described["feed_prices"] = json!(feed_prices);
+    }
     described
+}
+
+/// The feed's entries for one connection: every model the feed prices under the id the connection
+/// resolves to ([`Provider::feed_provider_id`]), the operator's own pricing always left untouched.
+fn feed_prices(app: &App, provider: &Provider) -> Vec<Value> {
+    let feed = app.price_feed.entries();
+    let Some(models) = feed.get(provider.feed_provider_id()) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .map(|(model, entry)| {
+            json!({
+                "model": model,
+                "pricing": entry.pricing,
+                "last_verified_at": entry.last_verified_at,
+                "source": entry.source,
+                "stale": entry.stale(),
+            })
+        })
+        .collect()
 }
 
 /// Quota exhaustion across providers for the status poll and the queue (issue #225): whether every
@@ -1411,6 +1471,13 @@ pub struct PutProvider {
     /// which also is exactly what "no pricing" means, so nothing becomes unreachable.
     #[serde(default)]
     pricing: Option<Pricing>,
+    /// Omitted keeps the saved per-model pricing, like pricing; an empty map is an explicit clear.
+    /// Keys are the canonical model names the client sends; every rate is checked like `pricing`'s.
+    #[serde(default)]
+    model_pricing: Option<BTreeMap<String, Pricing>>,
+    /// Omitted keeps the saved feed mapping, like pricing; an empty string clears it.
+    #[serde(default)]
+    price_feed_id: Option<String>,
     /// Omitted keeps the saved probe, like pricing; a probe whose URL is empty removes it, the way
     /// an empty key string does. The credential goes to this URL, so the host is pinned at
     /// validation (issue #199).
@@ -1443,6 +1510,17 @@ fn in_range(value: Option<u64>, min: u64, max: u64) -> bool {
 /// A price is a dollar amount per million tokens: finite, never negative.
 fn valid_price(value: f64) -> bool {
     value.is_finite() && value >= 0.0
+}
+
+/// The id a connection prices under in the feed: a leading `[A-Za-z0-9]`, then
+/// `[A-Za-z0-9._-]*` — the same shape the feed's own provider ids take.
+fn valid_feed_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 /// The gateway appends the request's own path to a base_url (e.g. `/v1/messages`, and `/v1/models`
@@ -1520,6 +1598,37 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
     });
     if !pricing_ok {
         return Err(bad("pricing rates must be dollar amounts per million tokens, zero or more"));
+    }
+    // Per-model pricing is checked like the provider-level kind, and its keys like model ids: a
+    // blank or whitespace key would price a model nobody can send.
+    let model_pricing_ok = req.model_pricing.as_ref().is_none_or(|map| {
+        map.iter().all(|(model, pricing)| {
+            valid_model(model.trim())
+                && [
+                    pricing.input_per_mtok,
+                    pricing.output_per_mtok,
+                    pricing.cache_read_per_mtok,
+                    pricing.cache_write_per_mtok,
+                    pricing.thinking_per_mtok,
+                ]
+                .iter()
+                .all(|rate| valid_price(*rate))
+        })
+    });
+    if !model_pricing_ok {
+        return Err(bad(
+            "model pricing keys must be model IDs and their rates dollar amounts per million tokens, zero or more",
+        ));
+    }
+    // The id this connection is priced under in the feed, when the operator maps it: the same shape
+    // the feed's own provider ids take, checked here so a typo does not silently unprice the feed.
+    if let Some(feed_id) = req.price_feed_id.as_deref().map(str::trim)
+        && !feed_id.is_empty()
+        && !valid_feed_id(feed_id)
+    {
+        return Err(bad(
+            "the price feed provider id must start with a letter or digit, then letters, digits, dots, dashes or underscores",
+        ));
     }
     // The quota probe is fetched with the provider's own credential, so its origin is pinned to the
     // base URL's — scheme, host and port, the port included: a probe anywhere else, even a plaintext
@@ -1685,6 +1794,22 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         Some(pricing) => Some(pricing),
         None => providers.iter().find(|p| p.id == id).and_then(|p| p.pricing),
     };
+    // Per-model pricing keeps the same way: omitted keeps the saved map, `{}` is an explicit clear.
+    // Keys are trimmed, so the id the lookup matches is the one the operator meant.
+    let model_pricing = req
+        .model_pricing
+        .map(|map| {
+            map.into_iter()
+                .map(|(model, pricing)| (model.trim().to_string(), pricing))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.model_pricing.clone())
+                .unwrap_or_default()
+        });
 
     let provider = Provider {
         id: id.clone(),
@@ -1700,6 +1825,16 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         context_tokens: req.context_tokens,
         fallback_model,
         pricing,
+        model_pricing,
+        // Trimmed on the way in, so the id the feed is looked up under is the one the operator
+        // meant; an empty string clears it, like an empty key.
+        price_feed_id: match req.price_feed_id {
+            Some(feed_id) => {
+                let feed_id = feed_id.trim();
+                (!feed_id.is_empty()).then(|| feed_id.to_string())
+            }
+            None => providers.iter().find(|p| p.id == id).and_then(|p| p.price_feed_id.clone()),
+        },
         model_map: req.model_map.unwrap_or_else(|| {
             providers
                 .iter()
@@ -1837,6 +1972,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_pricing: BTreeMap::new(),
+            price_feed_id: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
             quota: None,
@@ -1998,8 +2135,8 @@ mod tests {
 
         let unpriced = provider("local");
         assert_eq!(
-            unpriced.cost_usd(usage),
-            0.0,
+            unpriced.price_for("any-model", None).map(|p| p.cost_usd(usage)),
+            None,
             "no pricing configured: tokens counted, dollars none"
         );
         assert_eq!(Usage::default().total_tokens(), 0);
@@ -2021,7 +2158,7 @@ mod tests {
 
         // Extra slashes are the provider's model id, as in `ColonyRoutes::used`.
         assert_eq!(
-            pricing_for(&providers, "deepseek/deepseek-ai/DeepSeek-V4.1-Flash"),
+            pricing_for(&providers, "deepseek/deepseek-ai/DeepSeek-V4.1-Flash", None),
             Some(Pricing {
                 input_per_mtok: 0.27,
                 output_per_mtok: 1.1,
@@ -2029,11 +2166,140 @@ mod tests {
             })
         );
         // A bare alias or ID never routes through the gateway, so nothing prices it.
-        assert_eq!(pricing_for(&providers, "opus"), None);
+        assert_eq!(pricing_for(&providers, "opus", None), None);
         // A prefix no configured provider answers to.
-        assert_eq!(pricing_for(&providers, "unknown/model"), None);
+        assert_eq!(pricing_for(&providers, "unknown/model", None), None);
         // The provider is found but carries no pricing on file.
-        assert_eq!(pricing_for(&providers, "strix/qwen3"), None);
+        assert_eq!(pricing_for(&providers, "strix/qwen3", None), None);
+    }
+
+    /// The precedence (issue #1038): the operator's per-model price, then the provider-level one,
+    /// then the feed's — so two models on one connection can be priced differently, an operator's
+    /// own provider-level price beats the feed, and an unpriced connection falls through to the
+    /// feed under the id the operator mapped it to (else the catalogue id it was added from).
+    #[test]
+    fn pricing_precedence_is_model_then_provider_then_feed() {
+        let feed = crate::price_feed::FeedEntries::from([
+            (
+                "deepseek".to_string(),
+                BTreeMap::from([
+                    (
+                        "deepseek-chat".to_string(),
+                        crate::price_feed::FeedEntry {
+                            pricing: Pricing {
+                                input_per_mtok: 0.1,
+                                output_per_mtok: 0.2,
+                                ..Default::default()
+                            },
+                            last_verified_at: None,
+                            source: None,
+                        },
+                    ),
+                    (
+                        "deepseek-reasoner".to_string(),
+                        crate::price_feed::FeedEntry {
+                            pricing: Pricing {
+                                input_per_mtok: 0.3,
+                                output_per_mtok: 0.4,
+                                ..Default::default()
+                            },
+                            last_verified_at: None,
+                            source: None,
+                        },
+                    ),
+                ]),
+            ),
+            (
+                "kimi".to_string(),
+                BTreeMap::from([(
+                    "k2".to_string(),
+                    crate::price_feed::FeedEntry {
+                        pricing: Pricing {
+                            input_per_mtok: 0.5,
+                            output_per_mtok: 0.6,
+                            ..Default::default()
+                        },
+                        last_verified_at: None,
+                        source: None,
+                    },
+                )]),
+            ),
+        ]);
+
+        // Feed only: an unpriced connection whose catalogue id the feed knows is priced per model.
+        let mut custom = provider("my-relay");
+        custom.preset = "custom".into();
+        assert_eq!(pricing_for(&[custom], "my-relay/deepseek-chat", Some(&feed)), None);
+
+        let mut catalogue = provider("our-deepseek");
+        catalogue.preset = "deepseek".into();
+        let catalogue = vec![catalogue];
+        assert_eq!(
+            pricing_for(&catalogue, "our-deepseek/deepseek-chat", Some(&feed))
+                .unwrap()
+                .input_per_mtok,
+            0.1,
+            "the catalogue id the connection was added from is the feed's key"
+        );
+        assert_eq!(
+            pricing_for(&catalogue, "our-deepseek/deepseek-reasoner", Some(&feed))
+                .unwrap()
+                .input_per_mtok,
+            0.3,
+            "two models on one connection are priced differently"
+        );
+        assert_eq!(pricing_for(&catalogue, "our-deepseek/unknown-model", Some(&feed)), None);
+
+        // The operator's mapping wins over the catalogue id.
+        let mut mapped = provider("proxy");
+        mapped.preset = "custom".into();
+        mapped.price_feed_id = Some("kimi".into());
+        assert_eq!(
+            pricing_for(&[mapped], "proxy/k2", Some(&feed)).unwrap().input_per_mtok,
+            0.5,
+            "price_feed_id maps a custom connection onto the feed's id"
+        );
+
+        // The operator's own provider-level price beats the feed, per model or not.
+        let mut operator = provider("our-deepseek");
+        operator.preset = "deepseek".into();
+        operator.pricing = Some(Pricing {
+            input_per_mtok: 9.0,
+            output_per_mtok: 9.0,
+            ..Default::default()
+        });
+        assert_eq!(
+            pricing_for(&[operator.clone()], "our-deepseek/deepseek-chat", Some(&feed))
+                .unwrap()
+                .input_per_mtok,
+            9.0,
+            "an operator price always wins, provider-level over a feed per-model price"
+        );
+
+        // And the operator's per-model price beats everything, with the rest of the map falling back.
+        let mut per_model = operator;
+        per_model.model_pricing.insert(
+            "deepseek-reasoner".into(),
+            Pricing {
+                input_per_mtok: 1.5,
+                output_per_mtok: 1.5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            pricing_for(&[per_model.clone()], "our-deepseek/deepseek-reasoner", Some(&feed))
+                .unwrap()
+                .input_per_mtok,
+            1.5,
+            "the per-model price wins over the provider-level one"
+        );
+        assert_eq!(
+            pricing_for(&[per_model], "our-deepseek/deepseek-chat", Some(&feed))
+                .unwrap()
+                .input_per_mtok,
+            9.0,
+            "a model the map lacks falls back to the provider-level price"
+        );
     }
 
     /// providers.json on disk predates `pricing`, and a Settings save from an older web build omits it.
@@ -2043,6 +2309,14 @@ mod tests {
         let saved = r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key"}"#;
         let provider: Provider = serde_json::from_str(saved).unwrap();
         assert_eq!(provider.pricing, None);
+        // The per-model map and the feed mapping (issue #1038) default the same way.
+        assert!(provider.model_pricing.is_empty());
+        assert_eq!(provider.price_feed_id, None);
+        assert_eq!(
+            provider.feed_provider_id(),
+            "deepseek",
+            "the catalogue id prices the connection in the feed"
+        );
 
         let priced: Provider = serde_json::from_str(
             r#"{"id":"deepseek","name":"DeepSeek","base_url":"https://api.deepseek.com/anthropic","auth":"x-api-key","pricing":{"input_per_mtok":0.27,"output_per_mtok":1.1}}"#,
@@ -2057,7 +2331,7 @@ mod tests {
             })
         );
         assert_eq!(
-            priced.cost_usd(Usage {
+            priced.price_for("deepseek-chat", None).unwrap().cost_usd(Usage {
                 input_tokens: 1_000_000,
                 ..Default::default()
             }),
@@ -2725,6 +2999,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_pricing: None,
+            price_feed_id: None,
             model_map: None,
             disabled_tools: None,
             quota: None,
@@ -2768,6 +3044,100 @@ mod tests {
         assert!(!stored.vetted);
         assert_eq!(stored.vendor, None, "a blank vendor string clears the vendor");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Per-model pricing rides the same omitted-keeps-saved rule (issue #1038): a save from a client
+    /// that predates it must not strip the map, `{}` is an explicit clear, and the feed mapping
+    /// keeps and clears the way a blank vendor does.
+    #[tokio::test]
+    async fn a_put_that_omits_model_pricing_keeps_it_and_an_empty_map_clears() {
+        let (app, root) = providers_app();
+        let rate = Pricing {
+            input_per_mtok: 0.27,
+            output_per_mtok: 1.1,
+            ..Default::default()
+        };
+        let mut first = put_req("DeepSeek");
+        first.model_pricing = Some(BTreeMap::from([("deepseek-chat".into(), rate)]));
+        first.price_feed_id = Some(" deepseek-official ".into());
+        let saved = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+        assert_eq!(app.providers()[0].model_pricing.get("deepseek-chat"), Some(&rate));
+        assert_eq!(
+            app.providers()[0].price_feed_id.as_deref(),
+            Some("deepseek-official"),
+            "the mapping is saved trimmed"
+        );
+        // The PUT response lists the feed's prices for the connection — an empty list here, since no
+        // feed is configured, so the field is omitted; never a persisted one.
+        assert!(saved.get("model_pricing").is_some());
+        assert!(saved.get("feed_prices").is_none());
+
+        let second = put_req("DeepSeek renamed");
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(second)).await.unwrap();
+        assert_eq!(
+            app.providers()[0].model_pricing.get("deepseek-chat"),
+            Some(&rate),
+            "an omitted map keeps the saved one"
+        );
+        assert_eq!(app.providers()[0].price_feed_id.as_deref(), Some("deepseek-official"));
+
+        let mut third = put_req("DeepSeek renamed");
+        third.model_pricing = Some(BTreeMap::new());
+        third.price_feed_id = Some(String::new());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(third)).await.unwrap();
+        assert!(
+            app.providers()[0].model_pricing.is_empty(),
+            "an empty map is an explicit clear"
+        );
+        assert_eq!(app.providers()[0].price_feed_id, None, "an empty string clears the mapping");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The save refuses what the lookup would never match: a model key with a space, a bad rate, or
+    /// a feed id the feed's own ids could not have.
+    #[tokio::test]
+    async fn a_put_refuses_bad_model_pricing_keys_rates_and_feed_ids() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.model_pricing = Some(BTreeMap::from([(
+            "has space".into(),
+            Pricing {
+                input_per_mtok: 1.0,
+                ..Default::default()
+            },
+        )]));
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("model pricing keys"), "{}", err.message());
+
+        let mut req = put_req("DeepSeek");
+        req.model_pricing = Some(BTreeMap::from([(
+            "deepseek-chat".into(),
+            Pricing {
+                input_per_mtok: -1.0,
+                ..Default::default()
+            },
+        )]));
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        let mut req = put_req("DeepSeek");
+        req.price_feed_id = Some("has space".into());
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("price feed provider id"), "{}", err.message());
+        assert!(app.providers().is_empty(), "the refused saves write nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn feed_ids_are_checked_for_shape_not_membership() {
+        for ok in ["deepseek", "Kimi_K2", "openrouter.legacy-1", "9"] {
+            assert!(valid_feed_id(ok), "{ok}");
+        }
+        for bad in ["", " has-space", "-leading", "has space", "has/slash"] {
+            assert!(!valid_feed_id(bad), "{bad}");
+        }
     }
 
     /// `trusted` and the connection policy ride the same GET as pricing and the key state (#605):

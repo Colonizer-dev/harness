@@ -1286,8 +1286,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         };
         if tokens != crate::routing::RoutingCostTokens::default() {
             let provider_list = app.providers();
-            let direct_pricing = providers::pricing_for(&provider_list, &module_model);
-            let routed_pricing = providers::pricing_for(&provider_list, routed_model);
+            let feed = app.price_feed.entries();
+            let direct_pricing = providers::pricing_for(&provider_list, &module_model, Some(&feed));
+            let routed_pricing = providers::pricing_for(&provider_list, routed_model, Some(&feed));
             if let (Some(direct_pricing), Some(routed_pricing)) = (direct_pricing, routed_pricing) {
                 let estimate = crate::routing::estimate_cost(direct_pricing, routed_pricing, tokens);
                 gated = setting(&agent_choice, &agent.schema, "route_cost_gate")
@@ -2006,6 +2007,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 .await
         }
     }
+    // Living Brain (living_brain.rs): a colony whose repository's rule asks for the brain gets its
+    // MCP server. The runner registers the URL; the token is handed to msb below as a secret for the
+    // MCP host alone, so the guest only ever holds the placeholder.
+    let living_brain = match crate::living_brain::colony_mcp(app, &s.repo, &agent.id) {
+        Some(Ok((secret, url))) => {
+            runner_env.insert(crate::living_brain::MCP_URL_ENV.into(), Value::String(url));
+            log.info(format!(
+                "Living Brain: the brain's MCP server is wired in ({})",
+                secret.hosts.join(", ")
+            ))
+            .await;
+            Some(secret)
+        }
+        Some(Err(why)) => {
+            log.warn(format!(
+                "Living Brain: this colony starts without the brain's MCP server ({why})"
+            ))
+            .await;
+            None
+        }
+        None => None,
+    };
     let mut session_json = json!({
         "session_id": id,
         "workspace": "/workspace",
@@ -2115,6 +2138,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     }
     secrets.extend(crate::colony_secrets::boot_secrets(&colony_secrets));
+    secrets.extend(living_brain);
     let mut publish = None;
     // The mesh half of the network fence is captured here — `direct_path_rules` is async (it
     // shells out to `ip`/`ifconfig`) — and the fence itself is decided, purely, in

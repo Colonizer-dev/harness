@@ -293,6 +293,48 @@ upstream's own benchmark, not Colonizer's: see [Token savings](protocol/token-sa
 bench protocol in [The bench](bench.md#measuring-a-skill-pack) for what has and has not been
 measured here.
 
+### security-audit
+
+[security-audit](https://github.com/cloudflare/security-audit-skill) (commit c1c8a8c, 2026-09-14,
+MIT, © Cloudflare) is a one-skill pack that makes a colony a security auditor: upstream's six-phase
+workflow — reconnaissance, coverage-led hunting, candidate validation, structured findings,
+independent record verification, target-neutral reporting. Loading the skill is guidance only; the
+skill runs the full workflow and writes its report artifacts only when a task explicitly asks for an
+audit or pen-test, and its full runs write under `~/security-audit-skill/<repo>/run-<N>` — outside
+the worktree under review.
+
+**What is staged.** One skill, `security-audit`: the `SKILL.md`, the attack-class references it
+reads by relative path, `report-schema.json` and the two dependency-free node validators the
+workflow runs on its own output (`validate-findings.cjs`, `validate-coverage-ledger.cjs`), plus
+upstream's LICENSE. Upstream ships no plugin manifest, hooks or MCP server, so staging generates
+both manifests and asserts the exact staged file set: a new upstream file fails staging until a
+maintainer adds it to `scripts/fetch-vendor.sh` and to the `vendor.lock` comment deliberately.
+Upstream's own tests for the validators (`*.test.cjs`) and its README are not staged.
+
+**Off by default.** An operator switches it on in Settings → Skillsets, by adding `security-audit`
+to the Claude Code module's `plugins` list (comma-separated names; `archify` is the default), or
+per-org with the workspace's `agent.skillsets` override. It is not in the default, and nothing
+turns it on by itself. In a colony the skill is addressed as `security-audit:security-audit`.
+
+**It runs target code only in a sandbox, by its own rule.** The skill instructs the agent to run
+target-controlled builds, tests, fuzzers and browsers only inside a sandbox that, among other
+controls, denies external network — and to skip the execution and record the finding as
+`needs_validation`, with the missing sandbox capability named, whenever a control cannot be
+enforced. A colony started with `--net-default-egress deny`
+([sandbox-network.md](sandbox-network.md#egress-policy-303)) provides that network control; the
+skill decides per check whether the rest are met, and a colony operator should expect
+`needs_validation` records for any check whose controls the colony does not provide.
+
+The red team's Security preset does not switch this pack on — nothing does, short of the operator.
+When the org has switched it on, the preset's hunters are briefed to use it: each runs the skill's
+full audit on its focus area instead of an open-ended hunt, writes the run outside the target,
+validates `findings.json` with the skill's own validator, and files only the records the skill marks
+`confirmed` ([red-team.md](red-team.md#the-security-preset)).
+
+**Its pin.** The upstream commit and archive sha256 live in `vendor/vendor.lock` as the
+`security-audit` plugin entry, like every other vendored pack, and the daily vendored-plugin updater
+proposes each upstream move as a pull request; see [Plugin directories](protocol/plugins.md).
+
 ## Downloadable skillsets
 
 Some skillsets are too big, or carry native code, to ship in every release. Those are

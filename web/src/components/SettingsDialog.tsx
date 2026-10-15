@@ -31,6 +31,7 @@ import { PhonePane } from "./PhonePane";
 import { YourCockpitCard } from "./YourCockpitCard";
 import { SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { ConnectionsPane } from "./settings/ConnectionsPane";
+import { LivingBrainPane } from "./settings/LivingBrainPane";
 import { RuntimePane } from "./settings/RuntimePane";
 import { UpdatesPane } from "./settings/UpdatesPane";
 import { LiveMapPane } from "./settings/LiveMapPane";
@@ -825,6 +826,7 @@ const SECTIONS: SectionEntry[] = [
   { id: "remote", render: (c) => <RemoteAccessPane remote={c.remote} onChanged={c.onRemoteChanged} back={c.back} /> },
   { id: "phone", render: (c) => <PhonePane back={c.back} /> },
   { id: "tokens", render: (c) => <TokensPane back={c.back} /> },
+  { id: "living-brain", render: (c) => <LivingBrainPane orgs={c.orgs} back={c.back} /> },
   { id: "fleet", render: (c) => <FleetPane back={c.back} /> },
   { id: "updates", render: (c) => <UpdatesPane update={c.update} onChanged={c.setUpdate} back={c.back} /> },
   { id: "usage", render: (c) => <UsagePane usage={c.usage} onChanged={c.onUsageChanged} back={c.back} /> },

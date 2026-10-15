@@ -53,8 +53,8 @@ those flags were not imported, and no placement here was paid for.
 Vendored skill packs
 --------------------
 
-A colony may be switched to the skill pack vendored from the project below.
-Only the skills are staged; upstream's hooks, tool servers and commands are
+A colony may be switched to a skill pack vendored from one of the projects
+below. Only the skills are staged; upstream's hooks, tool servers and commands are
 not, so no third-party code runs in a colony. Its version pin lives in
 vendor/vendor.lock, and its licence travels with the staged copy, as a LICENSE
 file beside the skills. The other vendored packs — ECC, superpowers, archify and
@@ -67,6 +67,33 @@ Google's skills — are credited in vendor/vendor.lock and docs/protocol/plugins
 MIT License
 
 Copyright (c) 2026 DietrichGebert
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+  security-audit — Copyright (c) 2025-2026 Cloudflare, Inc. — MIT
+  License — https://github.com/cloudflare/security-audit-skill
+
+```
+MIT License
+
+Copyright (c) 2025-2026 Cloudflare, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

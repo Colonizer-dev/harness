@@ -1,0 +1,2 @@
+/api/price-feed                                      GET    unauth=401    token=owner            activity=-
+/api/price-feed                                      PUT    unauth=401    token=owner            activity=-

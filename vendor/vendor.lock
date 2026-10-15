@@ -71,6 +71,16 @@ archify      2026.10.05-73aaa06 any       plugin  cb2c9693ed43049b64d407f091cfa5
 # scripts/fetch-vendor.sh and to this comment.
 ponytail     4.12.0     any           plugin  b85f6049059b819a68a551a60e529bc64f704f3935aec460a34a6dc77a1c14e5  https://codeload.github.com/DietrichGebert/ponytail/tar.gz/refs/tags/v4.12.0
 
+# security-audit is github.com/cloudflare/security-audit-skill at commit c1c8a8c (2026-09-14); upstream
+# has no tags or releases, so the version is the commit date and short hash. MIT, © Cloudflare (LICENSE
+# is staged with it). Staged as a one-skill plugin (skills/security-audit/): the SKILL.md, the
+# attack-class references it reads by relative path, report-schema.json and the two dependency-free
+# node validators (validate-findings.cjs, validate-coverage-ledger.cjs) the workflow runs on its own
+# findings and coverage ledger. Not staged: upstream's validator tests (*.test.cjs) and README, and
+# neither upstream manifest exists so staging generates both. Off by default — an org opts in; see
+# docs/skill-packs.md.
+security-audit 2026.09.14-c1c8a8c any       plugin  53e708ebf770dfe35b57df0586a5058707081a870cd149ce30a2d57c51ed29b6  https://codeload.github.com/cloudflare/security-audit-skill/tar.gz/c1c8a8c1471069fb0e188eeaff69b8e8db6564a8
+
 # fast-jev-compaction is github.com/tamaratran/fast-jev-compaction at commit e3f262a: Jev-scored
 # deletion of stale tool calls for colonies that switch compaction on. Pinned as a commit tarball,
 # not the npm fast-jev-compaction@0.4.0 release, which ships only the library dist/ (not the plugin

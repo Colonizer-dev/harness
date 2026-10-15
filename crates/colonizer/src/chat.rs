@@ -1336,11 +1336,15 @@ fn prepare(app: &App, route: &Route, reach: &Reach, mut body: Value) -> Result<P
             if let Some((name, value)) = crate::gateway::credential_header(app, provider) {
                 request = request.header(name, value);
             }
+            // Priced at the same precedence the gateway records at (issue #1038): the canonical name
+            // the client sent — the part after `<provider>/` — keys the per-model map and the feed.
+            let canonical = model.split_once('/').map(|(_, model)| model).unwrap_or(model);
+            let feed = app.price_feed.entries();
             Ok(Prepared {
                 request,
                 streaming,
                 openai: out.openai,
-                pricing: provider.pricing,
+                pricing: provider.price_for(canonical, Some(&feed)),
             })
         }
     }

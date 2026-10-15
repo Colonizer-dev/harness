@@ -1817,10 +1817,17 @@ mod tests {
 
         // The preview: run-now?dry_run=1 answers a report and removes nothing.
         let query = serde_json::from_value::<crate::loops::RunNowQuery>(json!({"dry_run": "1"})).unwrap();
-        let preview = crate::loops::run_now(AxState(app.clone()), RoutePath(LOOP_ID.into()), Query(query), None)
-            .await
-            .unwrap()
-            .0;
+        // An empty body is what the cockpit's preview POST carries (json content-type, no bytes).
+        let preview = crate::loops::run_now(
+            AxState(app.clone()),
+            RoutePath(LOOP_ID.into()),
+            Query(query),
+            None,
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(preview["dry_run"], true);
         assert!(preview["categories"].is_array());
         assert!(preview.get("id").is_none(), "no id: History must not read it as a colony");

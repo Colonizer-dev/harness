@@ -208,6 +208,15 @@ export interface ModelProvider extends ProviderLimits {
   model_map?: Record<string, string>;
   /** Claude Code tool names the gateway strips from every request through this connection (issue #295). */
   disabled_tools?: string[];
+  /**
+   * Operator per-model prices (issue #1038), keyed by the model id as written after `<provider>/`;
+   * they beat the connection's `pricing`. Omitted when none are set.
+   */
+  model_pricing?: Record<string, ProviderPricing>;
+  /** The price feed's provider id for this connection (issue #1038); omitted falls back to the catalogue id, then the connection id. */
+  price_feed_id?: string;
+  /** What the price feed lists for this connection (issue #1038): read-only, absent when the feed is off or lists nothing. */
+  feed_prices?: FeedPrice[];
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -288,6 +297,31 @@ export interface ProviderQuotaState {
   reset_unix: number | null;
 }
 
+/** One model's price as the price feed lists it (issue #1038): read-only, server-computed. */
+export interface FeedPrice {
+  /** The model id as written after `<provider>/`. */
+  model: string;
+  pricing: ProviderPricing;
+  /** When the feed last confirmed this price, RFC 3339; null when it does not say. */
+  last_verified_at: string | null;
+  /** Where the price came from, usually a URL. */
+  source: string | null;
+  /** The feed has not confirmed the price in over 14 days. */
+  stale: boolean;
+}
+
+/** GET /api/price-feed (issue #1038): the configured feed and when it was last read. Off by default. */
+export interface PriceFeedStatus {
+  /** The feed's URL; null when off. */
+  url: string | null;
+  /** When the Mothership last fetched it; null while it has not. */
+  fetched_at: string | null;
+  /** What the last fetch failed with, when it did. */
+  last_error: string | null;
+  /** How many model prices the feed carries. */
+  entries: number;
+}
+
 /**
  * The model settings whose resolved value can route to a provider. The two tier settings are the
  * Mothership's per-task model routing: it reads them itself and strips their env vars from a
@@ -326,6 +360,10 @@ export interface SaveProviderRequest {
   model_map?: Record<string, string>;
   /** Claude Code tools stripped through this connection (issue #295); omitted keeps the list, `[]` clears it. */
   disabled_tools?: string[];
+  /** Per-model prices (issue #1038); omitted keeps the saved ones, `{}` clears them all. */
+  model_pricing?: Record<string, ProviderPricing>;
+  /** The feed's provider id for this connection (issue #1038); omitted keeps it, `""` clears it. */
+  price_feed_id?: string;
 }
 
 export interface ProviderHealth {

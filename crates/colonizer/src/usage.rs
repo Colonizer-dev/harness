@@ -1219,6 +1219,8 @@ mod tests {
             context_tokens: None,
             fallback_model: None,
             pricing: None,
+            model_pricing: BTreeMap::new(),
+            price_feed_id: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
             quota: None,
