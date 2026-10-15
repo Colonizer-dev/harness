@@ -60,10 +60,11 @@ archify      2026.10.05-73aaa06 any       plugin  cb2c9693ed43049b64d407f091cfa5
 
 # ponytail is github.com/DietrichGebert/ponytail at tag v4.12.0. MIT (LICENSE is staged with it). Pinned by
 # tag, so the daily updater follows the repo's latest release like ECC's and superpowers' pins. Staged as a
-# six-skill plugin (skills/ponytail, -review, -audit, -debt, -gain, -help), each a single SKILL.md. Neither
+# six-skill plugin (skills/ponytail, -review, -audit, -debt, -gain, -help), each a single SKILL.md. No
 # upstream manifest is copied: the root plugin.json is a bare {"name": "ponytail"} with no version,
-# description or skills (validate-plugins.mjs rejects it), and .claude-plugin/plugin.json declares a hooks
-# path to a hooks/ nothing stages, so both are generated instead. Not staged — hooks/, ponytail-mcp/,
+# description or skills (validate-plugins.mjs rejects it), .claude-plugin/plugin.json declares a hooks
+# path to a hooks/ nothing stages, and skills/plugin.json (since v5.1.0) only points upstream's loader at
+# skills/ with no version, so ours are generated instead. Not staged — hooks/, ponytail-mcp/,
 # commands/ and the per-agent folders (.codex-plugin, .cursor, .opencode, .clinerules, .kiro, .qoder,
 # .windsurf, .openclaw, .devin-plugin, .grok-plugin, .agents) plus the benchmark assets — because no
 # third-party code ever runs in a colony, and the skills are instructions an agent reads. The skill list
