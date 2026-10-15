@@ -6,6 +6,7 @@ import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
 import { ContinueLocally } from "../features/handoff/ContinueLocally";
+import { LivingBrainLink } from "../features/livingBrain/LivingBrainLink";
 import type { Session } from "../types";
 import { BoundaryRow } from "./BoundaryRow";
 import { ChatPanel } from "./ChatPanel";
@@ -348,6 +349,7 @@ export function SessionView({
                 <IconGitPR size={15} /> View PR <IconExternal size={12} />
               </a>
             )}
+            <LivingBrainLink id={session.id} status={session.status} />
             {!session.pr_url && (
               <Button
                 variant="primary"

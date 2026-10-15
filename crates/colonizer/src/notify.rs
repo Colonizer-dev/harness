@@ -1445,6 +1445,8 @@ async fn deliver_routed(
         PushRoute::Event(session) => {
             let event = payload["event"].as_str().unwrap_or("notify");
             crate::cratefield_push::enqueue(app, event, session.map(|s| s.id.as_str()), None, text);
+            // A colony that just changed (a pull request, a failure) is worth a Living Brain pass now.
+            crate::living_brain::queue::wake();
             push::deliver(app, client, event, text, session).await
         }
         PushRoute::Quota { provider, colonies } => {
