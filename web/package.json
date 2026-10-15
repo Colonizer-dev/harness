@@ -15,8 +15,8 @@
   "type": "module",
   "private": "true",
   "dependencies": {
-    "@assistant-ui/react": "^0.15.23",
-    "@assistant-ui/react-markdown": "^0.14.18",
+    "@assistant-ui/react": "^0.15.26",
+    "@assistant-ui/react-markdown": "^0.14.20",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "highlight.js": "^11.12.0",
@@ -30,10 +30,10 @@
     "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.1",
+    "@vitejs/plugin-react": "^6.1.2",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.2",
+    "vite": "^8.3.4",
     "vitest": "^5.0.3"
   },
   "overrides": {
