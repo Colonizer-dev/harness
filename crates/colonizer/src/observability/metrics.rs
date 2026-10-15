@@ -311,6 +311,10 @@ struct Snapshot {
     storage_alert: bool,
     /// Free bytes on the data volume, `None` while it has never been measured.
     disk_free_bytes: Option<u64>,
+    /// The add-on exporter's `status.json` as it lay on disk, `None` when this install runs no
+    /// exporter or the file could not be read. Parsed in [`render`], defensively, because the file
+    /// belongs to another process that may be mid-write or a build older than this one.
+    exporter: Option<serde_json::Value>,
 }
 
 impl Snapshot {
@@ -373,6 +377,12 @@ impl Snapshot {
         // One non-inserting read of the gateway: a scrape must not create a provider entry.
         let providers = app.gateway.scrape_stats();
         let (started, finished) = colony_counters();
+        // The exporter's own health, as the add-on last wrote it beside the data. Read as raw JSON
+        // and parsed in the renderer, because a file another process writes must never break a
+        // scrape: any error here is simply "no exporter families".
+        let exporter = std::fs::read(app.cfg.data_dir.join("observability").join("status.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
         Snapshot {
             colonies: colonies
                 .into_iter()
@@ -388,6 +398,7 @@ impl Snapshot {
             queue_depth,
             storage_alert: app.shown_storage_alert().await.is_some(),
             disk_free_bytes: app.disk_verdict.lock().await.free_bytes,
+            exporter,
         }
     }
 }
@@ -535,6 +546,84 @@ fn render(snapshot: &Snapshot, hasher: &Hasher) -> String {
         disk.push(Vec::new(), free as f64);
     }
     disk.render(&mut out);
+
+    // The add-on exporter's own health, from its `status.json`: what a backend has acknowledged,
+    // per signal, and what is still waiting. Every read is defensive — a missing key, a null or a
+    // half-written file skips its series rather than breaking the scrape — and nothing the file
+    // says beyond these numbers (an endpoint, an error string) is ever echoed into one.
+    if let Some(exporter) = &snapshot.exporter {
+        let mut backlog = Family::gauge(
+            "colonizer_export_backlog_bytes",
+            "Exporter ledger bytes not yet acknowledged, per signal.",
+            &["signal"],
+        );
+        let mut records = Family::counter(
+            "colonizer_export_records_total",
+            "Records the exporter has had acknowledged, per signal; `signal=\"all\",result=\"dropped\"` sums the records lost.",
+            &["signal", "result"],
+        );
+        let mut bytes = Family::counter(
+            "colonizer_export_bytes_total",
+            "Wire bytes the exporter has had acknowledged, per signal.",
+            &["signal"],
+        );
+        let mut last_success = Family::gauge(
+            "colonizer_export_last_success_timestamp_seconds",
+            "When the exporter last had a request acknowledged, per signal, in unix seconds.",
+            &["signal"],
+        );
+        if let Some(signals) = exporter.get("signals").and_then(serde_json::Value::as_object) {
+            for (name, of_signal) in signals {
+                let signal = label(name);
+                if let Some(v) = of_signal.get("backlog_bytes").and_then(serde_json::Value::as_u64) {
+                    backlog.push(vec![signal.clone()], v as f64);
+                }
+                if let Some(v) = of_signal.get("records_sent").and_then(serde_json::Value::as_u64) {
+                    records.push(vec![signal.clone(), label("sent")], v as f64);
+                }
+                if let Some(v) = of_signal.get("bytes_sent").and_then(serde_json::Value::as_u64) {
+                    bytes.push(vec![signal.clone()], v as f64);
+                }
+                if let Some(v) = of_signal.get("last_success_unix").and_then(serde_json::Value::as_u64) {
+                    last_success.push(vec![signal], v as f64);
+                }
+            }
+        }
+        let dropped = exporter.get("dropped").and_then(serde_json::Value::as_object);
+        // The drop counts are not per signal, so they sum into one `all` series. The `gap_*`
+        // reasons are holes in what could be read rather than records lost, and each keeps its own
+        // series below instead of counting here.
+        let lost: u64 = dropped
+            .map(|d| {
+                d.iter()
+                    .filter(|(reason, _)| !reason.starts_with("gap_"))
+                    .map(|(_, n)| n.as_u64().unwrap_or(0))
+                    .sum()
+            })
+            .unwrap_or(0);
+        if lost > 0 {
+            records.push(vec![label("all"), label("dropped")], lost as f64);
+        }
+        let mut gaps = Family::counter(
+            "colonizer_export_gaps_total",
+            "Holes in what the exporter could read, by `gap_*` drop reason.",
+            &["reason"],
+        );
+        if let Some(dropped) = dropped {
+            for (reason, n) in dropped {
+                if reason.starts_with("gap_")
+                    && let Some(n) = n.as_u64()
+                {
+                    gaps.push(vec![label(reason)], n as f64);
+                }
+            }
+        }
+        backlog.render(&mut out);
+        records.render(&mut out);
+        bytes.render(&mut out);
+        last_success.render(&mut out);
+        gaps.render(&mut out);
+    }
 
     out
 }

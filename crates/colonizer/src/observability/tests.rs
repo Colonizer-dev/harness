@@ -239,5 +239,9 @@ async fn observability_ranges_are_checked_at_save_time() {
         .await
         .unwrap_err();
     assert!(err.message().contains("between 128 and 8192"), "{}", err.message());
+    let err = save_observability(&app, "otlp", obs_settings(&[("metrics_interval_secs", json!(1))]), false)
+        .await
+        .unwrap_err();
+    assert!(err.message().contains("between 5 and 86400"), "{}", err.message());
     std::fs::remove_dir_all(root).ok();
 }
