@@ -1,0 +1,2 @@
+/api/open-code-review                                GET    unauth=401    token=owner            activity=-
+/api/open-code-review/download                       POST   unauth=401    token=owner            activity=-

@@ -2,7 +2,7 @@
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, isLive, sleep } from "../../mockShared";
 import { REPOS } from "../../features/repos/mock";
-import type { MergeStewardInfo, ModelSpend, OrgInfo, OrgSpend, SpendDay, SpendHistory, SpendOrgDay, SpendTokens } from "../../types";
+import type { MergeStewardInfo, ModelSpend, OpenCodeReviewStatus, OrgInfo, OrgSpend, SpendDay, SpendHistory, SpendOrgDay, SpendTokens } from "../../types";
 import type { MockState } from "../../mockState";
 import type { OrgsApi } from "./api";
 
@@ -71,6 +71,18 @@ const mockSteward = (): MergeStewardInfo => ({
     },
   ],
 });
+
+/** The mock's open-code-review binary (issue #1274): the same state machine as a skillset download, about 28 MB. */
+const OCR_BYTES = 29_360_128;
+let mockOcr: OpenCodeReviewStatus = { name: "ocr", release: "v1.13.0", installed_release: null, state: "idle", path: null, bytes: 0, total: null, started_at: null, finished_at: null, error: null };
+function tickOcr(): OpenCodeReviewStatus {
+  if (mockOcr.state !== "downloading" || !mockOcr.started_at) return mockOcr;
+  const bytes = Math.min(OCR_BYTES, Math.round(((Date.now() - Date.parse(mockOcr.started_at)) / 4000) * OCR_BYTES));
+  mockOcr = bytes >= OCR_BYTES
+    ? { ...mockOcr, state: "installed", installed_release: mockOcr.release, bytes, total: OCR_BYTES, finished_at: new Date().toISOString() }
+    : { ...mockOcr, bytes, total: OCR_BYTES };
+  return mockOcr;
+}
 
 export function orgsMock(ms: MockState): OrgsApi {
   return {
@@ -160,6 +172,13 @@ export function orgsMock(ms: MockState): OrgsApi {
       ms.orgSettings[org] = { ...(ms.orgSettings[org] ?? {}), ...settings };
       ms.awaitingDecision.delete(org.toLowerCase());
       return clone({ org, settings: ms.orgSettings[org] });
-    }
+    },
+    openCodeReview: async () => clone(tickOcr()),
+    openCodeReviewDownload: async () => {
+      if (mockOcr.state === "idle" || mockOcr.state === "failed") {
+        mockOcr = { ...mockOcr, state: "downloading", bytes: 0, total: OCR_BYTES, started_at: new Date().toISOString(), finished_at: null, error: null };
+      }
+      return clone(tickOcr());
+    },
   };
 }
