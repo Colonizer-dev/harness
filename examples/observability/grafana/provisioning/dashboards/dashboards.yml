@@ -1,0 +1,13 @@
+# Watches the dashboards directory for the Colonizer folder. Mount
+# examples/observability/grafana/dashboards at /var/lib/grafana/dashboards.
+apiVersion: 1
+providers:
+  - name: colonizer
+    orgId: 1
+    folder: Colonizer
+    type: file
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

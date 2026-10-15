@@ -288,6 +288,14 @@ jobs:
       - name: Check documentation links
         run: node scripts/check-doc-links.mjs
 
+      # The Grafana dashboards under examples/observability must parse, query only datasource uids
+      # the provisioning declares and metric names the catalogues list, and carry no hard-coded
+      # colony id — a renamed metric or a pasted id fails this pull request instead of showing a
+      # blank panel later. The unit test above covers the checker; this runs it over what a Grafana
+      # provisions.
+      - name: Check dashboards
+        run: node scripts/check-dashboards.mjs
+
       # Pending changelog entries are fragments under changelog.d/, one file per change, so parallel
       # pull requests never collide in CHANGELOG.md. This validates every fragment and, on a pull
       # request, fails one that edits CHANGELOG.md unless it is the release (it adds the section for
