@@ -9,7 +9,7 @@ import { IconCheck, IconChevron } from "../icons";
 import { Pane, Row } from "./ui";
 import { AutonomyHealth } from "./AutonomyHealth";
 import { WebhookDeliveries } from "./WebhookDeliveries";
-import { ObservabilityRows } from "./ObservabilityRows";
+import { ObservabilityRows, contentConfirmation } from "./ObservabilityRows";
 import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestRow, isDirty, kindInfo, useHeadroom, valueOf, type ModuleDraft } from "./moduleFields";
 
 // ---------------------------------------------------------------------------
@@ -221,12 +221,17 @@ export function ModulePane({
     // into a no-op when they decline is the whole point: nothing is sent.
     const confirm = riskConfirmation(draft.provider, draft.enabled, draft.settings);
     if (confirm !== null && !window.confirm(confirm)) return;
+    // Turning on conversation content or thinking is the one save the observability backend
+    // refuses without the word (#855): the pane asks, then sends confirm_content.
+    const contentWarning = module.kind === "observability" ? contentConfirmation(module.settings, draft.settings) : null;
+    if (contentWarning !== null && !window.confirm(contentWarning)) return;
     setSaving(true);
     try {
       const saved = await api.saveModule(module.kind, {
         provider: draft.provider,
         enabled: draft.enabled,
         settings: draft.settings,
+        ...(contentWarning !== null ? { confirm_content: true } : {}),
         ...(anyway ? { save_anyway: true } : {}),
       });
       onSaved(saved);

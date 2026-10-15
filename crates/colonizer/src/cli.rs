@@ -340,6 +340,11 @@ enum Command {
         #[command(subcommand)]
         command: FleetCommand,
     },
+    /// Send this machine's observability history to the configured backend, or count it first (issue #858)
+    Observability {
+        #[command(subcommand)]
+        command: ObservabilityCommand,
+    },
 }
 
 /// The `sessions` subcommands. They run locally off the settings — no mothership, no token.
@@ -408,6 +413,30 @@ enum FleetCommand {
         /// Show the bundle's manifest, and import nothing
         #[arg(long)]
         preview: bool,
+    },
+}
+
+/// The `observability` subcommands. They are clients of a running mothership, like the colony
+/// commands; the export itself is done by the add-on it supervises.
+#[derive(Subcommand, Debug)]
+enum ObservabilityCommand {
+    /// Replay on-disk history the exporter never sent, at a bounded rate (docs/observability/backfill.md)
+    Backfill {
+        /// Only records written at or after this: RFC3339, YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Only records written before this, same forms (a bare date means its end)
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        /// Only colonies of this repository (owner/name)
+        #[arg(long, value_name = "OWNER/REPO")]
+        repo: Option<String>,
+        /// Send at most this many records per second (default 500)
+        #[arg(long, value_name = "N")]
+        rate: Option<u64>,
+        /// Count what would be sent, per signal and per org, and send nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -2034,6 +2063,16 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             fleet_sync_command(cli, action).await
         }
         Command::Fleet { command } => fleet_command(cli, command),
+        Command::Observability {
+            command:
+                ObservabilityCommand::Backfill {
+                    since,
+                    until,
+                    repo,
+                    rate,
+                    dry_run,
+                },
+        } => observability_backfill_command(cli, since, until, repo, rate, dry_run).await,
     }
 }
 
@@ -2158,6 +2197,96 @@ fn fleet_command(cli: &Cli, command: FleetCommand) -> i32 {
             eprintln!("colonizer: {e:#}");
             EXIT_ERROR
         }
+    }
+}
+
+/// `observability backfill` (issue #858): replay the history a destination never received, or
+/// with `--dry-run` count what would go — per signal and per org. A client of the running
+/// mothership like the colony commands; the sending is the supervised add-on's, at a bounded
+/// rate, and a real run answers only that it started: its progress is the status route's
+/// `backfill` (docs/observability/backfill.md).
+async fn observability_backfill_command(
+    cli: &Cli,
+    since: Option<String>,
+    until: Option<String>,
+    repo: Option<String>,
+    rate: Option<u64>,
+    dry_run: bool,
+) -> i32 {
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        // Only the flags given travel: an absent one is the add-on's default, not a null.
+        let mut body = serde_json::Map::new();
+        if let Some(v) = since {
+            body.insert("since".into(), json!(v));
+        }
+        if let Some(v) = until {
+            body.insert("until".into(), json!(v));
+        }
+        if let Some(v) = repo {
+            body.insert("repo".into(), json!(v));
+        }
+        if let Some(v) = rate {
+            body.insert("rate".into(), json!(v));
+        }
+        if dry_run {
+            body.insert("dry_run".into(), json!(true));
+        }
+        let answer = machine
+            .post("/api/observability/backfill", Some(&Value::Object(body)))
+            .await?
+            .unwrap_or(Value::Null);
+        if json {
+            println!("{}", pretty(&answer)?);
+            return Ok(EXIT_OK);
+        }
+        if dry_run {
+            print_backfill_preview(&answer);
+        } else {
+            println!(
+                "backfill started; watch it in the cockpit (Settings \u{2192} Modules \u{2192} Observability) or at GET /api/observability/status"
+            );
+        }
+        Ok(EXIT_OK)
+    })
+    .await
+}
+
+/// Prints a backfill dry run's counts for a person, `print_sync_preview`'s shape: the total
+/// records and ledger bytes, the window, one line per signal and per org, and what the encoded
+/// requests are estimated to weigh.
+fn print_backfill_preview(answer: &Value) {
+    let mib = |v: u64| v as f64 / (1024.0 * 1024.0);
+    println!(
+        "{} records, {:.1} MiB of ledger lines would be sent",
+        answer["records_sent"].as_u64().unwrap_or(0),
+        mib(answer["bytes_sent"].as_u64().unwrap_or(0)),
+    );
+    if let Some(window) = answer["window"].as_str() {
+        println!("window: {window}");
+    }
+    for (what, key) in [("signal", "per_signal"), ("org", "per_org")] {
+        if let Some(entries) = answer[key].as_object() {
+            for (name, entry) in entries {
+                // An entry is a count, or an object holding one under `records`.
+                let records = entry.as_u64().or_else(|| entry["records"].as_u64()).unwrap_or(0);
+                println!("per {what} {name}: {records} records");
+            }
+        }
+    }
+    let estimated = ["estimated_encoded_bytes", "encoded_bytes", "encoded_volume_bytes"]
+        .iter()
+        .find_map(|key| answer[key].as_u64())
+        .or_else(|| {
+            // The dry run carries the estimate per signal only; the backend's volume is their sum.
+            answer["per_signal"]
+                .as_object()?
+                .values()
+                .map(|entry| entry["encoded_bytes"].as_u64().unwrap_or(0))
+                .reduce(|a, b| a.saturating_add(b))
+        });
+    if let Some(estimated) = estimated {
+        println!("backend volume \u{2248} {:.1} MiB encoded (before gzip)", mib(estimated));
     }
 }
 

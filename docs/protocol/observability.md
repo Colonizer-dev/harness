@@ -76,3 +76,19 @@ The metric names, label names and label values in the catalogue are the public c
 the repository's compatibility rules. Bucket bounds, the `other` fold and the set of counted
 outcomes are the current implementation; a change to any of them is a changelog entry. See
 [Metrics (`GET /metrics`)"](../observability/metrics.md) for the full table and the reasoning.
+
+## The backfill routes
+
+The module's `/api` surface, beside the scrape route above: the history backfill (issue #858),
+served by the mothership and done by the add-on it supervises
+([Backfill](../observability/backfill.md)). Both are owner-only — the install's own API token.
+
+| Route | Does |
+| :--- | :--- |
+| `POST /api/observability/backfill` | `{since?, until?, repo?, rate?, dry_run?}` → with `dry_run`, the counts summary (`{per_signal, per_org, records_sent, bytes_sent, …}`); otherwise `{started: true, progress: "GET /api/observability/status"}` and the replay runs beside the exporter. 409 when export is off or a backfill is already running; 503 when the add-on is missing or its version does not match. |
+| `DELETE /api/observability/backfill` | Cancels the running backfill: the child finishes its tick, writes `state: "cancelled"` and exits; → `{cancelled: true}`. 409 when none is running. |
+
+`GET /api/observability/status` carries the backfill's progress as `backfill` while one runs:
+`{state: "running"|"complete"|"cancelled"|"failed", window, records_sent, bytes_sent, cursors,
+started_unix, updated_unix, …}`, read from the add-on's
+`<data>/observability/backfill.json` (`error` beside a `failed` state).
