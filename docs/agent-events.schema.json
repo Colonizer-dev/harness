@@ -40,7 +40,8 @@
       "properties": {
         "id": { "type": "string" },
         "name": { "type": "string", "description": "The subagent type, or its task description when the type was not named." },
-        "description": { "type": ["string", "null"] }
+        "description": { "type": ["string", "null"] },
+        "model": { "type": "string", "description": "The model the subagent's messages ran on, once one has said; absent until then." }
       },
       "required": ["id", "name"]
     },
