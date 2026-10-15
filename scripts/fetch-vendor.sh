@@ -216,8 +216,11 @@ while read -r name version plat kind sha url; do
       # while the count assertion still passed. Fail here instead: a human adds it to $skills_expected and
       # to the vendor.lock comment, or writes down here why it is not staged.
       [ -d "$src/skills" ] || { echo "ponytail $version has no skills/" >&2; exit 1; }
+      # skills/plugin.json (upstream since v5.1.0) is not a skill: it is upstream's manifest pointing its
+      # own loader at skills/ ({"name", "description", "skills": "."}). Like the other upstream manifests
+      # it is not staged, because both of ours are generated below; any other new entry still fails.
       for present in $(ls "$src/skills"); do
-        case " $skills_expected " in
+        case " $skills_expected plugin.json " in
           *" $present "*) ;;
           *) echo "ponytail $version has an unexpected skills/$present — add it to the skill list in this arm of scripts/fetch-vendor.sh and to the vendor.lock comment, or say there why it is not staged" >&2; exit 1 ;;
         esac
