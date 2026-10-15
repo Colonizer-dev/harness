@@ -43,6 +43,7 @@ Both providers share the second table.
 | Colony activity | on | Stages, tool use and status changes. |
 | Traces | on | One trace per colony: its turns, tool calls and subagents as spans ([Traces](traces.md)). |
 | Metrics | on | Counters and durations. |
+| Metrics push interval (seconds) | `30` | 5 to 86400; how often the metric catalogue is pushed ([Metrics push](metrics-push.md)). |
 | Conversation content | off | The words you and the agent exchanged. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Agent thinking | off | The agent's reasoning. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Trace sample ratio | `1` | 0 to 1; the share of colonies traced, chosen per colony so a trace is always whole. Logs and metrics are never sampled. |
