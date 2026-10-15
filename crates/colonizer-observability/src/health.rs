@@ -13,6 +13,7 @@
 
 use crate::cursor::{Cursor, FileId};
 use crate::sources::SourceFile;
+use crate::state::{Signal, State};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -53,6 +54,8 @@ pub struct SignalStatus {
     pub last_error: Option<String>,
     pub records_sent: u64,
     pub bytes_sent: u64,
+    /// This signal's ledger bytes not yet behind a committed cursor (an estimate).
+    pub backlog_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -116,4 +119,21 @@ pub(crate) fn backlog_bytes(file: &SourceFile, cursor: &Cursor) -> u64 {
         // The file the cursor named is gone: the reader starts the live file over.
         _ => live_len,
     }
+}
+
+/// The backlog split by the signal each discovered file feeds (`logs`, `traces`, `metrics`): the
+/// same bytes [`backlog_bytes`] sums, bucketed, for the status page and the backlog gauge. Here
+/// rather than in the exporter so the per-file rule and its split stay in one place.
+pub(crate) fn backlog_by_signal(files: &[SourceFile], state: &State, destination: &str) -> BTreeMap<String, u64> {
+    let mut out: BTreeMap<String, u64> = BTreeMap::new();
+    for file in files {
+        let signal = match file.signal {
+            Signal::Logs => "logs",
+            Signal::Traces => "traces",
+            Signal::Metrics => "metrics",
+        };
+        let cursor = state.cursor(&crate::tailer::key(destination, file));
+        *out.entry(signal.to_string()).or_default() += backlog_bytes(file, &cursor);
+    }
+    out
 }

@@ -239,6 +239,25 @@ export function installModulesMockState(ms: MockState): void {
       },
     },
     {
+      kind: "observability",
+      provider: "otlp",
+      providers: [{ id: "otlp", name: "OpenTelemetry OTLP", description: "Send logs, traces and metrics to any OTLP/HTTP backend" }],
+      enabled: true,
+      settings: { endpoint: "https://otlp-gateway-eu.grafana.net/otlp", protocol: "http/protobuf", preset: "grafana_cloud", stream_operational: true, stream_activity: true, conversation_content: false, conversation_thinking: false },
+      schema: {
+        type: "object",
+        properties: {
+          endpoint: { type: "string", title: "Endpoint URL", description: "http:// or https://. It must carry no credentials (user:pass@) and no query string — those belong in the observability-headers secret, never in the URL.", default: "" },
+          protocol: { type: "string", title: "Protocol", enum: ["http/protobuf", "http/json", "grpc"], default: "http/protobuf", description: "http/protobuf suits almost every backend." },
+          preset: { type: "string", title: "Backend", enum: ["custom", "grafana_cloud", "local_collector", "datadog", "honeycomb", "elastic", "signoz", "new_relic"], default: "custom", description: "Which backend this endpoint is, so the right header name is offered. The header's value lives in the observability-headers secret, never here." },
+          stream_operational: { type: "boolean", title: "Operational events", description: "Structured events about colonies: starts, outcomes, errors. Structure only, never content.", default: true },
+          stream_activity: { type: "boolean", title: "Activity events", description: "Spans for tool calls and turns. Structure only, never content.", default: true },
+          conversation_content: { type: "boolean", title: "Conversation content", description: "Also send what you and the agent actually said. Each workspace must opt in too, and restricted colonies never send content.", default: false },
+          conversation_thinking: { type: "boolean", title: "Conversation thinking", description: "Also send the model's thinking. Each workspace must opt in too, and restricted colonies never send content.", default: false },
+        },
+      },
+    },
+    {
       kind: "burn_down",
       provider: "default",
       providers: [
