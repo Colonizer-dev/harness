@@ -50,6 +50,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::github_breaker::FEATURE,
     &crate::handoff::FEATURE,
     &crate::history::FEATURE,
+    &crate::living_brain::FEATURE,
     &crate::loop_history::FEATURE,
     &crate::maps::FEATURE,
     &crate::merge_steward::FEATURE,
