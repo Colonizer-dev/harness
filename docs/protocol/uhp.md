@@ -101,7 +101,7 @@ one, so the id keeps working across restarts.
 | `POST /api/sessions/{id}/resume`, no body: same worktree, fresh microVM, new run epoch | `previous_response_id` on create | `POST /api/sessions` with `previous_response_id` continues that colony instead of creating one | Resolved as below. The resume route stays and runs underneath. |
 | WS `{"type": "user_message", "text": …}`, live colonies only | `input` on a continuation | the same `POST /api/sessions` | The WS command does not change. |
 | `instructions` in the create body: the task text | `input` | `POST /api/sessions` | Not an in-place alias: UHP's `instructions` means system-level instructions. `input` becomes the task text; `instructions` keeps today's meaning through the deprecation release, and reusing the name is a later decision. |
-| duplicate-issue check, `allow_duplicate` | `Idempotency-Key` header | `POST /api/sessions` | A repeat with the same key within 24 hours returns the first colony and starts nothing, even while that one is still booting. The duplicate check stays. |
+| duplicate-issue check, `allow_duplicate` | `Idempotency-Key` header | `POST /api/sessions` | The header is honoured there now (issue #901, [harness-api.md](harness-api.md)): a repeat with the same key answers the colony that key created and starts nothing — the key is kept with the colony, so it survives a mothership restart where a 24-hour in-memory map would not — and a key already naming a colony on another repository is a **409**. The `/uhp/v1/responses` create above is the separate surface, still planned. The duplicate-issue check stays. |
 
 How `POST /uhp/v1/responses` reads a request (#650):
 

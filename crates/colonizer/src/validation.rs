@@ -21,6 +21,7 @@ use crate::{
     util::{short_id, truncate},
 };
 use anyhow::{Context, Result, bail};
+use axum::http::HeaderMap;
 use axum::{Json, extract::State};
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -361,7 +362,9 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
     let created = crate::sessions::create(
         State(app.clone()),
         None,
+        HeaderMap::new(),
         Json(NewSession {
+            external_ref: None,
             repo: hunter.repo.clone(),
             issue: None,
             title,

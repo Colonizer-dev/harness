@@ -936,15 +936,13 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
                         "the question's hold timed out; resuming once more so the agent can choose without waiting".into(),
                     )
                     .await;
-                    // The resume handler re-checks everything under its own locks (status, slot,
-                    // supersession) and queues when none is free, so a colony an operator just
-                    // touched is not doubled. A refusal (a race, a supersession, a failed rotation)
-                    // leaves the colony parked: give the step back and take the note off, so a
-                    // refusal neither burns the backoff nor rides a resume it was not written for.
-                    if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
-                        .await
-                        .is_err()
-                    {
+                    // The resume re-checks everything under its own locks (status, slot,
+                    // supersession, and that the hold still parks it) and queues when none is free,
+                    // so a colony an operator just touched or stopped is not doubled. A refusal (a
+                    // race, a stop, a supersession, a failed rotation) leaves the colony as it is:
+                    // give the step back and take the note off, so a refusal neither burns the
+                    // backoff nor rides a resume it was not written for.
+                    if crate::lifecycle::resume_if(app, &id, hold_parked).await.is_err() {
                         app.update_session(&id, |x| {
                             if x.resume_note.as_deref() != Some(HOLD_RESUME_NOTE) {
                                 return;
@@ -1027,21 +1025,13 @@ pub(crate) async fn resume_provider_retry_parked(app: &Shared) {
             .collect()
     };
     for id in ids {
-        // The id came from an earlier read snapshot, so re-check it under the lock right before
-        // resuming, exactly as `resume_hold_parked` does above: an operator may have stopped or
-        // answered the colony in between, and `can_resume` still admits a `Stopped` colony
-        // (lifecycle.rs), so without this the sweep would boot one the operator just stopped. A
-        // colony no longer parked for the retry, or no longer due, is left alone — `resume` on its
-        // own does not know this reason. A refusal (a race, a supersession, a failed rotation)
-        // leaves it parked; the next tick looks again.
-        let still_due = app
-            .update_session(&id, |x| provider_retry_due(x, now, &schedule))
-            .await
-            .is_some_and(|(_, due)| due);
-        if !still_due {
-            continue;
-        }
-        if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
+        // The id came from an earlier read snapshot, so the resume re-checks it in its claim, under
+        // the colony's lifecycle lock: an operator may have stopped or answered the colony in
+        // between, and `can_resume` still admits a `Stopped` colony, so without this the sweep would
+        // boot one the operator just stopped. A colony no longer parked for the retry, or no longer
+        // due, is left alone. A refusal (a race, a supersession, a failed rotation) leaves it as it
+        // is; the next tick looks again.
+        if crate::lifecycle::resume_if(app, &id, |x| provider_retry_due(x, now, &schedule))
             .await
             .is_ok()
         {
@@ -1068,8 +1058,9 @@ pub(crate) async fn resume_waiting_for_account(app: &Shared) {
             .collect()
     };
     for id in ids {
-        // Re-checked under the lock right before resuming, as `resume_provider_retry_parked` does: a
-        // colony no longer parked for this reason, or an operator who just stopped it, is left alone.
+        // Re-checked here for the account lookup, and again in the resume's claim, as
+        // `resume_provider_retry_parked` does: a colony no longer parked for this reason, or an
+        // operator who just stopped it, is left alone.
         let still_waiting = app
             .update_session(&id, |x| waiting_for_account(x))
             .await
@@ -1082,10 +1073,7 @@ pub(crate) async fn resume_waiting_for_account(app: &Shared) {
         if crate::account_health::troubled(app, &account).await.is_some() {
             continue;
         }
-        if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
-            .await
-            .is_ok()
-        {
+        if crate::lifecycle::resume_if(app, &id, waiting_for_account).await.is_ok() {
             app.session_log(
                 &id,
                 "info",
@@ -1327,24 +1315,12 @@ fn claimed_for_boot(x: &mut Session) {
 }
 
 /// The colony is claimed and about to boot: retire its old agent link and move the stale event log
-/// aside, with the log's own file lock held across the rename (`rotate_events` has the why). A
-/// rotation failure runs the given revert — putting the colony back under the claim's own
-/// re-checks — logs, and answers `false`, ending the caller's tick: a retry every 5 s would only
-/// churn on a storage problem.
+/// aside, exactly as the resume handler does ([`crate::lifecycle::retire_and_rotate_events`] has the
+/// order and the why). A rotation failure runs the given revert — putting the colony back under the
+/// claim's own re-checks — logs, and answers `false`, ending the caller's tick: a retry every 5 s
+/// would only churn on a storage problem.
 async fn retire_and_rotate(app: &Shared, id: &str, revert: impl FnOnce(&mut Session), kept: &str) -> bool {
-    let runtime = app.runtimes.lock().await.remove(id);
-    if let Some(rt) = &runtime {
-        rt.stop.send_replace(true);
-        rt.retired.send_replace(true);
-    }
-    let rotated = {
-        let _file_lock = match runtime.as_ref() {
-            Some(rt) => Some(rt.file_lock.lock().await),
-            None => None,
-        };
-        rotate_events(app.store(), id).await
-    };
-    if let Err(e) = rotated {
+    if let Err(e) = retire_and_rotate_events(app, id).await {
         let e = anyhow::Error::from(e);
         if let Some((x, ())) = app.update_session(id, revert).await {
             app.persist_and_broadcast(&x).await;
@@ -1792,26 +1768,30 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         }
         out
     };
+    let provider_ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
+    let any_exhausted = !app.gateway.quota_exhausted().is_empty();
+    let others_exhausted = app
+        .gateway
+        .quota_exhausted()
+        .iter()
+        .any(|(id, _, _)| id != crate::gateway::ACCOUNT_QUOTA_ID);
+    let now = Utc::now().timestamp();
+    // Each route re-checks this under its own lock: an operator's stop clears the quota flag, so a
+    // colony stopped since the snapshot below no longer reads as quota-parked and is left alone.
+    let exhausted = |pid: &str| app.gateway.is_quota_exhausted(pid);
+    let recovered = |s: &Session| {
+        let carried = account_parked.iter().any(|(id, carried)| *carried && *id == s.id);
+        let any = if carried { others_exhausted } else { any_exhausted };
+        matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked)
+            && quota_resume_due(s, &provider_ids, &exhausted, any, now)
+    };
     let (ids, kept_ids): (Vec<String>, Vec<String>) = {
         let sessions = app.sessions.read().await;
-        let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
-        let any_exhausted = !app.gateway.quota_exhausted().is_empty();
-        let others_exhausted = app
-            .gateway
-            .quota_exhausted()
-            .iter()
-            .any(|(id, _, _)| id != crate::gateway::ACCOUNT_QUOTA_ID);
-        let now = Utc::now().timestamp();
-        let recovered = |s: &Session| {
-            let carried = account_parked.iter().any(|(id, carried)| *carried && *id == s.id);
-            let any = if carried { others_exhausted } else { any_exhausted };
-            quota_resume_due(s, &ids, &|pid| app.gateway.is_quota_exhausted(pid), any, now)
-        };
         let mut cold: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for s in sessions
             .iter()
-            .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked) && recovered(s))
+            .filter(|s| recovered(s))
             // Issue #673: a merge covered this colony's work — it stays parked, park record
             // intact, until it is kept; the tick after that resumes it like any other.
             .filter(|s| !crate::supersede::blocks_start(s))
@@ -1826,12 +1806,12 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         (cold, kept)
     };
     for id in ids {
-        // Queued holds no slot, so the flip needs no admission; the loop below boots it. The status
-        // is re-checked under the lock, so a concurrent operator resume wins instead of doubling.
+        // Queued holds no slot, so the flip needs no admission; the loop below boots it. The park is
+        // re-checked under the lock, so a concurrent operator resume or stop wins instead of being
+        // undone.
         let flipped = app
             .update_session(&id, |x| {
-                let due = x.status == SessionStatus::Stopped
-                    || (x.status == SessionStatus::Parked && x.parked.as_ref().is_some_and(|p| !p.vm_kept));
+                let due = recovered(x) && (x.status == SessionStatus::Stopped || x.parked.as_ref().is_some_and(|p| !p.vm_kept));
                 if due {
                     x.status = SessionStatus::Queued;
                     x.error = None;
@@ -1854,11 +1834,11 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         }
     }
     for id in kept_ids {
-        // The handler re-checks everything under its own locks — status, live link, running
-        // microVM, the discard setting, admission — so a colony an operator just resumed or
-        // stopped is not doubled, and one it cannot warm-resume lands on the cold path. A
+        // The resume re-checks everything under its own locks — status, the quota park, live link,
+        // running microVM, the discard setting, admission — so a colony an operator just resumed
+        // or stopped is not doubled, and one it cannot warm-resume lands on the cold path. A
         // refusal (409, 404) means the park is no longer this tick's to recover.
-        let _ = crate::lifecycle::resume(State(app.clone()), Path(id), None).await;
+        let _ = crate::lifecycle::resume_if(app, &id, recovered).await;
     }
 }
 
@@ -1992,10 +1972,11 @@ pub(crate) async fn resume_repo_pr_rate_limit_parked_with(
         }
     }
     for id in kept {
-        // The handler re-checks everything under its own locks — status, live link, running
-        // microVM, the discard setting, admission — so a colony an operator just touched is not
-        // doubled. A refusal (409, 404) means the park is no longer this tick's to recover.
-        let _ = crate::lifecycle::resume(State(app.clone()), Path(id), None).await;
+        // The resume re-checks everything under its own locks — status, the cap's park, live link,
+        // running microVM, the discard setting, admission — so a colony an operator just touched
+        // or stopped is not doubled. A refusal (409, 404) means the park is no longer this tick's
+        // to recover.
+        let _ = crate::lifecycle::resume_if(app, &id, capped).await;
     }
 }
 
@@ -4599,6 +4580,53 @@ mod tests {
         let resumed = app.session("waiting").await.unwrap();
         assert_eq!(resumed.status, SessionStatus::Queued, "the colony rejoins the queue");
         assert!(resumed.parked.is_none(), "the park goes with the resume");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An operator's stop that lands after the provider-retry sweep chose a colony, but before its
+    /// resume claims it, stands: `can_resume` admits the `stopped` the stop made, so the sweep's own
+    /// condition is what must be re-checked under the colony's lifecycle lock.
+    #[tokio::test]
+    async fn an_operator_stop_between_the_provider_retry_check_and_its_resume_stands() {
+        let root = std::env::temp_dir().join(format!("colonizer-provider-retry-stop-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut sessions = vec![provider_retry_parked_colony(
+            "abc",
+            1,
+            Utc::now() - chrono::Duration::minutes(3),
+        )];
+        for i in 0..3 {
+            let mut f = colony("acme", SessionStatus::Running);
+            f.id = format!("filler-{i}");
+            sessions.push(f);
+        }
+        *app.sessions.write().await = sessions;
+        tokio::fs::create_dir_all(app.session_dir("abc")).await.unwrap();
+        // The stop holds the lifecycle lock across its flip, as `lifecycle::stop` does.
+        let lifecycle = app.session_lock("abc").await;
+        let stopping = lifecycle.lock().await;
+        let sweep = tokio::spawn({
+            let app = app.clone();
+            async move { resume_provider_retry_parked(&app).await }
+        });
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        app.update_session("abc", |x| {
+            x.status = SessionStatus::Stopped;
+            x.attention = None;
+            x.parked = None;
+        })
+        .await
+        .unwrap();
+        drop(stopping);
+        sweep.await.unwrap();
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::Stopped,
+            "the sweep does not undo the operator's stop"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

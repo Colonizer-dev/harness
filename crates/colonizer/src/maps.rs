@@ -21,6 +21,7 @@ use crate::{
     util::{exec_within, valid_repo, write_atomic},
 };
 use anyhow::{Context, Result, bail};
+use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -547,7 +548,7 @@ pub async fn launch(app: &Shared, repo: &str, origin: &str) -> Result<Session, c
     });
     let new_session: sessions::NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    let Json(session) = sessions::create(State(app.clone()), None, Json(new_session)).await?;
+    let Json(session) = sessions::create(State(app.clone()), None, HeaderMap::new(), Json(new_session)).await?;
     Ok(session)
 }
 

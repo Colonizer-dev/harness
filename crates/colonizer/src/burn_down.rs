@@ -21,6 +21,7 @@ use crate::{
     redteam,
     sessions::{self, Session, SessionStatus},
 };
+use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use serde_json::{Map, Value, json};
@@ -401,7 +402,7 @@ async fn launch(app: &Shared, repo: &str, instructions: &str, focus: &str) {
     } else {
         String::new()
     };
-    match sessions::create(State(app.clone()), None, Json(new_session)).await {
+    match sessions::create(State(app.clone()), None, HeaderMap::new(), Json(new_session)).await {
         Ok(Json(session)) => {
             app.session_log_as(
                 Origin::BurnDown,

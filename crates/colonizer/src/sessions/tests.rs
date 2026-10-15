@@ -20,6 +20,8 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         origin: None,
         auto_note: None,
         launched_by_token: None,
+        external_ref: None,
+        idempotency_key: None,
         placement: None,
         worktree: String::new(),
         git_admin_dir: None,

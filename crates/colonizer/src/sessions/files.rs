@@ -353,7 +353,16 @@ async fn uhp_sessions(
     headers: HeaderMap,
     scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
 ) -> Response {
-    let visible = visible_sessions(&app, scoped.as_ref()).await;
+    let visible = match filtered(visible_sessions(&app, scoped.as_ref()).await, &query) {
+        Ok(visible) => visible,
+        Err(field) => {
+            return wrong_input(
+                true,
+                &headers,
+                format!("`{field}` names nothing; send the value it filters on, or leave it out"),
+            );
+        }
+    };
     paged_list(&app, visible, &query, true, &headers).await
 }
 

@@ -194,10 +194,23 @@ impl App {
             return rt.clone();
         }
         // Read through the store outside the map's lock, then insert: two first callers racing both
-        // build one, and the first insert wins, so every caller still shares a single runtime.
-        let saved = SavedLogs::read(self.store(), id).await;
-        let built = Arc::new(Runtime::from_saved(saved, &self.session_dir(id).join("out")));
+        // build one, and the first insert wins, so every caller still shares a single runtime. A
+        // resume never empties the map around its rotation (`replace_runtime`), so a build that read
+        // the log before the rename loses this insert to the runtime rebuilt after it.
+        let built = self.build_runtime(id).await;
         self.runtimes.lock().await.entry(id.to_string()).or_insert(built).clone()
+    }
+
+    /// Puts a runtime rebuilt from the colony's saved logs in place of its current one, answering the
+    /// one it replaced: the swap `lifecycle::retire_and_rotate_events` makes once the log is rotated.
+    pub(crate) async fn replace_runtime(&self, id: &str) -> Option<Arc<Runtime>> {
+        let built = self.build_runtime(id).await;
+        self.runtimes.lock().await.insert(id.to_string(), built)
+    }
+
+    async fn build_runtime(&self, id: &str) -> Arc<Runtime> {
+        let saved = SavedLogs::read(self.store(), id).await;
+        Arc::new(Runtime::from_saved(saved, &self.session_dir(id).join("out")))
     }
 
     /// The colony log, stamped `system`: the host's own bookkeeping. A subsystem that speaks in its

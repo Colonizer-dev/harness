@@ -353,6 +353,19 @@ pub struct Session {
     /// `None` for anything the owner started. The token itself is never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launched_by_token: Option<String>,
+    /// The caller's own stable name for this colony (issue #901), taken from `external_ref` in the
+    /// create body. Set once at creation and never changed afterwards, so `GET /api/sessions
+    /// ?external_ref=…` finds a colony by the id the caller's own system already keeps. `None` when
+    /// the caller named none — the overwhelming majority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
+    /// The `Idempotency-Key` header that created this colony (issue #901), or `None` when the
+    /// request carried none. A repeat of that key answers the colony recorded here instead of
+    /// starting a second one — and only for a colony the repeating caller can see, so a key never
+    /// discloses one a scoped token may not read. Persisted rather than kept in memory, so a retry
+    /// after a mothership restart still finds the same colony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     /// Why this colony is where it is, in placement's words (issue #688): the member and its free
     /// capacity, or that a peer had room but cross-member launch is not built yet. Recorded on a
     /// fresh launch; `None` on colonies written before it existed or re-admitted from the queue.
@@ -721,6 +734,8 @@ impl Default for Session {
             origin: None,
             auto_note: None,
             launched_by_token: None,
+            external_ref: None,
+            idempotency_key: None,
             placement: None,
             worktree: String::new(),
             git_admin_dir: None,

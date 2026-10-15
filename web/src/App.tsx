@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SecretsNavContext } from "./secretsNav";
 import { useApi } from "./context";
-import { IconMenu, IconSpark } from "./components/icons";
+import { IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
 import { OrgNotices } from "./components/OrgNotice";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
-import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
-import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
+import { SettingsBody, type SectionId } from "./components/SettingsDialog";
 import { Cockpit } from "./cockpit/Cockpit";
 import { DemoBanner } from "./components/DemoBanner";
 import { DEMO } from "./demo";
@@ -65,10 +64,10 @@ import type {
 
 export function App() {
   const api = useApi();
-  // The sidebar-drawer layout survives only for a narrow desktop window. A phone runs the cockpit
-  // (issue #516): below `sm` the cockpit hides its rail and shows the mobile tab bar instead, so
-  // the "done when" flows — inbox, answering, colony chat, the Nest — are its own at 390px.
-  const narrow = useMediaQuery("(min-width: 640px) and (max-width: 899px)");
+  // The cockpit is the shell at every width (issue #1203): its rail shows from `sm` (640px) up and
+  // the mobile tab bar below it (issue #516), so every route keeps the same left navigation
+  // whatever the window is. A phone still runs it — the "done when" flows (inbox, answering,
+  // colony chat, the Nest) are its own at 390px.
   const phone = useMediaQuery(PHONE_QUERY);
   const [status, setStatus] = useState<HarnessStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
@@ -81,7 +80,6 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(() => stored("colonizer.session"));
   const [interfaces, setInterfaces] = useState<InterfaceFlags>({ chat: true, terminal: true });
   const [autopilotDefault, setAutopilotDefault] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
   const [dismissed, setDismissed] = useState<string[]>([]);
@@ -89,12 +87,10 @@ export function App() {
   // The remote-access view (issue #535), one state for the whole app: the header's badge and the
   // settings pane read it, and the pane's setter folds a toggle or reset straight back in.
   const [remote, setRemote] = useState<RemoteStatus | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   // Whether the first /api/orgs answer (or its failure) is in: until then an empty list says nothing.
   const [orgsLoaded, setOrgsLoaded] = useState(false);
   const [selectedOrg, setSelectedOrg] = useState<string | null>(() => stored("colonizer.org") || null);
-  const [view, setView] = useState<MainView>(() => (stored("colonizer.view") === "memory" ? "memory" : "colonies"));
   const [pendingMemory, setPendingMemory] = useState(0);
   const [orgSettingsFor, setOrgSettingsFor] = useState<string | null>(null);
   // Orgs answered this session: the PUT has marked them decided server-side, but until the 15 s
@@ -118,9 +114,6 @@ export function App() {
   const [secretsRequest, setSecretsRequest] = useState<{ n: number; id?: string }>({ n: 0 });
   // Whether the cockpit is showing its inspector; the fixed card column steps left of it.
   const [inspectorShown, setInspectorShown] = useState(false);
-  // The sidebar's tab, lifted so Setup's launch button can open the launcher directly.
-  // (colonizer.sidebar-tab stays the sidebar's own memory of itself.)
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>(() => (stored("colonizer.sidebar-tab") === "new" ? "new" : "sessions"));
   const [modules, setModules] = useState<ModuleInfo[]>([]);
   // The realtime feed (issue #446): while its connection is open the sessions/orgs/fleet poll
   // ticks skip their fetch; a pushed storage frame feeds the storage panel through liveStorage.
@@ -363,11 +356,11 @@ export function App() {
   // Only once both lists are in, so a slow first poll never clears a good choice.
   useEffect(() => {
     if (!sessionsLoaded || !orgsLoaded || !selectedOrg) return;
-    const kept = reconcileSelectedOrg(selectedOrg, orgEntries(orgs, sessions), narrow);
+    const kept = reconcileSelectedOrg(selectedOrg, orgEntries(orgs, sessions), false);
     if (kept === selectedOrg) return;
     setSelectedOrg(kept);
     store("colonizer.org", kept);
-  }, [sessionsLoaded, orgsLoaded, orgs, sessions, selectedOrg, narrow]);
+  }, [sessionsLoaded, orgsLoaded, orgs, sessions, selectedOrg]);
 
   // Keep a valid selection: fall back to the newest running colony in the current workspace.
   useEffect(() => {
@@ -380,10 +373,6 @@ export function App() {
   useEffect(() => {
     store("colonizer.session", selectedId);
   }, [selectedId]);
-
-  useEffect(() => {
-    store("colonizer.view", view);
-  }, [view]);
 
   // Notifications preferences are client-side only (no client-settings endpoint), so they persist as one localStorage blob like the other colonizer.* keys.
   useEffect(() => {
@@ -426,18 +415,14 @@ export function App() {
   );
 
   /**
-   * Settings has two frames: a dialog on a narrow window, and a cockpit view on a wide one. Both are
-   * opened through here so a caller — the rail, the version chip, an inspector row, Setup's auto-open —
-   * never has to know which is on screen.
+   * Settings is a cockpit view at every width (issue #1203), opened through here so a caller — the
+   * rail, the version chip, an inspector row, Setup's auto-open, the live-map prompt — never has to
+   * know how it is on screen.
    */
-  const openSettings = useCallback(
-    (section?: SectionId) => {
-      setSettingsSection(section);
-      if (narrow) setSettingsOpen(true);
-      else setSettingsRequests((n) => n + 1);
-    },
-    [narrow],
-  );
+  const openSettings = useCallback((section?: SectionId) => {
+    setSettingsSection(section);
+    setSettingsRequests((n) => n + 1);
+  }, []);
 
   // Replaces the old `!github.connected || !claude.configured` auto-open: `setup.autoOpen` is
   // "a row that gates launch is unmet", which also catches runtime failures. Fires at most once
@@ -448,20 +433,8 @@ export function App() {
     if (setup.autoOpen && !setupDismissed.current) openSettings("setup");
   }, [setup, openSettings]);
 
-  /** "Not now": in-memory only, so the next page load asks again. */
-  const dismissSetup = useCallback(() => {
-    setupDismissed.current = true;
-    setSettingsOpen(false);
-  }, []);
-
-  /** Setup's launch row: close Setup, open the existing launcher. */
+  /** Setup's launch row: ask the cockpit for the launch view. */
   const openLauncher = useCallback(() => {
-    setSettingsOpen(false);
-    setSidebarTab("new");
-    setView("colonies");
-    setSidebarOpen(true);
-    // The cockpit has no sidebar to open. Setup lives in the dialog App owns, so this counter is how
-    // its launch row reaches across and asks the cockpit for the launch view.
     setLaunchRequests((n) => n + 1);
   }, []);
 
@@ -513,8 +486,6 @@ export function App() {
   // Stable identity, so the notifier effect can call the latest selection without re-running on every render.
   const select = useCallback((id: string) => {
     setSelectedId(id);
-    setView("colonies");
-    setSidebarOpen(false);
   }, []);
 
   // A notification's click is delivered to the onSelect captured when the notification was raised,
@@ -575,17 +546,13 @@ export function App() {
     };
   });
 
-  // Like settings, memory has two frames: the narrow layout's main view, and a cockpit view.
+  // Memory is a cockpit view, like settings.
   const openMemory = useCallback(() => {
-    setSidebarOpen(false);
-    if (narrow) setView("memory");
-    else setMemoryRequests((n) => n + 1);
-  }, [narrow]);
+    setMemoryRequests((n) => n + 1);
+  }, []);
 
   // The deep link into Secrets (secretsNav.ts): any pane can ask for a key to be set.
   const openSecrets = useCallback((id?: string) => {
-    setSidebarOpen(false);
-    setSettingsOpen(false);
     setSecretsRequest((r) => ({ n: r.n + 1, id }));
   }, []);
 
@@ -633,68 +600,18 @@ export function App() {
   const storageAlert = visibleStorageAlert(status?.storage, dismissedStorage);
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;
   // a mothership already set up still gets asked, in memory, on its first load of the page.
-  const liveMapPrompt = telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && !setupShown;
+  const liveMapPrompt = telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && status !== null && !setupShown;
   // On a phone the prompt joins the page flow (the top of the Nest and the Inbox) instead of a
   // fixed sheet that covered whatever sat under it; desktop keeps the corner card.
   const liveMapInline = liveMapPrompt && liveMapPlacement(phone) === "inline";
-  const openLiveMapDetails = () => {
-    setSettingsSection("live-map");
-    setSettingsOpen(true);
-  };
+  const openLiveMapDetails = () => openSettings("live-map");
 
-  const sidebar = (
-    <Sidebar
-      status={status}
-      statusError={statusError}
-      sessions={sessions}
-      sessionsLoaded={sessionsLoaded}
-      selectedId={selectedId}
-      onSelect={select}
-      onOpenColony={openColony}
-      onCreated={(session) => {
-        upsertSession(session);
-        select(session.id);
-        void loadOrgs();
-      }}
-      onOpenSettings={() => {
-        setSidebarOpen(false);
-        // Reopening mid-setup lands back on the checklist, at the first row needing the user
-        // (the pane scrolls itself there). With nothing blocking, the landing is unchanged.
-        setSettingsSection(setup?.autoOpen ? "setup" : undefined);
-        setSettingsOpen(true);
-      }}
-      onClose={narrow ? () => setSidebarOpen(false) : undefined}
-      orgs={orgs}
-      selectedOrg={selectedOrg}
-      onSelectOrg={selectOrg}
-      onOpenOrgSettings={(org) => {
-        setSidebarOpen(false);
-        setOrgSettingsFor(org);
-      }}
-      onManageOrgs={() => {
-        setSidebarOpen(false);
-        setSettingsSection("orgs");
-        setSettingsOpen(true);
-      }}
-      view={view}
-      onOpenMemory={openMemory}
-      pendingMemory={pendingMemory}
-      autopilotDefault={autopilotDefault}
-      attentionStrip={notifyPrefs.inTab}
-      tab={sidebarTab}
-      onTab={setSidebarTab}
-      pull={pull}
-    />
-  );
-
-  // Both layouts show the same two panes; only the chrome around them differs, so they are built
-  // once here and handed to whichever shell is on screen.
+  // The cockpit's colony and memory slots: built here so App keeps its wiring for them, handed to
+  // whichever view is showing them.
   const memoryPane = (
     <MemoryView
-      narrow={narrow}
       selectedOrg={selectedOrg}
       orgs={orgs}
-      onOpenSidebar={() => setSidebarOpen(true)}
       onChanged={() => {
         void loadPendingMemory();
         void loadOrgs();
@@ -708,23 +625,21 @@ export function App() {
       sessionId={current.id}
       fallback={current}
       interfaces={interfaces}
-      narrow={narrow}
       showOrg={!selectedOrg}
       sessions={sessions}
       onSessionChanged={upsertSession}
       onSessionDeleted={removeSession}
       onSelectSession={select}
-      onOpenSidebar={() => setSidebarOpen(true)}
       onOpenMemory={openMemory}
       onMemoryProposed={loadPendingMemory}
     />
   ) : (
-    <EmptyState narrow={narrow} org={selectedOrg} onOpenSidebar={() => setSidebarOpen(true)} />
+    <EmptyState org={selectedOrg} />
   );
 
-  // Same body the dialog renders, in the cockpit's own column. Keyed on the request count so an
-  // external jump ("open providers") re-seeds the section; clicking around inside it does not remount.
-  /** A saved workspace, from the dialog or from Settings → Workspaces: patch it in, then refetch. */
+  // The settings body, in the cockpit's own column. Keyed on the request count so an external jump
+  // ("open providers") re-seeds the section; clicking around inside it does not remount.
+  /** A saved workspace, from Settings → Workspaces: patch it in, then refetch. */
   const saveOrgInfo = (saved: OrgInfo) => {
     setOrgs((list) => {
       const index = list.findIndex((o) => sameOrg(o.org, saved.org));
@@ -761,7 +676,13 @@ export function App() {
         setupDismissed.current = true;
         close();
       }}
-      onClose={close}
+      onClose={() => {
+        // Nothing polls the live-map or the usage reading, so the settings view refreshes them as it
+        // closes — what the dialog this replaced did.
+        void loadTelemetry();
+        void loadUsage();
+        close();
+      }}
       orgs={orgs}
       onOrgSaved={saveOrgInfo}
       sessions={sessions}
@@ -783,101 +704,58 @@ export function App() {
     <div className="flex h-full min-h-0 flex-col">
       {DEMO && <DemoBanner />}
       <div className="flex min-h-0 flex-1">
-      {narrow ? (
-        <>
-          {sidebarOpen && (
-            <div className="fixed inset-0 z-40 flex">
-              <div className="absolute inset-0 bg-black/40" onClick={() => setSidebarOpen(false)} aria-hidden="true" />
-              <aside className="relative h-full w-[min(340px,88vw)] border-r border-border bg-panel shadow-[var(--shadow)]">
-                {sidebar}
-              </aside>
-            </div>
-          )}
-          <main className="flex h-full min-w-0 flex-1 flex-col">
-            {orgPrompt}
-            <div className="min-h-0 flex-1">{view === "memory" ? memoryPane : colonyPane}</div>
-          </main>
-        </>
-      ) : (
-        // The cockpit everywhere but a narrow desktop window: a rail, a nest and a 360px inspector
-        // from `sm` up (with the tab bar below it), the sidebar drawer between 640 and 899px.
-        <div className="flex h-full min-w-0 flex-1 flex-col">
-          {orgPrompt}
-          <div className="min-h-0 flex-1">
-            <Cockpit
-              sessions={sessions}
-              sessionsLoaded={sessionsLoaded}
-              orgs={orgs}
-              redRuns={redRuns}
-              selectedOrg={selectedOrg}
-              onSelectOrg={selectOrg}
-              selectedId={selectedId}
-              onSelectSession={setSelectedId}
-              onOpenColony={openColony}
-              status={status}
-              statusError={statusError}
-              remoteOn={remote?.enabled ?? false}
-              fleet={fleet}
-              update={updateStatus}
-              onUpdateChanged={setUpdateStatus}
-              liveConnection={liveConnection}
-              liveStorage={liveStorage}
-              autopilotDefault={autopilotDefault}
-              launchRequests={launchRequests}
-              settingsRequests={settingsRequests}
-              memoryRequests={memoryRequests}
-              secretsRequest={secretsRequest}
-              pendingMemory={pendingMemory}
-              settings={settingsPane}
-              onSessionChanged={upsertSession}
-              onRedStart={startRedRun}
-              onRedStop={stopRedRun}
-              onRedCancel={cancelRedRun}
-              onRedSynthesize={synthesizeRedRun}
-              onCreated={(session) => {
-                upsertSession(session);
-                select(session.id);
-                void loadOrgs();
-              }}
-              onOpenSettings={openSettings}
-              onOpenOrgSettings={(org) => openSettings(`org:${org}`)}
-              onInspectorShown={setInspectorShown}
-              colony={colonyPane}
-              memory={memoryPane}
-              notice={liveMapInline ? <LiveMapPrompt inline onAnswered={setTelemetry} onDetails={openLiveMapDetails} /> : null}
-            />
-          </div>
+      {/* The cockpit at every width (issue #1203): a rail, a nest and a 360px inspector from `sm`
+          up, and the mobile tab bar below it — so every route keeps the same left navigation. */}
+      <div className="flex h-full min-w-0 flex-1 flex-col">
+        {orgPrompt}
+        <div className="min-h-0 flex-1">
+          <Cockpit
+            sessions={sessions}
+            sessionsLoaded={sessionsLoaded}
+            orgs={orgs}
+            redRuns={redRuns}
+            selectedOrg={selectedOrg}
+            onSelectOrg={selectOrg}
+            selectedId={selectedId}
+            onSelectSession={setSelectedId}
+            onOpenColony={openColony}
+            status={status}
+            statusError={statusError}
+            remoteOn={remote?.enabled ?? false}
+            fleet={fleet}
+            update={updateStatus}
+            onUpdateChanged={setUpdateStatus}
+            liveConnection={liveConnection}
+            liveStorage={liveStorage}
+            autopilotDefault={autopilotDefault}
+            launchRequests={launchRequests}
+            settingsRequests={settingsRequests}
+            memoryRequests={memoryRequests}
+            secretsRequest={secretsRequest}
+            pendingMemory={pendingMemory}
+            settings={settingsPane}
+            onSessionChanged={upsertSession}
+            onRedStart={startRedRun}
+            onRedStop={stopRedRun}
+            onRedCancel={cancelRedRun}
+            onRedSynthesize={synthesizeRedRun}
+            onCreated={(session) => {
+              upsertSession(session);
+              select(session.id);
+              void loadOrgs();
+            }}
+            onOpenSettings={openSettings}
+            onOpenOrgSettings={(org) => openSettings(`org:${org}`)}
+            onInspectorShown={setInspectorShown}
+            colony={colonyPane}
+            memory={memoryPane}
+            notice={liveMapInline ? <LiveMapPrompt inline onAnswered={setTelemetry} onDetails={openLiveMapDetails} /> : null}
+          />
         </div>
-      )}
-      <SettingsDialog
-        open={settingsOpen}
-        onClose={() => {
-          setSettingsOpen(false);
-          void loadTelemetry();
-          void loadUsage();
-        }}
-        status={status}
-        onStatusChanged={loadStatus}
-        onModulesChanged={applyModules}
-        telemetry={telemetry}
-        onTelemetryChanged={setTelemetry}
-        onDismissedChanged={setDismissed}
-        usage={usage}
-        onUsageChanged={setUsage}
-        notifications={notifyPrefs}
-        onNotificationsChanged={setNotifyPrefs}
-        remote={remote}
-        onRemoteChanged={setRemote}
-        initialSection={settingsSection}
-        setup={setup}
-        pull={pull}
-        onLaunch={openLauncher}
-        onSetupShown={() => setSetupShown(true)}
-        onSetupDismissed={dismissSetup}
-      />
+      </div>
       {(storageAlert || (liveMapPrompt && !liveMapInline) || appUpdate.ready) && (
         // The fixed cards live in the same corner; the shared column keeps them stacked and clickable.
-        <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(narrow, inspectorShown))}>
+        <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(inspectorShown))}>
           {storageAlert && (
             <StorageAlert
               storage={storageAlert}
@@ -966,22 +844,9 @@ export function StorageAlert({ storage, onDismiss }: { storage: StorageHealth; o
   );
 }
 
-function EmptyState({ narrow, org, onOpenSidebar }: { narrow: boolean; org: string | null; onOpenSidebar: () => void }) {
+function EmptyState({ org }: { org: string | null }) {
   return (
     <div className="flex h-full flex-col">
-      {narrow && (
-        <div className="flex items-center gap-2 border-b border-border bg-panel px-3 py-2">
-          <button
-            type="button"
-            onClick={onOpenSidebar}
-            aria-label="Open sidebar"
-            className="grid size-9 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
-          >
-            <IconMenu size={18} />
-          </button>
-          <span className="font-semibold">Colonizer</span>
-        </div>
-      )}
       <div className="grid flex-1 place-items-center p-6">
         <div className="max-w-sm text-center">
           <div className="mx-auto mb-4 grid size-12 place-items-center rounded-2xl bg-accent-soft text-accent">
@@ -992,11 +857,6 @@ function EmptyState({ narrow, org, onOpenSidebar }: { narrow: boolean; org: stri
             Each colony is a private microVM with a fresh git worktree and a coding agent. Watch it work, answer its questions,
             open a terminal, and create the pull request when you're happy. The Mothership keeps them all in sight.
           </p>
-          {narrow && (
-            <Button className="mt-4" variant="primary" onClick={onOpenSidebar}>
-              Browse issues
-            </Button>
-          )}
         </div>
       </div>
     </div>

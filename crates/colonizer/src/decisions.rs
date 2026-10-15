@@ -33,6 +33,7 @@ use crate::{
     sessions::{self, NewSession, Session, SessionStatus},
     util::{truncate, valid_repo},
 };
+use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Path, State},
@@ -1550,7 +1551,7 @@ async fn redo(app: &Shared, card: &PrCard) -> Result<String, crate::AppError> {
     });
     let req: NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")))?;
-    let Json(new) = sessions::create(State(app.clone()), None, Json(req)).await?;
+    let Json(new) = sessions::create(State(app.clone()), None, HeaderMap::new(), Json(req)).await?;
     let repo = old.repo.clone();
     let url = pr_url.clone();
     if let Err(e) = merge_loop::update(&dir, move |s| {

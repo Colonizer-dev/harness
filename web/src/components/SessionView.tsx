@@ -20,14 +20,13 @@ import {
   IconChevronDown,
   IconExternal,
   IconGitPR,
-  IconMenu,
   IconNetwork,
   IconPower,
   IconStack,
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, autoFixLine, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle } from "./ui";
+import { AttentionBadge, Badge, autoFixLine, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle, useMediaQuery } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -43,20 +42,17 @@ export function SessionView({
   sessionId,
   fallback,
   interfaces,
-  narrow,
   showOrg,
   sessions,
   onSessionChanged,
   onSessionDeleted,
   onSelectSession,
-  onOpenSidebar,
   onOpenMemory,
   onMemoryProposed,
 }: {
   sessionId: string;
   fallback: Session | null;
   interfaces: InterfaceFlags;
-  narrow: boolean;
   /** Show the org chip (the sidebar isn't filtered to one org). */
   showOrg: boolean;
   /** Every colony the mothership knows; the stack chip resolves the parent and the children against it. */
@@ -65,7 +61,6 @@ export function SessionView({
   onSessionDeleted: (id: string) => void;
   /** Selecting the colony a stack chip points at; App's own `select`, so org filters and storage follow it. */
   onSelectSession: (id: string) => void;
-  onOpenSidebar: () => void;
   onOpenMemory: () => void;
   onMemoryProposed: () => void;
 }) {
@@ -97,6 +92,10 @@ export function SessionView({
   );
   useEffect(() => (DEMO ? undefined : subscribe(() => setTabState(tabFromAddress()))), [tabFromAddress]);
   const [busy, setBusy] = useState<Action | null>(null);
+  // A half-width desktop window (a tiled pane, 640–899px) has no room for chat and terminal side by
+  // side, so there they become one tabbed panel. Read here rather than passed in: the cockpit is the
+  // shell at every width now (issue #1203) and no longer has a narrow layout to answer for.
+  const narrow = useMediaQuery("(min-width: 640px) and (max-width: 899px)");
 
   // The stream sees session changes immediately; keep the sidebar list in step instead of waiting for its poll.
   useEffect(() => {
@@ -233,16 +232,6 @@ export function SessionView({
     <div className="flex h-full min-h-0 flex-col">
       <header className="shrink-0 border-b border-border bg-panel px-4 py-3 max-sm:max-h-[45dvh] max-sm:overflow-y-auto">
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-          {narrow && (
-            <button
-              type="button"
-              onClick={onOpenSidebar}
-              aria-label="Open sidebar"
-              className="-ml-1.5 grid size-9 shrink-0 cursor-pointer place-items-center rounded-lg text-muted hover:bg-panel-2 hover:text-text"
-            >
-              <IconMenu size={18} />
-            </button>
-          )}
           <div className="min-w-0 flex-1 basis-64">
             <div className="flex flex-wrap items-center gap-2">
               {showOrg && (

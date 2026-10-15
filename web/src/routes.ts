@@ -31,8 +31,8 @@ export interface Route {
   org?: string;
 }
 
-/** The view each plain path belongs to. `/` is the Overview. */
-const VIEW_PATHS: Partial<Record<CockpitView, string>> = {
+/** The view each plain path belongs to. `/` is the Overview. Exported so a test can walk them all. */
+export const VIEW_PATHS: Partial<Record<CockpitView, string>> = {
   overview: "/",
   home: "/nest",
   chat: "/chat",

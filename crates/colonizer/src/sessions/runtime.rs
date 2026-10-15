@@ -78,6 +78,10 @@ pub struct Runtime {
     /// new epoch. Distinct from `stop`, which `teardown_vm` also sets on a plain stop where
     /// sockets stay open on purpose.
     pub(crate) retired: watch::Sender<bool>,
+    /// Set by `lifecycle::retire_and_rotate_events` under `file_lock`, once this run's log has been
+    /// moved aside: an agent event of this run still queued on the lock is dropped instead of landing
+    /// in the next run's `events.jsonl`. Distinct from `stop`, after which a plain stop still drains.
+    pub(crate) rotated: std::sync::atomic::AtomicBool,
     pub(crate) file_lock: Mutex<()>,
     /// What the cockpit derives from the whole of this run's events, built on the first socket that
     /// asks and kept current by every broadcast after (issue #1210).
@@ -320,6 +324,7 @@ impl Runtime {
             restart_resume_until: std::sync::Mutex::new(None),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
+            rotated: std::sync::atomic::AtomicBool::new(false),
             file_lock: Mutex::new(()),
             summary: std::sync::Mutex::new(history::SummaryState::Cold),
             findings_lock: Mutex::new(()),
