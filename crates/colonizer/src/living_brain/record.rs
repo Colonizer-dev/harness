@@ -1,6 +1,6 @@
 //! A colony as a Living Brain `agent_log` record — the one place the mapping lives.
 //!
-//! The record is the brain's normalised session, schema version 2 (Livingbrain-wiki/livingbrain,
+//! The record is the brain's normalised session, schema version 3 (Livingbrain-wiki/livingbrain,
 //! `docs/logs.md` and `crates/livingbrain-cli/src/logs.rs`), with the `colonizer` collector's
 //! mapping: one record per colony, read from its `sessions.json` row (serialised exactly as the
 //! store writes it) and its event logs (`events-1.jsonl` … then `events.jsonl`). Field order is wire
@@ -10,8 +10,10 @@
 //! What a record keeps of the stream: the maintainer's instructions as the opening user turn (the
 //! harness prompt around them is boilerplate), the person's own messages and answers, the
 //! orchestrating agent's text, thinking and tool calls with their results, and the colony's
-//! milestones as `event` turns. Harness nudges become one-line events. A background subagent is
-//! folded into the call that started it: its last words are that call's output.
+//! milestones as `event` turns. Harness nudges become one-line events. A subagent's own steps — its
+//! text, thinking and tool calls, and the subagents it starts in turn — nest under the call that
+//! started it as that call's `subagent` (schema version 3): its name, the model its messages ran
+//! on, when it ran, how it ended, and its turns. Its last words are still that call's output.
 //!
 //! Then, in the CLI's order: the detail level (what it leaves out is never touched again), home
 //! elision, the per-message clip, redaction of every string value on its own, the size cap, and one
@@ -24,9 +26,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+/// 3: a subagent's steps nest under the call that started it, and assistant turns name their model
+/// when it changes.
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 pub(crate) const AGENT: &str = "colonizer";
-pub(crate) const COLLECTOR_VERSION: u32 = 1;
+/// 2: subagents mapped (schema 3).
+pub(crate) const COLLECTOR_VERSION: u32 = 2;
 /// The most text one turn keeps under `summary`, in characters.
 const SUMMARY_TURN_CHARS: usize = 2000;
 /// The most of one message any level keeps: its first and last 128 KiB.
@@ -80,6 +85,9 @@ pub(crate) struct SessionRecord {
     pub(crate) outcome: Option<String>,
     pub(crate) truncated: bool,
     pub(crate) omitted_turns: usize,
+    /// How many subagent turns the size cap removed, across every subagent; each subagent says its
+    /// own share in its `omitted_turns`.
+    pub(crate) omitted_subagent_turns: usize,
     pub(crate) colony: Colony,
 }
 
@@ -110,6 +118,10 @@ pub(crate) enum Role {
 pub(crate) struct Turn {
     pub(crate) role: Role,
     pub(crate) at: Option<String>,
+    /// On an assistant turn, the model it ran on — only where that differs from the previous
+    /// assistant turn's in the same list, so the first carries it and each change after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
     pub(crate) text: String,
     pub(crate) tool_calls: Vec<ToolCall>,
 }
@@ -119,10 +131,34 @@ impl Turn {
         Turn {
             role,
             at: present(at),
+            model: None,
             text: text.to_owned(),
             tool_calls: Vec::new(),
         }
     }
+}
+
+/// A subagent a call started, and everything it did. Field order is wire order; every field is
+/// always present.
+#[derive(Debug, Serialize)]
+pub(crate) struct Subagent {
+    /// The call that started it.
+    pub(crate) id: String,
+    /// The subagent type the call named (`Explore`, `general-purpose`, …), else its description.
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    /// The models its messages ran on, first seen first; else the model the call asked for.
+    pub(crate) models: Vec<String>,
+    pub(crate) started_at: Option<String>,
+    pub(crate) ended_at: Option<String>,
+    /// `completed`, `failed`, `stopped`, or `null` when the stream never said.
+    pub(crate) status: Option<&'static str>,
+    /// The agent events carry no per-subagent usage: zeros and a null cost, the colony's own
+    /// totals holding every model's spend.
+    pub(crate) totals: Totals,
+    pub(crate) turns: Vec<Turn>,
+    pub(crate) truncated: bool,
+    pub(crate) omitted_turns: usize,
 }
 
 /// A tool the agent called; under `full`, what it was called with and what came back.
@@ -141,6 +177,9 @@ pub(crate) struct ToolCall {
     pub(crate) status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) exit_code: Option<i64>,
+    /// The subagent this call started, when it started one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subagent: Option<Box<Subagent>>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -410,6 +449,7 @@ pub(crate) fn collect(colony: &Value, events: &[Value]) -> Option<SessionRecord>
         outcome: opt(colony, "status"),
         truncated: false,
         omitted_turns: 0,
+        omitted_subagent_turns: 0,
         colony: Colony {
             org: repo.split('/').next().unwrap_or_default().to_owned(),
             base: opt(colony, "base"),
@@ -426,6 +466,8 @@ pub(crate) fn collect(colony: &Value, events: &[Value]) -> Option<SessionRecord>
     for event in events {
         stream.event(&mut record, colony, event);
     }
+    stream.nest(&mut record);
+    settle_models(&mut record.turns);
     if let Some(usage) = colony.get("model_usage").and_then(Value::as_object) {
         let sorted: BTreeMap<&String, &Value> = usage.iter().collect();
         for (model, tokens) in sorted {
@@ -446,15 +488,302 @@ pub(crate) fn collect(colony: &Value, events: &[Value]) -> Option<SessionRecord>
     Some(record)
 }
 
+/// Where a call sits: in the orchestrator's turns (`None`) or a subagent's (the id of the call that
+/// started it), and at which turn and call.
+type Place = (Option<String>, usize, usize);
+
+/// One subagent's steps as the stream builds them, keyed by the call that started it.
+#[derive(Default)]
+struct Lane {
+    name: String,
+    description: Option<String>,
+    /// The model the launch asked for (`haiku`, `sonnet`, …), when it named one: the fallback when
+    /// none of its messages said which model it ran on.
+    asked_model: Option<String>,
+    models: Vec<String>,
+    /// The model its latest message ran on.
+    model: Option<String>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    status: Option<&'static str>,
+    turns: Vec<Turn>,
+    opened: BTreeMap<String, usize>,
+    /// Its last words: a background subagent's call output.
+    said: String,
+}
+
+impl Lane {
+    /// A lane for the call `id` launched with `input` (`Task`/`Agent`): named as the runner names the
+    /// subagent, `subagent_type`, else its description.
+    fn launched(input: &Value, at: &str) -> Lane {
+        let description = opt(input, "description");
+        let name = opt(input, "subagent_type")
+            .or_else(|| description.clone())
+            .unwrap_or_else(|| "subagent".to_owned());
+        Lane {
+            name,
+            description,
+            asked_model: opt(input, "model"),
+            started_at: present(at),
+            ..Lane::default()
+        }
+    }
+
+    fn touch(&mut self, at: &str) {
+        if at.is_empty() {
+            return;
+        }
+        if self.started_at.is_none() {
+            self.started_at = Some(at.to_owned());
+        }
+        self.ended_at = Some(at.to_owned());
+    }
+
+    fn into_subagent(mut self, id: &str) -> Subagent {
+        if self.models.is_empty()
+            && let Some(asked) = self.asked_model.take()
+        {
+            self.models.push(asked);
+        }
+        Subagent {
+            id: id.to_owned(),
+            name: self.name,
+            description: self.description,
+            models: self.models,
+            started_at: self.started_at,
+            ended_at: self.ended_at,
+            status: self.status,
+            totals: Totals::default(),
+            turns: self.turns,
+            truncated: false,
+            omitted_turns: 0,
+        }
+    }
+}
+
+/// The status a subagent ended with, in the record's words.
+fn subagent_status(word: &str) -> &'static str {
+    match word {
+        "completed" => "completed",
+        "stopped" => "stopped",
+        _ => "failed",
+    }
+}
+
 #[derive(Default)]
 struct Stream {
     started: bool,
+    /// The orchestrator's open assistant turns, by message id.
     opened: BTreeMap<String, usize>,
-    calls: BTreeMap<String, (usize, usize)>,
-    subagent_said: BTreeMap<String, String>,
+    /// The orchestrator's model, as its last `model_changed` named it.
+    model: Option<String>,
+    calls: BTreeMap<String, Place>,
+    lanes: BTreeMap<String, Lane>,
+    /// Lane ids in the order they were opened: a subagent's own subagents open after it.
+    order: Vec<String>,
+}
+
+/// The assistant turn a message id's blocks land in, in `turns`: the one already opened for it,
+/// else a new one on `model`.
+fn assistant_turn_in(
+    turns: &mut Vec<Turn>,
+    opened: &mut BTreeMap<String, usize>,
+    message_id: &str,
+    at: &str,
+    model: Option<&String>,
+) -> usize {
+    if let Some(index) = opened.get(message_id) {
+        return *index;
+    }
+    let mut turn = Turn::new(Role::Assistant, at, "");
+    turn.model = model.cloned();
+    turns.push(turn);
+    let index = turns.len() - 1;
+    if !message_id.is_empty() {
+        opened.insert(message_id.to_owned(), index);
+    }
+    index
 }
 
 impl Stream {
+    /// The lane a subagent event belongs to, opened from its `agent` when no launch was seen. Notes
+    /// the model the event's agent ran on.
+    fn lane(&mut self, event: &Value) -> Option<String> {
+        let agent = event.get("agent")?;
+        let id = str_field(agent, "id");
+        if id.is_empty() {
+            return None;
+        }
+        if !self.lanes.contains_key(id) {
+            let name = opt(agent, "name").unwrap_or_else(|| "subagent".to_owned());
+            self.lanes.insert(
+                id.to_owned(),
+                Lane {
+                    name,
+                    description: opt(agent, "description"),
+                    ..Lane::default()
+                },
+            );
+            self.order.push(id.to_owned());
+        }
+        let lane = self.lanes.get_mut(id).expect("just ensured");
+        let model = str_field(agent, "model");
+        if !model.is_empty() {
+            lane.model = Some(model.to_owned());
+            if !lane.models.iter().any(|seen| seen == model) {
+                lane.models.push(model.to_owned());
+            }
+        }
+        Some(id.to_owned())
+    }
+
+    /// The turns a call's place names.
+    fn turns_at<'a>(&'a mut self, record: &'a mut SessionRecord, owner: &Option<String>) -> Option<&'a mut Vec<Turn>> {
+        match owner {
+            None => Some(&mut record.turns),
+            Some(lane) => self.lanes.get_mut(lane).map(|lane| &mut lane.turns),
+        }
+    }
+
+    /// The agent's (or a subagent's) text, thinking or tool call.
+    fn step(&mut self, record: &mut SessionRecord, event: &Value, owner: Option<String>, at: &str) {
+        note_time(record, at);
+        let kind = str_field(event, "type");
+        let (turns, opened, model) = match &owner {
+            None => (&mut record.turns, &mut self.opened, self.model.as_ref()),
+            Some(id) => {
+                let Some(lane) = self.lanes.get_mut(id) else { return };
+                lane.touch(at);
+                (&mut lane.turns, &mut lane.opened, lane.model.as_ref())
+            }
+        };
+        match kind {
+            "assistant_text" => {
+                let text = str_field(event, "text");
+                if text.trim().is_empty() {
+                    return;
+                }
+                let index = assistant_turn_in(turns, opened, str_field(event, "message_id"), at, model);
+                let turn = &mut turns[index];
+                if !turn.text.is_empty() {
+                    turn.text.push('\n');
+                }
+                turn.text.push_str(text);
+                if let Some(id) = &owner
+                    && let Some(lane) = self.lanes.get_mut(id)
+                {
+                    lane.said = text.trim().to_owned();
+                }
+            }
+            "thinking" => {
+                let text = str_field(event, "text").trim();
+                if !text.is_empty() {
+                    turns.push(Turn::new(Role::Reasoning, at, text));
+                }
+            }
+            "tool_call" => {
+                let name = str_field(event, "name");
+                if name.is_empty() {
+                    return;
+                }
+                let index = assistant_turn_in(turns, opened, str_field(event, "message_id"), at, model);
+                let turn = &mut turns[index];
+                if turn.tool_calls.len() >= MAX_TOOL_CALLS {
+                    return;
+                }
+                let input = event.get("input").unwrap_or(&Value::Null);
+                turn.tool_calls.push(describe(name, input));
+                let call = turn.tool_calls.len() - 1;
+                let id = str_field(event, "tool_call_id");
+                if id.is_empty() {
+                    return;
+                }
+                self.calls.insert(id.to_owned(), (owner, index, call));
+                if matches!(name, "Task" | "Agent") && !self.lanes.contains_key(id) {
+                    self.lanes.insert(id.to_owned(), Lane::launched(input, at));
+                    self.order.push(id.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A tool's result, settled on its call wherever the call sits. A launch answered in the
+    /// foreground ends its subagent with it.
+    fn result(&mut self, record: &mut SessionRecord, event: &Value, at: &str) {
+        let id = str_field(event, "tool_call_id");
+        let Some((owner, turn, call)) = self.calls.get(id).cloned() else {
+            return;
+        };
+        note_time(record, at);
+        if let Some(owner) = &owner
+            && let Some(lane) = self.lanes.get_mut(owner)
+        {
+            lane.touch(at);
+        }
+        if event.get("background").and_then(Value::as_bool) == Some(true) {
+            return; // a background launch's ack: the call settles on its subagent_end
+        }
+        let output = str_field(event, "output");
+        let failed = event.get("is_error").and_then(Value::as_bool) == Some(true);
+        let exit = if failed { claude_exit_code(output) } else { None };
+        if let Some(turns) = self.turns_at(record, &owner) {
+            settle(
+                &mut turns[turn].tool_calls[call],
+                output,
+                exit,
+                Some(if failed { "error" } else { "ok" }),
+            );
+        }
+        if let Some(lane) = self.lanes.get_mut(id) {
+            lane.touch(at);
+            lane.status = Some(if failed { "failed" } else { "completed" });
+        }
+    }
+
+    /// A background subagent's end: its last words become its call's output.
+    fn subagent_end(&mut self, record: &mut SessionRecord, event: &Value, at: &str) {
+        let id = str_field(event, "tool_call_id");
+        let Some((owner, turn, call)) = self.calls.get(id).cloned() else {
+            return;
+        };
+        note_time(record, at);
+        let word = str_field(event, "status");
+        let status = match word {
+            "completed" => "ok",
+            "stopped" => "interrupted",
+            _ => "error",
+        };
+        let said = match self.lanes.get_mut(id) {
+            Some(lane) => {
+                lane.touch(at);
+                lane.status = Some(subagent_status(word));
+                std::mem::take(&mut lane.said)
+            }
+            None => String::new(),
+        };
+        if let Some(turns) = self.turns_at(record, &owner) {
+            settle(&mut turns[turn].tool_calls[call], &said, None, Some(status));
+        }
+    }
+
+    /// Every lane onto the call that started it, a subagent's own subagents first — a lane opens
+    /// after the lane its launch sits in, so the newest goes first. A lane whose call the record
+    /// does not hold (past the per-turn cap, or before the logs begin) is dropped.
+    fn nest(&mut self, record: &mut SessionRecord) {
+        let order = std::mem::take(&mut self.order);
+        for id in order.iter().rev() {
+            let Some(lane) = self.lanes.remove(id) else { continue };
+            let Some((owner, turn, call)) = self.calls.get(id).cloned() else {
+                continue;
+            };
+            let subagent = lane.into_subagent(id);
+            if let Some(turns) = self.turns_at(record, &owner) {
+                turns[turn].tool_calls[call].subagent = Some(Box::new(subagent));
+            }
+        }
+    }
+
     fn event(&mut self, record: &mut SessionRecord, colony: &Value, event: &Value) {
         let at = str_field(event, "ts");
         let origin = str_field(event, "origin");
@@ -463,81 +792,19 @@ impl Stream {
                 note_time(record, at);
                 self.user_message(record, colony, event, at);
             }
-            ("assistant_text", "agent") => {
-                let text = str_field(event, "text");
-                if text.trim().is_empty() {
-                    return;
-                }
-                note_time(record, at);
-                let index = self.assistant_turn(record, str_field(event, "message_id"), at);
-                let turn = &mut record.turns[index];
-                if !turn.text.is_empty() {
-                    turn.text.push('\n');
-                }
-                turn.text.push_str(text);
-            }
-            ("thinking", "agent") => {
-                let text = str_field(event, "text").trim();
-                if !text.is_empty() {
-                    note_time(record, at);
-                    record.turns.push(Turn::new(Role::Reasoning, at, text));
+            ("assistant_text" | "thinking" | "tool_call", "agent") => self.step(record, event, None, at),
+            ("assistant_text" | "thinking" | "tool_call", "subagent") => {
+                if let Some(lane) = self.lane(event) {
+                    self.step(record, event, Some(lane), at);
                 }
             }
-            ("tool_call", "agent") => {
-                let name = str_field(event, "name");
-                if name.is_empty() {
-                    return;
+            ("tool_result", "agent" | "subagent") => {
+                if origin == "subagent" {
+                    self.lane(event);
                 }
-                note_time(record, at);
-                let index = self.assistant_turn(record, str_field(event, "message_id"), at);
-                let turn = &mut record.turns[index];
-                if turn.tool_calls.len() >= MAX_TOOL_CALLS {
-                    return;
-                }
-                turn.tool_calls
-                    .push(describe(name, event.get("input").unwrap_or(&Value::Null)));
-                let id = str_field(event, "tool_call_id");
-                if !id.is_empty() {
-                    self.calls.insert(id.to_owned(), (index, turn.tool_calls.len() - 1));
-                }
+                self.result(record, event, at);
             }
-            ("tool_result", "agent") => {
-                let Some(&(turn, call)) = self.calls.get(str_field(event, "tool_call_id")) else {
-                    return;
-                };
-                note_time(record, at);
-                if event.get("background").and_then(Value::as_bool) == Some(true) {
-                    return; // a background launch's ack: the call settles on its subagent_end
-                }
-                let output = str_field(event, "output");
-                let failed = event.get("is_error").and_then(Value::as_bool) == Some(true);
-                let exit = if failed { claude_exit_code(output) } else { None };
-                settle(
-                    &mut record.turns[turn].tool_calls[call],
-                    output,
-                    exit,
-                    Some(if failed { "error" } else { "ok" }),
-                );
-            }
-            ("assistant_text", "subagent") => {
-                let started_by = event.get("agent").map(|agent| str_field(agent, "id")).unwrap_or_default();
-                let text = str_field(event, "text").trim();
-                if !started_by.is_empty() && !text.is_empty() {
-                    self.subagent_said.insert(started_by.to_owned(), text.to_owned());
-                }
-            }
-            ("subagent_end", _) => {
-                let id = str_field(event, "tool_call_id");
-                let Some(&(turn, call)) = self.calls.get(id) else { return };
-                note_time(record, at);
-                let status = match str_field(event, "status") {
-                    "completed" => "ok",
-                    "stopped" => "interrupted",
-                    _ => "error",
-                };
-                let said = self.subagent_said.remove(id).unwrap_or_default();
-                settle(&mut record.turns[turn].tool_calls[call], &said, None, Some(status));
-            }
+            ("subagent_end", _) => self.subagent_end(record, event, at),
             ("question", "agent") => {
                 let text = question_text(event);
                 if !text.is_empty() {
@@ -557,7 +824,13 @@ impl Stream {
                     push_event(record, at, &format!("Answered automatically: {}", one_line(&answer, 300)));
                 }
             }
-            ("model_changed", _) => note_model(record, str_field(event, "model")),
+            ("model_changed", _) => {
+                let model = str_field(event, "model");
+                note_model(record, model);
+                if !model.is_empty() {
+                    self.model = Some(model.to_owned());
+                }
+            }
             ("turn_end", _) if event.get("is_error").and_then(Value::as_bool) == Some(true) => {
                 note_time(record, at);
                 let result = one_line(str_field(event, "result"), 200);
@@ -597,18 +870,6 @@ impl Stream {
             }
             _ => {}
         }
-    }
-
-    fn assistant_turn(&mut self, record: &mut SessionRecord, message_id: &str, at: &str) -> usize {
-        if let Some(index) = self.opened.get(message_id) {
-            return *index;
-        }
-        record.turns.push(Turn::new(Role::Assistant, at, ""));
-        let index = record.turns.len() - 1;
-        if !message_id.is_empty() {
-            self.opened.insert(message_id.to_owned(), index);
-        }
-        index
     }
 
     fn user_message(&mut self, record: &mut SessionRecord, colony: &Value, event: &Value, at: &str) {
@@ -748,6 +1009,39 @@ fn one_line(text: &str, max: usize) -> String {
     line
 }
 
+/// Keep an assistant turn's `model` only where it changes from the previous assistant turn's in the
+/// same list — the first one names it, each switch after does — and the same in every subagent's
+/// turns, each list on its own.
+fn settle_models(turns: &mut [Turn]) {
+    let mut previous: Option<String> = None;
+    for turn in turns.iter_mut() {
+        if turn.role == Role::Assistant && turn.model.is_some() {
+            if turn.model == previous {
+                turn.model = None;
+            } else {
+                previous.clone_from(&turn.model);
+            }
+        }
+        for call in &mut turn.tool_calls {
+            if let Some(subagent) = call.subagent.as_mut() {
+                settle_models(&mut subagent.turns);
+            }
+        }
+    }
+}
+
+/// Every turn of `turns` and of every subagent under them, depth first.
+fn each_turn(turns: &mut [Turn], f: &mut dyn FnMut(&mut Turn)) {
+    for turn in turns.iter_mut() {
+        f(turn);
+        for call in &mut turn.tool_calls {
+            if let Some(subagent) = call.subagent.as_mut() {
+                each_turn(&mut subagent.turns, f);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Detail, redaction and the size cap (the CLI's `prepare`)
 
@@ -801,11 +1095,28 @@ fn apply_detail(record: &mut SessionRecord, detail: Detail) {
     if detail == Detail::Full {
         return;
     }
-    record.turns.retain(|turn| turn.role != Role::Reasoning);
-    for turn in &mut record.turns {
+    detail_turns(&mut record.turns, detail);
+}
+
+/// One list of turns brought down to `detail`, and every subagent's under it: reasoning gone, tool
+/// calls their names (a call keeps the subagent it started), and under `summary` every text — a
+/// subagent's description too — cut to [`SUMMARY_TURN_CHARS`].
+fn detail_turns(turns: &mut Vec<Turn>, detail: Detail) {
+    turns.retain(|turn| turn.role != Role::Reasoning);
+    for turn in turns.iter_mut() {
         for call in &mut turn.tool_calls {
+            let mut subagent = call.subagent.take();
+            if let Some(subagent) = subagent.as_mut() {
+                detail_turns(&mut subagent.turns, detail);
+                if detail == Detail::Summary
+                    && let Some(description) = subagent.description.as_mut()
+                {
+                    truncate_text(description, SUMMARY_TURN_CHARS);
+                }
+            }
             *call = ToolCall {
                 name: std::mem::take(&mut call.name),
+                subagent,
                 ..ToolCall::default()
             };
         }
@@ -823,7 +1134,14 @@ fn content_strings(record: &mut SessionRecord) -> Vec<&mut String> {
     if let Some(title) = record.colony.issue_title.as_mut() {
         strings.push(title);
     }
-    for turn in &mut record.turns {
+    turn_strings(&mut record.turns, &mut strings);
+    strings
+}
+
+/// Every string a person, a tool or a subagent wrote in `turns`, subagents' descriptions and turns
+/// included.
+fn turn_strings<'a>(turns: &'a mut [Turn], strings: &mut Vec<&'a mut String>) {
+    for turn in turns.iter_mut() {
         strings.push(&mut turn.text);
         for call in &mut turn.tool_calls {
             for field in [&mut call.path, &mut call.input, &mut call.output] {
@@ -831,9 +1149,14 @@ fn content_strings(record: &mut SessionRecord) -> Vec<&mut String> {
                     strings.push(value);
                 }
             }
+            if let Some(subagent) = call.subagent.as_mut() {
+                if let Some(description) = subagent.description.as_mut() {
+                    strings.push(description);
+                }
+                turn_strings(&mut subagent.turns, strings);
+            }
         }
     }
-    strings
 }
 
 pub(crate) fn serialise(record: &SessionRecord) -> String {
@@ -844,13 +1167,95 @@ fn escaped_len(text: &str) -> usize {
     serde_json::to_string(text).expect("a string always serialises").len() - 2
 }
 
+/// How far the record is over the caps, raw and escaped, with room for a marker turn; `None` when it
+/// fits.
+fn excess(record: &SessionRecord, marker_room: usize) -> Option<(isize, isize)> {
+    let full = serialise(record);
+    let (raw, escaped) = (full.len(), escaped_len(&full));
+    if raw <= MAX_BODY_BYTES && escaped <= MAX_ESCAPED_BODY_BYTES {
+        return None;
+    }
+    Some((
+        (raw + marker_room) as isize - MAX_BODY_BYTES as isize,
+        (escaped + 2 * marker_room) as isize - MAX_ESCAPED_BODY_BYTES as isize,
+    ))
+}
+
+/// Shed a subagent's oldest turns until `excess` is paid or only its final answer (its last
+/// assistant turn with text, else its last turn) and what follows it are left. The removed run
+/// becomes one event turn. Returns how many turns went.
+fn trim_subagent(subagent: &mut Subagent, excess: (isize, isize)) -> usize {
+    let (mut excess_raw, mut excess_escaped) = excess;
+    let Some(last) = subagent.turns.len().checked_sub(1) else {
+        return 0;
+    };
+    let keep = subagent
+        .turns
+        .iter()
+        .rposition(|turn| turn.role == Role::Assistant && !turn.text.trim().is_empty())
+        .unwrap_or(last);
+    let mut cut = 0;
+    while (excess_raw > 0 || excess_escaped > 0) && cut < keep {
+        let turn = serde_json::to_string(&subagent.turns[cut]).expect("a turn always serialises");
+        excess_raw -= turn.len() as isize + 1;
+        excess_escaped -= escaped_len(&turn) as isize + 1;
+        cut += 1;
+    }
+    if cut == 0 {
+        return 0;
+    }
+    let at = subagent.turns[..cut]
+        .iter()
+        .find_map(|turn| turn.at.clone())
+        .unwrap_or_default();
+    subagent.turns.drain(..cut);
+    subagent.turns.insert(
+        0,
+        Turn::new(
+            Role::Event,
+            &at,
+            &format!("{cut} earlier turn(s) of this subagent omitted to fit the upload size cap"),
+        ),
+    );
+    subagent.truncated = true;
+    subagent.omitted_turns += cut;
+    cut
+}
+
+/// Bound the record for the wire. Subagents go first — the oldest first, each down to its final
+/// answer — then the orchestrator's own turns after its opening one, then every text and tool
+/// payload. Deterministic: the same colony caps to the same bytes.
 fn cap(record: &mut SessionRecord) {
+    const MARKER_ROOM: usize = 256;
+    if excess(record, 0).is_none() {
+        return;
+    }
+    let launches: Vec<(usize, usize)> = record
+        .turns
+        .iter()
+        .enumerate()
+        .flat_map(|(t, turn)| {
+            turn.tool_calls
+                .iter()
+                .enumerate()
+                .filter(|(_, call)| call.subagent.is_some())
+                .map(move |(c, _)| (t, c))
+        })
+        .collect();
+    for (t, c) in launches {
+        let Some(over) = excess(record, MARKER_ROOM) else { break };
+        let subagent = record.turns[t].tool_calls[c].subagent.as_mut().expect("a launch");
+        let removed = trim_subagent(subagent, over);
+        if removed > 0 {
+            record.truncated = true;
+            record.omitted_subagent_turns += removed;
+        }
+    }
     let full = serialise(record);
     let (raw, escaped) = (full.len(), escaped_len(&full));
     if raw <= MAX_BODY_BYTES && escaped <= MAX_ESCAPED_BODY_BYTES {
         return;
     }
-    const MARKER_ROOM: usize = 256;
     let mut excess_raw = (raw + MARKER_ROOM) as isize - MAX_BODY_BYTES as isize;
     let mut excess_escaped = (escaped + 2 * MARKER_ROOM) as isize - MAX_ESCAPED_BODY_BYTES as isize;
     let keep = usize::from(record.turns.len() > 1);
@@ -881,13 +1286,13 @@ fn cap(record: &mut SessionRecord) {
     record.omitted_turns += omitted;
     let body = serialise(record);
     if body.len() > MAX_BODY_BYTES || escaped_len(&body) > MAX_ESCAPED_BODY_BYTES {
-        for turn in &mut record.turns {
+        each_turn(&mut record.turns, &mut |turn| {
             truncate_text(&mut turn.text, SUMMARY_TURN_CHARS);
             for call in &mut turn.tool_calls {
                 call.input = None;
                 call.output = None;
             }
-        }
+        });
     }
 }
 
@@ -917,11 +1322,11 @@ pub(crate) fn prepare(mut record: SessionRecord, detail: Detail, scrub: &Scrubbe
     for text in content_strings(&mut record) {
         scrub.elide(text);
     }
-    for turn in &mut record.turns {
+    each_turn(&mut record.turns, &mut |turn| {
         if turn.text.len() > MAX_TEXT_BYTES {
             turn.text = clip(&turn.text, MAX_TEXT_BYTES);
         }
-    }
+    });
     for text in content_strings(&mut record) {
         if !text.is_empty() {
             *text = scrub.redact(text);

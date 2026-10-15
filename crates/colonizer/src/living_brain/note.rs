@@ -5,7 +5,7 @@
 //! order, quoted to fit a 48 KiB page. Built from the already-redacted record, redacted again,
 //! wiki-link brackets defused last.
 
-use super::record::{Role, SessionRecord, ToolCall, Turn, clip};
+use super::record::{Role, SessionRecord, Subagent, ToolCall, Turn, clip};
 use std::collections::BTreeMap;
 
 const NOTE_BUDGET_BYTES: usize = 48 * 1024;
@@ -155,6 +155,12 @@ fn header(record: &SessionRecord, source: Option<&str>) -> String {
         .count();
     out.push_str(&format!("- Messages: {users} user, {said} assistant\n"));
     out.push_str(&format!("- Tool calls: {}\n", tool_summary(&record.turns)));
+    let subagents = subagent_count(&record.turns);
+    if subagents > 0 {
+        out.push_str(&format!(
+            "- Subagents: {subagents} (each one's own turns are in the full transcript)\n"
+        ));
+    }
     let t = &record.totals;
     out.push_str(&format!(
         "- Tokens: {} in, {} out, {} cache read, {} cache write, {} reasoning\n",
@@ -172,9 +178,13 @@ fn header(record: &SessionRecord, source: Option<&str>) -> String {
     }
     if record.truncated {
         out.push_str(&format!(
-            "- Truncated: {} turn(s) removed to fit the upload size cap\n",
+            "- Truncated: {} turn(s) removed to fit the upload size cap",
             record.omitted_turns
         ));
+        if record.omitted_subagent_turns > 0 {
+            out.push_str(&format!(", and {} subagent turn(s)", record.omitted_subagent_turns));
+        }
+        out.push('\n');
     }
     out
 }
@@ -241,10 +251,86 @@ fn call_block(call: &ToolCall, limits: Limits) -> String {
         };
         out.push_str(&fenced(lang, &clip(input, limits.input)));
     }
-    if let Some(output) = call.output.as_ref().filter(|_| limits.output > 0) {
-        out.push_str(&fenced("text", &clip(output, limits.output)));
+    match &call.subagent {
+        // The subagent's last words are its call's output: shown once, as its answer.
+        Some(subagent) => out.push_str(&subagent_block(subagent, limits)),
+        None => {
+            if let Some(output) = call.output.as_ref().filter(|_| limits.output > 0) {
+                out.push_str(&fenced("text", &clip(output, limits.output)));
+            }
+        }
     }
     out
+}
+
+/// A subagent under its call: one line naming it, its model, how long it ran, its tokens and how it
+/// ended, then its final answer quoted. Its own turns stay in the transcript.
+fn subagent_block(subagent: &Subagent, limits: Limits) -> String {
+    let mut parts = vec![format!("🤖 **{}**", one_line(&subagent.name).replace('*', ""))];
+    if !subagent.models.is_empty() {
+        parts.push(subagent.models.join(", "));
+    }
+    if let Some(duration) = duration(subagent.started_at.as_deref(), subagent.ended_at.as_deref()) {
+        parts.push(duration);
+    }
+    let t = &subagent.totals;
+    let tokens = t.input_tokens + t.output_tokens;
+    if tokens > 0 {
+        parts.push(format!("{tokens} tokens"));
+    }
+    if let Some(cost) = t.cost_usd {
+        parts.push(format!("${cost:.4}"));
+    }
+    parts.push(subagent.status.unwrap_or("status unknown").to_owned());
+    let steps = subagent.turns.iter().filter(|turn| turn.role != Role::Event).count();
+    parts.push(format!("{steps} step(s)"));
+    let mut line = format!("> {}", parts.join(" · "));
+    if let Some(description) = subagent.description.as_deref().map(one_line).filter(|d| !d.is_empty()) {
+        line.push_str(&format!(" — {description}"));
+    }
+    let mut out = format!("{line}\n");
+    let answer = subagent
+        .turns
+        .iter()
+        .rev()
+        .find(|turn| turn.role == Role::Assistant && !turn.text.trim().is_empty());
+    let room = (limits.text / 2).max(limits.output);
+    if let Some(answer) = answer.filter(|_| room > 0) {
+        out.push_str(">\n");
+        for text in clip(answer.text.trim(), room).lines() {
+            if text.trim_start().starts_with("```") {
+                out.push_str(&format!("> \u{200b}{text}\n"));
+            } else {
+                out.push_str(&format!("> {text}\n"));
+            }
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// `2m 05s` between two RFC 3339 instants, or nothing when either is missing or unreadable.
+fn duration(start: Option<&str>, end: Option<&str>) -> Option<String> {
+    let parse = |at: Option<&str>| chrono::DateTime::parse_from_rfc3339(at?).ok();
+    let seconds = (parse(end)? - parse(start)?).num_seconds();
+    if seconds < 0 {
+        return None;
+    }
+    Some(match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
+    })
+}
+
+/// How many subagents ran, nested ones included.
+fn subagent_count(turns: &[Turn]) -> usize {
+    turns
+        .iter()
+        .flat_map(|turn| &turn.tool_calls)
+        .filter_map(|call| call.subagent.as_ref())
+        .map(|subagent| 1 + subagent_count(&subagent.turns))
+        .sum()
 }
 
 fn fenced(lang: &str, body: &str) -> String {

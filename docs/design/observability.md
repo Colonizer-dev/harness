@@ -190,8 +190,9 @@ above and POSTs them.
 | `reqwest` | 0.13 (already in `Cargo.lock`, shared) | OTLP/HTTP transport |
 | `flate2` | new | gzip compression (OTLP/HTTP `Content-Encoding: gzip`) |
 
-None of `opentelemetry*`, `prost`, `tonic`, `flate2` exist in today's `Cargo.lock`; `reqwest` 0.13.5 and
-`zstd` 0.14.0 are already present and nothing above adds a second major version of either — the
+`opentelemetry*`, `prost` and `flate2` entered `Cargo.lock` with the OTLP/HTTP exporter, and #851
+adds `tonic` behind the add-on's `otlp-grpc` feature; `reqwest` 0.13.5 and `zstd` 0.14.0 were
+already present before any of it and nothing above adds a second major version of either — the
 duplicate-dependency check #844 asks for is `cargo tree -p colonizer-observability -d` showing no
 duplicate major version of `reqwest`, `prost`, or `zstd-safe`.
 

@@ -26,7 +26,7 @@ Both providers share the second table.
 | OTLP endpoint | Default | What it is |
 | :--- | :--- | :--- |
 | Endpoint URL | *(empty)* | `http://` or `https://`. Required while the module is on (an enabled OTLP module with no endpoint is refused; leave it empty only while the module is off). It must carry no credentials (`user:pass@`) and no query string — those go in the **Observability headers** secret. |
-| Protocol | `http/protobuf` | `http/protobuf`, `http/json`, or `grpc`. `grpc` is refused in this build; a later issue adds it. |
+| Protocol | `http/protobuf` | `http/protobuf`, `http/json`, or `grpc`. The mothership refuses `grpc` at save (it links no gRPC stack); an add-on built with `--features otlp-grpc` speaks it ([OTLP/gRPC](grpc.md)). |
 | Backend | `custom` | Names the header the backend expects: Honeycomb `x-honeycomb-team`, Datadog `dd-api-key`, New Relic `api-key`, Grafana Cloud `Authorization` (Basic), Elastic `Authorization` (ApiKey); SigNoz and a local collector usually want none. The value is in the secret. |
 | Compression | `gzip` | `gzip` or `none`. |
 | Request timeout (seconds) | `10` | 1 to 120. |
