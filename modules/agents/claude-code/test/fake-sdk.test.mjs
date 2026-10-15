@@ -539,6 +539,34 @@ test("a subagent's question is marked blocking and the lead's is not", async () 
   assert.ok(calls.decisions.every((d) => d.behavior === 'allow'));
 });
 
+// Living Brain files a subagent's steps under the Task call that started it, with the model it ran on:
+// the model a subagent's message names is carried on its `agent` from then on.
+test("a subagent's events carry the model its messages ran on", async () => {
+  const { query } = fakeQuery(async function* () {
+    yield assistant('msg_lead', [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { subagent_type: 'Explore', description: 'Look around' } }]);
+    yield {
+      type: 'assistant',
+      message: { id: 'msg_sub', role: 'assistant', model: 'claude-haiku-5', content: [{ type: 'text', text: 'Found it.' }] },
+      parent_tool_use_id: 'toolu_task',
+    };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0, duration_ms: 1 };
+  });
+  const events = [];
+  const commands = new AsyncQueue();
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', text: 'go' });
+
+  await runAgent({ query, commands, emit, graceMs: 100 });
+
+  const said = events.find((e) => e.type === 'assistant_text' && e.text === 'Found it.');
+  assert.deepEqual(said.agent, { id: 'toolu_task', name: 'Explore', description: 'Look around', model: 'claude-haiku-5' });
+  const launch = events.find((e) => e.type === 'tool_call' && e.tool_call_id === 'toolu_task');
+  assert.ok(!('agent' in launch), "the lead's own call keeps its shape");
+});
+
 test('a plain-text question ending a turn is re-asked as a choice card once', async () => {
   const { query, calls } = fakeQuery(async function* (options, c) {
     const result = c.prompts.length === 1 ? 'Which database should I use?' : 'Still unsure, which one?';

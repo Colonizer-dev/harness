@@ -83,13 +83,16 @@ fn http_date(value: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-/// One OTLP/HTTP destination.
+/// One OTLP destination: HTTP by default, or gRPC behind the `otlp-grpc` feature (#851).
 pub struct Transport {
     client: reqwest::Client,
     settings: Settings,
     headers: Vec<(String, String)>,
     encoding: Encoding,
     gzip: bool,
+    /// The gRPC transport, when `protocol = "grpc"` and this build has the feature for it.
+    #[cfg(feature = "otlp-grpc")]
+    grpc: Option<crate::grpc::GrpcTransport>,
 }
 
 impl std::fmt::Debug for Transport {
@@ -109,23 +112,35 @@ impl Transport {
         let encoding = match settings.protocol.as_str() {
             "http/protobuf" | "" => Encoding::Protobuf,
             "http/json" => Encoding::Json,
+            // The messages are protobuf on the wire; a build without the feature keeps refusing
+            // `grpc` on the `other` arm below, with the same wording.
+            #[cfg(feature = "otlp-grpc")]
+            "grpc" => Encoding::Protobuf,
             other => {
                 return Err(format!(
                     "protocol {other} is not supported by this build; use http/protobuf or http/json"
                 ));
             }
         };
+        // The reqwest client is inert for `grpc` (the gRPC transport has its own channel), but it
+        // is cheap and unconditional, so both paths keep one constructor.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(settings.timeout_secs.clamp(1, 120)))
             .user_agent(concat!("colonizer-observability/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
+        #[cfg(feature = "otlp-grpc")]
+        let grpc = (settings.protocol == "grpc")
+            .then(|| crate::grpc::GrpcTransport::new(settings, headers.clone()))
+            .transpose()?;
         Ok(Transport {
             client,
             settings: settings.clone(),
             headers,
             encoding,
             gzip: settings.compression != "none",
+            #[cfg(feature = "otlp-grpc")]
+            grpc,
         })
     }
 
@@ -135,6 +150,10 @@ impl Transport {
 
     /// Sends one request and classifies the answer.
     pub async fn send(&self, request: &Request) -> Outcome {
+        #[cfg(feature = "otlp-grpc")]
+        if let Some(grpc) = &self.grpc {
+            return grpc.send(request).await;
+        }
         let url = self.settings.url(request.path());
         let mut body = request.encode(self.encoding);
         let mut builder = self.client.post(&url).header(
@@ -192,14 +211,20 @@ impl Transport {
 
     /// `text` redacted, with every header value removed even if the redactor would not know it.
     fn scrub(&self, text: &str) -> String {
-        let mut out = colonizer_redact::redact_text(text).into_owned();
-        for (_, value) in &self.headers {
-            if value.len() >= 4 {
-                out = out.replace(value.as_str(), "<redacted>");
-            }
-        }
-        out
+        scrub_error(&self.headers, text)
     }
+}
+
+/// The one scrubber both transports share: `text` redacted, then every header value of at least
+/// four characters cut out of it, so a gRPC error can never quote what an HTTP error could not.
+pub(crate) fn scrub_error(headers: &[(String, String)], text: &str) -> String {
+    let mut out = colonizer_redact::redact_text(text).into_owned();
+    for (_, value) in headers {
+        if value.len() >= 4 {
+            out = out.replace(value.as_str(), "<redacted>");
+        }
+    }
+    out
 }
 
 /// A reqwest error's text without the URL it carries (the caller names the URL itself).
@@ -217,7 +242,7 @@ fn without_url(e: &reqwest::Error) -> String {
 }
 
 /// `text` cut to 300 bytes on a character boundary.
-fn cap(text: &str) -> String {
+pub(crate) fn cap(text: &str) -> String {
     let mut end = text.len().min(300);
     while !text.is_char_boundary(end) {
         end -= 1;

@@ -48,24 +48,29 @@ and queues only when confirmed.
 A colony is sent once it has **settled**: its status is `idle`, `waiting_for_answer`, `parked`,
 `pr_opened`, `merged`, `closed`, `no_changes`, `stopped` or `failed`, and nothing has been written
 to its event logs for 30 minutes. A sweep every minute — and at once whenever a notification goes
-out — queues every settled colony whose fingerprint (status, pull request, cost and the size of its
-event logs) differs from the one last sent. Two requests per colony, both in the token owner's
+out — queues every settled colony, active since the rule went on or sent before, whose fingerprint
+(the record's schema and collector versions, status, pull request, cost and the size of its event
+logs) differs from the one last sent. Because the versions lead the fingerprint, an upgrade that
+changes the record (schema 3 nested the subagents) re-sends every colony already sent — backfilled
+ones included — once, at the queue's usual pace (20 per pass, two seconds apart). Two requests per colony, both in the token owner's
 personal scope:
 
 - `POST /v1/pages/sources` `{kind: "agent_log", path: "colonizer session <id>", body, scope:
-  "personal", project}`. `body` is the brain's normalised session record, schema version 2
-  (Living Brain's `docs/logs.md`), compact JSON in this field order: `schema_version: 2`, `agent:
-  "colonizer"`, `collector_version: 1`, `detail`, `session_id` (the colony id), `repo`
+  "personal", project}`. `body` is the brain's normalised session record, schema version 3
+  (Living Brain's `docs/logs.md`), compact JSON in this field order: `schema_version: 3`, `agent:
+  "colonizer"`, `collector_version: 2`, `detail`, `session_id` (the colony id), `repo`
   (`owner/name`), `branch`, `models` (each `model_changed` model in order, then the sorted
   `model_usage` keys), `started_at` (the colony's `created_at`), `ended_at` (the last event the
   record used), `turns`, `totals` (from `model_usage`; `cache_creation_tokens` is
   `cache_write_tokens`; `cost_usd` is `cost_usd` plus `routed_cost_usd`, or null), `outcome` (the
-  status), `truncated`, `omitted_turns`, and `colony` (`org`, `base`, `issue`, `issue_title`,
+  status), `truncated`, `omitted_turns`, `omitted_subagent_turns`, and `colony` (`org`, `base`, `issue`, `issue_title`,
   `pr_url`, `pr_opened_at`, `merged_at`, `ci_state`, `origin`; null when absent). `project` is the
   repository's name, so a repository's colonies meet the sessions its people sync with the CLI.
 - `POST /v1/notes` `{slug: "agent-log-colonizer-<id>", title, body, project}`: the CLI's session note
   — header, outcome, detail, the source and a transcript link, then the conversation quoted to fit
-  48 KiB. The slug keeps one page per colony, updated in place.
+  48 KiB; under a call that started a subagent, one line `> 🤖 **<name>** · <model> · <duration> ·
+  <status> · <N> step(s) — <description>` and its final answer quoted (its own steps are in the
+  transcript). The slug keeps one page per colony, updated in place.
 
 The events become turns the way the brain's `colonizer` collector reads them. The logs are read
 `events-1.jsonl` … then `events.jsonl`, and a line at or below the last `seq` seen in the same file
@@ -78,16 +83,36 @@ messages are user turns. The agent's `assistant_text` makes assistant turns (one
 joined by a newline), `thinking` a reasoning turn, and each `tool_call` a call `{name, format, path,
 input, output, status, exit_code}` settled by its `tool_result` (a background launch ack is
 skipped). A background subagent's last words, at its `subagent_end`, are its call's output
-(`completed` → `ok`, `failed` → `error`, `stopped` → `interrupted`); its own steps are dropped. A
+(`completed` → `ok`, `failed` → `error`, `stopped` → `interrupted`). A
 `question` is an assistant turn listing the questions and options; `question_answered` is a user
 turn when the person answered and the event `Answered automatically: …` otherwise. A `turn_end` in
 error, a system `verification`, a `finding` and a `loop_stop` are one-line events. Deltas, log
 lines, status changes, boundaries and memory proposals are dropped.
 
+**Subagents.** A `Task`/`Agent` call starts a subagent, and every event the runner tagged with that
+call as its `agent.id` (`origin: "subagent"`) is the subagent's own step: its text, thinking and
+tool calls become turns under the call's `subagent`, by the same rules as the orchestrator's — and a
+subagent's own `Task` call nests the subagent it starts the same way, to any depth. The block is
+`{id, name, description, models, started_at, ended_at, status, totals, turns, truncated,
+omitted_turns}`, every field present: `id` is the starting call, `name` the call's `subagent_type`
+(else its description, else `subagent`), `description` the call's description, `models` the models
+its messages ran on (`agent.model`, which the Claude Code runner sets from the SDK message; the
+call's own `model` when no message said), `started_at` the launch and `ended_at` its last event,
+result or `subagent_end`, `status` `completed` or `failed` (a foreground result, by `is_error`) or
+`completed`/`failed`/`stopped` (a background `subagent_end`), null when the stream never said.
+`totals` is zeros and a null cost: the events carry no per-subagent usage, and the colony's totals
+already hold every model's spend. An assistant turn carries `model` where it changes from the
+previous assistant turn in the same list (the orchestrator's from `model_changed`). A subagent whose
+starting call the record does not hold is dropped.
+
 Then, in the CLI's order: the detail level (what it leaves out is never touched again), home
-elision, the 256 KiB per-message clip, redaction of every string value on its own, the size cap
-(768 KiB raw, 992 KiB once JSON-escaped: the opening turn stays, the oldest after it go, and an
-event says how many), and one more redaction pass over the serialised body. Nothing in the record is
+elision, the 256 KiB per-message clip, redaction of every string value on its own (subagents'
+descriptions and turns included; the levels apply inside subagents too, and a call keeps its
+`subagent` at every level), the size cap (768 KiB raw, 992 KiB once JSON-escaped: first the
+subagents, oldest first, each shedding its oldest turns down to its final answer — its last
+assistant turn with text — behind an event saying how many, counted in its `omitted_turns` and the
+record's `omitted_subagent_turns`; then the orchestrator's turns, where the opening turn stays, the
+oldest after it go, and an event says how many), and one more redaction pass over the serialised body. Nothing in the record is
 read from the clock, so one colony in one state is one byte string and the brain's
 `(scope, sha256(body))` key dedupes a resend.
 

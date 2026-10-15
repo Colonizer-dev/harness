@@ -58,6 +58,21 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   model=… detail=…` at `warn`. Only if that attempt fails too is the failure answered and logged as above.
   Nothing is replayed after any response byte, after a timeout, or after an HTTP answer. Idle pooled
   sockets are reused for at most 4 s, or the server's `Keep-Alive: timeout=` hint less 2 s, capped at 30 s.
+- An unreachable route: when a routed request gets no HTTP answer because the route could not be reached
+  at all (a connect failure, or a connection dropped before any answer), typically the mothership's
+  gateway during a mothership restart, the router tries the same route again after 0.5 s, 1 s, 2 s, 4 s,
+  then every 5 s, for up to `COLONIZER_ROUTER_GATEWAY_GRACE_SECS` (default 20, `0` turns it off), and
+  logs `provider … unreachable (<code>); retrying in N s` at `warn` before each wait. Only then does it
+  answer the failure or fall back (§6.5), so a conversation is not moved to another provider by a restart
+  that lasted a second. A timeout, DNS or TLS failure is not retried this way.
+- Reasoning never crosses providers. A request sent to a different provider than the one it named (the
+  Claude fallback of §6.5, or a Claude request carried by the account fallback) leaves out every
+  `thinking`, `redacted_thinking` and `reasoning` block from the assistant turns, and an assistant turn
+  that held nothing else; text, `tool_use` and `tool_result` stay. A thinking block is only valid on the
+  provider that produced it: Anthropic refuses the whole request ("Invalid `signature` in `thinking`
+  block") for one minted by GLM, DeepSeek or MiniMax. All of them go, never some, so no partial chain of
+  thinking is replayed. A retry on the same provider (the keep-alive race, the gateway grace) resends the
+  request byte for byte, thinking included.
 - Every upstream failure, retry and fallback is a runner `log` event with `"source": "model_router"`:
   `upstream failure: provider=… class=dns|connect|tls|timeout|connection|auth|rate_limit|upstream_5xx|client_error
   status=… elapsed=…s model=… detail=…`. The mothership also writes those lines to its own output, with
