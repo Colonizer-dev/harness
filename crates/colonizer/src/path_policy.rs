@@ -712,7 +712,7 @@ pub(crate) async fn on_attempt(
     }
 }
 
-fn matches_any(path: &str, entries: &[String]) -> bool {
+pub(crate) fn matches_any(path: &str, entries: &[String]) -> bool {
     let components: Vec<&str> = path.split('/').collect();
     entries.iter().any(|entry| {
         let dir = entry.ends_with('/');

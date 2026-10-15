@@ -165,7 +165,7 @@ pub fn resource_for(policy: &Policy, contract: &Contract) -> ExportResource {
 
 /// The destination a cursor belongs to: a new endpoint starts its own cursors (from the backlog
 /// limit), rather than skipping what the old one never received.
-fn destination_hash(contract: &Contract) -> String {
+pub(crate) fn destination_hash(contract: &Contract) -> String {
     let s = &contract.settings;
     // A Loki contract carries an empty `endpoint` (its destination rides in `url`), so keying on
     // the endpoint alone would hash every Loki destination identically and a URL change would
@@ -182,7 +182,7 @@ fn destination_hash(contract: &Contract) -> String {
 }
 
 /// Splits a request's records in half, or `None` when it holds one record or fewer.
-fn halves(request: &Request) -> Option<(Request, Request)> {
+pub(crate) fn halves(request: &Request) -> Option<(Request, Request)> {
     match request {
         Request::Logs(r) => {
             let mut a = r.clone();

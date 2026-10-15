@@ -2,6 +2,8 @@
 // Org workspaces (§6.3)
 // ---------------------------------------------------------------------------
 
+import type { DownloadableSkillset } from "../providers/types";
+
 /** Every field is optional; missing or null inherits the global module setting. */
 export interface OrgSettings {
   agent?: {
@@ -48,6 +50,10 @@ export interface OrgSettings {
   delete_branch?: boolean | null;
   /** Whether the steward verifies a pull request locally while Actions is blocked, and merges it on a pass (issue #1245); null is off. */
   verify_locally_when_ci_blocked?: boolean | null;
+  /** The host-side open-code-review pass (issue #1274): `shadow` records the findings in the colony log and the session's open-code-review.json, changing nothing; absent, null and `off` are no review. */
+  open_code_review?: "off" | "shadow" | null;
+  /** The model that org's reviews run on, a `provider/model` string (issue #1274); absent or null follows the install's cheap summary route. */
+  open_code_review_model?: string | null;
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
@@ -303,3 +309,6 @@ export interface MergeStewardInfo {
 export interface MergeStewardStatus {
   ci_blocked: (StewardBlock & { org: string; prs: number })[];
 }
+
+/** GET /api/open-code-review (issue #1274): the reviewer binary's install status — graft's Status shape plus the installed path. */
+export type OpenCodeReviewStatus = DownloadableSkillset & { path: string | null };

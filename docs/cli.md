@@ -5,7 +5,7 @@ has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7
 colonies. The subcommands are everything else: a few run against this machine (`version`,
 `update`, `setup`, `doctor`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
-`resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
+`resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `observability backfill`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
@@ -313,6 +313,29 @@ colonizer fleet sync --status   # consent_required, synced, backoff, unauthorize
 Without consent a plain `fleet sync` fails with the 409 and says how to give it. A manual
 `fleet sync` also retries a push that stopped on a 401 or a 403, or is waiting out a
 `Retry-After`. With the global `--json` both print the mothership's answer.
+
+### Observability backfill
+
+A destination starts at "now": the live exporter sends what is written from the moment it was
+configured (or, with **Start from = backlog**, only as far back as the backlog limit). The history
+before that line is on disk and never left the machine. `observability backfill` replays it through
+the same supervised add-on, at a bounded rate, with the same record and span ids the live exporter
+would have produced — and never touches the live exporter's cursors
+([Backfill](observability/backfill.md)).
+
+```sh
+colonizer observability backfill --since 2026-01-01 --until 2026-06-30 --dry-run   # counts only
+colonizer observability backfill --since 2026-01-01 --until 2026-06-30 --rate 500  # send it
+colonizer observability backfill --repo acme/widgets --dry-run                     # one repository
+```
+
+`--dry-run` prints the total records and ledger bytes, one line per signal and per org, and the
+estimated encoded volume on the wire — it sends nothing and writes nothing, so a window can be
+narrowed as often as needed. Without it the run starts on the mothership and prints where to watch
+it: the cockpit's Settings → Modules → Observability, or the `backfill` object `GET
+/api/observability/status` carries (`state`, `records_sent`, `bytes_sent`, …). `DELETE
+/api/observability/backfill` stops it within one tick, and a restart resumes where it stopped. With
+the global `--json` both print the mothership's answer.
 
 ## `--json`
 
