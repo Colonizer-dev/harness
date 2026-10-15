@@ -74,7 +74,7 @@ fn prepared(detail: Detail) -> (record::SessionRecord, String) {
 }
 
 #[test]
-fn an_empty_colony_has_the_schema_two_shape_byte_for_byte() {
+fn an_empty_colony_has_the_schema_three_shape_byte_for_byte() {
     let mut s = colony("c0");
     s.model_usage = None;
     s.cost_usd = None;
@@ -88,11 +88,12 @@ fn an_empty_colony_has_the_schema_two_shape_byte_for_byte() {
     assert_eq!(
         body,
         concat!(
-            r#"{"schema_version":2,"agent":"colonizer","collector_version":1,"detail":"full","#,
+            r#"{"schema_version":3,"agent":"colonizer","collector_version":2,"detail":"full","#,
             r#""session_id":"c0","repo":"acme/webshop","branch":null,"models":[],"started_at":"2026-10-01T10:00:00Z","#,
             r#""ended_at":null,"turns":[],"totals":{"input_tokens":0,"output_tokens":0,"#,
             r#""cache_read_tokens":0,"cache_creation_tokens":0,"reasoning_tokens":0,"#,
             r#""cost_usd":null},"outcome":"merged","truncated":false,"omitted_turns":0,"#,
+            r#""omitted_subagent_turns":0,"#,
             r#""colony":{"org":"acme","base":null,"issue":42,"issue_title":null,"pr_url":null,"#,
             r#""pr_opened_at":null,"merged_at":null,"ci_state":null,"origin":null}}"#
         )
@@ -127,9 +128,20 @@ fn full_maps_the_stream_like_the_collector() {
     );
     assert_eq!(
         turns[2]["tool_calls"],
-        json!([{"name":"Agent","format":"text","input":"dig","output":"Found it.","status":"ok"}]),
-        "the subagent folds into its call"
+        json!([{"name":"Agent","format":"text","input":"dig","output":"Found it.","status":"ok","subagent":{
+            "id":"call-2","name":"subagent","description":null,"models":[],"started_at":"t7","ended_at":"t11",
+            "status":"completed",
+            "totals":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"reasoning_tokens":0,"cost_usd":null},
+            "turns":[
+                {"role":"assistant","at":"t9","text":"","tool_calls":[{"name":"Read","path":"/x"}]},
+                {"role":"assistant","at":"t10","text":"Found it.","tool_calls":[]}
+            ],
+            "truncated":false,"omitted_turns":0
+        }}]),
+        "the subagent's steps nest under its call; its last words stay the call's output"
     );
+    assert_eq!(turns[1]["model"], "claude-opus-5", "the first assistant turn names its model");
+    assert!(turns[2].get("model").is_none(), "the same model is not repeated");
     assert_eq!(
         v["models"],
         json!(["claude-opus-5", "claude-sonnet-5", "zz-routed/model"]),
@@ -342,6 +354,185 @@ fn the_queue_takes_a_colony_once_per_change() {
     assert!(!since_ok(None, now), "no since: nothing goes on its own");
 }
 
+/// A Claude Code colony as the runner writes it: the orchestrator starts an `Explore` subagent in
+/// the foreground, which starts one of its own; a second subagent runs in the background on another
+/// model and ends with `subagent_end`.
+fn subagent_lines() -> Vec<Value> {
+    let explore = json!({"id":"toolu_task1","name":"Explore","description":"Survey the storage layer","model":"claude-haiku-5"});
+    let nested = json!({"id":"toolu_inner","name":"general-purpose","description":"Read the tests","model":"claude-haiku-5"});
+    let tests = json!({"id":"toolu_task2","name":"general-purpose","description":"Write tests","model":"claude-sonnet-5"});
+    vec![
+        json!({"seq":1,"ts":"2026-09-24T10:00:00.000Z","type":"user_message","id":"initial","origin":"user","text":"x"}),
+        json!({"seq":2,"ts":"2026-09-24T10:00:01.000Z","type":"model_changed","model":"claude-opus-5","origin":"agent"}),
+        json!({"seq":3,"ts":"2026-09-24T10:00:02.000Z","type":"tool_call","message_id":"m1","tool_call_id":"toolu_task1","name":"Task","input":{"subagent_type":"Explore","description":"Survey the storage layer","prompt":"Find every write under /Users/alice/repo"},"origin":"agent"}),
+        json!({"seq":4,"ts":"2026-09-24T10:00:04.000Z","type":"thinking","message_id":"s1","text":"Start with the store.","agent":explore,"origin":"subagent"}),
+        json!({"seq":5,"ts":"2026-09-24T10:00:05.000Z","type":"tool_call","message_id":"s1","tool_call_id":"toolu_r1","name":"Bash","input":{"command":"cat /Users/alice/.env"},"agent":explore,"origin":"subagent"}),
+        json!({"seq":6,"ts":"2026-09-24T10:00:06.000Z","type":"tool_result","tool_call_id":"toolu_r1","output":"TOKEN=hunter2-the-saved-secret","is_error":false,"agent":explore,"origin":"subagent"}),
+        json!({"seq":7,"ts":"2026-09-24T10:00:07.000Z","type":"tool_call","message_id":"s2","tool_call_id":"toolu_inner","name":"Agent","input":{"subagent_type":"general-purpose","description":"Read the tests","prompt":"look"},"agent":explore,"origin":"subagent"}),
+        json!({"seq":8,"ts":"2026-09-24T10:00:08.000Z","type":"assistant_text","message_id":"n1","text":"Two tests.","agent":nested,"origin":"subagent"}),
+        json!({"seq":9,"ts":"2026-09-24T10:00:09.000Z","type":"tool_result","tool_call_id":"toolu_inner","output":"Two tests.","is_error":false,"agent":explore,"origin":"subagent"}),
+        json!({"seq":10,"ts":"2026-09-24T10:00:10.000Z","type":"assistant_text","message_id":"s3","text":"Three writers.","agent":explore,"origin":"subagent"}),
+        json!({"seq":11,"ts":"2026-09-24T10:00:11.000Z","type":"tool_result","tool_call_id":"toolu_task1","output":"Three writers.","is_error":false,"origin":"agent"}),
+        json!({"seq":12,"ts":"2026-09-24T10:00:12.000Z","type":"tool_call","message_id":"m2","tool_call_id":"toolu_task2","name":"Task","input":{"subagent_type":"general-purpose","description":"Write tests","run_in_background":true},"origin":"agent"}),
+        json!({"seq":13,"ts":"2026-09-24T10:00:13.000Z","type":"tool_result","tool_call_id":"toolu_task2","output":"Started in the background.","is_error":false,"background":true,"origin":"agent"}),
+        json!({"seq":14,"ts":"2026-09-24T10:00:15.000Z","type":"assistant_text","message_id":"b1","text":"Writing tests.","agent":tests,"origin":"subagent"}),
+        json!({"seq":15,"ts":"2026-09-24T10:02:20.000Z","type":"assistant_text","message_id":"b2","text":"Tests written.","agent":tests,"origin":"subagent"}),
+        json!({"seq":16,"ts":"2026-09-24T10:02:21.000Z","type":"subagent_end","tool_call_id":"toolu_task2","status":"stopped","origin":"agent"}),
+    ]
+}
+
+fn subagent_record(evs: &[Value], detail: Detail) -> (record::SessionRecord, String) {
+    let collected = record::collect(&record::row(&colony("c5")), evs).unwrap();
+    record::prepare(collected, detail, &scrub())
+}
+
+#[test]
+fn a_subagents_steps_nest_under_its_call_with_its_name_and_model() {
+    let (_, body) = subagent_record(&subagent_lines(), Detail::Full);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["schema_version"], 3);
+    let turns = v["turns"].as_array().unwrap();
+    let explore = &turns[1]["tool_calls"][0];
+    assert_eq!(explore["name"], "Task");
+    assert_eq!(explore["output"], "Three writers.");
+    let sub = &explore["subagent"];
+    assert_eq!(sub["id"], "toolu_task1");
+    assert_eq!(sub["name"], "Explore");
+    assert_eq!(sub["description"], "Survey the storage layer");
+    assert_eq!(sub["models"], json!(["claude-haiku-5"]));
+    assert_eq!(sub["status"], "completed", "answered in the foreground");
+    assert_eq!(sub["started_at"], "2026-09-24T10:00:02.000Z", "from its launch");
+    assert_eq!(sub["ended_at"], "2026-09-24T10:00:11.000Z", "to its result");
+    let inner: Vec<&str> = sub["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(inner, ["reasoning", "assistant", "assistant", "assistant"]);
+    assert_eq!(sub["turns"][1]["model"], "claude-haiku-5", "each list names its own model");
+    assert_eq!(sub["turns"][1]["tool_calls"][0]["input"], "cat ~/.env");
+    // The subagent it started nests under its own call.
+    let nested = &sub["turns"][2]["tool_calls"][0]["subagent"];
+    assert_eq!(nested["name"], "general-purpose");
+    assert_eq!(nested["description"], "Read the tests");
+    assert_eq!(nested["turns"][0]["text"], "Two tests.");
+    // The background one: its own model, ended by subagent_end, its last words the output.
+    let background = &turns[2]["tool_calls"][0];
+    assert_eq!(background["status"], "interrupted");
+    assert_eq!(background["output"], "Tests written.");
+    assert_eq!(background["subagent"]["models"], json!(["claude-sonnet-5"]));
+    assert_eq!(background["subagent"]["status"], "stopped");
+    assert_eq!(background["subagent"]["ended_at"], "2026-09-24T10:02:21.000Z");
+    assert!(background["subagent"].get("description").is_some());
+    // Messages: names only, but the subagent and its messages stay; its reasoning goes.
+    let (_, body) = subagent_record(&subagent_lines(), Detail::Messages);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let sub = &v["turns"][1]["tool_calls"][0]["subagent"];
+    assert_eq!(v["turns"][1]["tool_calls"][0]["name"], "Task");
+    assert!(v["turns"][1]["tool_calls"][0].get("input").is_none());
+    assert_eq!(sub["turns"][0]["tool_calls"][0], json!({"name": "Bash"}));
+    assert!(!body.contains("\"reasoning\""), "{body}");
+    assert_eq!(sub["turns"].as_array().unwrap().last().unwrap()["text"], "Three writers.");
+}
+
+#[test]
+fn nothing_unredacted_leaves_a_subagents_turns() {
+    let mut evs = subagent_lines();
+    evs.push(json!({"seq":17,"ts":"2026-09-24T10:03:00.000Z","type":"tool_call","message_id":"m3","tool_call_id":"toolu_task3","name":"Task","input":{"subagent_type":"Explore","description":"check hunter2-the-saved-secret"},"origin":"agent"}));
+    evs.push(json!({"seq":18,"ts":"2026-09-24T10:03:01.000Z","type":"assistant_text","message_id":"x1","text":"key sk-ant-api03-SENTINELSENTINELSENTINELSENTINELSENTINEL-abcdef in /Users/alice/x","agent":{"id":"toolu_task3","name":"Explore"},"origin":"subagent"}));
+    let (r, body) = subagent_record(&evs, Detail::Full);
+    let note = super::note::body(&r, Some("src5"), &scrub());
+    for text in [&body, &note] {
+        assert!(!text.contains("hunter2-the-saved-secret"), "a saved secret leaked: {text}");
+        assert!(!text.contains("SENTINELSENTINEL"), "a provider key leaked: {text}");
+        assert!(!text.contains("/Users/alice"), "the home path leaked: {text}");
+    }
+    assert!(body.contains("[REDACTED:secret]"), "{body}");
+    assert!(
+        note.contains("> 🤖 **Explore** · claude-haiku-5 · 9s · completed · 4 step(s) — Survey the storage layer"),
+        "{note}"
+    );
+    assert!(note.contains("> Three writers."), "{note}");
+    assert!(note.contains("- Subagents: 4"), "{note}");
+}
+
+#[test]
+fn the_size_cap_trims_subagents_first_and_keeps_their_answers() {
+    let mut evs = vec![json!({"seq":1,"ts":"t0","type":"user_message","id":"initial","origin":"user","text":"x"})];
+    for task in 0..3 {
+        let id = format!("toolu_task{task}");
+        let agent = json!({"id": id, "name": "Explore"});
+        evs.push(json!({"type":"tool_call","message_id":format!("m{task}"),"tool_call_id":id,"name":"Task","input":{"subagent_type":"Explore"},"origin":"agent","ts":format!("t{task}")}));
+        for step in 0..150 {
+            evs.push(json!({"type":"assistant_text","message_id":format!("s{task}-{step}"),"text":"word ".repeat(600),"agent":agent,"origin":"subagent","ts":format!("t{task}-{step}")}));
+        }
+        evs.push(json!({"type":"assistant_text","message_id":format!("s{task}-end"),"text":format!("Answer {task}."),"agent":agent,"origin":"subagent","ts":format!("t{task}-end")}));
+        evs.push(json!({"type":"tool_result","tool_call_id":id,"output":format!("Answer {task}."),"is_error":false,"origin":"agent","ts":format!("t{task}-done")}));
+    }
+    evs.push(json!({"type":"assistant_text","origin":"agent","message_id":"last","text":"All done.","ts":"t9"}));
+    let collected = record::collect(&record::row(&colony("c6")), &evs).unwrap();
+    let (r, body) = record::prepare(collected, Detail::Full, &Scrubber::default());
+    assert!(body.len() <= record::MAX_BODY_BYTES, "{}", body.len());
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert!(r.truncated);
+    assert_eq!(r.omitted_turns, 0, "the orchestrator's own turns all stay");
+    assert!(r.omitted_subagent_turns > 0);
+    assert_eq!(v["omitted_subagent_turns"], r.omitted_subagent_turns);
+    let first = &v["turns"][1]["tool_calls"][0]["subagent"];
+    assert_eq!(first["truncated"], true, "the oldest subagent goes first");
+    let turns = first["turns"].as_array().unwrap();
+    assert!(
+        turns[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("earlier turn(s) of this subagent omitted to fit the upload size cap")
+    );
+    assert_eq!(turns.last().unwrap()["text"], "Answer 0.", "its final answer stays");
+    assert_eq!(first["omitted_turns"].as_u64().unwrap() as usize + turns.len() - 1, 151);
+    let last = &v["turns"][3]["tool_calls"][0]["subagent"];
+    assert_eq!(
+        last["truncated"], false,
+        "the newest subagent is untouched when the older ones paid"
+    );
+    assert_eq!(v["turns"].as_array().unwrap().last().unwrap()["text"], "All done.");
+    assert_eq!(
+        record::prepare(
+            record::collect(&record::row(&colony("c6")), &evs).unwrap(),
+            Detail::Full,
+            &Scrubber::default()
+        )
+        .1,
+        body
+    );
+}
+
+#[test]
+fn a_record_upgrade_requeues_every_colony_already_sent() {
+    let fp = super::queue::fingerprint_text("merged", "", 0.5, 100);
+    assert!(
+        fp.starts_with(&format!("v{}.{}|", record::SCHEMA_VERSION, record::COLLECTOR_VERSION)),
+        "{fp}"
+    );
+    let mut q = super::queue::Queue::default();
+    let now = chrono::Utc::now();
+    assert!(enqueue(&mut q, "c1", "acme/web", "backfill", "merged||0.500000|100", now));
+    let e = q.entries.get_mut("c1").unwrap();
+    e.state = EntryState::Sent;
+    e.fingerprint = e.pending_fp.clone();
+    assert!(
+        enqueue(&mut q, "c1", "acme/web", "merged", &fp, now),
+        "sent at schema 2: queued again"
+    );
+    // The backfilled colony predates the rule, and is still looked at because it was sent.
+    let old = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let since = Some("2026-06-01T00:00:00Z");
+    assert!(!super::queue::sweep_candidate(since, old, false));
+    assert!(super::queue::sweep_candidate(since, old, true));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Against a stand-in brain
 
@@ -442,7 +633,7 @@ async fn a_finished_colony_is_sent_once_as_a_source_and_a_note() {
         assert_eq!(body["project"], "webshop");
         let record: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
         assert_eq!(record["agent"], "colonizer");
-        assert_eq!(record["schema_version"], 2);
+        assert_eq!(record["schema_version"], 3);
         assert_eq!(record["detail"], "messages");
         assert_eq!(record["outcome"], "merged");
         let (path, _, note) = &calls[1];

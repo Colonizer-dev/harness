@@ -92,7 +92,8 @@ fixture covers one ordinary turn, so it has no `jev_ladder`, `loop_next` or `loo
 Rules:
 
 - Any event a **subagent** produced carries `"agent": {"id":"toolu_…","name":"code-reviewer","description":"…"}`,
-  where `id` is the `Task` tool call that started it. The orchestrator's own events omit the field
+  where `id` is the `Task` tool call that started it, plus `"model"` once one of its messages named the
+  model it ran on (the Claude Code runner sets it from the SDK message). The orchestrator's own events omit the field
   entirely rather than sending null. `assistant_text(_delta)`, `thinking`, `tool_call` and
   `tool_result` can all carry it; `question`, `turn_end` and `status` are the colony's own and never
   do. A UI groups consecutive events by `agent.id` to show each subagent as its own speaker.
