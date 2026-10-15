@@ -83,6 +83,33 @@ test('repeats and settlers are counted', () => {
   assert.equal(r.subagent_tool_calls, 1);
 });
 
+test('the per-turn routing shadow ledger is summarised, and an unpriced row is not read as $0', () => {
+  const events = [{ type: 'status', state: 'working', ts: at(0) }];
+  const r = analyze({
+    session: { id: 'route' },
+    events,
+    turn_routing: [
+      { turn: 0, suggested_tier: 'low', would_switch: false },
+      { turn: 1, suggested_tier: 'low', would_switch: true, est_refill_usd: 1.5, est_saving_usd: 2.4 },
+      { turn: 2, suggested_tier: 'high', would_switch: false },
+    ],
+  });
+  assert.equal(r.turn_routing_turns, 3);
+  assert.equal(r.turn_routing_would_switch, 1);
+  assert.deepEqual(r.turn_routing_suggested, { low: 2, high: 1 });
+  assert.equal(r.turn_routing_net_usd, 0.9, 'saving minus refill, over the priced rows');
+  const unpriced = analyze({ session: { id: 'route' }, events, turn_routing: [{ suggested_tier: 'low', would_switch: false }] });
+  assert.equal(unpriced.turn_routing_turns, 1);
+  assert.equal(unpriced.turn_routing_net_usd, null, 'no pricing is unmeasured, not zero');
+
+  const s = summarize([r, unpriced]);
+  assert.equal(s.turn_routing_turns, 4);
+  assert.equal(s.turn_routing_would_switch, 1);
+  assert.equal(s.turn_routing_net_usd, 0.9);
+  assert.ok(formatReport(s, [r]).includes('Per-turn routing (shadow'), 'a ledger gets its bullet');
+  assert.ok(!formatReport(summarize([analyze({ session: { id: 'q' }, events })]), []).includes('Per-turn routing'), 'no ledger, no bullet');
+});
+
 test('the runner re-prompting a plain-text question is counted', () => {
   const events = [
     { type: 'status', state: 'working', ts: at(0) },

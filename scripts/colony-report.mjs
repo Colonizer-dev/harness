@@ -61,6 +61,7 @@ export function loadColonies(dataDir, label = basename(resolve(dataDir))) {
     events: readJsonLines(join(sessionsDir, id, 'events.jsonl')),
     logs: readJsonLines(join(sessionsDir, id, 'harness.jsonl')),
     gateway: readJsonLines(join(sessionsDir, id, 'gateway.jsonl')),
+    turn_routing: readJsonLines(join(sessionsDir, id, 'turn_routing.jsonl')),
   }));
 }
 
@@ -117,7 +118,7 @@ function modelTokens(usage) {
 }
 
 /** One colony's numbers. Pure: takes what loadColonies read, so it can be tested without a mothership. */
-export function analyze({ mothership = '', session = {}, events = [], logs = [], gateway = [] }) {
+export function analyze({ mothership = '', session = {}, events = [], logs = [], gateway = [], turn_routing = [] }) {
   const tools = {};
   const reads = new Map();
   const commands = new Map();
@@ -180,6 +181,11 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [],
     verification_verdict: null,
     verification_ms: null,
     memory_proposals: 0,
+    // Per-turn routing, shadow (issue #1152): what the ledger measured, and the tiers it picked.
+    turn_routing_turns: 0,
+    turn_routing_would_switch: 0,
+    turn_routing_suggested: {},
+    turn_routing_net_usd: null,
     repeated_reads: [],
     repeated_commands: [],
     tools,
@@ -357,6 +363,21 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [],
   r.working_ms = Math.max(0, r.working_ms - r.answer_wait_ms);
   r.total_cost_usd = totalCost(r.cost_usd, r.routed_cost_usd);
   r.subagents = subagents.size;
+  // The per-turn routing ledger (issue #1152): one row per measured turn end. The net dollar figure
+  // sums only the rows both figures priced; a row without pricing is unmeasured, not zero.
+  let net = 0;
+  let priced = 0;
+  for (const t of turn_routing) {
+    if (!t || typeof t !== 'object') continue;
+    r.turn_routing_turns += 1;
+    if (t.would_switch === true) r.turn_routing_would_switch += 1;
+    if (typeof t.suggested_tier === 'string') r.turn_routing_suggested[t.suggested_tier] = (r.turn_routing_suggested[t.suggested_tier] ?? 0) + 1;
+    if (typeof t.est_saving_usd === 'number' && typeof t.est_refill_usd === 'number') {
+      net += t.est_saving_usd - t.est_refill_usd;
+      priced += 1;
+    }
+  }
+  r.turn_routing_net_usd = priced > 0 ? net : null;
   for (const type of subagents.values()) r.subagent_types[type] = (r.subagent_types[type] ?? 0) + 1;
   r.repeated_reads = [...reads].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).map(([path, n]) => ({ path, n }));
   r.repeated_commands = [...commands]
@@ -449,6 +470,14 @@ export function summarize(reports) {
     contradicted_claims: sum('contradicted_claims'),
     memory_proposals: sum('memory_proposals'),
     subagents: sum('subagents'),
+    turn_routing_turns: sum('turn_routing_turns'),
+    turn_routing_would_switch: sum('turn_routing_would_switch'),
+    turn_routing_suggested: (() => {
+      const out = {};
+      for (const r of reports) for (const [tier, n] of Object.entries(r.turn_routing_suggested ?? {})) out[tier] = (out[tier] ?? 0) + n;
+      return out;
+    })(),
+    turn_routing_net_usd: reports.some((r) => typeof r.turn_routing_net_usd === 'number') ? sum('turn_routing_net_usd') : null,
     tokenCategories,
     tokenCategoriesByModel,
     tools: Object.entries(tools)
@@ -709,6 +738,16 @@ export function formatReport(summary, reports, worst = 10) {
   out.push(`- Questions: ${summary.questions.total}, waiting ${duration(summary.answer_wait_ms.total)} in total for answers (longest ${duration(summary.answer_wait_ms.longest)}).`);
   out.push(`- Asked in plain text and re-prompted: ${summary.plain_text_reprompts}. Watchdog nudges: ${summary.watchdog_nudges}. Failed turns: ${summary.failed_turns}. Rate-limit hits: ${summary.rate_limit_hits}.`);
   out.push(`- Settlers sent out: ${summary.subagents}. Findings filed: ${summary.findings}${findingChain(summary)}. Memory proposals: ${summary.memory_proposals}. Verifications: ${summary.verifications}${summary.contradicted_claims ? `, ${summary.contradicted_claims} contradicted` : ''}.`);
+  if (summary.turn_routing_turns > 0) {
+    const tiers = Object.entries(summary.turn_routing_suggested)
+      .sort((a, b) => b[1] - a[1])
+      .map(([tier, n]) => `${tier} ${n}`)
+      .join(', ');
+    out.push(
+      `- Per-turn routing (shadow, never acted on): ${summary.turn_routing_turns} turn ends measured, would have switched ${summary.turn_routing_would_switch}×` +
+        `${tiers ? `, suggested tiers: ${tiers}` : ''}; estimated saving net of refill ${usd(summary.turn_routing_net_usd)} (– is unpriced, not $0).`,
+    );
+  }
   out.push('', '## Tools', '');
   out.push(table(['Tool', 'Calls', 'Failed', 'Failure rate'], summary.tools.slice(0, 15).map((t) => [t.name, t.calls, t.errors, pct(t.error_rate)])));
   out.push('', '## Token categories', '');
