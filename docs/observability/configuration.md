@@ -51,7 +51,7 @@ in a unit file does not blank the service name.
 | `COLONIZER_OBSERVABILITY` | *(master switch)* | unset | `on` enables an environment-only setup; anything else turns export off. Not an override. |
 | `OTEL_SDK_DISABLED` | *(master off)* | unset | `true` turns export off, whatever else says. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `endpoint` | *(module)* | The base OTLP/HTTP endpoint. Stored as given; the add-on appends `/v1/logs`, `/v1/traces` and `/v1/metrics` to it. Checked like a save: no credentials (`user:pass@`), no query string, and a plain `http://` only to a loopback or private address unless the module's **Allow plain http to a public host** is on. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `protocol` | `http/protobuf` | `http/protobuf` or `http/json`; `grpc` is refused in this build. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `protocol` | `http/protobuf` | `http/protobuf` or `http/json`; `grpc` is refused by the mothership — only an add-on built with the `otlp-grpc` feature speaks it ([OTLP/gRPC](grpc.md)). |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | `compression` | `gzip` | `gzip` or `none`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `timeout_secs` | `10` | In **milliseconds**, as the specification has it, rounded up to whole seconds and clamped to 1–120. The module's field is in seconds. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | `headers` | *(secret)* | The `k=v,…` list below. Takes precedence over the **Observability headers** secret; the secret is read only when this is unset. |

@@ -68,6 +68,25 @@ jobs:
             exit 1
           fi
 
+      # The other half of that truth: the add-on is the only crate that could carry tonic, and only
+      # with its otlp-grpc feature (#851) — without the feature even it links none, so a release
+      # binary built at the default features has no gRPC stack anywhere in it.
+      - name: The add-on links no gRPC stack without the feature
+        run: |
+          tree="$(cargo tree -p colonizer-observability -e normal --locked --prefix none)"
+          if printf '%s\n' "$tree" | grep -E '^tonic'; then
+            echo "::error::colonizer-observability links tonic without the otlp-grpc feature"
+            exit 1
+          fi
+
+      # The feature-on build the two steps above never compile: clippy and the tests run with
+      # otlp-grpc, so the transport cannot rot between the times someone builds it. The workspace
+      # lint below covers the feature-off build, as every release does.
+      - name: Test with otlp-grpc
+        run: |
+          cargo clippy -p colonizer-observability --all-targets --locked --features otlp-grpc -- -D warnings
+          node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- cargo test -p colonizer-observability --locked --features otlp-grpc
+
       # Includes colonizer-agentd's integration and smoke tests, which boot the real agentd binary on
       # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
       # stock runners have it; no KVM is involved anywhere in this job. --locked, like the release
