@@ -4,37 +4,38 @@ turn a task into a pull request: a coding agent works in an isolated sandbox, wa
 Usage: colonizer [OPTIONS] [COMMAND]
 
 Commands:
-  version      Print what this build is, and whether it is a release (also `--version`)
-  about        Print what the venture is built with, each product's status said in words (issue #944)
-  help         Print this message, or a command's own help; `help glossary` explains this CLI's words in ordinary language (issue #904)
-  update       Install the newest release against a running mothership and restart into it
-  setup        Install this version's release over a `cargo install` build, which has no app beside it
-  doctor       Say whether this host can run colonies — kernel features, `/dev/kvm`, the mesh and microVM binaries — and name the fix for whatever is missing
-  open         Print the cockpit sign-in link and open it in a browser
-  login-item   Start the control plane (the mothership) at login (macOS LaunchAgent, Linux systemd user unit)
-  telemetry    Show or change anonymous usage reporting (no network, no daemon needed)
-  hotspots     Show the files merged pull requests touched most often in a window — where parallel colonies collide, and a hint at what to split (issue #831)
-  sessions     Manage this machine's session store: where colonies' records and logs live (docs/session-store.md)
-  completions  Print a shell completion script for this command (source it from your shell's rc)
-  man          Print this command's man page to stdout
-  launch       Start a colony: an isolated sandbox running one coding agent, working the repo or one issue in it
-  handoff      Hand a local agent session to a colony: a session you ran here continues on the mothership
-  list         List the colonies this token may see, newest first
-  status       Show one colony (an isolated sandbox): where it stands, what it costs, and what it is doing right now
-  logs         Print a colony's recent events, or follow them live
-  diff         Print everything a colony has changed against its base branch, as a unified diff
-  ask          Print the question a colony is waiting on, with its options numbered
-  answer       Answer a colony's pending question: an option's number, its label, or free text
-  stop         Stop a colony: the microVM goes away, the worktree is kept for a later `resume`
-  resume       Start a stopped colony again, picking up its worktree where it was left
-  pr           Print a colony's pull request URL and state, or --wait for its checks to settle
-  map          Print a repository's architecture map as a text outline, or search it with --find
-  mcp          Serve this harness to MCP clients over stdio (tools for listing, watching and driving colonies); the tool set follows the token's scope
-  loop         Manage loops: saved prompts that launch a colony on a schedule — the cockpit's Loops page from a terminal. `colonizer loop create --help` shows the cadence grammar
-  redteam      Start and list red-team runs: hunters that find and report bugs, or security defects with `--preset security`
-  token        Manage the control plane's (the mothership's) scoped API tokens (the owner token only)
-  feed-key     Manage the public feed's read-only keys (issue #895). Local: it reads and writes the config dir, no mothership and no token
-  fleet        Export this machine's stats, logs and colony history, or import another machine's (issue #687)
+  version        Print what this build is, and whether it is a release (also `--version`)
+  about          Print what the venture is built with, each product's status said in words (issue #944)
+  help           Print this message, or a command's own help; `help glossary` explains this CLI's words in ordinary language (issue #904)
+  update         Install the newest release against a running mothership and restart into it
+  setup          Install this version's release over a `cargo install` build, which has no app beside it
+  doctor         Say whether this host can run colonies — kernel features, `/dev/kvm`, the mesh and microVM binaries — and name the fix for whatever is missing
+  open           Print the cockpit sign-in link and open it in a browser
+  login-item     Start the control plane (the mothership) at login (macOS LaunchAgent, Linux systemd user unit)
+  telemetry      Show or change anonymous usage reporting (no network, no daemon needed)
+  hotspots       Show the files merged pull requests touched most often in a window — where parallel colonies collide, and a hint at what to split (issue #831)
+  sessions       Manage this machine's session store: where colonies' records and logs live (docs/session-store.md)
+  completions    Print a shell completion script for this command (source it from your shell's rc)
+  man            Print this command's man page to stdout
+  launch         Start a colony: an isolated sandbox running one coding agent, working the repo or one issue in it
+  handoff        Hand a local agent session to a colony: a session you ran here continues on the mothership
+  list           List the colonies this token may see, newest first
+  status         Show one colony (an isolated sandbox): where it stands, what it costs, and what it is doing right now
+  logs           Print a colony's recent events, or follow them live
+  diff           Print everything a colony has changed against its base branch, as a unified diff
+  ask            Print the question a colony is waiting on, with its options numbered
+  answer         Answer a colony's pending question: an option's number, its label, or free text
+  stop           Stop a colony: the microVM goes away, the worktree is kept for a later `resume`
+  resume         Start a stopped colony again, picking up its worktree where it was left
+  pr             Print a colony's pull request URL and state, or --wait for its checks to settle
+  map            Print a repository's architecture map as a text outline, or search it with --find
+  mcp            Serve this harness to MCP clients over stdio (tools for listing, watching and driving colonies); the tool set follows the token's scope
+  loop           Manage loops: saved prompts that launch a colony on a schedule — the cockpit's Loops page from a terminal. `colonizer loop create --help` shows the cadence grammar
+  redteam        Start and list red-team runs: hunters that find and report bugs, or security defects with `--preset security`
+  token          Manage the control plane's (the mothership's) scoped API tokens (the owner token only)
+  feed-key       Manage the public feed's read-only keys (issue #895). Local: it reads and writes the config dir, no mothership and no token
+  fleet          Export this machine's stats, logs and colony history, or import another machine's (issue #687)
+  observability  Send this machine's observability history to the configured backend, or count it first (issue #858)
 
 Options:
       --host <HOST[:PORT]>  Which mothership the client commands talk to: a host name or host:port. The default is the local one (COLONIZER_BIND, else 127.0.0.1:7878); across a tailnet or tunnel, name it
