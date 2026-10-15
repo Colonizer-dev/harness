@@ -1439,7 +1439,9 @@ impl Store {
         let state = match std::fs::read(&file) {
             Err(_) => LoopState::default(),
             Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-                eprintln!(
+                tracing::warn!(
+                    path = %file.display(),
+                    error = %e,
                     "supply-chain loop: could not parse {}: {e}; starting switched off",
                     file.display()
                 );
@@ -1948,7 +1950,12 @@ pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger
         st.last_report = Some(report.clone());
     }
     if let Err(e) = app.supply_chain.save().await {
-        eprintln!("supply-chain loop: could not save {}: {e:#}", app.supply_chain.file.display());
+        tracing::error!(
+            path = %app.supply_chain.file.display(),
+            error = %format!("{e:#}"),
+            "supply-chain loop: could not save {}: {e:#}",
+            app.supply_chain.file.display()
+        );
     }
     let mut entry = Entry::new("loop.supply_chain", "colony");
     entry.target = Some(NAME.to_string());
@@ -1961,7 +1968,11 @@ pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger
     crate::activity::record(app, entry).await;
     crate::loop_history::record(app, crate::loop_history::from_supply_chain(&report)).await;
     for item in &report.attention {
-        eprintln!(
+        tracing::warn!(
+            severity = %item.severity.word(),
+            id = %item.id.as_deref().unwrap_or("vulnerability"),
+            package = %item.package,
+            repo = %item.repo,
             "supply-chain loop: attention: {} {} {} in {} has no fixed version",
             item.severity.word(),
             item.id.as_deref().unwrap_or("vulnerability"),

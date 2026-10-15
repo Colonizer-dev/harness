@@ -476,7 +476,7 @@ async fn run(app: Shared) {
         if let Err(e) = tokio::spawn(async move { tick_once(&worker).await }).await
             && e.is_panic()
         {
-            eprintln!("merge train: the tick panicked and was skipped: {e}");
+            tracing::warn!(error = %e, "merge train: the tick panicked and was skipped: {e}");
         }
     }
 }

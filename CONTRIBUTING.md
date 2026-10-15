@@ -133,6 +133,8 @@ sh scripts/ci/check-case-collisions.sh              # no two tracked paths diffe
 node --test modules/agents/opencode/test/*.test.mjs  # opencode has no package.json
 ```
 
+Mothership diagnostics go through `tracing` (`tracing::warn!`, `tracing::error!`, …), not `eprintln!` — `clippy.toml` rejects `std::eprintln` workspace-wide, with allowances only for the CLI's own output, the first-start usage notice, and the guest agent (each marked with a reason comment where the allow lives).
+
 `check-doc-links.mjs` takes file names to check only those (`node scripts/check-doc-links.mjs
 docs/cli.md`). If you rename a heading, search for its old anchor: other pages may link to it.
 

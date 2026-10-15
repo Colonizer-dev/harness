@@ -395,7 +395,7 @@ impl RedTeamStore {
             (run.clone(), result)
         };
         if let Err(e) = self.save().await {
-            eprintln!("redteam: could not save the red-team runs list: {e:#}");
+            tracing::error!(error = %format!("{e:#}"), "redteam: could not save the red-team runs list: {e:#}");
         }
         Some((run, result))
     }
@@ -430,7 +430,9 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
     let data = match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "redteam: could not read {}: {e}; starting with no red-team runs",
                 path.display()
             );
@@ -441,7 +443,9 @@ fn load_runs(path: &FsPath) -> Vec<RedTeamRun> {
     let mut runs = match serde_json::from_slice::<Vec<RedTeamRun>>(&data) {
         Ok(runs) => runs,
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "redteam: could not parse {}: {e}; starting with no red-team runs",
                 path.display()
             );
@@ -534,7 +538,7 @@ impl RaidLead {
 /// malformed raid set reads as none, logged — a broken bench must not cost the swarm its launch.
 fn raid_leads(pool: &FsPath, repo: &str) -> Vec<RaidLead> {
     let path = pool.join("raid.json");
-    let warn = |why: String| eprintln!("redteam: {why} — hunters are briefed without raid leads");
+    let warn = |why: String| tracing::warn!(why = %why, "redteam: {why} — hunters are briefed without raid leads");
     let Ok(content) = crate::github::read_regular_file(&path, RAID_CAP) else {
         warn(format!("the bench raid set at {} is not readable", path.display()));
         return Vec::new();
@@ -969,7 +973,7 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
             match shannon_brief(run) {
                 Some(brief) => brief,
                 None => {
-                    eprintln!("redteam: run {}: no Shannon command renders", run.id);
+                    tracing::warn!(id = %run.id, "redteam: run {}: no Shannon command renders", run.id);
                     break;
                 }
             }
@@ -1002,7 +1006,11 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
                     ingested: false,
                 });
             }
-            Err(message) => eprintln!(
+            Err(message) => tracing::error!(
+                index = i + 1,
+                count = n,
+                id = %run.id,
+                error = %message,
                 "redteam: hunter {}/{} of run {} could not be created: {message}",
                 i + 1,
                 n,
@@ -1546,7 +1554,13 @@ async fn attach_synthesis(app: &Shared, id: &str, launched: Result<Session, Stri
                 .is_some_and(|s| s.session_id.as_deref() == Some(session.id.as_str()))
         });
         if !attached && let Err(e) = crate::lifecycle::stop(State(app.clone()), Path(session.id.clone())).await {
-            eprintln!("redteam: could not stop the unattached judge {}: {}", session.id, e.message());
+            tracing::warn!(
+                id = %session.id,
+                error = %e.message(),
+                "redteam: could not stop the unattached judge {}: {}",
+                session.id,
+                e.message()
+            );
         }
     }
 }
@@ -1908,7 +1922,7 @@ async fn halt(app: &Shared, id: &str, to: RedTeamState) -> ApiResult<RedTeamRun>
             continue;
         }
         if let Err(e) = crate::lifecycle::stop(State(app.clone()), Path(hunter.clone())).await {
-            eprintln!("redteam: could not stop hunter {hunter}: {}", e.message());
+            tracing::warn!(hunter = %hunter, error = %e.message(), "redteam: could not stop hunter {hunter}: {}", e.message());
         }
     }
     app.redteam
@@ -2023,14 +2037,18 @@ fn load_schedules(path: &FsPath) -> Vec<RedTeamSchedule> {
     match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "redteam: could not read {}: {e}; no red-team schedules loaded",
                 path.display()
             );
             Vec::new()
         }
         Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "redteam: could not parse {}: {e}; no red-team schedules loaded",
                 path.display()
             );
@@ -2224,7 +2242,7 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
             }
         }
         if let Err(e) = app.redteam.save_schedules().await {
-            eprintln!("redteam: could not save the red-team schedules: {e:#}");
+            tracing::error!(error = %format!("{e:#}"), "redteam: could not save the red-team schedules: {e:#}");
         }
     }
 }

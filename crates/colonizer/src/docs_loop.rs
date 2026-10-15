@@ -136,11 +136,21 @@ fn load(path: &FsPath) -> Saved {
     match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Saved::default(),
         Err(e) => {
-            eprintln!("docs loop: could not read {}: {e}; the loop is off", path.display());
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "docs loop: could not read {}: {e}; the loop is off",
+                path.display()
+            );
             Saved::default()
         }
         Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-            eprintln!("docs loop: could not parse {}: {e}; the loop is off", path.display());
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "docs loop: could not parse {}: {e}; the loop is off",
+                path.display()
+            );
             Saved::default()
         }),
     }
@@ -2834,8 +2844,8 @@ async fn run(app: Shared) {
         let done = tokio::spawn(async move { run_once(&worker, "schedule", false, Mirror::Fetch, REPO_GAP).await }).await;
         match done {
             Ok(Err(e)) if e.message().contains("already in progress") => {}
-            Ok(Err(e)) => eprintln!("docs loop: the run failed: {}", e.message()),
-            Err(e) if e.is_panic() => eprintln!("docs loop: the run panicked and was skipped: {e}"),
+            Ok(Err(e)) => tracing::warn!(error = %e.message(), "docs loop: the run failed: {}", e.message()),
+            Err(e) if e.is_panic() => tracing::warn!(error = %e, "docs loop: the run panicked and was skipped: {e}"),
             _ => {}
         }
     }

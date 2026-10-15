@@ -140,7 +140,9 @@ fn load(app: &App) -> Vec<Subscription> {
     let path = file(app);
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "notify: {} could not be parsed ({e}); no webhook subscriptions",
                 path.display()
             );
@@ -232,7 +234,9 @@ pub(super) async fn fan_out(app: &App, client: &reqwest::Client, payload: &Value
         );
         match outbox::send(app, client, delivery).await {
             Ok(()) => delivered += 1,
-            Err((error, _)) => eprintln!(
+            Err((error, _)) => tracing::warn!(
+                id = %subscription.id,
+                error = %error,
                 "notify: the webhook subscription {} failed ({error}); it will be retried",
                 subscription.id
             ),

@@ -387,7 +387,12 @@ impl LoopStore {
             (l.clone(), r)
         };
         if let Err(e) = self.save().await {
-            eprintln!("loops: could not save {}: {e:#}", self.file.display());
+            tracing::error!(
+                path = %self.file.display(),
+                error = %format!("{e:#}"),
+                "loops: could not save {}: {e:#}",
+                self.file.display()
+            );
         }
         Some(out)
     }
@@ -397,11 +402,21 @@ fn load(path: &FsPath) -> Vec<Loop> {
     match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
-            eprintln!("loops: could not read {}: {e}; no loops loaded", path.display());
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "loops: could not read {}: {e}; no loops loaded",
+                path.display()
+            );
             Vec::new()
         }
         Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-            eprintln!("loops: could not parse {}: {e}; no loops loaded", path.display());
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "loops: could not parse {}: {e}; no loops loaded",
+                path.display()
+            );
             Vec::new()
         }),
     }
@@ -1028,7 +1043,9 @@ async fn retry_run(app: &Shared, l: &Loop, last: &LastRun, now: DateTime<Utc>) {
                     });
                 })
                 .await;
-            eprintln!(
+            tracing::info!(
+                name = %l.name,
+                session = %last.session,
                 "loops: re-running loop {}'s run {}, which failed for an infrastructure reason",
                 l.name, last.session
             );

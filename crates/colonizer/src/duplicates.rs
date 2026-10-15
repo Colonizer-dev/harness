@@ -416,7 +416,10 @@ pub async fn check_launch(
     };
     let checked = crate::claims::check_remote_claim(app, &work.repo, issue).await;
     if let Err(e) = &checked {
-        eprintln!(
+        tracing::warn!(
+            issue = issue,
+            repo = %work.repo,
+            error = %format!("{e:#}"),
             "claims: remote duplicate check for #{issue} in {} failed ({e:#}); falling back to the local guard",
             work.repo
         );

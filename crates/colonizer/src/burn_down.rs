@@ -391,7 +391,7 @@ async fn launch(app: &Shared, repo: &str, instructions: &str, focus: &str) {
     let new_session = match serde_json::from_value::<sessions::NewSession>(body) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("burn_down: could not build a launch body: {e:#}");
+            tracing::error!(error = %format!("{e:#}"), "burn_down: could not build a launch body: {e:#}");
             return;
         }
     };
@@ -414,7 +414,7 @@ async fn launch(app: &Shared, repo: &str, instructions: &str, focus: &str) {
         }
         // Logged and dropped: the next tick decides again, so a transient failure (an org
         // switched off, a login gap) is not a retry storm.
-        Err(_) => eprintln!("burn_down: could not start a hunt colony on {repo}; will retry next tick"),
+        Err(_) => tracing::warn!(repo = %repo, "burn_down: could not start a hunt colony on {repo}; will retry next tick"),
     }
 }
 

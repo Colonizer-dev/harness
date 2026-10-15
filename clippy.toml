@@ -1,0 +1,5 @@
+# Workspace clippy configuration (issue #857): mothership diagnostics go through `tracing`,
+# never straight to stderr — see docs/observability/mothership-log.md.
+disallowed-macros = [
+    { path = "std::eprintln", reason = "log through tracing (docs/observability/mothership-log.md)" },
+]

@@ -1019,7 +1019,7 @@ pub(crate) async fn tick_once(app: &Shared) {
         // No model anywhere — the question waits with no word about why: the cockpit shows it in
         // the status line; the log says it once, not every thirty seconds (issue #776).
         if missing_model(&modules, &app.agents) && !MISSING_MODEL_LOGGED.swap(true, Ordering::Relaxed) {
-            eprintln!("autonomy: {MISSING_MODEL}");
+            tracing::warn!("autonomy: {MISSING_MODEL}");
         }
         return;
     };

@@ -11,6 +11,8 @@
 //! then exports until its stdin closes — the mothership's death ends it without a heartbeat — and
 //! exits 78 when the contract or version is refused. It never prints a header value.
 
+#![allow(clippy::disallowed_macros)] // standalone add-on: no tracing subscriber; the mothership supervisor captures this stderr
+
 use colonizer_observability::contract::{self, CONTRACT, EXIT_REFUSED};
 use colonizer_observability::exporter::{self, Exporter};
 use std::path::PathBuf;

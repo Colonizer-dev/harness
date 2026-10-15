@@ -68,7 +68,9 @@ pub fn load_meta(config_dir: &FsPath) -> AccountsMeta {
     match crate::util::read_json_or_default(&meta_file(config_dir)) {
         Ok(meta) => meta,
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                path = %meta_file(config_dir).display(),
+                error = %format!("{e:#}"),
                 "claude-accounts: {} could not be read ({e:#}); no accounts and no default choice until it is fixed or removed",
                 meta_file(config_dir).display()
             );

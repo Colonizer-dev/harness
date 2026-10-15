@@ -1951,7 +1951,9 @@ pub(crate) async fn create_github_issue(app: &App, tag: &str, req: &NewIssue) ->
         client_error(StatusCode::BAD_GATEWAY, &format!("{e:#}"))
     })?;
     if !filed.skipped.is_empty() {
-        eprintln!(
+        tracing::warn!(
+            url = %filed.url,
+            skipped = %filed.skipped.join(", "),
             "issues: filed {} without the Source label(s) {} (they could not be created or added)",
             filed.url,
             filed.skipped.join(", ")
@@ -2015,7 +2017,10 @@ where
         Err(e) if !labels.is_empty() => e,
         Err(e) => return Err(e),
     };
-    eprintln!(
+    tracing::warn!(
+        repo = %repo,
+        labels = %labels.join(", "),
+        error = %format!("{first_error:#}"),
         "issues: gh would not file on {repo} with the labels {}: {first_error:#}; filing without them",
         labels.join(", ")
     );
@@ -2246,7 +2251,7 @@ async fn run_reply(
         tools: tool_notes,
     };
     if let Err(e) = append_message(&app, &meta.id, &reply).await {
-        eprintln!("chat: could not store a reply in {}: {e:#}", meta.id);
+        tracing::error!( id = %meta.id, error = %format!("{e:#}"), "chat: could not store a reply in {}: {e:#}", meta.id );
     }
     if input + output > 0 {
         let org = meta.workspace.clone().unwrap_or_else(|| CHAT_ORG.to_string());

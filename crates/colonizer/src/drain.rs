@@ -105,11 +105,19 @@ pub async fn drain_and_wait(app: &Shared, timeout: Duration) -> bool {
             return true;
         }
         if !announced {
-            eprintln!("drain: waiting for {waiting} colony(ies) to finish booting or publishing (up to {timeout:?})");
+            tracing::info!(
+                waiting = waiting,
+                timeout = ?timeout,
+                "drain: waiting for {waiting} colony(ies) to finish booting or publishing (up to {timeout:?})"
+            );
             announced = true;
         }
         if tokio::time::Instant::now() >= deadline {
-            eprintln!("drain: {waiting} colony(ies) still in flight after {timeout:?}; going on without them");
+            tracing::warn!(
+                waiting = waiting,
+                timeout = ?timeout,
+                "drain: {waiting} colony(ies) still in flight after {timeout:?}; going on without them"
+            );
             return false;
         }
         tokio::time::sleep(POLL).await;

@@ -21,3 +21,4 @@ same time as you:
   `crates/colonizer/routes/<module>.snap`. A route is owner-only to scoped API tokens unless its
   feature's `token_scope` (or, for an un-migrated module, `api_tokens::classify`) lists it. The whole
   recipe is in [docs/architecture.md](docs/architecture.md#adding-a-module).
+- **Logging?** Mothership diagnostics go through `tracing` with structured fields (`tracing::warn!(path = %p, error = %e, "…")`), never `eprintln!` — clippy's `disallowed-macros` rejects it outside the CLI and a few reason-commented allowances; see `docs/observability/mothership-log.md`.

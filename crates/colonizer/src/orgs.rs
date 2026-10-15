@@ -350,7 +350,12 @@ impl App {
             }
         }
         if changed && let Err(e) = self.save_known_orgs(&all).await {
-            eprintln!("orgs: could not save {}: {e:#}", self.known_orgs_file().display());
+            tracing::error!(
+                path = %self.known_orgs_file().display(),
+                error = %format!("{e:#}"),
+                "orgs: could not save {}: {e:#}",
+                self.known_orgs_file().display()
+            );
         }
     }
 

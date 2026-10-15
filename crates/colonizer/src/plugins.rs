@@ -742,7 +742,7 @@ pub fn check_skillsets<'a>(cfg: &Settings, names: impl IntoIterator<Item = &'a s
         // Saving is when a shadow is chosen: name the loser here, as each colony boot does in its
         // own log (sessions.rs), instead of leaving it to the list API's `shadows_vendored` flag.
         if let Some(vendored) = shadowed_vendored(cfg, name) {
-            eprintln!("{}", shadow_message(name, &dir, &vendored));
+            tracing::warn!("{}", shadow_message(name, &dir, &vendored));
         }
         let ants = validate_pack(&dir).map_err(|err| format!("skillset {name:?} is invalid: {err:#}"))?;
         // The same rule resolve applies at boot: an ant may only carry installed skillsets, so a

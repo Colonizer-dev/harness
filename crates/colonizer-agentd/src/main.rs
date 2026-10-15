@@ -2,6 +2,8 @@
 //! session event log, and serves events, terminals and shutdown to the harness over the mesh.
 //! Contract: docs/protocol.md §1–§3.
 
+#![allow(clippy::disallowed_macros)] // guest agent: runs in the VM, its stderr never reaches the mothership log
+
 mod config;
 mod harden;
 mod pty;

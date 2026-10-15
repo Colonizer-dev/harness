@@ -1328,6 +1328,7 @@ pub(crate) fn cli_export(
 /// `colonizer fleet import`: print the bundle's manifest, then import it into this machine's data
 /// dir with progress on stderr. Ctrl-C (or anything else that ends the process) leaves a partial
 /// import that resumes on the next run.
+#[allow(clippy::disallowed_macros)] // CLI output: the terminal is the destination
 pub(crate) fn cli_import(settings: &Settings, file: &Path, preview_only: bool, json: bool) -> Result<i32> {
     print_manifest(&read_manifest(file)?, json);
     if preview_only {

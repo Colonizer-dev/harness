@@ -166,7 +166,12 @@ pub async fn launch_refusal(fetch: &Fetch, repo: &str, issue: Option<u64>, allow
     match lookup(fetch, repo, issue).await {
         Ok(epic) => epic.map(|e| refusal_message(issue, &e)),
         Err(e) => {
-            eprintln!("epic: could not check whether #{issue} in {repo} is an epic ({e:#}); launching anyway");
+            tracing::warn!(
+                repo = %repo,
+                issue = issue,
+                error = %format!("{e:#}"),
+                "epic: could not check whether #{issue} in {repo} is an epic ({e:#}); launching anyway"
+            );
             None
         }
     }

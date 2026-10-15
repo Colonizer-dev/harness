@@ -143,7 +143,7 @@ pub(crate) async fn note_member(app: &Shared, root: &Path) {
     if let Ok(bytes) = serde_json::to_vec(&note)
         && let Err(e) = util::write_atomic(&path, &bytes).await
     {
-        eprintln!("fleet history: could not record member {id}'s name: {e:#}");
+        tracing::error!(id = %id, error = %format!("{e:#}"), "fleet history: could not record member {id}'s name: {e:#}");
     }
 }
 
@@ -481,7 +481,7 @@ fn prune_blocking(data_dir: &Path, cutoff: DateTime<Utc>) -> Pruned {
                     std::fs::rename(&tmp, &file)
                 });
             if let Err(e) = written {
-                eprintln!("fleet history: could not prune {}: {e}", file.display());
+                tracing::warn!(path = %file.display(), error = %e, "fleet history: could not prune {}: {e}", file.display());
                 continue;
             }
         }
@@ -517,7 +517,9 @@ fn prune_blocking(data_dir: &Path, cutoff: DateTime<Utc>) -> Pruned {
 pub(crate) async fn prune_tick(app: &Shared) {
     let pruned = prune(&app.cfg.data_dir, retention_days(), Utc::now()).await;
     if pruned != Pruned::default() {
-        eprintln!(
+        tracing::info!(
+            rows = pruned.rows,
+            payloads = pruned.payloads,
             "fleet history: retention removed {} rows and {} payloads",
             pruned.rows, pruned.payloads
         );
