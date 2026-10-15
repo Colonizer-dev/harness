@@ -33,6 +33,7 @@ pub mod exporter;
 pub mod grpc;
 pub mod hashing;
 pub mod health;
+pub mod loki;
 pub mod map;
 pub mod metrics;
 pub mod policy;
