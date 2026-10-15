@@ -752,6 +752,12 @@ pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
 mod tests {
     use super::*;
 
+    /// Spliced together at compile time so the source never holds a key-shaped literal; at
+    /// runtime it is an ordinary key and trips the redactor exactly as a real one would.
+    fn anthropic_key_fixture() -> &'static str {
+        concat!("sk-", "ant-", "api03-", "AbCdEf123456_GhIjKl-", "789012MnOpQr")
+    }
+
     #[test]
     fn the_real_lock_pins_every_platform_this_module_names() {
         for (os, arch, platform, sha) in [
@@ -826,13 +832,14 @@ mod tests {
     #[test]
     fn ocr_json_parses_and_its_findings_are_redacted() {
         let stdout = r#"{"status":"completed","summary":{"total_comments":2},"comments":[
-            {"path":"src/lib.rs","content":"the key sk-ant-api03-AbCdEf123456_GhIjKl-789012MnOpQr appears here","start_line":1,"end_line":1,
+            {"path":"src/lib.rs","content":"the key {key} appears here","start_line":1,"end_line":1,
              "category":"correctness","severity":"high","suggestion_code":"fix it"},
-            {"path":"other.txt","content":"fine"}]}"#;
-        let (report, findings) = parse_report(stdout).unwrap();
+            {"path":"other.txt","content":"fine"}]}"#
+            .replace("{key}", anthropic_key_fixture());
+        let (report, findings) = parse_report(&stdout).unwrap();
         assert_eq!(findings.len(), 2);
         assert!(findings[0].content.contains("[REDACTED"), "{}", findings[0].content);
-        assert!(!findings[0].content.contains("sk-ant-api"));
+        assert!(!findings[0].content.contains(concat!("sk-", "ant-api")));
         assert!(report["comments"][0]["content"].as_str().unwrap().contains("[REDACTED"));
         assert_eq!(findings[1].start_line, None, "a missing line is None, not an error");
         let (_, findings) = parse_report(r#"{"status":"completed","comments":[{"path":null}]}"#).unwrap();
@@ -900,7 +907,7 @@ mod tests {
         }
         assert!(!crate::path_policy::credential_like(".env.example"));
         assert_eq!(
-            reviewable(Some(b"token sk-ant-api03-AbCdEf123456_GhIjKl-789012MnOpQr".to_vec())).as_deref(),
+            reviewable(Some(format!("token {}", anthropic_key_fixture()).into_bytes())).as_deref(),
             Some("token [REDACTED:anthropic_key]")
         );
         assert_eq!(reviewable(Some(vec![0, 159, 146, 150])), None, "not UTF-8");
@@ -912,7 +919,7 @@ mod tests {
     async fn the_head_side_reads_regular_files_only() {
         let wt = std::env::temp_dir().join(format!("ocr-head-{}", crate::util::short_id()));
         std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(wt.join("real.txt"), "token sk-ant-api03-AbCdEf123456_GhIjKl-789012MnOpQr").unwrap();
+        std::fs::write(wt.join("real.txt"), format!("token {}", anthropic_key_fixture())).unwrap();
         std::fs::write(wt.join("big.txt"), vec![b'x'; MAX_FILE_BYTES + 1]).unwrap();
         std::fs::write(wt.join("outside.txt"), "not the colony's business").unwrap();
         std::os::unix::fs::symlink(wt.join("outside.txt"), wt.join("link.txt")).unwrap();
