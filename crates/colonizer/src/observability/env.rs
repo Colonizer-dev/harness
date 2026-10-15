@@ -419,6 +419,7 @@ pub fn resolve(
         ("stream_activity", json!(cfg.stream_activity)),
         ("stream_traces", json!(cfg.stream_traces)),
         ("stream_metrics", json!(cfg.stream_metrics)),
+        ("metrics_interval_secs", json!(cfg.metrics_interval_secs)),
         ("max_attribute_bytes", json!(cfg.max_attribute_bytes)),
         ("max_content_bytes", json!(cfg.max_content_bytes)),
         ("trace_sample_ratio", json!(cfg.trace_sample_ratio)),

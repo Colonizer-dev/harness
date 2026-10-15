@@ -177,10 +177,11 @@ const RECORD_COMMON: &[Rule] = &[
     cd("colonizer.issue.title"),
     cd("colonizer.pr.title"),
     s(TRUNCATED),
-    // The exporter's own metric points (#853): a colony status bucket and a drop reason, both from
-    // fixed sets.
+    // The exporter's own metric points (#853): a colony status bucket, a drop reason and a signal
+    // name, all from fixed sets.
     s("colonizer.colony.status"),
     s("colonizer.drop.reason"),
+    s("colonizer.signal"),
 ];
 
 /// Every span may carry these. The `gen_ai.*` keys are the structural ones only — names, ids,
