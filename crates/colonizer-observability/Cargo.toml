@@ -19,6 +19,12 @@ name = "colonizer_observability"
 name = "colonizer-observability"
 path = "src/main.rs"
 
+# OTLP/gRPC (#851): off by default, so a default build never pulls tonic. `gen-tonic` also turns on
+# opentelemetry-proto's generated client and server stubs, which pair with tonic 0.14 (its own
+# requirement), so the two resolve to one tonic.
+[features]
+otlp-grpc = ["dep:tonic", "opentelemetry-proto/gen-tonic"]
+
 [dependencies]
 colonizer-redact = { version = "0.2.15", path = "../colonizer-redact" }
 # gzip for OTLP/HTTP `Content-Encoding: gzip`.
@@ -37,6 +43,11 @@ ring = "0.17.14"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "io-std", "io-util", "sync"] }
+# The OTLP/gRPC transport behind `otlp-grpc` (see `src/grpc.rs` for what each feature is for): the
+# client channel, TLS over ring with webpki roots, the gzip request encoding, and the server and
+# router its own tests drive an in-process collector with. `codegen`, the generated client and
+# server stubs' runtime, arrives with `opentelemetry-proto/gen-tonic`.
+tonic = { version = "0.14", optional = true, default-features = false, features = ["channel", "tls-ring", "tls-webpki-roots", "gzip", "server", "router"] }
 
 [dev-dependencies]
 # The fake OTLP collector the exporter's tests send to, on 127.0.0.1.
