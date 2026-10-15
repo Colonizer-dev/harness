@@ -28,6 +28,9 @@ pub mod contract;
 pub(crate) mod cursor;
 pub mod encode;
 pub mod exporter;
+/// The OTLP/gRPC transport (#851), behind the `otlp-grpc` cargo feature.
+#[cfg(feature = "otlp-grpc")]
+pub mod grpc;
 pub mod hashing;
 pub mod health;
 pub mod map;

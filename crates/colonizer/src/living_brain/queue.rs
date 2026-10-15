@@ -3,9 +3,11 @@
 //! **Triggers.** A sweep runs every minute, and at once whenever a notification goes out
 //! (notify.rs) or the settings change. It looks at every colony of a repository whose rule sends,
 //! in a state where a turn has ended — `idle`, `pr_opened`, `merged`, `closed`, `no_changes`,
-//! `stopped`, `failed` — and active since the rule was switched on. A colony whose fingerprint (its
-//! status, pull request, cost and the size of its event logs) differs from the one last sent is
-//! queued. Older colonies wait for the backfill button, which queues them on request.
+//! `stopped`, `failed` — and active since the rule was switched on, or sent before. A colony whose
+//! fingerprint (the record's schema and collector versions, its status, pull request, cost and the
+//! size of its event logs) differs from the one last sent is queued — so an upgrade that changes
+//! the record re-sends every colony already sent, a batch per pass like any other. Older colonies
+//! never sent wait for the backfill button, which queues them on request.
 //!
 //! **Sending.** One colony at a time, a pause between each (the rate limit), and never more than a
 //! batch per pass: the record and the note are built at send time from the colony as it is then,
@@ -231,13 +233,31 @@ async fn fingerprint(app: &App, s: &crate::sessions::Session) -> (String, Option
             }
         }
     }
-    let fp = format!(
-        "{}|{}|{:.6}|{events}",
-        status_word(s.status),
+    let fp = fingerprint_text(
+        &status_word(s.status),
         s.pr_url.as_deref().unwrap_or(""),
-        s.cost_usd.unwrap_or(0.0) + s.routed_cost_usd.unwrap_or(0.0)
+        s.cost_usd.unwrap_or(0.0) + s.routed_cost_usd.unwrap_or(0.0),
+        events,
     );
     (fp, last_write)
+}
+
+/// The fingerprint's text. The record's schema and collector versions lead it: a colony sent before
+/// an upgrade that changed what a record carries (schema 3 nested its subagents) differs from its
+/// last-sent fingerprint once, and is queued and sent again in the new shape.
+pub(crate) fn fingerprint_text(status: &str, pr_url: &str, cost: f64, events: u64) -> String {
+    format!(
+        "v{}.{}|{status}|{pr_url}|{cost:.6}|{events}",
+        record::SCHEMA_VERSION,
+        record::COLLECTOR_VERSION,
+    )
+}
+
+/// Whether the sweep looks at a colony of a sending repository: active since the rule went on, or
+/// sent before — a colony the backfill sent is older than the rule, and must still be re-sent when
+/// an upgrade changes its record.
+pub(crate) fn sweep_candidate(rule_since: Option<&str>, updated_at: DateTime<Utc>, sent_before: bool) -> bool {
+    sent_before || since_ok(rule_since, updated_at)
 }
 
 fn is_event_log(name: &str) -> bool {
@@ -302,6 +322,12 @@ async fn sweep(app: &App, saved: &Saved) {
     if !saved.rules.iter().any(|r| r.send) {
         return;
     }
+    let sent: std::collections::BTreeSet<String> = load_queue(&app.cfg.config_dir)
+        .entries
+        .into_iter()
+        .filter(|(_, e)| e.state == EntryState::Sent)
+        .map(|(id, _)| id)
+        .collect();
     let candidates: Vec<crate::sessions::Session> = app
         .sessions
         .read()
@@ -311,7 +337,7 @@ async fn sweep(app: &App, saved: &Saved) {
         .filter(|s| {
             saved
                 .rule_for(&s.repo)
-                .is_some_and(|r| r.send && since_ok(r.since.as_deref(), s.updated_at))
+                .is_some_and(|r| r.send && sweep_candidate(r.since.as_deref(), s.updated_at, sent.contains(&s.id)))
         })
         .cloned()
         .collect();

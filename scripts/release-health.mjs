@@ -110,7 +110,8 @@ async function crateChecks(version) {
 }
 
 // colonizer.dev is behind Cloudflare, which answers an occasional single request with a 403 that
-// the next one does not. Retrying a transient status costs a couple of seconds against a run that
+// the next one does not. A 403 that every attempt gets is usually the zone's bot protection
+// challenging the runner's datacenter IP, which the report names when Cloudflare says so. Retrying a transient status costs a couple of seconds against a run that
 // already waits out ten minutes of asset downloads; a 404 is an answer, not a hiccup, so it is
 // never retried.
 const SITE_ATTEMPTS = 3;
@@ -126,7 +127,11 @@ export async function fetchSiteText(url, { attempts = SITE_ATTEMPTS, fetchImpl =
       const res = await fetchImpl(url, { headers: UA, signal: AbortSignal.timeout(600000) });
       if (res.ok) return await res.text();
       status = res.status;
-      last = new Error(`HTTP ${res.status}`);
+      // Cloudflare's bot protection answers a runner it distrusts with a 403 "Just a moment..."
+      // challenge page and marks it `cf-mitigated: challenge`. Saying so names the zone's security
+      // setting as the cause, rather than a bare 403 that reads like the page itself is broken.
+      const challenged = res.headers?.get?.('cf-mitigated') === 'challenge';
+      last = new Error(challenged ? `HTTP ${res.status}, a Cloudflare bot challenge (cf-mitigated: challenge)` : `HTTP ${res.status}`);
     } catch (e) {
       last = e;
     }

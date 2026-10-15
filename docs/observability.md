@@ -12,6 +12,8 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [Settings and privacy](observability/settings.md): every setting of the module.
 - [Export policy and OTLP encoding](observability/export-policy.md): how every exported string is
   allowlisted, gated, redacted again, capped and hashed, and how requests are batched and encoded.
+- [OTLP/gRPC](observability/grpc.md): the tonic transport behind the add-on's `otlp-grpc` feature,
+  for collectors that only speak gRPC on 4317.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
@@ -106,7 +108,7 @@ overrides its one field of the saved module; it never turns export on by itself,
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The base URL; `/v1/logs`, `/v1/traces` and `/v1/metrics` are appended. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | A full URL for one signal, used as is. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | `k=v,k2=v2`, values percent-encoded. Overrides the **Observability headers** secret. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. gRPC is not built. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. gRPC only behind the add-on's `otlp-grpc` feature ([gRPC](observability/grpc.md)). |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` (default) or `none`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | Milliseconds. |
 | `OTEL_SERVICE_NAME` | `service.name`, default `colonizer`. |

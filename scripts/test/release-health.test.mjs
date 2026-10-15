@@ -28,7 +28,8 @@ function stub(responses) {
     calls.push(url);
     const next = responses[Math.min(calls.length - 1, responses.length - 1)];
     if (next instanceof Error) throw next;
-    return { ok: next.status === 200, status: next.status, text: async () => next.body };
+    const headers = new Headers(next.headers ?? {});
+    return { ok: next.status === 200, status: next.status, headers, text: async () => next.body };
   };
   return { calls, fetchImpl, fetchSite: (url) => fetchSiteText(url, { fetchImpl, delay: async () => {} }) };
 }
@@ -79,6 +80,14 @@ test('a transient 403 is retried and the check passes when the next fetch succee
   assert.equal(calls.filter((u) => u === HOME).length, 2, 'the 403 was retried');
   assert.equal(website.ok, true);
   assert.equal(website.text, okText('website'));
+});
+
+test('a Cloudflare challenge is named in the fetch failure, so the report points at the zone, not the page', async () => {
+  const { calls, fetchSite } = stub([{ status: 403, headers: { 'cf-mitigated': 'challenge' }, body: '<title>Just a moment...</title>' }]);
+  const results = await siteChecks(TAG, { fetchSite });
+  assert.equal(results[0].ok, false);
+  assert.equal(results[0].text, `**website** — could not read ${HOME} (HTTP 403, a Cloudflare bot challenge (cf-mitigated: challenge))`);
+  assert.ok(calls.length >= 3, 'a challenge is still retried like any 403');
 });
 
 test('a 404 is the site’s answer and is not retried', async () => {

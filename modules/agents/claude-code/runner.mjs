@@ -1367,6 +1367,14 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     const messageId = msg.message?.id ?? msg.uuid ?? null;
     const parent = msg.parent_tool_use_id ?? null;
     const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
+    // The model a subagent's message says it ran on rides on its `agent` from here on, so its
+    // events name the model the Task call actually got (an alias, a forced subagent model, a
+    // route) rather than the one it asked for.
+    const model = typeof msg.message?.model === 'string' ? msg.message.model : '';
+    if (parent && model) {
+      const known = subagents.get(parent) ?? { id: parent, name: 'subagent', description: null };
+      if (known.model !== model) subagents.set(parent, { ...known, model });
+    }
     for (const block of content) {
       const index = blockIndex(messageId, block);
       if (block.type === 'text') {
