@@ -35,6 +35,8 @@ pub mod hashing;
 pub mod health;
 pub mod map;
 pub mod metrics;
+#[cfg(test)]
+mod observability_conformance;
 pub mod policy;
 pub(crate) mod sources;
 pub(crate) mod state;

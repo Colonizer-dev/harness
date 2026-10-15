@@ -1,0 +1,74 @@
+# The collector the observability conformance run (#864) exports to: `.github/workflows/
+# observability-conformance.yml` builds it into an image with the Dockerfile beside this file and
+# points `cargo test observability_conformance` at it. Everything lives under /tmp/otel-conformance,
+# mounted from the host so the test can read what the collector stored:
+#
+#   collector-output.json      what the live OTLP receiver parsed out of our requests
+#   file-receiver-output.json  what the otlp_json_file receivers read out of our goldens
+#   golden-<signal>.jsonl      the test appends the committed OTLP/JSON goldens here (see the
+#                              module docs in crates/colonizer-observability/src/observability_conformance.rs)
+#
+# No processors on purpose: the point is to see exactly what we sent. The golden pipelines keep
+# their own output file so the two legs cannot pollute each other's assertions.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  # One receiver per signal so each golden lands in the right pipeline. `include_file_name: false`
+  # keeps the file name out of the resource attributes; `start_at: beginning` because the test
+  # writes the files after the collector is up (the receiver re-reads a file it watches that
+  # changes). v0.162.0 spells the component `otlp_json_file`; `otlpjsonfile` is a deprecated alias.
+  otlp_json_file/golden-traces:
+    include: [/tmp/otel-conformance/golden-traces.jsonl]
+    include_file_name: false
+    start_at: beginning
+  otlp_json_file/golden-metrics:
+    include: [/tmp/otel-conformance/golden-metrics.jsonl]
+    include_file_name: false
+    start_at: beginning
+  otlp_json_file/golden-logs:
+    include: [/tmp/otel-conformance/golden-logs.jsonl]
+    include_file_name: false
+    start_at: beginning
+
+exporters:
+  # json = one pdata-JSON object per received request, one per line: traceId/spanId as lowercase
+  # hex, exactly what the test asserts against.
+  file/collector:
+    path: /tmp/otel-conformance/collector-output.json
+    format: json
+    flush_interval: 100ms
+  file/golden:
+    path: /tmp/otel-conformance/file-receiver-output.json
+    format: json
+    flush_interval: 100ms
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file/collector]
+    metrics:
+      receivers: [otlp]
+      exporters: [file/collector]
+    logs:
+      receivers: [otlp]
+      exporters: [file/collector]
+    traces/golden:
+      receivers: [otlp_json_file/golden-traces]
+      exporters: [file/golden]
+    metrics/golden:
+      receivers: [otlp_json_file/golden-metrics]
+      exporters: [file/golden]
+    logs/golden:
+      receivers: [otlp_json_file/golden-logs]
+      exporters: [file/golden]

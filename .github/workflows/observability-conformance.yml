@@ -1,0 +1,101 @@
+# The observability add-on's conformance run (#864): everything its own tests assert against
+# fakes and goldens, asserted against a REAL OpenTelemetry Collector. The job builds the
+# digest-pinned collector image from .github/ci/otel-collector/ (dependabot bumps the digest),
+# starts it with a config whose file exporters store what it parsed, and runs the crate's one
+# ignored conformance test against it: ids as lowercase hex, parent links, resource attributes,
+# per-signal record counts, the secret canaries never reaching the stored output, and the
+# committed OTLP/JSON goldens round-tripping through the collector's own file receiver.
+#
+# Path-filtered like CI's per-piece jobs: it runs when the add-on, the mothership's observability
+# module, the observability examples, or the collector config and this workflow change.
+name: Observability conformance
+
+on:
+  pull_request:
+    paths:
+      - crates/colonizer-observability/**
+      - crates/colonizer/src/observability/**
+      - examples/observability/**
+      - .github/workflows/observability-conformance.yml
+      - .github/ci/otel-collector/**
+  push:
+    branches: [main]
+    paths:
+      - crates/colonizer-observability/**
+      - crates/colonizer/src/observability/**
+      - examples/observability/**
+      - .github/workflows/observability-conformance.yml
+      - .github/ci/otel-collector/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nothing here publishes, so a superseded run's result is worthless: only the newest commit on a ref
+# matters, and an older one still running is just queued minutes.
+concurrency:
+  group: observability-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  collector:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain and cache family the rust job uses: stable, minimal profile, and the restore
+      # keys fall back to the rust job's cache, so usually only the add-on compiles.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-obs-conformance-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-obs-conformance-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # Before the mount, so the runner user owns it: the test appends the golden files into it and
+      # the in-container collector (root) must read them, while the test must read what it wrote.
+      - name: Scratch dir
+        run: mkdir -p /tmp/otel-conformance
+
+      - name: Build the collector image
+        run: docker build -t otel-conformance/collector .github/ci/otel-collector
+
+      - name: Start the collector
+        run: |
+          docker run -d --name otel-collector \
+            -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 -p 127.0.0.1:13133:13133 \
+            -v /tmp/otel-conformance:/tmp/otel-conformance \
+            otel-conformance/collector
+
+      - name: Wait for the collector's health check
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:13133/; then echo; exit 0; fi
+            sleep 1
+          done
+          echo "the collector never became healthy"; docker logs otel-collector; exit 1
+
+      # The one test does everything, one phase per leg; --ignored because it needs this collector.
+      # otlp-grpc so the gRPC leg runs against the collector's 4317 receiver too. Wrapped, like the
+      # rust job's test steps: a flake is retried once and recorded; a real failure still ends the
+      # step non-zero.
+      - name: Conformance run
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- cargo test -p colonizer-observability --locked observability_conformance --features otlp-grpc -- --ignored --nocapture
+
+      # What the collector said and what it stored, when an assertion above failed.
+      - name: Collector logs and output tails
+        if: failure()
+        run: |
+          docker logs otel-collector || true
+          for f in /tmp/otel-conformance/collector-output.json /tmp/otel-conformance/file-receiver-output.json; do
+            echo "== $f"
+            tail -c 2000 "$f" || true
+          done
