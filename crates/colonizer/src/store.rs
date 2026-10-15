@@ -1530,6 +1530,11 @@ pub(crate) mod tests {
             "the VM-written out/pr-labels, read for the run's pull request labels",
         ),
         ("maps.rs", 1, "the VM-written out/architecture.json"),
+        (
+            "open_code_review.rs",
+            1,
+            "the vm/ policy, read so the review snapshot skips what the publish would hide",
+        ),
         ("publish.rs", 1, "the VM-written out/pr.md"),
         ("reclaim.rs", 2, "disk measurement of the working copy"),
         (

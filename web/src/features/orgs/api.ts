@@ -1,7 +1,7 @@
 // Org workspaces & activity API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { enc, post, put, query, request } from "../../http";
-import type { ActivityPage, ActivityQuery, MergeStewardInfo, OrgInfo, OrgSettings, SpendHistory } from "./types";
+import type { ActivityPage, ActivityQuery, MergeStewardInfo, OpenCodeReviewStatus, OrgInfo, OrgSettings, SpendHistory } from "./types";
 
 export interface OrgsApi {
   orgs(): Promise<OrgInfo[]>;
@@ -15,6 +15,10 @@ export interface OrgsApi {
   mergeSteward(): Promise<MergeStewardInfo>;
   /** POST /api/merge-steward/merge: merges one colony's pull request now; refused unless GitHub calls it mergeable. */
   mergeNow(url: string): Promise<{ merged: boolean; message: string }>;
+  /** GET /api/open-code-review: the reviewer binary's install status (issue #1274). */
+  openCodeReview(): Promise<OpenCodeReviewStatus>;
+  /** POST /api/open-code-review/download: start (or join) the pinned binary's download; poll openCodeReview for progress (issue #1274). */
+  openCodeReviewDownload(): Promise<OpenCodeReviewStatus>;
 }
 
 export const orgsHttp: OrgsApi = {
@@ -28,4 +32,6 @@ export const orgsHttp: OrgsApi = {
   saveOrg: (org, settings) => put(`/api/orgs/${enc(org)}`, { settings }),
   mergeSteward: () => request("/api/merge-steward"),
   mergeNow: (url) => post("/api/merge-steward/merge", { url }),
+  openCodeReview: () => request("/api/open-code-review"),
+  openCodeReviewDownload: () => post("/api/open-code-review/download"),
 };

@@ -175,6 +175,8 @@ pub struct App {
     pub graft: Mutex<crate::graft::Status>,
     /// The understand-anything skillset download (understand_anything.rs), for Settings.
     pub understand_anything: Mutex<crate::graft::Status>,
+    /// The open-code-review binary download (open_code_review.rs, issue #1274), for Settings.
+    pub open_code_review: Mutex<crate::open_code_review::Status>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<crate::headroom::Status>,
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
@@ -322,6 +324,7 @@ impl App {
             github_viewer: Mutex::new(None),
             graft: Mutex::new(Default::default()),
             understand_anything: Mutex::new(Default::default()),
+            open_code_review: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             host_cache: Mutex::new(None),
             capacity: crate::capacity::Capacity::new(),
