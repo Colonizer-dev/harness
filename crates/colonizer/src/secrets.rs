@@ -595,6 +595,23 @@ fn catalog(app: &App) -> Vec<Item> {
         editable: true,
         colonies: Access::Injected(vec!["api.typesafe.ai".into()]),
     });
+    items.push(Item {
+        id: "living-brain".into(),
+        label: "Living Brain".into(),
+        group: "integrations",
+        // Set by Settings → Living Brain (device sign-in or a pasted token); a colony whose repo
+        // asks for the brain's MCP server gets it only as an msb placeholder for the MCP host.
+        used_by: "Colony sessions sent to Living Brain, and its MCP server in colonies".into(),
+        icon: "memory",
+        path: Some(crate::living_brain::token_file(dir)),
+        env: None,
+        editable: true,
+        colonies: Access::Injected(
+            crate::living_brain::url_host(&crate::living_brain::load(dir).mcp_url)
+                .into_iter()
+                .collect(),
+        ),
+    });
     for secret in crate::colony_secrets::load(dir).unwrap_or_default() {
         items.push(Item {
             id: secret.id(),

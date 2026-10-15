@@ -89,6 +89,7 @@ mod jev;
 mod jev_ladder;
 mod ledger;
 mod lifecycle;
+mod living_brain;
 mod login_item;
 mod loop_github;
 mod loop_history;
