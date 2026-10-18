@@ -24,6 +24,7 @@ export const COCKPIT_VIEWS: readonly CockpitView[] = [
   "launch",
   "inbox",
   "history",
+  "queues",
   "loops",
   "settings",
   "memory",

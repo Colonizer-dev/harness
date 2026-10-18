@@ -13,6 +13,7 @@ export * from "./features/orgs/types";
 export * from "./features/memory/types";
 export * from "./features/events/types";
 export * from "./features/loops/types";
+export * from "./features/queues/types";
 export * from "./features/remote/types";
 export * from "./features/chat/types";
 export * from "./features/history/types";
