@@ -51,6 +51,7 @@ export function mobileMoreViews(): MobileMoreItem[] {
     { view: "overview", label: "Overview", glyph: "overview" },
     { view: "launch", label: "Launch", glyph: "plus" },
     { view: "history", label: "History", glyph: "history" },
+    { view: "queues", label: "Queues", glyph: "queues" },
     { view: "loops", label: "Loops", glyph: "loops" },
     { view: "memory", label: "Memory", glyph: "memory" },
     { view: "host", label: "Host", glyph: "host" },

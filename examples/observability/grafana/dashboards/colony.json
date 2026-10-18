@@ -1,0 +1,423 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "What did this colony do: its trace, turn durations, tool calls, questions and who answered, the harness log, and spend for its org. Colony ids are never metric labels (privacy rules), so pick a colony above and the panels follow it.",
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 16,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "description": "The root span closes when the colony finishes, so a running colony may have nothing to show yet.",
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 20,
+          "query": "{span.colonizer.colony.id=\"$colony\"}",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Colony trace",
+      "type": "traces"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ns"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=~\"turn [0-9]+\"} | quantile_over_time(duration, 0.5, 0.95)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Turn durations (p50/p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "description": "Span name, duration and status per tool call.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 3,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 100,
+          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=~\"execute_tool .*\"}",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool calls",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=~\"execute_tool .*\" && status=error} | rate() by (span.gen_ai.tool.name)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool errors/s by tool",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=\"question\" && span.colonizer.answered_by!=\"\"} | rate() by (span.colonizer.answered_by)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Answers: person vs autonomy-judge",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "description": "Open and answered questions; colonizer.answered_by says who answered, colonizer.unanswered marks the ones the root span closed.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "id": 6,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=\"question\"}",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Questions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "colonizer-prom"
+      },
+      "description": "Org-wide, because colony ids are never exported as series (privacy rules).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "id": 7,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "colonizer-prom"
+          },
+          "expr": "sum by (type) (rate(colonizer_tokens_total{model=\"all\", org=~\"$org\"}[5m]))",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens/s by type (this org)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "colonizer-prom"
+      },
+      "description": "Org-wide; colony-level spend is not exported.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "id": 8,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "colonizer-prom"
+          },
+          "expr": "sum by (org) (rate(colonizer_cost_usd_total{org=~\"$org\"}[5m])) * 3600",
+          "legendFormat": "{{org}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Spend $/h (this org)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "colonizer-loki"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 9,
+      "options": {
+        "enableLogDetails": false,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "colonizer-loki"
+          },
+          "expr": "{service_name=\"colonizer-mothership\"} | colonizer_colony_id=\"$colony\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Harness log",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "colonizer-loki"
+      },
+      "description": "Content log records linked to this colony's trace. Empty until content export is switched on for the org.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 54
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "noValue": "Content export is off for this org",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "colonizer-loki"
+          },
+          "expr": "sum by (trace_id) (count_over_time({service_name=\"colonizer-mothership\", colonizer_stream=\"content\"} | colonizer_colony_id=\"$colony\" [6h]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Content records by trace id",
+      "type": "stat"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "colonizer"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0,
+        "label": "Colony id",
+        "multi": false,
+        "name": "colony",
+        "options": [],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "colonizer-prom"
+        },
+        "definition": "label_values(colonizer_colonies, org)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Org",
+        "multi": false,
+        "name": "org",
+        "options": [],
+        "query": {
+          "query": "label_values(colonizer_colonies, org)",
+          "refId": "PromVariableQuery"
+        },
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Colonizer — Colony",
+  "uid": "colonizer-colony",
+  "version": 1,
+  "weekStart": ""
+}

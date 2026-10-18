@@ -137,6 +137,7 @@ mod push_guard;
 mod push_prefs;
 mod queue;
 mod queue_priority;
+mod queues;
 mod quota_cards;
 mod rebase;
 mod reclaim;
