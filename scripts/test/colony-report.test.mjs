@@ -593,7 +593,7 @@ function dataDir(t, sessionsJson) {
 test('a sessions.json that is valid JSON but not an array is treated as corrupt, not fatal', (t) => {
   for (const body of ['{}', 'null', '"x"', '{broken']) {
     const [colony] = loadColonies(dataDir(t, body), 'd');
-    assert.deepEqual(colony, { mothership: 'd', session: { id: 'lost' }, events: [], logs: [], gateway: [] });
+    assert.deepEqual(colony, { mothership: 'd', session: { id: 'lost' }, events: [], logs: [], gateway: [], turn_routing: [] });
   }
 });
 

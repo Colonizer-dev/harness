@@ -377,7 +377,8 @@ export function analyze({ mothership = '', session = {}, events = [], logs = [],
       priced += 1;
     }
   }
-  r.turn_routing_net_usd = priced > 0 ? net : null;
+  // Summed in floats, so round to a millionth of a dollar: 2.4 - 1.5 must read as 0.9, not 0.8999999999999999.
+  r.turn_routing_net_usd = priced > 0 ? Math.round(net * 1e6) / 1e6 : null;
   for (const type of subagents.values()) r.subagent_types[type] = (r.subagent_types[type] ?? 0) + 1;
   r.repeated_reads = [...reads].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).map(([path, n]) => ({ path, n }));
   r.repeated_commands = [...commands]

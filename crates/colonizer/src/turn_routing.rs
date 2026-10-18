@@ -318,14 +318,15 @@ pub(crate) async fn on_turn_end(
         suggested
     };
     let provider_list = app.providers();
+    let feed = app.price_feed.entries();
     let near_limit = account_near_limit(&app).await;
     let act = policy(
         sim_tier,
         suggested,
         turns_since_switch,
         context_tokens(tokens),
-        providers::pricing_for(&provider_list, &model),
-        providers::pricing_for(&provider_list, target).filter(|_| suggested != sim_tier),
+        providers::pricing_for(&provider_list, &model, Some(&feed)),
+        providers::pricing_for(&provider_list, target, Some(&feed)).filter(|_| suggested != sim_tier),
         near_limit,
     );
     let record = TurnRecord {
