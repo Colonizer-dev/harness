@@ -1,4 +1,5 @@
-//! OTLP/HTTP (#849): POSTs an encoded request to the signal's URL with the operator's headers, and
+//! OTLP/HTTP (#849), and the native Loki push provider (#865): POSTs an encoded request to the
+//! signal's URL — Loki JSON to `{url}/loki/api/v1/push` — with the operator's headers, and
 //! sorts the answer into sent, retry later, unauthorized, or refused. Only a refusal that is about
 //! the records (400, 413, 422) may lead to a record being dropped; every other failure keeps the
 //! batch for a later retry. Header values never appear in an error: an
@@ -83,13 +84,16 @@ fn http_date(value: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-/// One OTLP destination: HTTP by default, or gRPC behind the `otlp-grpc` feature (#851).
+/// One export destination: OTLP/HTTP by default, the native Loki push provider (#865) when
+/// `provider = "loki"`, or gRPC behind the `otlp-grpc` feature (#851).
 pub struct Transport {
     client: reqwest::Client,
     settings: Settings,
     headers: Vec<(String, String)>,
     encoding: Encoding,
     gzip: bool,
+    /// Whether this transport pushes to Loki rather than speaking OTLP.
+    loki: bool,
     /// The gRPC transport, when `protocol = "grpc"` and this build has the feature for it.
     #[cfg(feature = "otlp-grpc")]
     grpc: Option<crate::grpc::GrpcTransport>,
@@ -109,28 +113,34 @@ impl std::fmt::Debug for Transport {
 
 impl Transport {
     pub fn new(settings: &Settings, headers: Vec<(String, String)>) -> Result<Transport, String> {
-        let encoding = match settings.protocol.as_str() {
-            "http/protobuf" | "" => Encoding::Protobuf,
-            "http/json" => Encoding::Json,
-            // The messages are protobuf on the wire; a build without the feature keeps refusing
-            // `grpc` on the `other` arm below, with the same wording.
-            #[cfg(feature = "otlp-grpc")]
-            "grpc" => Encoding::Protobuf,
-            other => {
-                return Err(format!(
-                    "protocol {other} is not supported by this build; use http/protobuf or http/json"
-                ));
+        let loki = settings.provider == "loki";
+        let encoding = if loki {
+            // Loki speaks its own JSON whatever the protocol says; the setting belongs to OTLP.
+            Encoding::Json
+        } else {
+            match settings.protocol.as_str() {
+                "http/protobuf" | "" => Encoding::Protobuf,
+                "http/json" => Encoding::Json,
+                // The messages are protobuf on the wire; a build without the feature keeps refusing
+                // `grpc` on the `other` arm below, with the same wording.
+                #[cfg(feature = "otlp-grpc")]
+                "grpc" => Encoding::Protobuf,
+                other => {
+                    return Err(format!(
+                        "protocol {other} is not supported by this build; use http/protobuf or http/json"
+                    ));
+                }
             }
         };
         // The reqwest client is inert for `grpc` (the gRPC transport has its own channel), but it
-        // is cheap and unconditional, so both paths keep one constructor.
+        // is cheap and unconditional, so all paths keep one constructor.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(settings.timeout_secs.clamp(1, 120)))
             .user_agent(concat!("colonizer-observability/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
         #[cfg(feature = "otlp-grpc")]
-        let grpc = (settings.protocol == "grpc")
+        let grpc = (!loki && settings.protocol == "grpc")
             .then(|| crate::grpc::GrpcTransport::new(settings, headers.clone()))
             .transpose()?;
         Ok(Transport {
@@ -139,6 +149,7 @@ impl Transport {
             headers,
             encoding,
             gzip: settings.compression != "none",
+            loki,
             #[cfg(feature = "otlp-grpc")]
             grpc,
         })
@@ -153,6 +164,9 @@ impl Transport {
         #[cfg(feature = "otlp-grpc")]
         if let Some(grpc) = &self.grpc {
             return grpc.send(request).await;
+        }
+        if self.loki {
+            return self.post_loki(request).await;
         }
         let url = self.settings.url(request.path());
         let mut body = request.encode(self.encoding);
@@ -182,6 +196,52 @@ impl Transport {
                 };
             }
         };
+        self.answer(&url, request, wire_bytes, response).await
+    }
+
+    /// The Loki push path (#865): logs only, as Loki JSON to `{url}/loki/api/v1/push`. The tenant
+    /// setting rides as `X-Scope-OrgID` unless the operator's own headers already carry one — the
+    /// operator wins. A `Traces` or `Metrics` request is refused rather than retried: the
+    /// mothership refuses a Loki module with those streams on, so this cannot be reached in
+    /// practice, and a refusal ends in a dropped batch, never a loop.
+    async fn post_loki(&self, request: &Request) -> Outcome {
+        let mut body = match crate::loki::push_body(request, self.settings.structured_metadata) {
+            Ok(body) => body,
+            Err(message) => return Outcome::Refused { status: 0, message },
+        };
+        let url = crate::loki::push_url(&self.settings.url);
+        let mut builder = self.client.post(&url).header("content-type", "application/json");
+        if self.gzip {
+            body = gzip(&body);
+            builder = builder.header("content-encoding", "gzip");
+        }
+        for (name, value) in &self.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        if !self
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(crate::loki::TENANT_HEADER))
+            && let Some((name, value)) = crate::loki::tenant_header(&self.settings.tenant_id)
+        {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let wire_bytes = body.len() as u64;
+        let response = match builder.body(body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Outcome::Retry {
+                    message: self.scrub(&format!("{url}: {}", without_url(&e))),
+                    after: None,
+                };
+            }
+        };
+        self.answer(&url, request, wire_bytes, response).await
+    }
+
+    /// Sorts a finished HTTP answer into an [`Outcome`]: a 2xx is a plain ack on the Loki path
+    /// (Loki has no partial success), while OTLP reads the answer's `partialSuccess`.
+    async fn answer(&self, url: &str, request: &Request, wire_bytes: u64, response: reqwest::Response) -> Outcome {
         let status = response.status().as_u16();
         let after = match status {
             429 | 503 => response
@@ -193,10 +253,15 @@ impl Transport {
         };
         let bytes = response.bytes().await.unwrap_or_default();
         if (200..300).contains(&status) {
-            let (rejected, message) = partial_success(request, self.encoding, &bytes);
+            let (rejected, message) = if self.loki {
+                (0, None)
+            } else {
+                let (rejected, message) = partial_success(request, self.encoding, &bytes);
+                (rejected, message.map(|m| self.scrub(&cap(&m))))
+            };
             return Outcome::Sent {
                 rejected,
-                message: message.map(|m| self.scrub(&cap(&m))),
+                message,
                 bytes: wire_bytes,
             };
         }
