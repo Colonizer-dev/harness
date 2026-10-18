@@ -221,7 +221,7 @@ describe("Header observability badge (issue #855)", () => {
 
 describe("NavRail views", () => {
   it("lists the views in order; Colonize and settings have their own buttons", () => {
-    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "chat", "code", "history", "loops", "memory", "host", "secrets"]);
+    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "chat", "code", "history", "queues", "loops", "memory", "host", "secrets"]);
     const html = rail();
     expect(html).toContain('aria-label="colonize"');
     expect(html).toContain('aria-label="settings"');
