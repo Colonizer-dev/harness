@@ -406,7 +406,11 @@ mod tests {
                 "an at-cap line lands whole",
                 [vec![b'x'; MAX_LINE_BYTES], b"\ntail line\n".to_vec()].concat(),
                 Box::new(|name, lines| {
-                    assert!(lines.len() == 2, "{name}: at-cap line + the line after it, got {}", lines.len());
+                    assert!(
+                        lines.len() == 2,
+                        "{name}: at-cap line + the line after it, got {}",
+                        lines.len()
+                    );
                     assert!(
                         lines[0].chars().count() == MAX_LINE_BYTES
                             && lines[0].starts_with("xxxx")
@@ -420,7 +424,11 @@ mod tests {
                 "one byte over the cap is truncated, and the next line survives the skip",
                 [vec![b'x'; MAX_LINE_BYTES + 1], format!("\n{after}\n").into_bytes()].concat(),
                 Box::new(move |name, lines| {
-                    assert!(lines.len() == 2, "{name}: over-cap line + the line after it, got {}", lines.len());
+                    assert!(
+                        lines.len() == 2,
+                        "{name}: over-cap line + the line after it, got {}",
+                        lines.len()
+                    );
                     assert!(
                         lines[0].starts_with("xxxx")
                             && lines[0].ends_with(&marker(MAX_LINE_BYTES + 1))
@@ -434,7 +442,11 @@ mod tests {
                 "EOF mid-oversized-line emits it exactly once",
                 vec![b'x'; MAX_LINE_BYTES + 1000],
                 Box::new(|name, lines| {
-                    assert!(lines.len() == 1, "{name}: the truncated fragment and no phantom after, got {}", lines.len());
+                    assert!(
+                        lines.len() == 1,
+                        "{name}: the truncated fragment and no phantom after, got {}",
+                        lines.len()
+                    );
                     assert!(
                         lines[0].ends_with(&marker(MAX_LINE_BYTES + 1000)),
                         "{name}: the marker names the whole unterminated line"
@@ -451,7 +463,11 @@ mod tests {
                 ]
                 .concat(),
                 Box::new(move |name, lines| {
-                    assert!(lines.len() == 2, "{name}: truncated line + the stashed event, got {}", lines.len());
+                    assert!(
+                        lines.len() == 2,
+                        "{name}: truncated line + the stashed event, got {}",
+                        lines.len()
+                    );
                     assert!(
                         lines[0].ends_with(&marker(MAX_LINE_BYTES + 1 + 3 * CHUNK + 5000)),
                         "{name}: the marker counts the head and every skipped chunk"
@@ -517,23 +533,20 @@ mod tests {
             "a giant line landed whole (or near enough): longest stored line is {longest}"
         );
         // (b) Both giants reached the log truncated, carrying the marker with the line's size.
-        let stderr_event = text
-            .lines()
-            .find(|l| l.contains("\"level\":\"warn\"") && l.contains(&x100));
+        let stderr_event = text.lines().find(|l| l.contains("\"level\":\"warn\"") && l.contains(&x100));
         assert!(
             stderr_event.is_some_and(|l| l.contains("[truncated 2097152 bytes]")),
             "the 2 MiB stderr line must be stored as a warn with its truncation marker"
         );
-        let stdout_event = text
-            .lines()
-            .find(|l| l.contains("non-event line") && l.contains(&x100));
+        let stdout_event = text.lines().find(|l| l.contains("non-event line") && l.contains(&x100));
         assert!(
             stdout_event.is_some_and(|l| l.contains("[truncated ") && l.contains(" bytes]")),
             "the 2 MiB stdout event line must fail to parse and be logged with its marker"
         );
         // (c) The stream stayed aligned on newlines: the lines after the giants arrived whole.
         assert!(
-            text.lines().any(|l| l.contains("stderr after the giant") && !l.contains("truncated")),
+            text.lines()
+                .any(|l| l.contains("stderr after the giant") && !l.contains("truncated")),
             "the stderr line after the giant was lost or mangled by the skip"
         );
         let after = text

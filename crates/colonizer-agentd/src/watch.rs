@@ -919,11 +919,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         eprintln!("{say}");
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "the deep-tree scan crashed the daemon: {say}"
-        );
+        assert_eq!(output.status.code(), Some(0), "the deep-tree scan crashed the daemon: {say}");
     }
 
     /// An event is policed at the deepest checkout root above it, and nowhere when there is none —
