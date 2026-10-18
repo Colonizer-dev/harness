@@ -200,7 +200,7 @@ fn warn_unparseable(entry: &str) {
         return;
     }
     warned.push(entry.to_string());
-    eprintln!("public feed: ignoring ip_allowlist entry \"{entry}\": not an address or CIDR");
+    tracing::warn!( entry = %entry, "public feed: ignoring ip_allowlist entry \"{entry}\": not an address or CIDR" );
 }
 
 /// The per-key request ledger: the timestamps of a key's requests inside the window. In memory
@@ -281,7 +281,9 @@ pub fn load(config_dir: &Path) -> Vec<FeedKey> {
         // A missing file is a first use, not a fault.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "public feed: could not read {} ({e}); refusing every feed key",
                 path.display()
             );
@@ -290,7 +292,9 @@ pub fn load(config_dir: &Path) -> Vec<FeedKey> {
         Ok(bytes) => match serde_json::from_slice::<Vec<FeedKey>>(&bytes) {
             Ok(keys) => keys,
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
                     "public feed: {} does not parse ({e}); refusing every feed key until the file is repaired or removed",
                     path.display()
                 );
@@ -308,7 +312,7 @@ fn save(config_dir: &Path, keys: &[FeedKey]) {
         return; // a fixed-shape list cannot fail to serialize
     };
     if let Err(e) = util::write_private(&path, &bytes) {
-        eprintln!("public feed: could not save {}: {e}", path.display());
+        tracing::error!( path = %path.display(), error = %e, "public feed: could not save {}: {e}", path.display() );
     }
 }
 

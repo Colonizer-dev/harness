@@ -242,7 +242,11 @@ impl App {
             // Recorded here, not by calling session_log again — that would recurse — and outside
             // the guard, as in handle_agent_event. The frame still reaches every open browser
             // below; the console and the app alert keep the gap.
-            eprintln!("sessions: could not append to colony {id}'s harness.jsonl: {e:#}");
+            tracing::error!(
+                id = %id,
+                error = %format!("{e:#}"),
+                "sessions: could not append to colony {id}'s harness.jsonl: {e:#}"
+            );
             self.storage_failed("append to the harness log", &e).await;
         }
         let mut logs = rt.logs.lock().await;

@@ -242,10 +242,10 @@ pub async fn image(State(app): State<Shared>, Query(q): Query<ImgQuery>, headers
     match encode(&meta, &bytes) {
         Ok(file) => {
             if let Err(e) = app.img_cache.store_bytes(&key, &file) {
-                eprintln!("img: could not keep {key}: {e:#}");
+                tracing::warn!( key = %key, error = %format!("{e:#}"), "img: could not keep {key}: {e:#}" );
             }
         }
-        Err(e) => eprintln!("img: {e:#}"),
+        Err(e) => tracing::warn!( error = %format!("{e:#}"), "img: {e:#}" ),
     }
     respond(&meta, bytes, &headers)
 }

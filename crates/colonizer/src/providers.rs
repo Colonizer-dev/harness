@@ -650,7 +650,7 @@ impl App {
             Some(a) if !a.message.starts_with(DUPLICATE_IDS_WARNING) => return,
             _ => {}
         }
-        eprintln!("providers: {message}");
+        tracing::error!("providers: {message}");
         *damage = Some(crate::StorageAlert {
             kind: crate::StorageAlertKind::LoadDamage,
             message,
@@ -683,7 +683,10 @@ impl App {
             match self.save_providers(&providers).await {
                 Ok(()) => println!("providers: {moved} saved as custom now carry their vendor's preset"),
                 Err(e) => {
-                    eprintln!("providers: could not record the vendor presets ({e:#}); they are still inferred on read");
+                    tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "providers: could not record the vendor presets ({e:#}); they are still inferred on read"
+                    );
                     return 0;
                 }
             }

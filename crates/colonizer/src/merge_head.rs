@@ -312,7 +312,7 @@ pub(crate) async fn record_unmerged(app: &App, u: Unmerged) {
     })
     .await
     {
-        eprintln!("merge train: could not record unmerged commits: {e:#}");
+        tracing::error!(error = %format!("{e:#}"), "merge train: could not record unmerged commits: {e:#}");
     }
 }
 

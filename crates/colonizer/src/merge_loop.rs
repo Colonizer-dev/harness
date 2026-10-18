@@ -582,7 +582,9 @@ fn file(dir: &Path) -> PathBuf {
 pub(crate) async fn load(dir: &Path) -> LoopState {
     match tokio::fs::read(file(dir)).await {
         Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-            eprintln!(
+            tracing::warn!(
+                path = %file(dir).display(),
+                error = %e,
                 "merge-train loop: could not parse {}: {e}; the loop reads as off",
                 file(dir).display()
             );
@@ -3064,7 +3066,7 @@ pub(crate) async fn execute(app: &Shared, dry_requested: bool) -> Result<Report,
     })
     .await
     {
-        eprintln!("merge-train loop: could not save its report: {e:#}");
+        tracing::error!(error = %format!("{e:#}"), "merge-train loop: could not save its report: {e:#}");
     }
     record(app, &report, &sessions).await;
     if !report.dry_run {

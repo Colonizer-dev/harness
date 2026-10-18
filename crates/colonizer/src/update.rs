@@ -160,6 +160,7 @@ pub fn blocker(assets: Option<&Path>) -> Option<String> {
 ///
 /// `None` means there was nothing to hand off to (or this *is* the installed binary); `Some` is the
 /// message to print when the hand-off was attempted and `exec` failed.
+#[allow(clippy::disallowed_macros)] // the boot hand-off note: printed in serve() before the tracing log exists, and a successful exec never returns
 pub fn hand_off(assets: Option<&Path>) -> Option<String> {
     if assets.is_some() {
         return None;

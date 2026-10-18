@@ -144,12 +144,10 @@ fn queue_file(config_dir: &FsPath) -> PathBuf {
 /// The switch; a missing file is off, and an unparsable one is logged and read as off — a broken
 /// channel file must not stop the notifications that still go out.
 fn load(config_dir: &FsPath) -> Saved {
-    match std::fs::read(state_file(config_dir)) {
+    let path = state_file(config_dir);
+    match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            eprintln!(
-                "cratefield-push: {} could not be parsed ({e}); the channel reads as off",
-                state_file(config_dir).display()
-            );
+            tracing::warn!( path = %path.display(), error = %e, "cratefield-push: {} could not be parsed ({e}); the channel reads as off", path.display() );
             Saved::default()
         }),
         Err(_) => Saved::default(),
@@ -185,12 +183,10 @@ fn save(config_dir: &FsPath, saved: &Saved) -> Result<()> {
 /// The queue; a missing file is an empty one, and an unparsable one is logged and reset rather
 /// than wedging every later save.
 fn load_queue(config_dir: &FsPath) -> Queue {
-    match std::fs::read(queue_file(config_dir)) {
+    let path = queue_file(config_dir);
+    match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            eprintln!(
-                "cratefield-push: {} could not be parsed ({e}); the queue reads as empty",
-                queue_file(config_dir).display()
-            );
+            tracing::warn!( path = %path.display(), error = %e, "cratefield-push: {} could not be parsed ({e}); the queue reads as empty", path.display() );
             Queue::default()
         }),
         Err(_) => Queue::default(),

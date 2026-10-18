@@ -465,7 +465,9 @@ pub fn load_saved(path: &Path) -> Option<Loop> {
         Ok(l) if l.id == LOOP_ID => Some(l),
         Ok(_) => None,
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "disk cleanup: could not parse {}: {e}; starting from the defaults",
                 path.display()
             );
@@ -1216,7 +1218,7 @@ async fn record(app: &Shared, report: &RunReport, now: DateTime<Utc>) {
         entry.section = Some("loops".into());
         entry.detail = Some(attention.clone());
         crate::activity::record(app, entry).await;
-        eprintln!("disk cleanup: {attention}");
+        tracing::warn!("disk cleanup: {attention}");
     }
 }
 

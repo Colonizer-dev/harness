@@ -2,6 +2,8 @@
 //! to, the record id formula, and the privacy rules (redaction again, content never read).
 //! Regenerate the goldens with `UPDATE_GOLDEN=1 cargo test -p colonizer-observability ledger_`.
 
+#![allow(clippy::disallowed_macros)] // tests may print to stderr
+
 use super::*;
 use crate::batch::{BatchConfig, Batcher};
 use crate::encode::{Encoding, to_json, to_json_value};

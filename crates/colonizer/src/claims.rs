@@ -587,7 +587,11 @@ pub async fn reconcile_orphaned_claims(app: Shared) {
         {
             Ok(out) => out,
             Err(e) => {
-                eprintln!("claims: could not list claimed issues on {repo} to reconcile: {e:#}");
+                tracing::warn!(
+                    repo = %repo,
+                    error = %format!("{e:#}"),
+                    "claims: could not list claimed issues on {repo} to reconcile: {e:#}"
+                );
                 continue;
             }
         };
@@ -600,7 +604,7 @@ pub async fn reconcile_orphaned_claims(app: Shared) {
             )
             .await
             else {
-                eprintln!("claims: could not read the claim on {repo}#{issue} to reconcile it");
+                tracing::warn!(repo = %repo, issue = issue, "claims: could not read the claim on {repo}#{issue} to reconcile it");
                 continue;
             };
             let bodies = comment_bodies(&serde_json::from_str(&out).unwrap_or(Value::Null));
@@ -621,7 +625,10 @@ pub async fn reconcile_orphaned_claims(app: Shared) {
             if held_again {
                 continue;
             }
-            eprintln!(
+            tracing::info!(
+                repo = %orphan.repo,
+                issue = orphan.issue,
+                colony = %orphan.colony,
                 "claims: releasing the orphaned claim on {}#{}, colony {} no longer holds it",
                 orphan.repo, orphan.issue, orphan.colony
             );

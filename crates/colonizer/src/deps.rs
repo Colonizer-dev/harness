@@ -1425,7 +1425,7 @@ async fn get_json(app: &Shared, client: &reqwest::Client, url: &str, accept: Opt
     if let Some(entry) = keep
         && let Err(e) = app.http_cache.store(&entry)
     {
-        eprintln!("{url}: could not keep the response: {e:#}");
+        tracing::warn!(url = %url, error = %format!("{e:#}"), "{url}: could not keep the response: {e:#}");
     }
     Ok(Some(serde_json::from_str(&body)?))
 }

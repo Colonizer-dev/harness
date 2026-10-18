@@ -547,7 +547,7 @@ pub fn idle_publish_ready(
 fn table(app: &Shared) -> Vec<Entry> {
     let (entries, warning) = load(&app.cfg.config_dir);
     if let Some(warning) = warning {
-        eprintln!("playbook: ignoring {warning}; using the compiled-in table");
+        tracing::warn!("playbook: ignoring {warning}; using the compiled-in table");
     }
     entries
 }

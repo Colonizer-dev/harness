@@ -1,5 +1,7 @@
 //! Runs the real colonizer-agentd binary against a fake agent runner (python3).
 
+#![allow(clippy::disallowed_macros)] // integration tests may print to stderr
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{

@@ -3,6 +3,8 @@
 //!
 //! Regenerate the goldens with `UPDATE_GOLDEN=1 cargo test -p colonizer-observability traces::`.
 
+#![allow(clippy::disallowed_macros)] // tests may print to stderr
+
 use super::*;
 use crate::batch::{BatchConfig, Batcher, Record};
 use crate::encode::{Encoding, Request, to_json_value};

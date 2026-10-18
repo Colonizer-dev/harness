@@ -433,7 +433,11 @@ async fn release_pr_open(app: &App, repo: &str) -> bool {
             })
             .unwrap_or(true),
         Err(e) => {
-            eprintln!("merge steward: could not look for an open release pull request in {repo}: {e:#}");
+            tracing::warn!(
+                repo = %repo,
+                error = %format!("{e:#}"),
+                "merge steward: could not look for an open release pull request in {repo}: {e:#}"
+            );
             true
         }
     }
@@ -629,7 +633,12 @@ fn file(dir: &Path) -> PathBuf {
 pub(crate) async fn load(dir: &Path) -> Memory {
     match tokio::fs::read(file(dir)).await {
         Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-            eprintln!("merge steward: could not parse {}: {e}; starting empty", file(dir).display());
+            tracing::warn!(
+                path = %file(dir).display(),
+                error = %e,
+                "merge steward: could not parse {}: {e}; starting empty",
+                file(dir).display()
+            );
             Memory::default()
         }),
         Err(_) => Memory::default(),
@@ -852,7 +861,12 @@ async fn post_comment(app: &App, repo: &str, number: u64, body: &str) -> Result<
 /// Posts the local-verification report; a refusal to comment is a log line, never a failed merge.
 async fn post_quietly(app: &App, repo: &str, number: u64, body: &str) {
     if let Err(e) = post_comment(app, repo, number, body).await {
-        eprintln!("merge steward: could not post the local-verification report on {repo}#{number}: {e:#}");
+        tracing::warn!(
+            repo = %repo,
+            number = number,
+            error = %format!("{e:#}"),
+            "merge steward: could not post the local-verification report on {repo}#{number}: {e:#}"
+        );
     }
 }
 
@@ -867,7 +881,7 @@ async fn save_local_verify(dir: &Path, url: &str, v: LocalVerify) {
     })
     .await;
     if let Err(e) = wrote {
-        eprintln!("merge steward: could not save a local verification: {e:#}");
+        tracing::error!(error = %format!("{e:#}"), "merge steward: could not save a local verification: {e:#}");
     }
 }
 
@@ -1160,7 +1174,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
     let facts = match read_prs(app, &urls).await {
         Ok(facts) => facts,
         Err(e) => {
-            eprintln!("merge steward: could not read {org}'s pull requests: {e:#}");
+            tracing::warn!(org = %org, error = %format!("{e:#}"), "merge steward: could not read {org}'s pull requests: {e:#}");
             return;
         }
     };
@@ -1228,7 +1242,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
                     action = decide(f, &ctx);
                 }
                 Err(e) => {
-                    eprintln!("merge steward: update-branch on {url} failed: {e:#}");
+                    tracing::warn!(url = %url, error = %format!("{e:#}"), "merge steward: update-branch on {url} failed: {e:#}");
                     results.push((
                         url.clone(),
                         pr_memory(
@@ -1425,7 +1439,7 @@ async fn steward_org(app: &Shared, org: &str, settings: &orgs::OrgSettings, cand
             crate::notify::announce_line(app, "ci_blocked", "merge-steward:ci".to_string(), &line).await;
         }
         Ok(false) => {}
-        Err(e) => eprintln!("merge steward: could not save its memory: {e:#}"),
+        Err(e) => tracing::error!(error = %format!("{e:#}"), "merge steward: could not save its memory: {e:#}"),
     }
 }
 
@@ -1623,7 +1637,7 @@ fn start_tasks(app: &Shared) {
             if let Err(e) = tokio::spawn(async move { tick_once(&worker).await }).await
                 && e.is_panic()
             {
-                eprintln!("merge steward: a cycle panicked and was skipped: {e}");
+                tracing::warn!(error = %e, "merge steward: a cycle panicked and was skipped: {e}");
             }
         }
     });

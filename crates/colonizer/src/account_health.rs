@@ -135,7 +135,10 @@ pub async fn record_failure(app: &App, account: &str, status: u16) -> bool {
         }
     };
     if changed {
-        eprintln!(
+        tracing::warn!(
+            account = %account,
+            status = %status,
+            state = %State::NeedsSignIn.phrase(),
             "claude account `{account}` {} ({status} auth); colonies routed to it will wait",
             State::NeedsSignIn.phrase()
         );
@@ -148,7 +151,7 @@ pub async fn record_failure(app: &App, account: &str, status: u16) -> bool {
 pub async fn record_ok(app: &App, account: &str) -> bool {
     let cleared = app.account_health.0.lock().await.remove(account).is_some();
     if cleared {
-        eprintln!("claude account `{account}` works again; its colonies are resuming");
+        tracing::info!(account = %account, "claude account `{account}` works again; its colonies are resuming");
     }
     cleared
 }

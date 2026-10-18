@@ -323,7 +323,9 @@ impl Supervisor {
             // Running: keep the colony list current; the add-on re-reads it.
             if self.policy.as_ref() != Some(&contract["policy"]) {
                 if let Err(e) = write_contract(&contract_path(&data_dir), &contract).await {
-                    eprintln!(
+                    tracing::warn!(
+                        path = %contract_path(&data_dir).display(),
+                        error = %format!("{e:#}"),
                         "observability: could not refresh {}: {e:#}",
                         contract_path(&data_dir).display()
                     );
@@ -426,7 +428,7 @@ async fn spawn(binary: &Path, data_dir: &Path, headers: &str) -> Result<Child, S
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 // The add-on never prints a header value; redact anyway, as every log line is.
-                eprintln!("{}", crate::redact::redact_text(&line));
+                tracing::debug!("{}", crate::redact::redact_text(&line));
             }
         });
     }
@@ -653,7 +655,7 @@ async fn spawn_backfill(binary: &Path, contract: &Path, headers: &str, body: &Ba
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 // The add-on never prints a header value; redact anyway, as every log line is.
-                eprintln!("{}", crate::redact::redact_text(&line));
+                tracing::debug!("{}", crate::redact::redact_text(&line));
             }
         });
     }

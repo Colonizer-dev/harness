@@ -1588,7 +1588,12 @@ impl Store {
         let state = match std::fs::read(&file) {
             Err(_) => LoopState::default(),
             Ok(data) => serde_json::from_slice(&data).unwrap_or_else(|e| {
-                eprintln!("ts-any loop: could not parse {}: {e}; starting switched off", file.display());
+                tracing::warn!(
+                    path = %file.display(),
+                    error = %e,
+                    "ts-any loop: could not parse {}: {e}; starting switched off",
+                    file.display()
+                );
                 LoopState::default()
             }),
         };
@@ -2031,12 +2036,20 @@ async fn post_checks<H: Host>(
                     Some("the branch is gone after the merge; the default branch was counted".to_string()),
                 ),
                 Err(e) => {
-                    eprintln!("ts-any loop: could not read {} for the post-check: {e:#}", rec.repo);
+                    tracing::warn!(
+                        repo = %rec.repo,
+                        error = %format!("{e:#}"),
+                        "ts-any loop: could not read {} for the post-check: {e:#}",
+                        rec.repo
+                    );
                     continue;
                 }
             },
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
+                    repo = %rec.repo,
+                    branch = %s.branch,
+                    error = %format!("{e:#}"),
                     "ts-any loop: could not read {}@{} for the post-check: {e:#}",
                     rec.repo, s.branch
                 );
@@ -2267,7 +2280,12 @@ pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger
         st.last_report = Some(report.clone());
     }
     if let Err(e) = app.ts_any.save().await {
-        eprintln!("ts-any loop: could not save {}: {e:#}", app.ts_any.file.display());
+        tracing::error!(
+            path = %app.ts_any.file.display(),
+            error = %format!("{e:#}"),
+            "ts-any loop: could not save {}: {e:#}",
+            app.ts_any.file.display()
+        );
     }
     let mut entry = Entry::new("loop.ts_any", "colony");
     entry.target = Some(NAME.to_string());
@@ -2280,7 +2298,7 @@ pub async fn run_once<H: Host>(app: &Shared, host: &H, req: &RunRequest, trigger
     crate::activity::record(app, entry).await;
     crate::loop_history::record(app, crate::loop_history::from_ts_any(&report)).await;
     for item in &report.attention {
-        eprintln!("ts-any loop: attention: {}", item.reason);
+        tracing::warn!(reason = %item.reason, "ts-any loop: attention: {}", item.reason);
     }
     report
 }
