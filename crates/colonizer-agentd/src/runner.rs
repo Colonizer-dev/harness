@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{ChildStdin, Command},
     sync::{mpsc, oneshot, watch},
 };
@@ -28,6 +28,15 @@ fn spawn_failure_detail(program: &str, err: &std::io::Error) -> String {
 }
 
 const MAX_INVALID_LINE: usize = 500;
+
+/// The longest runner line read whole, in bytes. Runner output is untrusted in size, so
+/// `for_each_line` never buffers a line past this — the bound colonizer-observability puts on a
+/// line (cursor.rs `Limits::max_line_bytes`), taken at the mothership's own cap on a colony log
+/// line (`history::MAX_LINE_BYTES`), which a 2 MiB runner line must also fall under.
+const MAX_LINE_BYTES: usize = 256 * 1024;
+
+/// How much of a runner stream `for_each_line` reads at once (cursor.rs `CHUNK`).
+const CHUNK: usize = 64 * 1024;
 
 pub struct Runner {
     commands: mpsc::UnboundedSender<String>,
@@ -167,8 +176,11 @@ impl Runner {
         });
         let stderr_task = tokio::spawn({
             let store = store.clone();
+            // stderr is runner diagnostics, not payload: it goes through the same bounded
+            // excerpt as a non-event stdout line, so no path off the runner's pipes stores an
+            // unbounded line.
             for_each_line(stderr, move |line| {
-                store.append(log_event("warn", line));
+                store.append(log_event("warn", truncate(line, MAX_INVALID_LINE)));
             })
         });
 
@@ -234,22 +246,85 @@ async fn feed_stdin(mut stdin: ChildStdin, mut commands: mpsc::UnboundedReceiver
 }
 
 /// Calls `f` for every non-empty line; invalid UTF-8 is replaced rather than ending the stream.
+///
+/// A line that runs past [`MAX_LINE_BYTES`] is never buffered whole, the way cursor.rs never
+/// holds a line past its cap: its remainder is consumed in bounded chunks — counting the whole
+/// line's bytes, and keeping whatever followed its newline so the stream stays aligned — and `f`
+/// receives the line's head already truncated to [`MAX_INVALID_LINE`] chars with a marker naming
+/// its full size. Every path that stores runner output (an event line, a non-event log, a stderr
+/// log) then lands the same bounded text. A JSON event cut this way simply fails to parse and is
+/// handled as a non-event line — acceptable for a pathological line, and the only cost of the cap.
 async fn for_each_line(reader: impl AsyncRead + Unpin, mut f: impl FnMut(&str)) {
-    let mut reader = BufReader::new(reader);
-    let mut buf = Vec::new();
+    let mut reader = reader;
+    let mut chunk = vec![0u8; CHUNK];
+    let mut buf: Vec<u8> = Vec::new(); // the line in hand, never past MAX_LINE_BYTES + 1
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let line = String::from_utf8_lossy(&buf);
-                let line = line.trim();
-                if !line.is_empty() {
-                    f(line);
+        if let Some(i) = buf.iter().position(|&b| b == b'\n') {
+            let mut line: Vec<u8> = buf.drain(..=i).collect();
+            line.pop(); // the newline itself
+            emit(&line, &mut f);
+            continue;
+        }
+        // No newline in hand and the line is over the cap: consume its remainder a chunk at a
+        // time — never holding it — so the next line still starts exactly after its newline.
+        if buf.len() > MAX_LINE_BYTES {
+            let mut total = buf.len() as u64; // the whole line's byte count, head included
+            let head = String::from_utf8_lossy(&buf).into_owned();
+            buf.clear();
+            let mut ended = false; // EOF or a read error: this fragment is the stream's last line
+            loop {
+                match reader.read(&mut chunk).await {
+                    Ok(0) | Err(_) => {
+                        ended = true;
+                        break;
+                    }
+                    Ok(n) => match chunk[..n].iter().position(|&b| b == b'\n') {
+                        Some(i) => {
+                            total += i as u64;
+                            buf.extend_from_slice(&chunk[i + 1..n]); // the next line's start
+                            break;
+                        }
+                        None => total += n as u64,
+                    },
                 }
             }
+            f(&truncated_line(&head, total));
+            if ended {
+                break;
+            }
+            continue;
+        }
+        // Read more of the line in hand, bounded so `buf` can only just cross the cap: the
+        // check above needs the byte past it to tell an over-cap line from an at-cap one.
+        let want = CHUNK.min(MAX_LINE_BYTES + 1 - buf.len());
+        match reader.read(&mut chunk[..want]).await {
+            Ok(0) => {
+                emit(&buf, &mut f); // a trailing fragment is the stream's last line
+                break;
+            }
+            Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
     }
+}
+
+/// Hands one line to `f`: invalid UTF-8 is replaced, a whitespace-only line is skipped.
+fn emit(line: &[u8], f: &mut impl FnMut(&str)) {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim();
+    if !line.is_empty() {
+        f(line);
+    }
+}
+
+/// The stored form of a line that ran past [`MAX_LINE_BYTES`]: its head, cut to leave the whole
+/// string within [`MAX_INVALID_LINE`] chars, plus a marker naming how many bytes the full line
+/// ran (cursor.rs marks the same event `GapReason::OversizedLine`). Kept within the cap so the
+/// 500-char excerpt the callers apply leaves the marker intact.
+fn truncated_line(head: &str, total_bytes: u64) -> String {
+    let marker = format!("… [truncated {total_bytes} bytes]");
+    let keep = MAX_INVALID_LINE - marker.chars().count();
+    head.chars().take(keep).collect::<String>() + &marker
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -292,5 +367,182 @@ mod tests {
             detail.contains("No such file or directory"),
             "the cause must survive: {detail}"
         );
+    }
+
+    /// `for_each_line`'s boundary arithmetic, driven directly over byte slices (it takes any
+    /// `AsyncRead`, and a slice read returns exactly what is asked, so the chunking is
+    /// deterministic): the cap is inclusive — a line of exactly `MAX_LINE_BYTES` lands whole,
+    /// one byte more is truncated with its whole size in the marker — the skip keeps the stream
+    /// aligned when the oversized line's newline shares a chunk with the start of the next line,
+    /// and an oversized line cut short by EOF is emitted exactly once. `huge_runner_lines_are_
+    /// capped` proves the cap end-to-end through a real runner at 2 MiB; this pins the
+    /// off-by-ones (`>` vs `>=`) and the same-chunk stash that a 2 MiB line cannot see.
+    #[tokio::test]
+    async fn for_each_line_pins_the_cap_boundary_and_chunk_alignment() {
+        async fn run(input: &[u8]) -> Vec<String> {
+            let mut lines = Vec::new();
+            for_each_line(input, |line| lines.push(line.to_string())).await;
+            lines
+        }
+
+        /// The stdout closure's own test, so "still an event" means what `launch` means.
+        fn is_event(line: &str) -> bool {
+            matches!(
+                serde_json::from_str::<Value>(line),
+                Ok(Value::Object(event)) if event.get("type").is_some_and(Value::is_string)
+            )
+        }
+
+        fn marker(total: usize) -> String {
+            format!("[truncated {total} bytes]")
+        }
+
+        let after = r#"{"type":"log","message":"after the giant"}"#;
+        // One case: its name, the bytes fed to `for_each_line`, and the assertions on the
+        // lines `f` saw (named, so a failure says which case).
+        type Case = (&'static str, Vec<u8>, Box<dyn Fn(&str, &[String])>);
+        let cases: Vec<Case> = vec![
+            (
+                "an at-cap line lands whole",
+                [vec![b'x'; MAX_LINE_BYTES], b"\ntail line\n".to_vec()].concat(),
+                Box::new(|name, lines| {
+                    assert!(lines.len() == 2, "{name}: at-cap line + the line after it, got {}", lines.len());
+                    assert!(
+                        lines[0].chars().count() == MAX_LINE_BYTES
+                            && lines[0].starts_with("xxxx")
+                            && !lines[0].contains("truncated"),
+                        "{name}: a line of exactly MAX_LINE_BYTES is not oversized"
+                    );
+                    assert_eq!(lines[1], "tail line", "{name}");
+                }),
+            ),
+            (
+                "one byte over the cap is truncated, and the next line survives the skip",
+                [vec![b'x'; MAX_LINE_BYTES + 1], format!("\n{after}\n").into_bytes()].concat(),
+                Box::new(move |name, lines| {
+                    assert!(lines.len() == 2, "{name}: over-cap line + the line after it, got {}", lines.len());
+                    assert!(
+                        lines[0].starts_with("xxxx")
+                            && lines[0].ends_with(&marker(MAX_LINE_BYTES + 1))
+                            && lines[0].chars().count() <= MAX_INVALID_LINE,
+                        "{name}: the over-cap line is a bounded excerpt carrying its whole size"
+                    );
+                    assert_eq!(lines[1], after, "{name}: the line after the skip must arrive intact");
+                }),
+            ),
+            (
+                "EOF mid-oversized-line emits it exactly once",
+                vec![b'x'; MAX_LINE_BYTES + 1000],
+                Box::new(|name, lines| {
+                    assert!(lines.len() == 1, "{name}: the truncated fragment and no phantom after, got {}", lines.len());
+                    assert!(
+                        lines[0].ends_with(&marker(MAX_LINE_BYTES + 1000)),
+                        "{name}: the marker names the whole unterminated line"
+                    );
+                }),
+            ),
+            (
+                "a newline shared with the next event's start in one chunk keeps it an event",
+                // The overhang forces the skip through three full chunks; the fourth holds the
+                // line's last bytes, its newline, and the next line's start — one read.
+                [
+                    vec![b'x'; MAX_LINE_BYTES + 1 + 3 * CHUNK + 5000],
+                    format!("\n{after}\n").into_bytes(),
+                ]
+                .concat(),
+                Box::new(move |name, lines| {
+                    assert!(lines.len() == 2, "{name}: truncated line + the stashed event, got {}", lines.len());
+                    assert!(
+                        lines[0].ends_with(&marker(MAX_LINE_BYTES + 1 + 3 * CHUNK + 5000)),
+                        "{name}: the marker counts the head and every skipped chunk"
+                    );
+                    assert_eq!(lines[1], after, "{name}");
+                    assert!(is_event(&lines[1]), "{name}: the stashed line still parses as an event");
+                }),
+            ),
+        ];
+        for (name, input, check) in cases {
+            check(name, &run(&input).await);
+        }
+    }
+
+    /// Runner output is untrusted in size, so a giant line must be capped on every path off the
+    /// runner's pipes: never buffered whole (`for_each_line` reads in chunks and skips past a
+    /// line over `MAX_LINE_BYTES`, like cursor.rs), and stored as a bounded excerpt with a
+    /// truncation marker naming the line's full size — stderr warn logs through the same
+    /// 500-char path as non-event stdout, and a giant "event" fails to parse and takes the
+    /// non-event path. A 2 MiB stderr line and a 2 MiB event line must not land whole in
+    /// events.jsonl (nor on the /v1/events websockets it feeds), and the stream must stay
+    /// aligned: the normal lines after each giant still arrive intact, the one after the stdout
+    /// giant still recognised as an event.
+    #[tokio::test]
+    async fn huge_runner_lines_are_capped() {
+        let dir = std::env::temp_dir().join(format!("colonizer-agentd-lines-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::store::EventStore::open(&dir).unwrap());
+        let x100 = "x".repeat(100);
+        let config: SessionConfig = serde_json::from_value(serde_json::json!({
+            "agent": {
+                "command": [
+                    "sh", "-c",
+                    "big=$(dd if=/dev/zero bs=1024 count=2048 2>/dev/null | tr '\\000' x); \
+                     printf '%s\\n' \"$big\" >&2; \
+                     printf 'stderr after the giant\\n' >&2; \
+                     printf '{\"type\":\"log\",\"level\":\"info\",\"message\":\"%s\"}\\n' \"$big\"; \
+                     printf '{\"type\":\"log\",\"level\":\"info\",\"message\":\"stdout after the giant\"}\\n'"
+                ]
+            },
+            "workspace": dir.display().to_string(),
+        }))
+        .unwrap();
+        let runner = create();
+        runner.launch(&config, store.clone());
+        // Wait for the supervisor's "exited" status event, then measure what landed.
+        let events_path = dir.join("events.jsonl");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let text = std::fs::read_to_string(&events_path).unwrap_or_default();
+            if text.contains("\"state\":\"exited\"") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "runner never exited:\n{text}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let text = std::fs::read_to_string(&events_path).unwrap();
+        // (a) Nothing near the giants' 2 MiB landed: every stored line is a bounded excerpt.
+        let longest = text.lines().map(str::len).max().unwrap_or(0);
+        assert!(
+            longest < 4096,
+            "a giant line landed whole (or near enough): longest stored line is {longest}"
+        );
+        // (b) Both giants reached the log truncated, carrying the marker with the line's size.
+        let stderr_event = text
+            .lines()
+            .find(|l| l.contains("\"level\":\"warn\"") && l.contains(&x100));
+        assert!(
+            stderr_event.is_some_and(|l| l.contains("[truncated 2097152 bytes]")),
+            "the 2 MiB stderr line must be stored as a warn with its truncation marker"
+        );
+        let stdout_event = text
+            .lines()
+            .find(|l| l.contains("non-event line") && l.contains(&x100));
+        assert!(
+            stdout_event.is_some_and(|l| l.contains("[truncated ") && l.contains(" bytes]")),
+            "the 2 MiB stdout event line must fail to parse and be logged with its marker"
+        );
+        // (c) The stream stayed aligned on newlines: the lines after the giants arrived whole.
+        assert!(
+            text.lines().any(|l| l.contains("stderr after the giant") && !l.contains("truncated")),
+            "the stderr line after the giant was lost or mangled by the skip"
+        );
+        let after = text
+            .lines()
+            .find(|l| l.contains("\"type\":\"log\"") && l.contains("stdout after the giant"));
+        assert!(
+            after.is_some_and(|l| !l.contains("non-event")),
+            "the event after the giant must still parse as an event, not a non-event line"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

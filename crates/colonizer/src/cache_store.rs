@@ -218,13 +218,14 @@ pub struct HttpResponse {
 /// response is read: the helpers never combine `-i` with `--paginate`.
 pub fn parse_gh_include(out: &str) -> Option<HttpResponse> {
     let mut lines = out.split_inclusive('\n');
-    let status_line = lines.next()?.trim_end();
+    let raw_status = lines.next()?; // terminator included, so a CRLF's `\r` is consumed too
+    let status_line = raw_status.trim_end();
     let mut parts = status_line.split_whitespace();
     if !parts.next()?.starts_with("HTTP/") {
         return None;
     }
     let status: u16 = parts.next()?.parse().ok()?;
-    let mut consumed = status_line.len() + 1;
+    let mut consumed = raw_status.len();
     let (mut etag, mut last_modified) = (None, None);
     for line in lines {
         consumed += line.len();
@@ -375,6 +376,17 @@ mod tests {
         assert_eq!(not_modified.body, "");
         assert_eq!(parse_gh_include("gh: HTTP 304\n"), None);
         assert_eq!(parse_gh_include(""), None);
+    }
+
+    #[test]
+    fn a_crlf_status_line_parses_the_body_without_a_leading_blank_line() {
+        // Go's HTTP serializer ends every head line with `\r\n`, and the consumed count comes from
+        // the raw status chunk: counting the trimmed line instead left its `\r` unconsumed, so the
+        // body started one byte early, on the head's blank line.
+        let crlf = "HTTP/2.0 200 OK\r\nEtag: \"abc\"\r\n\r\n{\"a\":1}";
+        let res = parse_gh_include(crlf).unwrap();
+        assert_eq!(res.status, 200);
+        assert_eq!(res.body, "{\"a\":1}", "no leading blank line leaks into the body");
     }
 
     #[test]
