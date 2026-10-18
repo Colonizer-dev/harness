@@ -218,6 +218,14 @@ pub struct OrgSettings {
     /// never treated as green.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_locally_when_ci_blocked: Option<bool>,
+    /// The host-side open-code-review pass (issue #1274, `open_code_review.rs`): `shadow` records
+    /// the findings and changes nothing. `None` — the default — and `off` are the same: no review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_code_review: Option<crate::open_code_review::Mode>,
+    /// The model a review of this org's colonies runs on, a `provider/model` string. `None` — the
+    /// default — follows the install's cheap route (issue #1274).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_code_review_model: Option<String>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -731,6 +739,21 @@ pub fn verifies_locally_when_ci_blocked(org: &OrgSettings) -> bool {
     org.verify_locally_when_ci_blocked.unwrap_or(false)
 }
 
+/// The org's open-code-review mode (issue #1274): off unless the operator opted in.
+pub fn open_code_review_mode(org: &OrgSettings) -> crate::open_code_review::Mode {
+    org.open_code_review.unwrap_or_default()
+}
+
+/// The org's own model for open-code-review (issue #1274), a `provider/model`; `None` follows the
+/// install's cheap route. A blank string is no model at all, like a blank exec policy.
+pub fn open_code_review_model(org: &OrgSettings) -> Option<String> {
+    org.open_code_review_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(String::from)
+}
+
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
 /// unlike cpus or memory there is no dollar figure the harness can pick for someone else's deployment,
 /// and a default that silently stopped running colonies on upgrade would be a surprise.
@@ -957,6 +980,13 @@ pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
     }
     if settings.max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("parallel limit must be between 1 and 32".into());
+    }
+    // The review model is a `provider/model` string handed to a subprocess, so it gets the same
+    // shape check the agent models have; blank is inherit and needs no check (issue #1274).
+    if let Some(model) = open_code_review_model(settings).as_deref()
+        && (model.len() > 120 || model.contains(char::is_whitespace))
+    {
+        return Err("open_code_review_model can't contain spaces or exceed 120 characters".into());
     }
     if settings.repo_max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("per-repository parallel limit must be between 1 and 32".into());
@@ -1207,6 +1237,12 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("verify_locally_when_ci_blocked") {
         incoming.verify_locally_when_ci_blocked = saved.verify_locally_when_ci_blocked;
+    }
+    if !named("open_code_review") {
+        incoming.open_code_review = saved.open_code_review;
+    }
+    if !named("open_code_review_model") {
+        incoming.open_code_review_model = saved.open_code_review_model.clone();
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -1798,6 +1834,34 @@ mod tests {
         let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
         keep_unnamed_fields(&mut cleared, &set, Some(&clears));
         assert_eq!(cleared.auto_merge, None);
+    }
+
+    #[test]
+    fn open_code_review_is_off_by_default_and_survives_an_older_builds_save() {
+        let org = OrgSettings::default();
+        assert_eq!(open_code_review_mode(&org), crate::open_code_review::Mode::Off);
+        assert_eq!(open_code_review_model(&org), None);
+        let set: OrgSettings =
+            serde_json::from_value(json!({"open_code_review": "shadow", "open_code_review_model": "ds/r"})).unwrap();
+        assert_eq!(open_code_review_mode(&set), crate::open_code_review::Mode::Shadow);
+        assert_eq!(open_code_review_model(&set).as_deref(), Some("ds/r"));
+        assert_eq!(serde_json::to_value(&set).unwrap()["open_code_review"], "shadow");
+        assert!(serde_json::to_value(&org).unwrap().get("open_code_review").is_none());
+        assert!(serde_json::from_value::<OrgSettings>(json!({"open_code_review": "on"})).is_err());
+        assert!(validate(&set).is_ok());
+        // A save from a web build that predates the settings keeps them; a named null clears them.
+        let mut incoming = OrgSettings::default();
+        keep_unnamed_fields(&mut incoming, &set, Some(&json!({})));
+        assert_eq!(incoming.open_code_review, Some(crate::open_code_review::Mode::Shadow));
+        assert_eq!(incoming.open_code_review_model.as_deref(), Some("ds/r"));
+        let clears = json!({"open_code_review": null, "open_code_review_model": null});
+        let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared, &set, Some(&clears));
+        assert_eq!(cleared.open_code_review, None);
+        assert_eq!(cleared.open_code_review_model, None);
+        // A model with spaces is refused at save time; blank is inherit.
+        let bad: OrgSettings = serde_json::from_value(json!({"open_code_review_model": "a b"})).unwrap();
+        assert!(validate(&bad).is_err());
     }
 
     #[test]

@@ -451,6 +451,19 @@ pub(crate) fn start_tasks(app: &Shared) {
     });
 }
 
+/// A Loki base URL completed with the push path, as the status page's `endpoint` shows it — the
+/// same completion the add-on's `loki::push_url` applies (a URL that already ends with the path,
+/// as Grafana Cloud hands them out, is kept as it is). The mothership links no add-on code, so the
+/// few lines live here.
+fn loki_push_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/loki/api/v1/push") {
+        base.to_string()
+    } else {
+        format!("{base}/loki/api/v1/push")
+    }
+}
+
 /// `GET /api/observability/status`: whether export is on, why not, where each setting came from,
 /// the header *names*, the add-on's own health, and any backfill's progress. Never a header value.
 async fn status(State(app): State<Shared>) -> ApiResult<Value> {
@@ -481,8 +494,15 @@ async fn status(State(app): State<Shared>) -> ApiResult<Value> {
     match resolve(&app).await {
         Resolved::On(e) => {
             out["configured"] = json!(true);
-            out["endpoint"] = json!(e.str("endpoint"));
-            out["protocol"] = json!(e.str("protocol"));
+            // A Loki module has no `endpoint`/`protocol` (its destination rides in `url`, pushed
+            // as Loki JSON whatever the OTLP protocol says): show where the logs actually go.
+            let loki = e.str("provider") == super::settings::LOKI;
+            out["endpoint"] = json!(if loki {
+                loki_push_url(e.str("url"))
+            } else {
+                e.str("endpoint").to_owned()
+            });
+            out["protocol"] = json!(if loki { "loki" } else { e.str("protocol") });
             out["service_name"] = json!(e.str("service_name"));
             out["provenance"] = json!(e.provenance);
             out["headers"] = json!({
@@ -810,6 +830,28 @@ mod tests {
         let contract = contract(&app, &Map::new()).await;
         assert!(!contract.to_string().contains(&secret), "headers never go in the contract");
         assert_eq!(contract["contract"], json!(CONTRACT));
+    }
+
+    #[tokio::test]
+    async fn a_loki_module_shows_its_push_url_as_the_endpoint() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        let module = |url: &str| crate::config::ModuleChoice {
+            provider: "loki".into(),
+            enabled: true,
+            // A Loki module is saved with logs only; the defaults for the other two are on.
+            settings: serde_json::from_value(json!({"url": url, "stream_traces": false, "stream_metrics": false})).unwrap(),
+        };
+        app.modules.write().await.observability = Some(module("http://127.0.0.1:3100"));
+        let Json(shown) = status(State(app.clone())).await.unwrap();
+        assert_eq!(shown["configured"], json!(true));
+        assert_eq!(shown["endpoint"], json!("http://127.0.0.1:3100/loki/api/v1/push"));
+        assert_eq!(shown["protocol"], json!("loki"));
+
+        // Grafana Cloud hands out full push URLs; one is shown as it is.
+        app.modules.write().await.observability = Some(module("https://logs.example.com/loki/api/v1/push"));
+        let Json(full) = status(State(app.clone())).await.unwrap();
+        assert_eq!(full["endpoint"], json!("https://logs.example.com/loki/api/v1/push"));
     }
 
     #[tokio::test]

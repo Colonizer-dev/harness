@@ -39,6 +39,8 @@ pub async fn record_publish_stage(app: &App, id: &str, stage: PublishStage) {
 /// verdict — so every external effect inside can check itself against it (issue #98). A removal
 /// that cannot be confirmed fails the publish before anything touches the worktree.
 pub async fn publish_session(app: Shared, id: String, grant: Option<crate::authority::Grant>) {
+    // The shadow review (issue #1274) snapshots the diff before anything rewrites the worktree.
+    crate::open_code_review::shadow_review(&app, &id).await;
     publish_session_with(app.clone(), id, grant, &crate::epic::gh_fetch(&app)).await
 }
 

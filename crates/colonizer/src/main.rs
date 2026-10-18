@@ -110,6 +110,7 @@ mod modules;
 mod needs_feed;
 mod notify;
 mod observability;
+mod open_code_review;
 mod openai;
 mod operator;
 mod orgs;
