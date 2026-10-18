@@ -74,7 +74,8 @@ impl Collector {
         let app = axum::Router::new()
             .route("/v1/logs", axum::routing::post(handler("/v1/logs")))
             .route("/v1/traces", axum::routing::post(handler("/v1/traces")))
-            .route("/v1/metrics", axum::routing::post(handler("/v1/metrics")));
+            .route("/v1/metrics", axum::routing::post(handler("/v1/metrics")))
+            .route("/loki/api/v1/push", axum::routing::post(handler("/loki/api/v1/push")));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -884,6 +885,171 @@ async fn no_canary_reaches_the_wire() {
     }
 }
 
+/// A Loki contract over `url`: logs only, the push path completed from the base URL.
+fn loki(root: &Root, url: &str, edit: impl FnOnce(&mut Settings)) -> PathBuf {
+    contract(root, url, |s| {
+        s.provider = "loki".into();
+        s.url = url.to_string();
+        s.stream_traces = false;
+        s.stream_metrics = false;
+        edit(s);
+    })
+}
+
+#[tokio::test]
+async fn loki_provider_pushes_json_streams() {
+    let root = root("loki");
+    // Loki answers 204 with an empty body; any 2xx commits.
+    let collector = Collector::start(Arc::new(|_, _| (204, Vec::new()))).await;
+    harness(&root, "hello loki");
+    let path = loki(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK);
+
+    let seen = collector.seen("/loki/api/v1/push");
+    assert_eq!(
+        seen.len(),
+        1,
+        "one push, and nothing on the OTLP paths: {:?}",
+        collector.seen.lock().unwrap()
+    );
+    assert_eq!(seen[0].headers.get("content-type").unwrap(), "application/json");
+    // The contract keeps the default compression, so the push rides gzipped — the body the
+    // collector records is the decompressed one.
+    assert_eq!(seen[0].headers.get("content-encoding").unwrap(), "gzip");
+    let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1, "{body}");
+    assert_eq!(
+        streams[0]["stream"],
+        // The line is c0ffee12's, whose policy gives the org — the only way an org label appears.
+        serde_json::json!({"level": "info", "org": "acme", "service_name": "colonizer-mothership", "stream": "operational"}),
+        "{body}"
+    );
+    let values = streams[0]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 1, "{body}");
+    let entry = values[0].as_array().unwrap();
+    assert_eq!(entry[1], serde_json::json!("hello loki"), "{values:?}");
+    assert!(
+        entry[0].as_str().unwrap().chars().all(|c| c.is_ascii_digit()) && !entry[0].as_str().unwrap().is_empty(),
+        "the timestamp is a nanosecond string: {values:?}"
+    );
+    assert_eq!(
+        entry[2]["event_name"],
+        serde_json::json!("colonizer.harness_log"),
+        "{values:?}"
+    );
+    assert_eq!(committed_offset(&root), Some(file_size(&root)), "committed after the 204");
+}
+
+#[tokio::test]
+async fn loki_provider_sends_tenant_and_operator_headers() {
+    let root = root("loki-headers");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "with a tenant");
+    let path = loki(&root, &collector.url, |s| s.tenant_id = "acme-tenant".into());
+    let mut x = Exporter::new(&path, vec![("x-custom".into(), "v".into())]).unwrap();
+    assert_eq!(x.tick().await, TICK);
+    let seen = collector.seen("/loki/api/v1/push");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].headers.get("x-scope-orgid").unwrap(), "acme-tenant");
+    assert_eq!(seen[0].headers.get("x-custom").unwrap(), "v");
+
+    // The operator's own header wins over the setting, whatever its case.
+    harness(&root, "with the operator's header");
+    let mut y = Exporter::new(&path, vec![("X-Scope-OrgID".into(), "operator-tenant".into())]).unwrap();
+    assert_eq!(y.tick().await, TICK);
+    let seen = collector.seen("/loki/api/v1/push");
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].headers.get("x-scope-orgid").unwrap(), "operator-tenant");
+    // Exactly one header of a kind: reqwest would overwrite it, so this also holds if it did not.
+    assert_eq!(seen[1].headers.get_all("x-scope-orgid").iter().count(), 1);
+}
+
+#[tokio::test]
+async fn no_canary_reaches_the_loki_wire() {
+    let root = root("loki-canary");
+    let collector = Collector::start(ok()).await;
+    let canaries = crate::testkit::Canaries::new();
+    for canary in &canaries.all {
+        harness(&root, &canary.text);
+    }
+    harness(&root, &canaries.content);
+    let path = loki(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    let seen = collector.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "one push carries the whole batch: {seen:?}");
+    assert!(seen[0].path == "/loki/api/v1/push");
+    let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
+    let lines: usize = body["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["values"].as_array().map(Vec::len).unwrap_or(0))
+        .sum();
+    assert_eq!(lines, canaries.all.len() + 1, "every line was exported: {body}");
+    for request in &seen {
+        crate::testkit::assert_absent(&request.body, canaries.secrets(), &request.path);
+    }
+}
+
+/// The pane's "Send test event" runs `send-test-event` with the module's contract; a Loki one
+/// must not fail on a metric point the provider has no path for.
+#[tokio::test]
+async fn a_loki_test_event_sends_the_log_line_only() {
+    let root = root("loki-test-event");
+    let collector = Collector::start(ok()).await;
+    let path = loki(&root, &collector.url, |_| {});
+    let result = send_test(&contract::load(&path).unwrap(), Vec::new()).await;
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["signals"]["logs"]["ok"], true, "{result}");
+    assert_eq!(result["signals"].as_object().unwrap().len(), 1, "logs only: {result}");
+    assert_eq!(collector.seen("/loki/api/v1/push").len(), 1);
+    assert_eq!(collector.seen("/v1/metrics").len(), 0, "a metric point has no Loki path");
+}
+
+#[test]
+fn loki_destinations_hash_by_their_push_url_and_otlp_keeps_its_hash() {
+    // A Loki contract's `endpoint` is empty; unless the push URL is the key, every Loki
+    // destination hashes identically and a URL change shares cursor state with the old one.
+    let loki = |url: &str| {
+        destination_hash(&Contract {
+            settings: Settings {
+                provider: "loki".into(),
+                url: url.into(),
+                ..Settings::default()
+            },
+            ..Contract::default()
+        })
+    };
+    assert_ne!(
+        loki("http://loki-a:3100"),
+        loki("http://loki-b:3100"),
+        "two URLs, two destinations"
+    );
+    assert_eq!(
+        loki("http://loki-a:3100"),
+        loki("http://loki-a:3100/"),
+        "a trailing slash is nothing"
+    );
+    assert_eq!(
+        loki("http://loki-a:3100"),
+        loki("http://loki-a:3100/loki/api/v1/push"),
+        "a base and its full push URL are the same destination"
+    );
+    // The OTLP key is untouched, so an existing install keeps its cursors across the upgrade:
+    // sha256("http://127.0.0.1:4318||http/protobuf"), first 8 bytes as hex.
+    let otlp = destination_hash(&Contract {
+        settings: Settings {
+            endpoint: "http://127.0.0.1:4318".into(),
+            ..Settings::default()
+        },
+        ..Contract::default()
+    });
+    assert_eq!(otlp, "f46ac179053b3768");
+}
+
 #[tokio::test]
 async fn a_new_destination_starts_now_and_a_restart_never_skips_again() {
     let root = root("start-now");
@@ -1149,4 +1315,69 @@ async fn a_refused_trace_credential_holds_the_spans_and_their_state() {
     assert_eq!(accepted_spans(&collector).len(), 11, "every span, once the key works");
     let committed = crate::traces::Traces::load(&State::load(&root.0).0.extra, &x.destination);
     assert!(committed.colonies["c0ffee12"].root.emitted);
+}
+
+/// Issue #865's acceptance criterion — a push a real Loki accepts — against a pinned Loki 2.9:
+/// start one (nothing here does it for you), then
+/// `COLONIZER_TEST_LOKI_URL=http://127.0.0.1:13109 cargo test -p colonizer-observability
+/// push_is_accepted_by_a_real_loki -- --ignored --nocapture` and read the marker back with
+/// `curl -sG localhost:13109/loki/api/v1/query_range --data-urlencode 'query={service_name="colonizer"}'`.
+/// Nothing runs without the variable, so CI never needs a Loki.
+#[tokio::test]
+#[ignore]
+async fn push_is_accepted_by_a_real_loki() {
+    let Ok(url) = std::env::var("COLONIZER_TEST_LOKI_URL") else {
+        return;
+    };
+    if url.is_empty() {
+        return;
+    }
+    use crate::proto::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
+    use crate::proto::logs::v1::{LogRecord, ResourceLogs, ScopeLogs, SeverityNumber};
+    use crate::proto::resource::v1::Resource;
+    let kv = |key: &str, value: &str| KeyValue {
+        key: key.into(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.into())),
+        }),
+        ..KeyValue::default()
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let record = |offset: u64, body: &str| LogRecord {
+        time_unix_nano: now + offset,
+        observed_time_unix_nano: now + offset,
+        severity_number: SeverityNumber::Info as i32,
+        body: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(body.into())),
+        }),
+        ..LogRecord::default()
+    };
+    let request = Request::Logs(ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: Some(Resource {
+                attributes: vec![kv("service.name", "colonizer")],
+                ..Resource::default()
+            }),
+            scope_logs: vec![ScopeLogs {
+                scope: Some(InstrumentationScope::default()),
+                log_records: vec![
+                    record(0, "loki_conformance_marker #865"),
+                    record(1, "loki_conformance_marker #865 second line"),
+                ],
+                ..ScopeLogs::default()
+            }],
+            ..ResourceLogs::default()
+        }],
+    });
+    let settings = Settings {
+        provider: "loki".into(),
+        url,
+        structured_metadata: true,
+        ..Settings::default()
+    };
+    let transport = Transport::new(&settings, Vec::new()).unwrap();
+    match transport.send(&request).await {
+        Outcome::Sent { rejected, .. } => assert_eq!(rejected, 0, "the push was accepted in full"),
+        other => panic!("the real Loki did not accept the push: {other:?}"),
+    }
 }
