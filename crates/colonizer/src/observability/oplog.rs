@@ -369,15 +369,21 @@ impl ChannelGuard {
             }
             Err(TrySendError::Disconnected(_)) => {
                 if !WRITER_GONE.swap(true, Ordering::Relaxed) {
-                    #[allow(clippy::disallowed_macros)] // the file layer's writer is gone; tracing would log through the layer that stopped working
-                    eprintln!(
-                        "colonizer: the {LOG_DIR} writer thread is gone; \
-                         {FILE} is no longer being written and its lines are being dropped"
-                    );
+                    report_writer_gone();
                 }
             }
         }
     }
+}
+
+/// The one diagnostic the file layer prints, see [`ChannelGuard::send`]. The allow sits on this
+/// function, not on the macro call: an attribute on a macro invocation is ignored by the lint.
+#[allow(clippy::disallowed_macros)] // the file layer's writer is gone; tracing would log through the layer that stopped working
+fn report_writer_gone() {
+    eprintln!(
+        "colonizer: the {LOG_DIR} writer thread is gone; \
+         {FILE} is no longer being written and its lines are being dropped"
+    );
 }
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ChannelWriter {
