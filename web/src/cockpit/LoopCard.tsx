@@ -3,13 +3,13 @@
 // 7-day strip of its runs. Everything else opens in a detail drawer: the 7/30/90-day charts, the last
 // run grouped by outcome, the settings and the run list. The loop-specific parts (its settings, its
 // report, its buttons) are handed in as children; the shape is not negotiable.
-import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { useApi } from "../context";
-import { Badge, Button, Spinner, Switch, cx } from "../components/ui";
+import { Badge, Button, Spinner, Switch, TONE, cx } from "../components/ui";
 import type { LoopHistory, LoopHistoryRun, LoopOutcome } from "../types";
 import { AreaChart, RangePicker, niceStep } from "./DashChart";
 import type { RangeDays } from "./dash";
-import { OUTCOME, describeBucket, dayLabel, dayInitial, dayShort, groupItems, lineSubject, money, outcomeSeries, plural, stripBars, stripTotals, type DetailGroup, type DetailGroupDef, type DetailItem } from "./loopHistory";
+import { OUTCOME, describeBucket, dayLabel, dayInitial, dayShort, detailChips, groupItems, lineSubject, money, outcomeSeries, plural, stripBars, stripTotals, toggleKey, type DetailGroup, type DetailGroupDef, type DetailItem, type DetailLine, type FixAction, type ReasonText } from "./loopHistory";
 import { relative } from "./loops";
 
 /** The loop's history, refreshed every minute and whenever `refreshKey` changes. `null` while loading or when the server has none. */
@@ -457,24 +457,71 @@ export function RunList({ history, onOpenColony }: { history: LoopHistory | null
   );
 }
 
-/** A run's items grouped by outcome, collapsed, with identical reasons merged into one line. */
+/** A run's items grouped by outcome, collapsed, with identical reasons merged into one line. With
+ * `chips`, a summary chip per group sits above the sections and toggles its own; a group whose def
+ * is marked `attention` starts open, because it needs a person. */
 export function GroupedDetails({
   items,
   defs,
   unit,
   onOpenColony,
+  chips,
+  onFixAction,
+  fixDone,
 }: {
   items: readonly DetailItem[];
   defs: readonly DetailGroupDef[];
   unit: { one: string; many: string };
   onOpenColony?: (id: string) => void;
+  /** Chip row over the sections; `always` names groups that keep their chip even at zero. */
+  chips?: { always?: readonly string[] };
+  /** Handles a reason's action fixes (the merge train's "use local checks"); without it they do not render. */
+  onFixAction?: (action: FixAction, line: DetailLine) => void;
+  /** Whether a fix is already in place (its button reads "Saved" and gives up). */
+  fixDone?: (action: FixAction, line: DetailLine) => boolean;
 }): ReactElement | null {
   const groups = groupItems(items, defs);
-  if (groups.length === 0) return null;
+  const [open, setOpen] = useState<Set<string>>(() => new Set(defs.filter((d) => d.attention).map((d) => d.key)));
+  const base = useId();
+  // With `chips` an all-empty run still draws its chip row — a run whose only lines are the
+  // not-opted-in skips then shows the zero-count stats ("0 merged" among them) instead of nothing.
+  if (groups.length === 0 && !chips) return null;
   return (
     <div className="space-y-2" data-grouped>
+      {chips && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {detailChips(items, defs, chips.always ?? []).map((c) => (
+            <button
+              key={c.key}
+              type="button"
+              disabled={c.count === 0}
+              aria-expanded={c.count === 0 ? undefined : open.has(c.key)}
+              aria-controls={c.count === 0 ? undefined : `${base}-${c.key}`}
+              onClick={() => setOpen((o) => toggleKey(o, c.key))}
+              className={cx(
+                "inline-flex items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-meta-lg font-semibold leading-4 tabular-nums transition-colors",
+                c.count === 0 ? "cursor-default opacity-70" : "cursor-pointer",
+                TONE[c.tone],
+                c.count > 0 && open.has(c.key) && "ring-1 ring-current",
+              )}
+            >
+              {c.count} {c.label}
+            </button>
+          ))}
+        </div>
+      )}
       {groups.map((g) => (
-        <Group key={g.key} group={g} unit={unit} onOpenColony={onOpenColony} />
+        <Group
+          key={g.key}
+          group={g}
+          unit={unit}
+          id={chips ? `${base}-${g.key}` : undefined}
+          open={chips ? open.has(g.key) : undefined}
+          onOpen={chips ? (o) => setOpen((s) => (o ? new Set(s).add(g.key) : toggleKey(s, g.key))) : undefined}
+          onOpenColony={onOpenColony}
+          onFixAction={onFixAction}
+          fixDone={fixDone}
+        />
       ))}
     </div>
   );
@@ -482,9 +529,28 @@ export function GroupedDetails({
 
 const DOT: Record<DetailGroupDef["tone"], string> = { ok: "bg-ok", warn: "bg-warn", err: "bg-err", neutral: "bg-faint", info: "bg-info", accent: "bg-accent" };
 
-function Group({ group, unit, onOpenColony }: { group: DetailGroup; unit: { one: string; many: string }; onOpenColony?: (id: string) => void }): ReactElement {
+function Group({
+  group,
+  unit,
+  onOpenColony,
+  id,
+  open,
+  onOpen,
+  onFixAction,
+  fixDone,
+}: {
+  group: DetailGroup;
+  unit: { one: string; many: string };
+  onOpenColony?: (id: string) => void;
+  /** Set with `open`: the section is steered from the chip row (and the summary still works). */
+  id?: string;
+  open?: boolean;
+  onOpen?: (open: boolean) => void;
+  onFixAction?: (action: FixAction, line: DetailLine) => void;
+  fixDone?: (action: FixAction, line: DetailLine) => boolean;
+}): ReactElement {
   return (
-    <details className="group/g overflow-hidden rounded-xl border border-border bg-panel">
+    <details id={id} open={open} onToggle={onOpen ? (e) => onOpen(e.currentTarget.open) : undefined} className="group/g overflow-hidden rounded-xl border border-border bg-panel">
       <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2.5 text-body [&::-webkit-details-marker]:hidden">
         <span aria-hidden="true" className={cx("size-2 shrink-0 rounded-full", DOT[group.tone])} />
         <span className="font-medium text-text">{group.label}</span>
@@ -502,17 +568,12 @@ function Group({ group, unit, onOpenColony }: { group: DetailGroup; unit: { one:
                 <>
                   <p className="m-0 text-text">
                     <strong className="font-semibold">{lineSubject(line, unit)}</strong>: {line.reason.text}
-                    {line.reason.fix && (
-                      <>
-                        {" "}
-                        <a href={line.reason.fix.href} target="_blank" rel="noreferrer" className="text-accent hover:underline">
-                          {line.reason.fix.label}
-                        </a>
-                      </>
-                    )}
+                    <Fixes line={line} onFixAction={onFixAction} fixDone={fixDone} />
                   </p>
                   <details className="mt-1">
-                    <summary className="cursor-pointer text-muted hover:text-text">Show {line.repo ? unit.many : "them"}</summary>
+                    <summary className="cursor-pointer text-muted hover:text-text">
+                      Show {line.items.length} {line.repo ? unit.many : "of them"}
+                    </summary>
                     <ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-muted">
                       {line.items.map((i, n) => (
                         <li key={`${i.repo}${i.ref?.text}${n}`} className="[overflow-wrap:anywhere]">
@@ -522,25 +583,79 @@ function Group({ group, unit, onOpenColony }: { group: DetailGroup; unit: { one:
                       ))}
                     </ul>
                   </details>
+                  <RawNote reason={line.reason} />
                 </>
               ) : (
-                <p className="m-0 text-text [overflow-wrap:anywhere]">
-                  <Ref item={line.items[0]} onOpenColony={onOpenColony} />
-                  {line.items[0].title ? ` ${line.items[0].title}` : ""} {line.reason.text && <span className="text-muted">— {line.reason.text}</span>}
-                  {line.reason.fix && (
-                    <>
-                      {" "}
-                      <a href={line.reason.fix.href} target="_blank" rel="noreferrer" className="text-accent hover:underline">
-                        {line.reason.fix.label}
-                      </a>
-                    </>
-                  )}
-                </p>
+                <>
+                  <p className="m-0 text-text [overflow-wrap:anywhere]">
+                    <Ref item={line.items[0]} onOpenColony={onOpenColony} />
+                    {line.items[0].title ? ` ${line.items[0].title}` : ""} {line.reason.text && <span className="text-muted">— {line.reason.text}</span>}
+                    {line.attempt && (
+                      <span className="ml-1.5 whitespace-nowrap rounded-full bg-panel-2 px-2 py-0.5 text-meta tabular-nums text-muted">
+                        attempt {line.attempt.n}/{line.attempt.m}
+                      </span>
+                    )}
+                    <Fixes line={line} onFixAction={onFixAction} fixDone={fixDone} />
+                  </p>
+                  <RawNote reason={line.reason} />
+                </>
               )}
             </li>
           );
         })}
       </ul>
+    </details>
+  );
+}
+
+/** A line's fixes: pages on github.com as links, actions the cockpit performs as buttons — the latter only when someone handles them. */
+function Fixes({
+  line,
+  onFixAction,
+  fixDone,
+}: {
+  line: DetailLine;
+  onFixAction?: (action: FixAction, line: DetailLine) => void;
+  fixDone?: (action: FixAction, line: DetailLine) => boolean;
+}): ReactElement | null {
+  const fixes = (line.reason.fixes ?? []).filter((f) => !("action" in f) || onFixAction);
+  if (fixes.length === 0) return null;
+  return (
+    <>
+      {fixes.map((f) =>
+        "href" in f ? (
+          <Fragment key={f.label}>
+            {" "}
+            <a href={f.href} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+              {f.label}
+            </a>
+          </Fragment>
+        ) : (
+          <button
+            key={f.label}
+            type="button"
+            disabled={fixDone?.(f.action, line)}
+            onClick={() => onFixAction?.(f.action, line)}
+            className={cx(
+              "ml-1.5 cursor-pointer rounded-full border px-2 py-0.5 text-meta-lg font-medium leading-4 transition-colors disabled:cursor-not-allowed",
+              fixDone?.(f.action, line) ? "border-border bg-panel-2 text-muted" : "border-transparent bg-accent-soft text-accent hover:bg-accent-hover hover:text-on-accent",
+            )}
+          >
+            {fixDone?.(f.action, line) ? "Saved" : f.label}
+          </button>
+        ),
+      )}
+    </>
+  );
+}
+
+/** The reason as it was said, when the plain words left something out: one quiet toggle. */
+function RawNote({ reason }: { reason: ReasonText }): ReactElement | null {
+  if (!reason.raw || reason.raw === reason.text) return null;
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-muted hover:text-text">details</summary>
+      <p className="m-0 mt-1 whitespace-pre-wrap font-mono text-meta text-faint [overflow-wrap:anywhere]">{reason.raw}</p>
     </details>
   );
 }

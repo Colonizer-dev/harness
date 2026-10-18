@@ -105,7 +105,8 @@ export const limitText = (value: number | null | undefined) => (value == null ? 
 /** The four pricing rates, as they sit in the form's text fields. */
 export type PricingDraft = Record<keyof ProviderPricing, string>;
 
-const PRICING_KEYS = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok", "thinking_per_mtok"] as const;
+/** The rate fields a price edits, in display order — a connection's pricing and a per-model row's five alike. */
+export const PRICING_KEYS = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok", "thinking_per_mtok"] as const;
 
 const emptyPricingDraft = (): PricingDraft => ({
   input_per_mtok: "",
@@ -132,6 +133,78 @@ export function pricingSummaryOf(pricing: Record<keyof ProviderPricing, { value:
   return PRICING_KEYS.map((key) => [key.replace(/_per_mtok$/, "").replace("_", " "), pricing[key].value] as const)
     .filter((entry): entry is [string, number] => entry[1] != null)
     .map(([label, value]) => `${label} $${value}`);
+}
+
+/** A saved price object as parsed rates, so `pricingSummaryOf` can read it (the feed's prices, #1038). */
+export const pricingRatesOf = (pricing: ProviderPricing | null | undefined): Record<keyof ProviderPricing, { value: number | null }> =>
+  Object.fromEntries(PRICING_KEYS.map((key) => [key, { value: pricing?.[key] ?? null }])) as Record<keyof ProviderPricing, { value: number | null }>;
+
+// Per-model prices (issue #1038): rows of a model id and the same rate fields the connection's
+// pricing uses, saved as `model_pricing` only when they differ from what is on file.
+
+/** One per-model price row: the model id as written after `<provider>/`, and the rates in the fields. */
+export interface ModelPricingRow {
+  model: string;
+  pricing: PricingDraft;
+}
+
+/** The saved per-model prices as editor rows, by model id. */
+export function modelPricingRowsOf(modelPricing: Record<string, ProviderPricing> | undefined): ModelPricingRow[] {
+  return Object.entries(modelPricing ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([model, pricing]) => ({ model, pricing: pricingDraftOf(pricing) }));
+}
+
+/**
+ * The per-model prices the rows would save, and the first thing wrong with them. A blank model id or
+ * a row with no rate at all is dropped, like the model map's blank canonicals; a model id named twice
+ * is refused, because a saved map would collapse it last-wins.
+ */
+export function parseModelPricing(rows: ModelPricingRow[]): { value: Record<string, ProviderPricing>; error: string | null } {
+  const value: Record<string, ProviderPricing> = {};
+  let error: string | null = null;
+  for (const row of rows) {
+    const model = row.model.trim();
+    const rates = PRICING_KEYS.map((key) => parsePrice(row.pricing[key]));
+    const bad = rates.find((rate) => rate.error);
+    if (bad && !error) error = model ? `${model}: ${bad.error}` : bad.error;
+    if (!model || rates.every((rate) => rate.value == null)) continue;
+    if (model in value) {
+      error ??= `Duplicate model id: ${model}`;
+      continue;
+    }
+    value[model] = Object.fromEntries(
+      rates.flatMap((rate, i) => (rate.value == null ? [] : [[PRICING_KEYS[i], rate.value] as const])),
+    ) as ProviderPricing;
+  }
+  return { value, error };
+}
+
+/** Whether the parsed per-model prices differ from the saved ones: only then does the PUT carry `model_pricing`. */
+export function modelPricingChanged(value: Record<string, ProviderPricing>, saved: Record<string, ProviderPricing> | undefined): boolean {
+  // Rate keys are mapped through PRICING_KEYS, so a saved object whose JSON named them in another
+  // order still compares equal.
+  const canonical = (m: Record<string, ProviderPricing>) =>
+    JSON.stringify(
+      Object.entries(m)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([model, rates]) => [model, PRICING_KEYS.map((key) => rates[key] ?? null)]),
+    );
+  return canonical(value) !== canonical(saved ?? {});
+}
+
+/** "verified N days ago" for a feed price (#1038); "today" under a day, and "date unknown" when the feed does not say. */
+export function verifiedTextOf(lastVerifiedAt: string | null | undefined, now: number = Date.now()): string {
+  const at = lastVerifiedAt ? Date.parse(lastVerifiedAt) : NaN;
+  if (!Number.isFinite(at)) return "verified date unknown";
+  const days = Math.floor((now - at) / 86_400_000);
+  return days < 1 ? "verified today" : `verified ${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/** A feed price's source as a link target — only an http(s) URL is one; anything else is shown as plain text. */
+export function sourceLinkOf(source: string | null | undefined): string | null {
+  const url = source?.trim();
+  return url && /^https?:\/\//i.test(url) ? url : null;
 }
 
 function formatTokens(n: number): string {
@@ -326,6 +399,10 @@ export interface ProviderSaveInput {
   trusted: boolean;
   model_map: ModelMapRow[];
   disabled_tools: string[];
+  /** Per-model prices (#1038), already parsed and omitted unless the operator changed them. */
+  model_pricing?: Record<string, ProviderPricing>;
+  /** The price feed's provider id (#1038), omitted unless the operator changed it. */
+  price_feed_id?: string;
 }
 
 /**
@@ -364,6 +441,8 @@ export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest 
         .filter(([canonical]) => canonical),
     ),
     disabled_tools: input.disabled_tools,
+    model_pricing: input.model_pricing,
+    price_feed_id: input.price_feed_id,
   };
 }
 

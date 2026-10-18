@@ -8,8 +8,9 @@ import { buildHistory } from "../features/loops/mockHistory";
 import type { Loop, LoopHistoryRun } from "../types";
 import { DiskCleanupCard } from "./DiskCleanupLoop";
 import { DocsLoopPanel } from "./DocsLoopCard";
-import { LoopStrip, StackedBars } from "./LoopCard";
+import { GroupedDetails, LoopStrip, StackedBars } from "./LoopCard";
 import { CustomLoopCard, LoopsView } from "./LoopsView";
+import type { DetailGroupDef } from "./loopHistory";
 import { MergeLoopPanel } from "./MergeLoopCard";
 import { defaultMergeLoopSettings } from "./mergeLoop";
 import { CLEANUP_LOOP } from "./testFixtures";
@@ -136,5 +137,22 @@ describe("the 7-day strip's markup", () => {
 
   it("shows a placeholder while the history loads", () => {
     expect(renderToStaticMarkup(<LoopStrip history={null} />)).toContain("animate-pulse");
+  });
+});
+
+describe("the detail groups", () => {
+  const defs: DetailGroupDef[] = [
+    { key: "merged", label: "merged", tone: "ok" },
+    { key: "skipped", label: "skipped", tone: "neutral" },
+  ];
+
+  it("keeps the chip row when every group is empty, so a run of only not-opted-in skips still shows its zero stats", () => {
+    const html = renderToStaticMarkup(<GroupedDetails items={[]} defs={defs} unit={{ one: "PR", many: "PRs" }} chips={{ always: ["merged"] }} />);
+    expect(html).toContain("0 merged");
+    expect(html).not.toContain("<details");
+  });
+
+  it("still draws nothing when every group is empty and there are no chips, as the other loop cards see", () => {
+    expect(renderToStaticMarkup(<GroupedDetails items={[]} defs={defs} unit={{ one: "PR", many: "PRs" }} />)).toBe("");
   });
 });

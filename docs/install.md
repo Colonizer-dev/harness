@@ -7,7 +7,8 @@ environment is under [Settings](#settings).
 ## What you need
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
-  or an Apple Silicon Mac. On a stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
+  or an Apple Silicon Mac, or Windows 11 through WSL2 ([On Windows (WSL2)](#on-windows-wsl2)). On a
+  stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
   `kvm` group and log back in: `sudo usermod -aG kvm "$USER"`. An Intel Mac can't run Colonizer, because
   microsandbox's libkrun backend is aarch64-only. On Linux the host also needs glibc 2.28 or newer,
   which the pinned microsandbox binary requires.
@@ -109,16 +110,20 @@ curl -fsSL https://colonizer.dev/install.sh | sh -s -- --pull-image
 
 The installer's other variables are listed under [Installer and build](#installer-and-build).
 
-## macOS DMG (unsigned)
+## macOS DMG
 
 Apple Silicon Macs can also install from `Colonizer-arm64.dmg`, attached to every
 [release](https://github.com/Colonizer-dev/harness/releases) and listed in its `SHA256SUMS` and build
 attestation. `curl -fsSL https://colonizer.dev/install.sh | sh` stays the recommended path; the DMG is for
 people who would rather drag an app.
 
-1. Open the DMG and drag **Colonizer** to **Applications** (the DMG also carries a `First open.txt`).
-2. Open Colonizer. macOS blocks it, because the app is signed ad hoc (which Apple silicon requires) but not
-   with an Apple Developer ID, and not notarized. Open **System Settings → Privacy & Security**, scroll to
+1. Open the DMG and drag **Colonizer** to **Applications**. An unsigned DMG also carries a `First
+   open.txt`, which repeats the next step.
+2. Open Colonizer. If the release's DMG is notarized — the release workflow signs the app with
+   Colonizer's Developer ID certificate and notarizes it whenever the `APPLE_*` secrets are in the
+   `release` environment — it opens like any other download. Until that certificate is added, every
+   release's app is signed ad hoc (which Apple silicon requires) but not with a Developer ID, and not
+   notarized: macOS blocks it the first time. Open **System Settings → Privacy & Security**, scroll to
    the message about Colonizer and click **Open Anyway**. You do this once.
 3. The app installs Colonizer from the archive it carries, with no download of the app itself: the same
    `scripts/install-release.sh` the one-liner runs, so the slots under `~/.local/share/colonizer`, the
@@ -132,13 +137,16 @@ To update, download the newer DMG and open its app again: it installs the versio
 the same version alone. A running mothership keeps running the old version until you restart it (or use
 `colonizer update`).
 
-**Keychain.** While the app is unsigned, the macOS Keychain asks again for the secrets Colonizer saved
-after each update, because it ties a secret to the binary that wrote it; choose **Always Allow**. Signing with
-your own identity keeps the grant ([`COLONIZER_CODESIGN_IDENTITY`](#installer-and-build)).
+**Keychain.** While the app is ad hoc-signed, the macOS Keychain asks again for the secrets Colonizer
+saved after each update, because it ties a secret to the binary that wrote it; choose **Always Allow**. A
+Developer ID release keeps one identity from release to release, so a notarized DMG's Keychain grants
+survive updates; signing with your own identity keeps the grant too
+([`COLONIZER_CODESIGN_IDENTITY`](#installer-and-build)).
 
-`scripts/build-dmg.sh <tarball> <version> <out.dmg>` builds the DMG; the release workflow runs it.
-Developer ID signing and notarization are planned
-([#1138](https://github.com/Colonizer-dev/harness/issues/1138)).
+`scripts/build-dmg.sh <tarball> <version> <out.dmg>` builds the DMG; the release workflow runs it. It
+signs ad hoc unless `COLONIZER_DMG_IDENTITY` names a Developer ID Application identity, in which case
+the workflow also notarizes and staples the DMG — a certificate without the notary key fails the build,
+so no signed-but-unnotarized DMG ships ([#1138](https://github.com/Colonizer-dev/harness/issues/1138)).
 
 ## Build from source
 
@@ -243,6 +251,45 @@ release install instead gets the binaries in the tarball and builds nothing. The
 runs with userspace networking and a SOCKS5 listener, so a Mac needs no TUN device, no root and no
 special entitlements: Go's linker signs the binaries ad hoc, which is all Apple Silicon requires.
 If the three mesh binaries are absent, colonies fall back to a loopback port, as before.
+
+## On Windows (WSL2)
+
+Windows has no native build: Colonizer runs as the Linux build inside WSL2, on Ubuntu. Colonies are
+KVM microVMs, so the WSL2 VM has to pass virtualization through — nested virtualization, which
+Windows 11 has and Windows 10 does not.
+
+1. **Install WSL2** on Windows 11, with virtualization switched on in the firmware (Intel VT-x or
+   AMD-V): `wsl --install -d Ubuntu`, in PowerShell or Windows Terminal.
+2. **Turn nested virtualization on.** Create or edit `%UserProfile%\.wslconfig` to hold
+
+   ```toml
+   [wsl2]
+   nestedVirtualization=true
+   ```
+
+   then run `wsl --shutdown` from Windows and reopen Ubuntu.
+3. **Give your user `/dev/kvm`** inside Ubuntu: `ls -l /dev/kvm` should show it, and on a stock
+   Ubuntu it is `root:kvm 0660`, so `sudo usermod -aG kvm "$USER"` and restart the shell.
+4. **Install the release exactly as on Linux** ([Install a release](#install-a-release)). Keep the
+   repository and the data and config directories under your Linux home, not `/mnt/c`: the
+   filesystem that bridges Windows drives in is slow, and it does not carry Linux file permissions.
+5. **Run `colonizer doctor`.** A missing `/dev/kvm` comes back as one line naming the fix: on
+   WSL2, nested virtualization and the `.wslconfig` setting in step 2; on WSL1, which cannot run
+   microVMs at all, converting the distro with `wsl --set-version <distro> 2`.
+6. **Open the cockpit from Windows** at <http://127.0.0.1:7878>: WSL2 forwards localhost to Windows
+   by default (`localhostForwarding`, or mirrored networking on newer Windows 11), so the default
+   `COLONIZER_BIND` needs no change. Notifications reach the Windows browser the same way
+   ([Notifications and Web Push](cockpit.md#notifications-and-web-push)).
+
+If you start the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)),
+the systemd user unit needs systemd inside WSL: `[boot]` with `systemd=true` in `/etc/wsl.conf`,
+which new Ubuntu WSL installs have on by default. How long a colony takes to boot under WSL2 has
+not been measured yet.
+
+**Windows without WSL2.** Windows can be just a client: run the mothership on a Linux box or a Mac,
+and open its cockpit from Windows through [remote access](remote-tunnel.md), the
+`https://<install_id>.my.colonizer.dev` link. Native Windows through WHPX or Hyper-V is not planned
+yet; it is tracked in [#1091](https://github.com/Colonizer-dev/harness/issues/1091).
 
 ## Desktop: install the cockpit as an app, start at login
 
@@ -475,7 +522,7 @@ mothership they talk to is `--host`, else `COLONIZER_BIND`. See [docs/cli.md](cl
 | `COLONIZER_KEEP_PREVIOUS` | `install.sh` | `1` keeps the slot being replaced; an in-place update sets it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)) |
 | `COLONIZER_IMAGE` | both scripts, with `--pull-image` | The image to pull instead of the pinned `node:24-bookworm` |
 | `COLONIZER_MSB` | `scripts/install.sh` | A microsandbox binary to build with instead of the vendored one |
-| `COLONIZER_LOCAL_ARCHIVE` | `install-release.sh` | Install from this `colonizer-<platform>.tar.gz` instead of downloading one, skipping the archive's checksum and attestation checks; what the [macOS app](#macos-dmg-unsigned) sets. Claude Code, Node.js and the SDK are still fetched and checked |
+| `COLONIZER_LOCAL_ARCHIVE` | `install-release.sh` | Install from this `colonizer-<platform>.tar.gz` instead of downloading one, skipping the archive's checksum and attestation checks; what the [macOS app](#macos-dmg) sets. Claude Code, Node.js and the SDK are still fetched and checked |
 | `COLONIZER_CODESIGN_IDENTITY` | `install.sh`, `install-release.sh` | On macOS, sign the binary with this identity so the Keychain keeps granting access across rebuilds; a release install also records it, so later updates re-sign ([docs/configuration.md](configuration.md#the-system-keychain)) |
 | `COLONIZER_PREBUILT` | `scripts/install.sh` | A directory of prebuilt binaries to use instead of building them; the release workflow sets it |
 | `COLONIZER_DESCRIBE`, `COLONIZER_COMMIT` | the Rust build | The version and commit to stamp into the binary when git is not available; the release workflow sets them ([docs/updates.md](updates.md#which-version-am-i-running)) |

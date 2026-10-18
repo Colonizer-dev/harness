@@ -750,6 +750,7 @@ pub async fn create(
         hold_cause_repeats: 0,
         verify_fix_rounds: 0,
         auto_fixes: Vec::new(),
+        operator: Vec::new(),
         provider_retries: 0,
         agent_session: None,
         pending_answer: None,

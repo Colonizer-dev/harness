@@ -712,6 +712,13 @@ pub struct Session {
     /// header line, and the playbook counts its entries against each rule's `max_tries`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_fixes: Vec<crate::playbook::AutoFix>,
+    /// What the operator turn has done on this colony by itself (issue #1192), oldest last and
+    /// capped at [`crate::operator::KEPT_NOTES`]. Each entry is also an `operator: diagnosed …,
+    /// did …` line in the colony's log, and the cockpit reads this list for its header line; the
+    /// operator counts its last hour of entries against its per-colony turn budget. Every turn
+    /// that reached the model leaves one, whatever came of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator: Vec<crate::operator::OperatorNote>,
     /// How many automatic continues have been scheduled after a transient provider error
     /// (issue #980): the 1-based attempt the colony is backing off for, so the delay already
     /// spent is `provider_retries - 1` into the schedule. Reset to 0 on a successful turn and
@@ -915,6 +922,7 @@ impl Default for Session {
             hold_cause_repeats: 0,
             verify_fix_rounds: 0,
             auto_fixes: Vec::new(),
+            operator: Vec::new(),
             provider_retries: 0,
             agent_session: None,
             pending_answer: None,

@@ -175,6 +175,8 @@ pub struct App {
     pub graft: Mutex<crate::graft::Status>,
     /// The understand-anything skillset download (understand_anything.rs), for Settings.
     pub understand_anything: Mutex<crate::graft::Status>,
+    /// The open-code-review binary download (open_code_review.rs, issue #1274), for Settings.
+    pub open_code_review: Mutex<crate::open_code_review::Status>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<crate::headroom::Status>,
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
@@ -218,9 +220,18 @@ pub struct App {
     pub orgs_failed_at: Mutex<Option<std::time::Instant>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// The model-price feed (price_feed.rs, issue #1038): the operator's URL setting and the last
+    /// good copy of the feed, the lowest rung of the pricing precedence
+    /// (`providers::Provider::price_for`). Read by the gateway's accounting and the cost gate.
+    pub(crate) price_feed: crate::price_feed::PriceFeed,
     /// Phones paired through Settings → Add your phone (phone.rs, issue #746): the open invites and
     /// pairings in memory, the paired phones in `<config_dir>/phones.json`.
     pub phones: crate::phone::PhoneStore,
+    /// Model lists discovered from each provider's `GET /v1/models` (issue #1167), persisted to the
+    /// sidecar `<config_dir>/provider-models.json` so discovery never rewrites `providers.json`.
+    /// Recorded by every fresh probe, read by `GET /api/providers`, swept daily by the gateway's
+    /// `discover::refresh_loop`.
+    pub(crate) provider_models: crate::gateway::Discover,
     /// Boot-time provider probe results, keyed on provider id + base URL
     /// (`crate::gateway::probe_cache_key`) so repointing a provider never serves the old endpoint's
     /// answer. Both reachable and unreachable answers are kept for [`crate::gateway::PROVIDER_PROBE_TTL`];
@@ -313,6 +324,7 @@ impl App {
             github_viewer: Mutex::new(None),
             graft: Mutex::new(Default::default()),
             understand_anything: Mutex::new(Default::default()),
+            open_code_review: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
             host_cache: Mutex::new(None),
             capacity: crate::capacity::Capacity::new(),
@@ -330,7 +342,9 @@ impl App {
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_failed_at: Mutex::new(None),
             orgs_refreshed: Mutex::new(None),
+            price_feed: crate::price_feed::PriceFeed::load(&cfg.config_dir, &cfg.data_dir),
             phones: crate::phone::PhoneStore::load(&cfg.config_dir),
+            provider_models: crate::gateway::Discover::load(&cfg.config_dir),
             provider_probe_cache: Mutex::new(HashMap::new()),
             pull: Mutex::new(Default::default()),
             redteam: crate::redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),

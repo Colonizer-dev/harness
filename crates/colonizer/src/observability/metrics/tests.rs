@@ -238,6 +238,7 @@ fn seeded_snapshot() -> Snapshot {
         queue_depth: 4,
         storage_alert: true,
         disk_free_bytes: Some(1024 * 1024 * 1024),
+        exporter: None,
     }
 }
 
@@ -357,6 +358,113 @@ fn an_empty_family_still_declares_itself_and_an_unmeasured_disk_has_no_sample() 
     assert!(body.contains("# TYPE colonizer_attention gauge"));
     assert!(value_of(&body, "colonizer_attention", &[("reason", "stalled")]).is_none());
     assert_eq!(value_of(&body, "colonizer_storage_alert", &[]), Some(0.0));
+}
+
+/// The exporter families come from the add-on's `status.json`: five families, per signal, and
+/// nothing the file carries but a number — an endpoint never reaches a scrape. A key the file does
+/// not hold, or holds null, simply has no series; with no file at all there is no family, and the
+/// scrape is none the worse.
+#[tokio::test]
+async fn the_exporters_status_file_becomes_five_families_and_nothing_else() {
+    let dir = root("exporter-status");
+    let observability = dir.0.join("data/observability");
+    std::fs::create_dir_all(&observability).unwrap();
+    std::fs::write(
+        observability.join("status.json"),
+        serde_json::to_vec(&json!({
+            "state": "running",
+            "endpoint": "https://canary-otlp-endpoint.example",
+            "signals": {
+                "logs": {"records_sent": 5, "bytes_sent": 100, "backlog_bytes": 2048, "last_success_unix": 1780000000},
+                "traces": {"records_sent": 3, "bytes_sent": 30, "backlog_bytes": 0, "last_success_unix": null},
+                "metrics": {"state": "off"}
+            },
+            "dropped": {"gap_deleted": 1, "oversized": 2}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = app_with_metrics(&dir.0, &[]).await;
+    let res = router(&app).oneshot(get(PATH, Some(&app.api_token))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = text(res).await;
+
+    assert_eq!(
+        value_of(&body, "colonizer_export_backlog_bytes", &[("signal", "logs")]),
+        Some(2048.0)
+    );
+    assert_eq!(
+        value_of(&body, "colonizer_export_backlog_bytes", &[("signal", "metrics")]),
+        None,
+        "a signal with no number has no series"
+    );
+    assert_eq!(
+        value_of(
+            &body,
+            "colonizer_export_records_total",
+            &[("signal", "logs"), ("result", "sent")]
+        ),
+        Some(5.0)
+    );
+    assert_eq!(
+        value_of(
+            &body,
+            "colonizer_export_records_total",
+            &[("signal", "traces"), ("result", "sent")]
+        ),
+        Some(3.0)
+    );
+    // The non-gap drop reasons sum into one `all` series; a gap keeps its own family below.
+    assert_eq!(
+        value_of(
+            &body,
+            "colonizer_export_records_total",
+            &[("signal", "all"), ("result", "dropped")]
+        ),
+        Some(2.0)
+    );
+    assert_eq!(
+        value_of(&body, "colonizer_export_bytes_total", &[("signal", "logs")]),
+        Some(100.0)
+    );
+    assert_eq!(
+        value_of(
+            &body,
+            "colonizer_export_last_success_timestamp_seconds",
+            &[("signal", "logs")]
+        ),
+        Some(1_780_000_000.0)
+    );
+    assert_eq!(
+        value_of(
+            &body,
+            "colonizer_export_last_success_timestamp_seconds",
+            &[("signal", "traces")]
+        ),
+        None,
+        "a null last success has no series"
+    );
+    assert_eq!(
+        value_of(&body, "colonizer_export_gaps_total", &[("reason", "gap_deleted")]),
+        Some(1.0)
+    );
+    assert_eq!(
+        value_of(&body, "colonizer_export_gaps_total", &[("reason", "oversized")]),
+        None,
+        "only the gap reasons reach the gaps family"
+    );
+    assert!(
+        !body.contains("canary-otlp-endpoint"),
+        "the endpoint reached a scrape:\n{body}"
+    );
+
+    // With no status file the families are absent and nothing else breaks.
+    let bare = root("exporter-absent");
+    let app = app_with_metrics(&bare.0, &[]).await;
+    let res = router(&app).oneshot(get(PATH, Some(&app.api_token))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = text(res).await;
+    assert!(!body.contains("colonizer_export_"), "{body}");
 }
 
 // ---------------------------------------------------------------------------

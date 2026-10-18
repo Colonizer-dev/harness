@@ -11,6 +11,9 @@
 //! id `disk-cleanup`), present on every install and off until the owner switches it on; it runs
 //! in-process housekeeping instead of launching a colony.
 
+pub(crate) mod pr_labels;
+pub mod templates;
+
 use crate::schedule::{Cadence, next_run_after};
 use crate::sessions::{self, NewSession, Session, SessionStatus};
 use crate::{
@@ -292,8 +295,9 @@ pub fn clamp_next(delay_minutes: u64) -> u64 {
 /// What a colony launched by a loop is told about it, after the loop's own prompt. `loop_tools`
 /// says whether the agent module the colony launches on serves the loop MCP tools (issue #643):
 /// with them the colony paces and stops the loop itself; without, the brief never mentions the
-/// tools and a self-paced loop simply comes round again in 24 hours.
-pub fn loop_instructions(l: &Loop, run: u32, loop_tools: bool) -> String {
+/// tools and a self-paced loop simply comes round again in 24 hours. `only` names the sources this
+/// one run was narrowed to (a run-now `params.only`); a scheduled run names none.
+pub fn loop_instructions(l: &Loop, run: u32, loop_tools: bool, only: &[String]) -> String {
     let pacing = if l.self_paced() && loop_tools {
         format!(
             "This loop is self-paced: before you finish, call loop_next with how many minutes from now the next run should start ({NEXT_MIN_MINUTES} to {NEXT_MAX_MINUTES}) and why. If you don't, it runs again in 24 hours."
@@ -308,6 +312,12 @@ pub fn loop_instructions(l: &Loop, run: u32, loop_tools: bool) -> String {
         says.push(format!(
             "This loop works on GitHub, and you have no GitHub token: read what the mothership fetched for you under {dir} — issues.json (open issues touched since last run), ci-failures.json (failed runs on the default branch) and merged-prs.json (pull requests merged since last run), each with a \"since\" timestamp; do not try `gh` yourself.",
             dir = crate::loop_github::CONTEXT_DIR
+        ));
+    }
+    if !only.is_empty() {
+        let named = only.iter().map(|id| format!("`{id}`")).collect::<Vec<_>>().join(", ");
+        says.push(format!(
+            "This run was started with parameters: only = {named} — work only on those."
         ));
     }
     if loop_tools {
@@ -722,6 +732,60 @@ impl RunNowQuery {
     }
 }
 
+/// Run-now's optional body: `{"params": {"only": ["<source id>", …]}}` narrows this one run to
+/// those sources (the data-refresh template's shard). No body at all — or an empty one, which is
+/// what the cockpit's POST carries — runs the whole due set, exactly as a scheduled run does.
+#[derive(Deserialize)]
+pub struct RunNowBody {
+    #[serde(default)]
+    params: Option<RunParams>,
+}
+
+/// The parameters a single run may take. Anything else under `params` is refused, so a typo'd body
+/// is an error at the door rather than a run that silently ignores it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunParams {
+    #[serde(default)]
+    only: Vec<String>,
+}
+
+/// The `only` ids a run-now body asks for, validated so a bad body is a 400 rather than a colony
+/// launched against something it cannot parse. An absent `params` narrows nothing.
+fn validated_only(params: Option<RunParams>) -> Result<Vec<String>, crate::AppError> {
+    let Some(params) = params else {
+        return Ok(Vec::new());
+    };
+    let bad = |m: String| client_error(StatusCode::BAD_REQUEST, &m);
+    if params.only.is_empty() || params.only.len() > 100 {
+        return Err(bad("params.only needs 1 to 100 source ids".into()));
+    }
+    for id in &params.only {
+        let plain = id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'));
+        let climbs = id.split('/').any(|segment| segment == "..");
+        if id.is_empty() || id.chars().count() > 100 || !plain || climbs {
+            return Err(bad(format!(
+                "params.only: {id:?} is not a source id (1 to 100 characters of letters, digits, `.`, `_`, `:`, `/`, `-`; no `..` segment)"
+            )));
+        }
+    }
+    Ok(params.only)
+}
+
+/// The `only` ids a run-now body asks for. An empty — or whitespace-only — body is no parameters
+/// whatever its content-type (the cockpit's POST sends `Content-Type: application/json` with
+/// nothing after it); anything else must parse as the body above, and anything that does not, or
+/// that asks for ids that cannot be source ids, is the caller's mistake, named in a 400.
+fn only_of(body: &[u8]) -> Result<Vec<String>, crate::AppError> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
+    let body: RunNowBody = serde_json::from_slice(body).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    validated_only(body.params)
+}
+
 /// Starts the loop's next run now, whatever its schedule — still one run at a time. A colony or map
 /// loop answers the colony it started; the disk-cleanup loop answers its run report, and with
 /// `?dry_run=1` a preview of what a run would remove that removes nothing.
@@ -730,6 +794,7 @@ pub async fn run_now(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<RunNowQuery>,
     scoped: Option<axum::Extension<ScopedToken>>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Value> {
     let l = app
         .loops
@@ -753,15 +818,19 @@ pub async fn run_now(
             "only the disk cleanup loop has a dry run; a colony loop's run is a colony",
         ));
     }
+    let only = only_of(&body)?;
     if let Some(live) = live_run_for(&app.sessions.read().await, &l) {
         return Err(client_error(
             StatusCode::CONFLICT,
-            &format!("the loop's previous run ({}) is still live; one run at a time", live.id),
+            &format!(
+                "the loop's previous run ({}) is still live; one run at a time — try again after it ends",
+                live.id
+            ),
         ));
     }
     let started = match l.kind {
         LoopKind::Map => fire_map(&app, &l, Utc::now()).await,
-        LoopKind::Colony | LoopKind::DiskCleanup => launch(&app, &l, Utc::now()).await.map(Some),
+        LoopKind::Colony | LoopKind::DiskCleanup => launch(&app, &l, Utc::now(), &only).await.map(Some),
     };
     match started? {
         Some(session) => {
@@ -839,11 +908,12 @@ pub(crate) fn needs_preflight(l: &Loop) -> bool {
     l.needs_github && l.kind == LoopKind::Colony
 }
 
-/// Launches a colony loop's run through the normal admission path and books the next.
-async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, crate::AppError> {
+/// Launches a colony loop's run through the normal admission path and books the next. `only` names
+/// the sources this run was narrowed to (a run-now `params.only`); a scheduled run narrows nothing.
+async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>, only: &[String]) -> Result<Session, crate::AppError> {
     let run = l.runs + 1;
     let scoped = run_token(app, l).await?;
-    let session = start_run(app, l, run, scoped).await?;
+    let session = start_run(app, l, run, scoped, only).await?;
     app.loops.update(&l.id, |x| x.record_run(&session.id, now)).await;
     Ok(session)
 }
@@ -851,7 +921,13 @@ async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, c
 /// The colony-creating half of a launch, shared by the tick and a re-run (issue #881): admits the
 /// run through the same path a hand launch takes, under the loop's token when it has one. `run` is
 /// the number the brief names.
-async fn start_run(app: &Shared, l: &Loop, run: u32, scoped: Option<ScopedToken>) -> Result<Session, crate::AppError> {
+async fn start_run(
+    app: &Shared,
+    l: &Loop,
+    run: u32,
+    scoped: Option<ScopedToken>,
+    only: &[String],
+) -> Result<Session, crate::AppError> {
     // Issue #778: a loop whose work is GitHub's launches no colony until the mothership can reach
     // the repository — otherwise the colony only parks on a question. The note is recorded here so
     // run-now and a re-run (issue #881) get it too; the scheduler's error handler adds the tick's
@@ -875,7 +951,7 @@ async fn start_run(app: &Shared, l: &Loop, run: u32, scoped: Option<ScopedToken>
     let body = json!({
         "repo": l.repo,
         "title": format!("{} (loop, run {run})", l.name),
-        "instructions": loop_instructions(l, run, loop_tools),
+        "instructions": loop_instructions(l, run, loop_tools, only),
         "autopilot": l.autopilot,
         "allow_duplicate": true,
         "origin": format!("{ORIGIN_PREFIX}{}", l.id),
@@ -938,7 +1014,7 @@ async fn retry_run(app: &Shared, l: &Loop, last: &LastRun, now: DateTime<Utc>) {
     if live_run_for(&app.sessions.read().await, l).is_some() {
         return;
     }
-    match start_run(app, l, l.runs, scoped).await {
+    match start_run(app, l, l.runs, scoped, &[]).await {
         Ok(session) => {
             crate::loop_history::record(app, crate::loop_history::RunRecord::launched(&l.id, now, "retry", &session)).await;
             let fresh = session.id.clone();
@@ -1109,7 +1185,7 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
             Tick::Launch => {
                 let started = match l.kind {
                     LoopKind::Map => fire_map(app, &l, now).await,
-                    LoopKind::Colony | LoopKind::DiskCleanup => launch(app, &l, now).await.map(Some),
+                    LoopKind::Colony | LoopKind::DiskCleanup => launch(app, &l, now, &[]).await.map(Some),
                 };
                 if let Ok(Some(session)) = &started {
                     crate::loop_history::record(app, crate::loop_history::RunRecord::launched(&id, now, "schedule", session))

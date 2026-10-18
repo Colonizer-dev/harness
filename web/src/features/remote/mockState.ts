@@ -1,6 +1,6 @@
 // The mock's per-call state slice for the remote feature (issue #827). The one shared state object
 // (MockState in src/mockState.ts) carries these fields so a reassignment is seen by every feature.
-import type { ApiTokenMeta, LinkDevices, Phones, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "../../types";
+import type { ApiTokenMeta, CratefieldPushState, LinkDevices, Phones, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "../../types";
 import { ago } from "../../mockShared";
 import { defaultPushPrefs } from "../../push";
 import type { MockState } from "../../mockState";
@@ -13,6 +13,7 @@ export type RemoteMockState = {
     remoteHost: string;
     apiTokens: ApiTokenMeta[];
     pushSubs: PushSubscriptionSummary[];
+    cratefieldState: CratefieldPushState;
     pushLabel: (label: string) => string;
     MOCK_PUSH_KEY: string;
     remoteInstallId: () => string;
@@ -52,6 +53,9 @@ export function installRemoteMockState(ms: MockState): void {
     owner: null,
     pending: [{ code: "481516", github_login: "octocat", expires_at: Math.floor(Date.now() / 1000) + 600 }],
   };
+  // Cratefield delivery (issue #1085): off, like the server's fresh install — nothing queued,
+  // nothing dropped, never an attempt. Enabling needs the remote link, like the server's 409.
+  ms.cratefieldState = { enabled: false, since: null, state: "off", queued: 0, dropped: 0, last_error: null, last_delivered: null, last_attempt: null };
   // Scoped API tokens (issue #646): three rows with the shapes the list must tell apart — a capped
   // launcher in daily use, a reader that has never been used, and an operate token limited to one
   // org and repo. The plaintext of none of them is known, like the server's: only the hash is kept.

@@ -29,6 +29,7 @@ const report = (overrides: Partial<MergeLoopReport> = {}): MergeLoopReport => ({
         { session: "s1", pr_url: "https://github.com/acme/web/pull/1", title: "Fix totals", action: "merged", reason: "squash-merged: behind main by 0" },
         { session: "s3", pr_url: "https://github.com/acme/web/pull/3", title: "Add lint", action: "red", reason: "failing: unit" },
         { session: "s2", pr_url: "https://github.com/acme/web/pull/2", title: "Dark mode", action: "updated", reason: "updated onto main; its CI was still running after 20 min" },
+        { session: "s6", pr_url: "https://github.com/acme/web/pull/6", title: "Rebase hell", action: "resolving", reason: "a resolve colony is merging main in and resolving the conflicts (attempt 2/3)" },
         { session: "s5", pr_url: "https://github.com/acme/web/pull/5", title: "Rework", action: "redo_dispatched", reason: "needs_redo (the mechanical rebase onto main conflicted)" },
       ],
     },
@@ -87,9 +88,13 @@ describe("merge-train loop settings", () => {
 describe("merge-train loop report", () => {
   it("orders what moved first and reads each action, real or dry", () => {
     const rows = reportRows(report());
-    expect(rows.map((r) => `${r.pr} ${r.label}`)).toEqual(["#1 merged", "#2 updated (CI running)", "#5 redo dispatched", "#3 red", "#4 skipped"]);
+    expect(rows.map((r) => `${r.pr} ${r.label}`)).toEqual(["#1 merged", "#2 updated (CI running)", "#6 resolving conflicts", "#5 redo dispatched", "#3 red", "#4 skipped"]);
     expect(actionLabel("merged", true)).toBe("would merge");
     expect(actionLabel("skipped", true)).toBe("skipped");
+    const resolving = rows.find((r) => r.action === "resolving")!;
+    expect(resolving.attempt).toEqual({ n: 2, m: 3 });
+    expect(resolving.reason).toBe("a resolve colony is merging main in and resolving the conflicts");
+    expect(resolving.session).toBe("s6");
   });
 
   it("renders the counts, every pull request with its reason, and a pause", () => {
@@ -102,7 +107,10 @@ describe("merge-train loop report", () => {
         now={Date.parse("2026-09-30T10:00:00Z")}
       />,
     );
-    expect(out).toContain("merged 1 · updated (CI running) 1 · red 1 · redo dispatched 1 · skipped 1");
+    expect(out).toContain(">1 Merged</button>");
+    expect(out).toContain(">1 Skipped</button>");
+    expect(out).not.toContain("merged 1 ·");
+    expect(out).toContain("attempt 2/3");
     expect(out).toContain('href="https://github.com/acme/web/pull/3"');
     expect(out).toContain("failing: unit");
     expect(out).toContain("the pull request is a draft");
@@ -123,7 +131,96 @@ describe("merge-train loop report", () => {
     expect(out).toContain("11 PRs in kontinuum-ai/kontinuum");
     expect(out).toContain("GitHub Actions is blocked (billing)");
     expect(out).toContain('href="https://github.com/organizations/kontinuum-ai/settings/billing"');
-    expect(out.split("payments have failed").length - 1).toBe(0);
+    expect(out.split("payments have failed").length - 1).toBe(1);
+  });
+
+  it("reads 14 identical billing reasons as one line with a billing link and a local-checks button", () => {
+    const billing = "GitHub Actions did not start the checks: the job was not started because recent account payments have failed or your spending limit needs to be increased.";
+    const waiting = Array.from({ length: 14 }, (_, i) => ({ session: `k${i}`, pr_url: `https://github.com/kontinuum-ai/kontinuum/pull/${300 + i}`, title: `PR ${i}`, action: "waiting" as const, reason: billing }));
+    const out = renderToStaticMarkup(<MergeLoopReportView report={report({ repos: [{ repo: "kontinuum-ai/kontinuum", main: "green", paused: null, heal: [], items: waiting }] })} onLocalChecks={() => {}} />);
+    expect(out).toContain("14 PRs in kontinuum-ai/kontinuum");
+    expect(out).toContain("GitHub Actions is blocked (billing)");
+    expect(out).toContain("Show 14 PRs");
+    expect(out).toContain('href="https://github.com/organizations/kontinuum-ai/settings/billing"');
+    expect(out).toContain(">Use local checks</button>");
+    expect(out.split("payments have failed").length - 1).toBe(1);
+  });
+
+  it("hides the not-opted-in skips behind one quiet line, and the skipped chip counts only the rest", () => {
+    const skip = (repo: string, n: number, reason: string) => ({ session: `s${n}`, pr_url: `https://github.com/${repo}/pull/${n}`, title: `PR ${n}`, action: "skipped" as const, reason });
+    const notIn = "this repository is not opted in to the merge-train loop";
+    const repos = [
+      { repo: "acme/one", main: "not read", paused: null, heal: [], items: [skip("acme/one", 1, notIn)] },
+      { repo: "acme/two", main: "not read", paused: null, heal: [], items: [skip("acme/two", 2, notIn)] },
+      { repo: "acme/three", main: "not read", paused: null, heal: [], items: [skip("acme/three", 3, notIn)] },
+      { repo: "acme/web", main: "green", paused: null, heal: [], items: [skip("acme/web", 4, "the pull request is a draft")] },
+    ];
+    const out = renderToStaticMarkup(<MergeLoopReportView report={report({ repos })} />);
+    expect(out).not.toContain("not opted in");
+    expect(out).toContain("3 repos not in the merge train");
+    expect(out).toContain(">1 Skipped</button>");
+    expect(out).toContain("the pull request is a draft");
+  });
+
+  it("still shows the zero chips when every line is a not-opted-in skip", () => {
+    const notIn = "this repository is not opted in to the merge-train loop";
+    const repos = [{ repo: "acme/one", main: "not read", paused: null, heal: [], items: [{ session: "s1", pr_url: "https://github.com/acme/one/pull/1", title: "PR 1", action: "skipped" as const, reason: notIn }] }];
+    const out = renderToStaticMarkup(<MergeLoopReportView report={report({ repos })} />);
+    expect(out).toContain(">0 Merged</button>");
+    expect(out).toContain("1 repo not in the merge train");
+    expect(out).not.toContain("not opted in");
+  });
+
+  it("reads a timed-out gh call as GitHub's slowness and keeps the raw words behind details", () => {
+    const timeout = "not green yet (its CI could not be read (`gh api repos/acme/web/commits` timed out after 30s)); merging nothing";
+    const local = "GitHub CI could not run (the runner is offline), and its local checks could not run (the command timed out after 30s); tried again next run";
+    const out = renderToStaticMarkup(
+      <MergeLoopReportView
+        report={report({
+          repos: [
+            {
+              repo: "acme/web",
+              main: "pending",
+              paused: null,
+              heal: [],
+              items: [
+                { session: "s1", pr_url: "https://github.com/acme/web/pull/1", title: "Fix totals", action: "waiting", reason: timeout },
+                { session: "s2", pr_url: "https://github.com/acme/web/pull/2", title: "Rework", action: "waiting", reason: local },
+              ],
+            },
+          ],
+        })}
+      />,
+    );
+    expect(out).toContain("answer in time; retrying next run");
+    expect(out).toContain(">details</summary>");
+    expect(out.split("gh api repos/acme/web/commits").length - 1).toBe(1);
+    expect(out).toContain(local);
+  });
+
+  it("summarises the run as chips that name their closed groups, and opens the groups that need a person", () => {
+    const repos = [
+      {
+        repo: "acme/web",
+        main: "red",
+        paused: null,
+        heal: [],
+        items: [
+          { session: "s1", pr_url: "https://github.com/acme/web/pull/3", title: "Add lint", action: "red" as const, reason: "failing: unit" },
+          { session: "s2", pr_url: "https://github.com/acme/web/pull/6", title: "Rework", action: "waiting" as const, reason: "waiting behind #3" },
+        ],
+      },
+    ];
+    const out = renderToStaticMarkup(<MergeLoopReportView report={report({ repos })} />);
+    expect(out).toContain(">0 Merged</button>");
+    expect(out).toContain(">1 Red</button>");
+    expect(out).toContain(">1 Waiting</button>");
+    expect(out.match(/aria-expanded="true"/g)).toHaveLength(1);
+    expect(out.match(/aria-expanded="false"/g)).toHaveLength(1);
+    const controls = out.match(/aria-controls="([^"]+)"/)?.[1];
+    expect(controls).toBeTruthy();
+    expect(out).toContain(`id="${controls}"`);
+    expect(out).toContain('open=""');
   });
 });
 

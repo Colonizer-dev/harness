@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildHistory, mockRuns } from "../features/loops/mockHistory";
 import type { LoopHistory, LoopHistoryRun } from "../types";
-import { BUILTIN_HISTORY_ID, dayLabel, describeBucket, friendlyReason, groupItems, lineSubject, money, outcomeSeries, stripBars, stripTotals } from "./loopHistory";
+import { BUILTIN_HISTORY_ID, dayLabel, describeBucket, detailChips, friendlyReason, groupItems, lineSubject, money, outcomeSeries, stripBars, stripTotals, toggleKey } from "./loopHistory";
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const run = (at: string, outcome: LoopHistoryRun["outcome"], cost = 0): LoopHistoryRun => ({ at, trigger: "schedule", outcome, summary: `a ${outcome} run`, counts: {}, colonies: cost ? ["c"] : [], cost_usd: cost });
@@ -10,7 +10,7 @@ describe("run details, grouped", () => {
   const billing = "GitHub Actions did not start the checks: the job was not started because recent account payments have failed or your spending limit needs to be increased.";
   const item = (n: number, repo = "kontinuum-ai/kontinuum", reason = billing) => ({ group: "waiting", repo, ref: { text: `#${n}`, url: `https://github.com/${repo}/pull/${n}` }, title: `PR ${n}`, reason });
 
-  it("merges identical reasons in one repository into one line, with the billing link", () => {
+  it("merges identical reasons in one repository into one line, with the billing link and the local-checks action", () => {
     const groups = groupItems(Array.from({ length: 11 }, (_, i) => item(i)), [{ key: "waiting", label: "Waiting", tone: "neutral" }]);
     expect(groups).toHaveLength(1);
     expect(groups[0].count).toBe(11);
@@ -18,7 +18,10 @@ describe("run details, grouped", () => {
     const [line] = groups[0].lines;
     expect(lineSubject(line, { one: "PR", many: "PRs" })).toBe("11 PRs in kontinuum-ai/kontinuum");
     expect(line.reason.text).toBe("GitHub Actions is blocked (billing)");
-    expect(line.reason.fix?.href).toBe("https://github.com/organizations/kontinuum-ai/settings/billing");
+    expect(line.reason.fixes).toEqual([
+      { label: "Fix billing", href: "https://github.com/organizations/kontinuum-ai/settings/billing" },
+      { label: "Use local checks", action: "local_checks" },
+    ]);
   });
 
   it("keeps different repositories and different reasons apart, and the biggest line first", () => {
@@ -46,7 +49,32 @@ describe("run details, grouped", () => {
   it("leaves a reason that is not a known problem as it was said", () => {
     const r = friendlyReason("  squash-merged:   behind main by 0 ", "a/b");
     expect(r.text).toBe("squash-merged: behind main by 0");
-    expect(r.fix).toBeUndefined();
+    expect(r.fixes).toBeUndefined();
+  });
+
+  it("reads a timed-out gh call as GitHub's slowness, but not a local check that timed out", () => {
+    const gh = "not green yet (its CI could not be read (`gh api repos/a/b/commits` timed out after 30s)); merging nothing";
+    expect(friendlyReason(gh, "a/b")).toEqual({ text: "GitHub didn't answer in time; retrying next run", raw: gh });
+    const local = "GitHub CI could not run (the runner is offline), and its local checks could not run (the command timed out after 30s); tried again next run";
+    expect(friendlyReason(local, "a/b").text).toBe(local);
+  });
+
+  it("derives a chip per group with something in it, keeping the ones in `always`, and toggling flips one key", () => {
+    const defs = [
+      { key: "merged", label: "Merged", tone: "ok" as const },
+      { key: "red", label: "Red", tone: "err" as const, attention: true },
+      { key: "waiting", label: "Waiting", tone: "neutral" as const },
+    ];
+    const items = [{ ...item(1), group: "waiting" }, { ...item(2), group: "waiting" }, { ...item(3), group: "red" }];
+    expect(detailChips(items, defs)).toEqual([
+      { key: "red", count: 1, label: "Red", tone: "err", attention: true },
+      { key: "waiting", count: 2, label: "Waiting", tone: "neutral", attention: false },
+    ]);
+    expect(detailChips([], defs, ["merged"])).toEqual([{ key: "merged", count: 0, label: "Merged", tone: "ok", attention: false }]);
+    const open = toggleKey(new Set(["red"]), "waiting");
+    expect(open.has("waiting")).toBe(true);
+    expect(toggleKey(open, "waiting").has("waiting")).toBe(false);
+    expect(toggleKey(open, "red").has("red")).toBe(false);
   });
 });
 

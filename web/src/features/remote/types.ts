@@ -72,6 +72,27 @@ export interface PushPresenceBody {
   utc_offset?: number;
 }
 
+/** The Cratefield delivery channel (issue #1085), as all three /api/push/cratefield endpoints answer. */
+export interface CratefieldPushState {
+  enabled: boolean;
+  /** RFC3339, only while enabled: when the switch was turned on. */
+  since: string | null;
+  /** `off`: the switch is off; `no_remote`: on, but remote access has no link to sign with;
+   * `queued`: a batch waits for its first relay attempt; `unreachable`: the relay refused one;
+   * `ok`: everything queued has been delivered. */
+  state: "off" | "ok" | "queued" | "unreachable" | "no_remote";
+  /** Notifications waiting to ride the next flush. */
+  queued: number;
+  /** Dropped for the cap or expired after a day — the two ways an entry leaves without delivering. */
+  dropped: number;
+  /** The relay's last refusal, or its absence of an answer; cleared by the next delivery. */
+  last_error: string | null;
+  /** RFC3339 of the last batch the relay accepted; null until one. */
+  last_delivered: string | null;
+  /** RFC3339 of the last flush, delivered or not; null until one. */
+  last_attempt: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Remote access (issue #535): GET/PUT /api/remote, POST /api/remote/reset
 // (docs/protocol.md §6.10), plus the relay's pairing view the cockpit mirrors

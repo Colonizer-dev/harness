@@ -2,6 +2,7 @@ use super::*;
 use crate::retry::FailureClass;
 use crate::sessions::tests::colony;
 use chrono::TimeZone;
+use tower::ServiceExt as _;
 
 fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
@@ -54,7 +55,7 @@ fn a_github_loop_is_gated_on_github_and_told_where_its_inputs_are() {
     l.needs_github = true;
     assert!(needs_preflight(&l));
 
-    let brief = loop_instructions(&l, 1, false);
+    let brief = loop_instructions(&l, 1, false, &[]);
     assert!(brief.contains("/colonizer/github"), "{brief}");
     assert!(brief.contains("issues.json") && brief.contains("merged-prs.json"), "{brief}");
     assert!(brief.contains("you have no GitHub token"), "{brief}");
@@ -340,19 +341,19 @@ fn next_delays_are_clamped_and_described() {
 #[test]
 fn colonies_are_told_their_run_and_how_to_pace_or_stop() {
     let paced = a_loop(Cadence::SelfPaced {});
-    let text = loop_instructions(&paced, 3, true);
+    let text = loop_instructions(&paced, 3, true, &[]);
     assert!(text.starts_with("Triage new issues"));
     assert!(text.contains("run 3 of the loop \"Triage\""));
     assert!(text.contains("loop_next") && text.contains("loop_stop"));
-    let fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1, true);
+    let fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1, true, &[]);
     assert!(!fixed.contains("call loop_next") && fixed.contains("loop_stop"));
 
     // A module without the loop tools (issue #643) is never told to call them, and a
     // self-paced loop just says when it comes round again.
-    let plain_paced = loop_instructions(&paced, 3, false);
+    let plain_paced = loop_instructions(&paced, 3, false, &[]);
     assert!(!plain_paced.contains("loop_next") && !plain_paced.contains("loop_stop"));
     assert!(plain_paced.contains("This loop is self-paced: it runs again in 24 hours."));
-    let plain_fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1, false);
+    let plain_fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1, false, &[]);
     assert!(!plain_fixed.contains("loop_next") && !plain_fixed.contains("loop_stop"));
     assert!(plain_fixed.contains("fixed schedule"));
 }
@@ -368,7 +369,7 @@ async fn a_launch_briefs_its_colony_for_its_module_s_loop_tools() {
         let mut l = a_loop(Cadence::SelfPaced {});
         l.repo = "acme/app".into();
         app.loops.loops.write().await.push(l);
-        let session = launch(&app, &app.loops.get("loop_a").await.unwrap(), utc(2026, 9, 24, 9, 0))
+        let session = launch(&app, &app.loops.get("loop_a").await.unwrap(), utc(2026, 9, 24, 9, 0), &[])
             .await
             .unwrap();
         let brief = session.instructions.as_str();
@@ -512,7 +513,7 @@ async fn a_token_loop_launches_its_colony_under_its_token() {
     l.created_by_token = Some(made.meta.id.clone());
     app.loops.loops.write().await.push(l);
     let now = utc(2026, 9, 24, 9, 0);
-    let session = launch(&app, &app.loops.get("loop_a").await.unwrap(), now).await.unwrap();
+    let session = launch(&app, &app.loops.get("loop_a").await.unwrap(), now, &[]).await.unwrap();
     assert_eq!(
         session.launched_by_token.as_deref(),
         Some(made.meta.id.as_str()),
@@ -742,6 +743,155 @@ async fn the_loop_list_reports_a_runs_outcome_with_its_class() {
     assert!(
         saved["last_run"].get("outcome").is_none(),
         "the outcome is not persisted: {saved}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// -- Run-now's parameters (issue #1037) ---------------------------------------------------
+/// The run-now route on its own, driven with `oneshot`: so a POST with no body and no
+/// content-type at all — how `loop run` without `--only` sends it — reaches the handler as no
+/// body, not as a rejection.
+fn run_now_router(app: &Shared) -> axum::Router<()> {
+    axum::Router::new()
+        .route("/api/loops/{id}/run-now", axum::routing::post(run_now))
+        .with_state(app.clone())
+}
+
+async fn post_run_now(app: &Shared, uri: &str, body: Option<&str>) -> (StatusCode, Value) {
+    let mut request = axum::http::Request::builder().method("POST").uri(uri);
+    if body.is_some() {
+        request = request.header(axum::http::header::CONTENT_TYPE, "application/json");
+    }
+    let response = run_now_router(app)
+        .oneshot(
+            request
+                .body(axum::body::Body::from(body.unwrap_or_default().to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+async fn a_colony_loop(root: &FsPath) -> Shared {
+    let app = app_that_can_create(root);
+    let mut l = a_loop(Cadence::Interval { minutes: 60 });
+    l.repo = "acme/app".into();
+    app.loops.loops.write().await.push(l);
+    app
+}
+
+#[tokio::test]
+async fn run_now_s_only_parameters_reach_the_colony_s_brief() {
+    let root = std::env::temp_dir().join(format!("colonizer-loops-params-{}", short_id()));
+    let app = a_colony_loop(&root).await;
+    let (status, session) = post_run_now(
+        &app,
+        "/api/loops/loop_a/run-now",
+        Some(r#"{"params":{"only":["rainfall","gdp"]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let instructions = session["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("This run was started with parameters: only = `rainfall`, `gdp` — work only on those."),
+        "{instructions}"
+    );
+    assert_eq!(session["origin"].as_str(), Some("loop:loop_a"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn run_now_without_a_body_still_launches_and_says_nothing_about_parameters() {
+    let root = std::env::temp_dir().join(format!("colonizer-loops-nobody-{}", short_id()));
+    let app = a_colony_loop(&root).await;
+    // Neither body nor content-type, and an empty JSON object: both are a run of the whole set.
+    for body in [None, Some("{}")] {
+        let (status, session) = post_run_now(&app, "/api/loops/loop_a/run-now", body).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}: {session}");
+        assert!(
+            !session["instructions"].as_str().unwrap().contains("parameters"),
+            "{body:?}: {session}"
+        );
+        // The next POST is only reached once this run is no longer live.
+        app.sessions
+            .write()
+            .await
+            .iter_mut()
+            .for_each(|s| s.status = SessionStatus::Stopped);
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn the_cockpit_s_empty_json_body_launches_without_parameters() {
+    let root = std::env::temp_dir().join(format!("colonizer-loops-cockpit-{}", short_id()));
+    let app = a_colony_loop(&root).await;
+    // The cockpit's Run now (web/src/http.ts post()) always sends `Content-Type: application/json`,
+    // even when there is nothing to send: a zero-length — or whitespace-only — body must be no
+    // parameters, not a bad body.
+    for body in [Some(""), Some("  ")] {
+        let (status, session) = post_run_now(&app, "/api/loops/loop_a/run-now", body).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}: {session}");
+        assert!(
+            !session["instructions"].as_str().unwrap().contains("parameters"),
+            "{body:?}: {session}"
+        );
+        // The next POST is only reached once this run is no longer live.
+        app.sessions
+            .write()
+            .await
+            .iter_mut()
+            .for_each(|s| s.status = SessionStatus::Stopped);
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_bad_only_parameter_is_a_400_before_anything_launches() {
+    let root = std::env::temp_dir().join(format!("colonizer-loops-badparams-{}", short_id()));
+    let app = a_colony_loop(&root).await;
+    for (body, why) in [
+        (r#"{"params":{"only":[]}}"#, "no ids"),
+        (
+            r#"{"params":{"only":["rainfall","bad id"]}}"#,
+            "a character a source id may not hold",
+        ),
+        (r#"{"params":{"only":["ok",""]}}"#, "an empty id"),
+        (r#"{"params":{"only":["rainfall/../gdp"]}}"#, "a `..` segment"),
+        (r#"{"params":{"wat":1}}"#, "an unknown parameter"),
+        (r#"{"params":{"only":1}}"#, "not a list"),
+        ("not json", "not json at all"),
+    ] {
+        let (status, answer) = post_run_now(&app, "/api/loops/loop_a/run-now", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {answer}");
+        assert!(!answer["error"].as_str().unwrap_or_default().is_empty(), "{why}: {answer}");
+    }
+    assert!(
+        !app.sessions
+            .read()
+            .await
+            .iter()
+            .any(|s| s.origin.as_deref() == Some("loop:loop_a")),
+        "no colony was started"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn run_now_while_a_run_is_live_conflicts_and_says_to_come_back() {
+    let root = std::env::temp_dir().join(format!("colonizer-loops-live-{}", short_id()));
+    let app = a_colony_loop(&root).await;
+    let (status, _) = post_run_now(&app, "/api/loops/loop_a/run-now", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, answer) = post_run_now(&app, "/api/loops/loop_a/run-now", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    let message = answer["error"].as_str().unwrap();
+    assert!(
+        message.contains("still live") && message.contains("after it ends"),
+        "{message}"
     );
     let _ = std::fs::remove_dir_all(root);
 }

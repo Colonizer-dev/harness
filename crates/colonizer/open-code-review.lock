@@ -1,0 +1,13 @@
+# The ocr binary (github.com/alibaba/open-code-review), one row per host platform: the raw static
+# binary a release publishes, no archive. It is never fetched at install time: the mothership
+# downloads it when someone asks for open-code-review in Settings (src/open_code_review.rs) and
+# installs it to <data>/open-code-review/<release>/ocr; the platform is the host's (the review runs
+# host-side), both OS and architecture.
+#
+# Compiled into the mothership. Same columns as vendor/vendor.lock: name, version, platform, kind,
+# sha256, url. Each sha256 is that release's checksum for the asset. A release is pinned by pull
+# request: bump every row at once, one per platform, sha256 from the release's published checksums.
+ocr  v1.13.0  linux-amd64   binary  879d6eda27d136473f7af680ed5009516baf6236d8a0e5f5f14f3e6dececdd1f  https://github.com/alibaba/open-code-review/releases/download/v1.13.0/opencodereview-linux-amd64
+ocr  v1.13.0  linux-arm64   binary  2d66c71eeea08730e1394cc39884b9644d301288443d644a02c2adebb0425b93  https://github.com/alibaba/open-code-review/releases/download/v1.13.0/opencodereview-linux-arm64
+ocr  v1.13.0  darwin-amd64  binary  9bc7717b680cb1620adbf449446f51fcae74537efbf00442a235e7e62099527d  https://github.com/alibaba/open-code-review/releases/download/v1.13.0/opencodereview-darwin-amd64
+ocr  v1.13.0  darwin-arm64  binary  ccc1f3c14395313332451cb1c6a7c91616a9f36058412ac502eada7394d3c5ec  https://github.com/alibaba/open-code-review/releases/download/v1.13.0/opencodereview-darwin-arm64

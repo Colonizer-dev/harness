@@ -44,6 +44,13 @@ pub struct Settings {
     pub provider: String,
     /// The base OTLP/HTTP endpoint; `/v1/logs`, `/v1/traces` and `/v1/metrics` are appended to it.
     pub endpoint: String,
+    /// The Loki push provider's base URL (#865); `/loki/api/v1/push` is appended to it.
+    pub url: String,
+    /// The optional Loki tenant, sent as the `X-Scope-OrgID` header.
+    pub tenant_id: String,
+    /// Whether a Loki record's other attributes ride as structured metadata (Loki ≥ 2.9) rather
+    /// than inside one JSON line.
+    pub structured_metadata: bool,
     /// Per-signal endpoints (`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, …), used as they are.
     pub logs_endpoint: Option<String>,
     pub traces_endpoint: Option<String>,
@@ -80,6 +87,9 @@ impl Default for Settings {
         Settings {
             provider: "otlp".into(),
             endpoint: String::new(),
+            url: String::new(),
+            tenant_id: String::new(),
+            structured_metadata: true,
             logs_endpoint: None,
             traces_endpoint: None,
             metrics_endpoint: None,
@@ -297,6 +307,21 @@ mod tests {
         s.metrics_endpoint = Some("https://metrics.example.com/custom".into());
         assert_eq!(s.url("/v1/metrics"), "https://metrics.example.com/custom");
         assert_eq!(s.url("/v1/logs"), "https://otlp.example.com/otlp/v1/logs");
+    }
+
+    #[test]
+    fn the_loki_fields_default_to_an_empty_url_and_metadata_on() {
+        // Additive both ways: a contract from a mothership that knows no Loki still parses, and
+        // `structured_metadata` takes the default the schema promises, not the bool's own.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.url, "");
+        assert_eq!(s.tenant_id, "");
+        assert!(s.structured_metadata);
+        assert_eq!(s.provider, "otlp", "an absent provider is still OTLP");
+        let s: Settings =
+            serde_json::from_str(r#"{"provider":"loki","url":"http://loki:3100","structured_metadata":false}"#).unwrap();
+        assert_eq!(s.url, "http://loki:3100");
+        assert!(!s.structured_metadata);
     }
 
     #[test]

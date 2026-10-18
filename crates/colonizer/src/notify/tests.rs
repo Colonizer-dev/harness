@@ -32,6 +32,8 @@ fn provider(id: &str, name: &str) -> Provider {
         context_tokens: None,
         fallback_model: None,
         pricing: None,
+        model_pricing: Default::default(),
+        price_feed_id: None,
         model_map: Default::default(),
         disabled_tools: Vec::new(),
         quota: None,

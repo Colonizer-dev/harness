@@ -5,6 +5,8 @@ import { test } from 'node:test';
 
 import {
   classifyUpstreamError,
+  crossProviderBody,
+  gatewayGraceMs,
   classifyUpstreamStatus,
   fallbackBody,
   isConnectionReset,
@@ -14,6 +16,7 @@ import {
   routingPlan,
   startRouter,
   stripOauthBetas,
+  stripReasoning,
   upstreamTimeouts,
 } from '../router.mjs';
 
@@ -164,7 +167,7 @@ test('unreachable upstream answers 502 with an Anthropic-style error', async () 
   const closed = await upstream();
   const deadUrl = closed.url;
   await closed.close();
-  const router = await startRouter({ routes: [{ provider: 'gone', prefix: 'gone/', base_url: deadUrl, auth: 'none' }], env: {} });
+  const router = await startRouter({ routes: [{ provider: 'gone', prefix: 'gone/', base_url: deadUrl, auth: 'none' }], env: {}, graceMs: 0 });
   try {
     const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'gone/m' }) });
     assert.equal(res.status, 502);
@@ -278,7 +281,7 @@ test('falls back when the gateway itself is unreachable', async () => {
   await closed.close();
   const anthropic = await upstream();
   const logs = [];
-  const router = await startRouter({ routes: [gatewayRoute(deadUrl)], env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  const router = await startRouter({ routes: [gatewayRoute(deadUrl)], env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry), graceMs: 0 });
   try {
     const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'strix/m' }) });
     assert.equal(res.status, 200);
@@ -802,4 +805,192 @@ test('a parked answer, a missing route or an unreachable mothership leave the re
   assert.equal(anthropic.requests.length, cases.length);
   await provider.close();
   await anthropic.close();
+});
+
+// A conversation the routed provider (here GLM through Z.AI) has been answering: its thinking blocks
+// carry Z.AI's own short signatures, which Anthropic refuses ("Invalid `signature` in `thinking` block").
+const zaiHistory = () => [
+  { role: 'user', content: 'fix the bug' },
+  { role: 'assistant', content: [
+    { type: 'thinking', thinking: 'look at the file first', signature: '32f9c0e1a7b44d2e9f10c3a5b6d7e8f9' },
+    { type: 'text', text: 'Reading it.' },
+    { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.rs' } },
+  ] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'fn main() {}' }] },
+  { role: 'assistant', content: [{ type: 'thinking', thinking: 'only thinking', signature: '588ab' }] },
+  { role: 'user', content: [{ type: 'text', text: 'go on' }] },
+  { role: 'assistant', content: [
+    { type: 'redacted_thinking', data: 'opaque' },
+    { type: 'tool_use', id: 'toolu_2', name: 'Bash', input: { command: 'cargo test' } },
+  ] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: 'ok' }] },
+];
+const withoutReasoning = [
+  { role: 'user', content: 'fix the bug' },
+  { role: 'assistant', content: [
+    { type: 'text', text: 'Reading it.' },
+    { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'a.rs' } },
+  ] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'fn main() {}' }] },
+  { role: 'user', content: [{ type: 'text', text: 'go on' }] },
+  { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input: { command: 'cargo test' } }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: 'ok' }] },
+];
+const hasReasoning = (messages) => messages.some((m) => Array.isArray(m.content) && m.content.some((b) => ['thinking', 'redacted_thinking', 'reasoning'].includes(b.type)));
+
+test('stripReasoning drops every reasoning block and keeps text, tool_use and tool_result', () => {
+  assert.deepEqual(stripReasoning(zaiHistory()), withoutReasoning);
+  // OpenAI-style reasoning items are another provider's reasoning too.
+  assert.deepEqual(
+    stripReasoning([{ role: 'assistant', content: [{ type: 'reasoning', summary: [], encrypted_content: 'gAAA' }, { type: 'text', text: 'hi' }] }]),
+    [{ role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+  );
+  // Nothing to strip: the very same array, string content untouched.
+  const plain = [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }];
+  assert.equal(stripReasoning(plain), plain);
+  assert.equal(stripReasoning(undefined), undefined);
+  // The input is not modified.
+  const history = zaiHistory();
+  stripReasoning(history);
+  assert.deepEqual(history, zaiHistory());
+  assert.deepEqual(crossProviderBody({ model: 'x', messages: zaiHistory(), max_tokens: 5 }, 'y'), { model: 'y', messages: withoutReasoning, max_tokens: 5 });
+});
+
+test('a Claude fallback from a routed provider sends none of its thinking blocks', async () => {
+  const gateway = await upstream((req, body, res) => {
+    res.writeHead(503, { 'content-type': 'application/json', 'x-colonizer-fallback': 'queue_timeout' });
+    res.end('{"type":"error","error":{"type":"overloaded_error","message":"busy"}}');
+  });
+  const anthropic = await upstream();
+  const router = await startRouter({ routes: [{ ...gatewayRoute(gateway.url), provider: 'zai', prefix: 'zai/' }], env: {}, anthropicBase: anthropic.url });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, {
+      method: 'POST',
+      headers: claudeHeaders,
+      body: JSON.stringify({ model: 'zai/glm-5.3', thinking: { type: 'enabled', budget_tokens: 2000 }, messages: zaiHistory() }),
+    });
+    assert.equal(res.status, 200);
+    // The gateway was offered the conversation as it was, thinking and all.
+    assert.deepEqual(JSON.parse(gateway.requests[0].body).messages, zaiHistory());
+    const sent = JSON.parse(anthropic.requests[0].body);
+    assert.equal(sent.model, 'claude-sonnet-5');
+    assert.deepEqual(sent.thinking, { type: 'adaptive' });
+    assert.deepEqual(sent.messages, withoutReasoning);
+    assert.ok(!hasReasoning(sent.messages));
+  } finally {
+    await router.close();
+    await gateway.close();
+    await anthropic.close();
+  }
+});
+
+test('a same-provider retry resends the thinking blocks byte for byte', async () => {
+  const bodies = [];
+  const provider = await upstream(async (req, body, res) => {
+    bodies.push(body);
+    if (bodies.length === 1) {
+      req.socket.destroy(); // the keep-alive race: closed under the request, nothing written
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const route = { provider: 'zai', prefix: 'zai/', base_url: provider.url, auth: 'none' };
+  const router = await startRouter({ routes: [route], env: {} });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'zai/glm-5.3', messages: zaiHistory() }) });
+    assert.equal(res.status, 200);
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0], bodies[1]);
+    assert.deepEqual(JSON.parse(bodies[1]).messages, zaiHistory());
+  } finally {
+    await router.close();
+    await provider.close();
+  }
+});
+
+test('with the Claude account out, the fallback provider gets none of Claude\'s signed thinking', async () => {
+  const provider = await upstream();
+  const anthropic = await upstream();
+  const endpoint = await accountEndpoint({ action: 'fallback', model: 'zai/glm-5.3' });
+  const route = { provider: 'zai', prefix: 'zai/', base_url: provider.url, auth: 'none' };
+  const router = await startRouter({ routes: [route], env: {}, anthropicBase: anthropic.url, accountRoute: { url: endpoint.url, headers: {} } });
+  const claudeHistory = [
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'EqoBCkgIBxABGAIiQ'.repeat(20) }, { type: 'text', text: 'hello' }] },
+    { role: 'user', content: 'more' },
+  ];
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5', messages: claudeHistory }) });
+    assert.equal(res.status, 200);
+    const sent = JSON.parse(provider.requests[0].body);
+    assert.equal(sent.model, 'glm-5.3');
+    assert.deepEqual(sent.messages, [claudeHistory[0], { role: 'assistant', content: [{ type: 'text', text: 'hello' }] }, claudeHistory[2]]);
+  } finally {
+    await router.close();
+    await endpoint.close();
+    await provider.close();
+    await anthropic.close();
+  }
+});
+
+test('an unreachable gateway is retried for a short grace, so a mothership restart keeps the provider', async () => {
+  // The gateway is down (a mothership restart) when the request arrives and back 700 ms later.
+  const probe = await upstream();
+  const port = new URL(probe.url).port;
+  await probe.close();
+  const anthropic = await upstream();
+  const logs = [];
+  const route = { ...gatewayRoute(`http://127.0.0.1:${port}`), provider: 'zai', prefix: 'zai/' };
+  const router = await startRouter({ routes: [route], env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry), graceMs: 10_000 });
+  const seen = [];
+  const back = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    seen.push(Buffer.concat(chunks).toString('utf8'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  const restart = new Promise((resolve) => setTimeout(() => back.listen(Number(port), '127.0.0.1', resolve), 700));
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'zai/glm-5.3', messages: zaiHistory() }) });
+    assert.equal(res.status, 200);
+    assert.equal(anthropic.requests.length, 0, 'no fallback while the gateway was only restarting');
+    assert.equal(seen.length, 1);
+    assert.deepEqual(JSON.parse(seen[0]).messages, zaiHistory());
+    assert.ok(logs.length >= 1);
+    assert.ok(logs.every((entry) => /^provider zai unreachable \(ECONNREFUSED\); retrying in [\d.]+ s$/.test(entry.message)), JSON.stringify(logs));
+  } finally {
+    await restart;
+    await router.close();
+    await new Promise((resolve) => { back.close(resolve); back.closeAllConnections(); });
+    await anthropic.close();
+  }
+});
+
+test('a gateway still down after the grace falls back, without the provider\'s thinking', async () => {
+  const closed = await upstream();
+  const deadUrl = closed.url;
+  await closed.close();
+  const anthropic = await upstream();
+  const logs = [];
+  const router = await startRouter({ routes: [{ ...gatewayRoute(deadUrl), provider: 'zai', prefix: 'zai/' }], env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry), graceMs: 1_200 });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'zai/glm-5.3', messages: zaiHistory() }) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(JSON.parse(anthropic.requests[0].body).messages, withoutReasoning);
+    assert.ok(logs.filter((entry) => /retrying in/.test(entry.message)).length >= 1);
+    assert.match(logs.at(-1).message, /^provider zai unavailable \(gateway unreachable\); used claude-sonnet-5$/);
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('the gateway grace comes from COLONIZER_ROUTER_GATEWAY_GRACE_SECS, 20 s by default', () => {
+  assert.equal(gatewayGraceMs({}), 20_000);
+  assert.equal(gatewayGraceMs({ COLONIZER_ROUTER_GATEWAY_GRACE_SECS: '0' }), 0);
+  assert.equal(gatewayGraceMs({ COLONIZER_ROUTER_GATEWAY_GRACE_SECS: '3.5' }), 3_500);
+  assert.equal(gatewayGraceMs({ COLONIZER_ROUTER_GATEWAY_GRACE_SECS: 'soon' }), 20_000);
+  assert.equal(gatewayGraceMs({ COLONIZER_ROUTER_GATEWAY_GRACE_SECS: '-1' }), 20_000);
 });

@@ -66,15 +66,23 @@ test('the reason explains the guard and names what to use instead', () => {
   assert.match(understandAnythingDenial('Skill', { command: 'understand-figma' }, [DIR]), /Figma API/);
 });
 
-test('the prompt block and the gate appear only when the plugin is mounted', () => {
+test('the prompt block and the gate appear only when the plugin is mounted', async () => {
   const off = buildOptions({ COLONIZER_PLUGIN_DIRS: '/opt/colonizer/plugins/graft' });
   assert.equal(off.options.systemPrompt.append.includes(UNDERSTAND_ANYTHING_PROMPT_APPEND), false);
-  assert.equal(off.options.hooks.PreToolUse.some((entry) => entry.matcher === 'Skill'), false);
+  // The per-ant skillsets gate (issue #1163) is a second Skill-matcher hook and fails open; what
+  // must be absent here is the gate that refuses `understand`.
+  const deniesUnderstand = async (entries) => {
+    for (const entry of entries.filter((e) => e.matcher === 'Skill')) {
+      if ((await entry.hooks[0](SKILL('understand')))?.hookSpecificOutput?.permissionDecision === 'deny') return true;
+    }
+    return false;
+  };
+  assert.equal(await deniesUnderstand(off.options.hooks.PreToolUse), false);
 
   const on = buildOptions({ COLONIZER_PLUGIN_DIRS: DIR });
   assert.ok(on.options.systemPrompt.append.includes(UNDERSTAND_ANYTHING_PROMPT_APPEND));
   assert.match(on.options.systemPrompt.append, /git-ignored/);
-  assert.ok(on.options.hooks.PreToolUse.some((entry) => entry.matcher === 'Skill'));
+  assert.equal(await deniesUnderstand(on.options.hooks.PreToolUse), true);
 });
 
 test('the installed hook denies the three skills and lets the rest through', async () => {

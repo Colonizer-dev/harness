@@ -1,19 +1,25 @@
 #!/bin/sh
-# Builds Colonizer-arm64.dmg: an ad-hoc signed Colonizer.app around a release's darwin-arm64 tarball.
+# Builds Colonizer-arm64.dmg: a Colonizer.app around a release's darwin-arm64 tarball.
 #
 #   scripts/build-dmg.sh <colonizer-darwin-arm64.tar.gz> <version> <out.dmg>
 #
 # <version> is the release tag (v0.2.8) or a dev-<sha> name. The release workflow's macOS bundle job
 # calls this after it has built the tarball. The app carries that same tarball (the same binary and
 # vendored payload) and scripts/install-release.sh; scripts/dmg/launcher.sh is what runs when it is
-# opened (see there). The DMG also holds an /Applications link and "First open.txt". There is no
-# Developer ID and no notarization: the app is signed ad hoc, which Apple silicon requires and which
-# macOS still asks the user to approve once (docs/install.md#macos-dmg-unsigned).
+# opened (see there). The DMG also holds an /Applications link, and — unsigned builds only — a
+# "First open.txt" about the one-time "Open Anyway" approval.
+#
+# COLONIZER_DMG_IDENTITY names a codesigning identity, or "-" (the default) for the ad hoc
+# signature Apple silicon requires of any binary. A real identity is a Developer ID Application
+# certificate, which the release workflow imports on a tag push when the APPLE_* secrets are set
+# (issue #1138): the app is then signed inside out with --options runtime --timestamp, the DMG is
+# signed too, and the caller notarizes and staples what this builds (docs/install.md#macos-dmg).
 set -eu
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <colonizer-darwin-arm64.tar.gz> <version> <out.dmg>" >&2; exit 2; }
 tarball=$1 version=$2 out=$3
 repo=$(cd "$(dirname "$0")/.." && pwd)
+identity=${COLONIZER_DMG_IDENTITY:--}
 [ -f "$tarball" ] || { echo "no such tarball: $tarball" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] || { echo "build-dmg.sh needs macOS (hdiutil, codesign)" >&2; exit 1; }
 
@@ -60,12 +66,25 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$bundle/Contents/Info.plist" >/dev/null
 
-# Ad hoc: Apple silicon will not run an unsigned binary at all. Not Developer ID, not notarized.
-codesign --force --deep -s - "$bundle"
-codesign --verify --deep --strict "$bundle"
+# Ad hoc, the default: Apple silicon will not run an unsigned binary at all. With a Developer ID
+# identity the bundle is signed in one inside-out pass — the launcher is its only executable,
+# Resources are data — with the hardened runtime and a trusted timestamp, as notarization requires.
+# --deep would paper over nested code instead of failing on it.
+case $identity in
+  -)
+    codesign --force --deep -s - "$bundle"
+    codesign --verify --deep --strict "$bundle"
+    ;;
+  *)
+    codesign --force --options runtime --timestamp --sign "$identity" "$bundle"
+    codesign --verify --strict "$bundle"
+    ;;
+esac
 
 ln -s /Applications "$stage/Applications"
-cat > "$stage/First open.txt" <<'TXT'
+if [ "$identity" = - ]; then
+  # Written for the ad hoc signature only: a notarized app has nothing to approve.
+  cat > "$stage/First open.txt" <<'TXT'
 Colonizer: first open
 
 1. Drag Colonizer to Applications, then open it.
@@ -82,8 +101,15 @@ Prefer a terminal? This does the same and needs no approval:
 
 Guide: https://colonizer.dev/docs/install
 TXT
+fi
 
 mkdir -p "$(dirname "$out")"
 rm -f "$out"
 hdiutil create -quiet -volname Colonizer -srcfolder "$stage" -format UDZO -fs HFS+ -ov "$out"
+# The image itself is signed, so the download is checked before anything in it is run. Like the app,
+# it carries a trusted timestamp, which the notarization ticket is stapled against.
+case $identity in
+  -) ;;
+  *) codesign --force --timestamp --sign "$identity" "$out" ;;
+esac
 echo "built $out ($(du -h "$out" | cut -f1)), app $short, LSMinimumSystemVersion $minos"

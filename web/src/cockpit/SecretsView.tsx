@@ -21,6 +21,7 @@ import {
 import { Button, Spinner, cx, inputClass, timeAgo } from "../components/ui";
 import type {
   ColonySecretScope,
+  KeychainHealth,
   SecretColonyAccess,
   SecretGroup,
   SecretLocation,
@@ -79,6 +80,14 @@ export function colonyAccessText(access: SecretColonyAccess | undefined): {
     default:
       return { icon: "lock", text: "—", tone: "border-border text-faint" };
   }
+}
+
+/** The unavailable-keychain banner's detail line: under WSL the Windows Credential Manager is
+ * simply out of reach, so the file store is the plan; elsewhere it is the desktop-session story. */
+export function keychainHint(keychain: KeychainHealth): string {
+  return keychain.wsl
+    ? "Under WSL the mothership runs in Linux and can't reach the Windows Credential Manager, so secrets are 0600 files in the WSL filesystem; encrypt the disk (BitLocker on the Windows side) to protect them."
+    : `${keychain.reason ?? "No reason given."} On Linux the Secret Service needs a desktop session with an unlocked keyring (GNOME Keyring or KWallet); a mothership started over ssh usually has neither. Start it from a desktop session, or keep the file store.`;
 }
 
 /** The explainer card: how a key reaches a colony, and why the colony never holds it. */
@@ -257,12 +266,7 @@ export function SecretsView({
             The keychain is not available on this host, so secrets are saved
             as 0600 files.
           </div>
-          <div className="mt-1 text-muted">
-            {keychain.reason ?? "No reason given."} On Linux the Secret
-            Service needs a desktop session with an unlocked keyring (GNOME
-            Keyring or KWallet); a mothership started over ssh usually has
-            neither. Start it from a desktop session, or keep the file store.
-          </div>
+          <div className="mt-1 text-muted">{keychainHint(keychain)}</div>
         </div>
       )}
 

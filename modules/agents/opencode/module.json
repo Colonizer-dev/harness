@@ -9,6 +9,7 @@
   "name": "OpenCode",
   "protocol": "colonizer-runner/1",
   "loop_tools": true,
+  "skill_packs": true,
   "requires": {
     "binaries": [
       "opencode"

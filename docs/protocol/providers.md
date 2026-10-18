@@ -39,7 +39,7 @@ wire itself reads it to know which routes serve its own paths untranslated (issu
 - **Fallback.** When a routed request returns 502, 503 or 504 with an `x-colonizer-fallback` header and
   the route has `fallback_model`, resend the same request to Anthropic (as for unrouted models, with the
   headers Claude Code sent) with `model` set to `fallback_model`, and emit
-  `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require.
+  `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require, and the provider's `thinking`, `redacted_thinking` and `reasoning` blocks are left out of the history, since Anthropic refuses a thinking block another provider signed (§6.1). A gateway that cannot be reached is first retried for `COLONIZER_ROUTER_GATEWAY_GRACE_SECS` (default 20), so a mothership restart does not move the request to the fallback.
   Without `fallback_model`, return the gateway's response unchanged.
 
 **Gateway endpoint** `POST /providers/{id}/v1/messages`, plus `POST
@@ -182,7 +182,9 @@ leaves behind is refused with it. Leaving `max_concurrent` unset really does mea
 provider gets asked for as many requests at once as are made of it. With `delegate = enforce` — the delegation
 default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
 of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
-`GET /api/providers` also returns `pricing`, `quota`, `in_flight`, `queued`, `usage`, `health` and `used_by`.
+`GET /api/providers` also returns `pricing`, `quota`, `in_flight`, `queued`, `usage`, `health`, `used_by` and — when
+the probe has discovered what the endpoint publishes (see **Discovered models**) — `discovered_models`, `new_models`
+and `discovered_at`.
 
 **Integration notes (Meta Model API).** Adding the `meta` preset as a first-class `wire: anthropic`
 provider surfaced a few quirks worth carrying into the next such integration. `base_url` for an
@@ -418,6 +420,21 @@ configured (see **Provider fields**) gets `quota: {remaining, error}` on the sam
 URL is fetched with the provider's credential alongside the models check, and whatever goes wrong with
 it (`remaining: null`, the reason in `error`) never changes `reachable`: reading a plan balance is not
 a health check. No probe configured, no `quota` field.
+
+**Discovered models.** Every fresh probe also records what `GET {base_url}/v1/models` answered with, as a
+sidecar entry for the provider in `<config_dir>/provider-models.json`
+(`{base_url, models, new_models, discovered_at}`) — a sidecar, not a `providers.json` field, because
+discovery is an observation and must never rewrite the operator's configuration. The triggers are the
+save (`PUT /api/providers/{id}` re-probes in the background), the Check button, and a background sweep
+that re-probes each provider whose entry is missing or older than 24 h; a provider that will not answer is
+retried at most once a day. Only a real answer records — a parsed `data` list, or the Anthropic-wire 404
+no-model-list case as an empty list — while a refused (401), throttled (429), failed (5xx) or list-less
+answer, like an unreachable one, records nothing, so a blip never wipes the stored list. The list is
+deduped, sorted and capped at 500. `GET /api/providers` then carries `discovered_models`, `new_models`
+(what the previous discovery at the same base URL did not have, so a model is flagged new once) and
+`discovered_at`, and carries none of them while the entry names another base URL — a repointed provider is
+not offered its old endpoint's models. The operator's own `models` list is never changed by any of this;
+deleting a provider drops its sidecar entry.
 
 **Test request.** `POST /api/providers/{id}/test` sends a one-token request (`max_tokens: 1`, the
 provider's first listed model) through the route a colony's turn takes — `/v1/messages` on the

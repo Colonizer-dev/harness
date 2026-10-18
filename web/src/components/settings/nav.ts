@@ -55,6 +55,7 @@ export const FIXED_PAGES: readonly PageInfo[] = [
   { id: "connections", group: "connections", slug: "github-claude", label: "GitHub & Claude", hint: "The two accounts colonies need" },
   { id: "secrets", group: "connections", slug: "secrets", label: "Secrets", hint: "Every key and token Colonizer holds, in one place", view: "secrets" },
   { id: "tokens", group: "connections", slug: "api-tokens", label: "API tokens", hint: "Scoped keys for CLIs, agents and CI" },
+  { id: "living-brain", group: "connections", slug: "living-brain", label: "Living Brain", hint: "Send colony sessions to your team brain, and let colonies read it" },
 
   { id: "runtime", group: "runtime", slug: "runtime", label: "Runtime", hint: "What this machine has to run colonies" },
 
@@ -243,6 +244,8 @@ const field = (section: SectionId, label: string, help: string, keywords: string
 export const FIELD_ENTRIES: readonly SearchEntry[] = [
   field("connections", "GitHub", "Sign in with the GitHub CLI, or give a token", ["token", "login", "gh", "account"]),
   field("connections", "Claude", "Log in with your Claude subscription, or give an API key", ["token", "login", "api key", "subscription", "anthropic"]),
+  field("living-brain", "Send colony sessions to Living Brain", "Per org or repository, with a detail level", ["brain", "sync", "sessions", "notes"]),
+  field("living-brain", "Give colonies the Living Brain MCP server", "Colonies can search, ask and note the brain while they work", ["mcp", "brain", "tools"]),
   field("remote", "Allow remote access", "Open this cockpit from your phone or another computer through the relay", ["tunnel", "relay", "https", "anywhere", "switch"]),
   field("remote", "Ask for GitHub sign-in first", "Visitors must sign in with GitHub before the pairing screen", ["login", "auth", "security"]),
   field("notifications", "Play a sound when a colony asks a question", "A short chime when a colony needs an answer", ["audio", "chime", "alert"]),
@@ -307,4 +310,5 @@ const PAGE_KEYWORDS: Partial<Record<SectionId, string[]>> = {
   updates: ["version", "release", "upgrade", "restart"],
   orgs: ["hide", "hidden", "show", "organisations", "organizations", "workspaces", "archive", "all repositories"],
   "built-with": ["stack", "licences", "licenses", "credits", "about"],
+  "living-brain": ["brain", "wiki", "memory", "mcp", "sessions", "integration", "livingbrain", "notes"],
 };

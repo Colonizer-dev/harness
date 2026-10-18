@@ -122,8 +122,9 @@ make the install owner's choice bind orgs that never agreed to it.
 
 ## No native Loki connector
 
-Decided 2026-10-03 · status: stands ([#839](https://github.com/Colonizer-dev/harness/issues/839),
-deferred to [#865](https://github.com/Colonizer-dev/harness/issues/865))
+Decided 2026-10-03 · status: superseded 2026-10-15 —
+[#865](https://github.com/Colonizer-dev/harness/issues/865) shipped the native Loki push provider
+(logs only); the why and the triggers below stay for the record
 
 The observability add-on speaks OTLP only. A Loki push-API connector is not built now: the `file`
 provider, plus running Alloy, Vector or Fluent Bit over those files (or over the OTLP/JSON file sink),

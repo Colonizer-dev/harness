@@ -190,8 +190,9 @@ above and POSTs them.
 | `reqwest` | 0.13 (already in `Cargo.lock`, shared) | OTLP/HTTP transport |
 | `flate2` | new | gzip compression (OTLP/HTTP `Content-Encoding: gzip`) |
 
-None of `opentelemetry*`, `prost`, `tonic`, `flate2` exist in today's `Cargo.lock`; `reqwest` 0.13.5 and
-`zstd` 0.14.0 are already present and nothing above adds a second major version of either — the
+`opentelemetry*`, `prost` and `flate2` entered `Cargo.lock` with the OTLP/HTTP exporter, and #851
+adds `tonic` behind the add-on's `otlp-grpc` feature; `reqwest` 0.13.5 and `zstd` 0.14.0 were
+already present before any of it and nothing above adds a second major version of either — the
 duplicate-dependency check #844 asks for is `cargo tree -p colonizer-observability -d` showing no
 duplicate major version of `reqwest`, `prost`, or `zstd-safe`.
 
@@ -509,6 +510,19 @@ in the collector config, `colonizer.org`. Everything else — `colonizer.colony.
 trace/span ids, tool names — stays structured metadata or a trace/log attribute, never a label; a
 label per colony or per repo is the cardinality explosion Loki's own docs warn against.
 
+## Native Loki push
+
+#865 ships a third provider, `loki`: one JSON push per batch to `POST {url}/loki/api/v1/push` —
+logs only, because a Loki stream is a log line; traces and metrics still go to the OTLP endpoint
+provider or a collector. Its labels are the fixed set above with the dots and prefixes dropped to
+Loki-legal names — `service_name`, `stream`, `level` (the severity bucket: trace through fatal) —
+plus `org` only when the record's colony carries an org, which the mothership sets only for an
+operator's explicit org policy. Every other attribute rides as Loki structured metadata (Loki ≥
+2.9, the default); with structured metadata off, each line is one JSON object instead, which also
+works on older Loki. A `tenant_id` setting rides as `X-Scope-OrgID` and loses to the same header
+in the observability-headers secret. Delivery keeps the OTLP machinery whole: gzip, retry/backoff,
+bisection of a refused batch, commit-on-ack cursors and the export policy all unchanged.
+
 ## Metrics catalogue
 
 Placeholder: the concrete counters and histograms are #852's to define. Fixed in advance here: the
@@ -545,7 +559,7 @@ metrics surface to scrape, not two.
 | #862 | `examples/` | local Grafana stack + recipes |
 | #863 | `examples/` | provisioned Grafana dashboards + lint |
 | #864 | CI | conformance + secret-leak check against a real OTel Collector |
-| #865 | — (deferred) | native Loki push — see [No native Loki connector](#no-native-loki-connector) |
+| #865 | `colonizer`, `colonizer-observability` | native Loki push provider, logs only — built 2026-10-15; see [No native Loki connector](#no-native-loki-connector) and [Native Loki push](#native-loki-push) |
 
 ## No native Loki connector
 
@@ -557,6 +571,10 @@ today without the harness carrying a second wire format; a native push client is
 (added latency or memory on a resource-constrained host); enough operators asking for one-binary Loki
 without a collector; or Loki adopting OTLP ingestion natively widely enough that "native connector"
 stops meaning "a second wire format" at all.
+
+**Status (2026-10-15):** superseded — the maintainer triggered #865 and the native Loki push
+provider shipped, logs only ([Native Loki push](#native-loki-push) above). The decision text and
+the triggers are kept for the record.
 
 Also not built now, neither deferred to a numbered issue: vendoring `.proto` files with `prost-build`
 instead of depending on `opentelemetry-proto` (rejected unless `cargo audit` or a binary-size delta

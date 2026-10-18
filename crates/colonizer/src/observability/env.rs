@@ -15,7 +15,7 @@
 //!   an API answer: only the header *names* are reported, and a rejected pair is reported by its
 //!   position rather than by its text (P8 — a malformed pair usually *is* the credential).
 
-use super::settings::{self, ExporterConfig, FILE, OTLP};
+use super::settings::{self, ExporterConfig, FILE, LOKI, OTLP};
 use crate::config::ModuleChoice;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -313,6 +313,27 @@ fn truthy(v: &str) -> bool {
     matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "on" | "yes")
 }
 
+/// The header list and its source — `env`, `secret` or `none` — shared by every provider. A list
+/// that does not parse is refused whole: sending a half-read credential is worse than sending none,
+/// and the caller turns the error into an `Invalid` the status page shows.
+struct Headers {
+    list: String,
+    parsed: Vec<(String, String)>,
+    source: &'static str,
+}
+
+fn headers_of(var: &dyn Fn(&str) -> Option<String>, secret: Option<String>) -> Result<Headers, HeaderError> {
+    let (list, source) = match var("OTEL_EXPORTER_OTLP_HEADERS") {
+        Some(h) => (h, "env"),
+        None => match secret.filter(|s| !s.trim().is_empty()) {
+            Some(h) => (h.trim().to_string(), "secret"),
+            None => (String::new(), "none"),
+        },
+    };
+    let parsed = parse_headers(&list)?;
+    Ok(Headers { list, parsed, source })
+}
+
 /// Resolves the effective config. `env` reads one variable (the process environment outside
 /// tests); `secret` is the `observability-headers` secret's value, if any; `id` is what this
 /// mothership is, which only the caller can read off the app.
@@ -363,6 +384,73 @@ pub fn resolve(
             "default".to_string()
         }
     };
+
+    // The Loki push provider (#865): logs only, as Loki JSON to `{url}/loki/api/v1/push`. Its own
+    // three fields take no `OTEL_*` override — the standard variables speak OTLP, and a Loki URL is
+    // not an OTLP endpoint — so they arrive as the module saved them. The resource, the streams and
+    // the headers secret are the machinery every provider shares.
+    if choice.provider == LOKI {
+        let mut s = Map::new();
+        for (key, value) in [
+            ("url", json!(cfg.url)),
+            ("tenant_id", json!(cfg.tenant_id)),
+            ("structured_metadata", json!(cfg.structured_metadata)),
+            ("service_name", json!(DEFAULT_SERVICE_NAME)),
+            (
+                "resource_attributes",
+                json!(resource_attributes(DEFAULT_SERVICE_NAME, id, &BTreeMap::new())),
+            ),
+            ("stream_operational", json!(cfg.stream_operational)),
+            ("stream_activity", json!(cfg.stream_activity)),
+            ("stream_traces", json!(cfg.stream_traces)),
+            ("stream_metrics", json!(cfg.stream_metrics)),
+            ("metrics_interval_secs", json!(cfg.metrics_interval_secs)),
+            ("max_attribute_bytes", json!(cfg.max_attribute_bytes)),
+            ("max_content_bytes", json!(cfg.max_content_bytes)),
+            ("trace_sample_ratio", json!(cfg.trace_sample_ratio)),
+            ("max_trace_bytes", json!(cfg.max_trace_bytes)),
+            ("repo_names", json!(cfg.repo_names)),
+            ("max_backlog_days", json!(cfg.max_backlog_days)),
+            ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
+            ("start_from", json!(cfg.start_from)),
+        ] {
+            provenance.insert(key.to_string(), origin(key));
+            s.insert(key.into(), value);
+        }
+        s.insert("provider".into(), json!(LOKI));
+
+        // The same rules a save is held to, now over the effective values.
+        if cfg.stream_traces || cfg.stream_metrics {
+            return Resolved::Invalid(
+                "the Loki provider takes logs only; turn Traces and Metrics off or pick the OTLP endpoint provider".into(),
+            );
+        }
+        if cfg.url.is_empty() {
+            return Resolved::Invalid("no Loki URL is configured; set the module's URL".into());
+        }
+        if let Err(err) = settings::check_endpoint(&cfg.url, false) {
+            return Resolved::Invalid(err);
+        }
+        let Headers {
+            list: headers,
+            parsed: parsed_headers,
+            source: headers_source,
+        } = match headers_of(&var, secret) {
+            Ok(found) => found,
+            Err(e) => {
+                return Resolved::Invalid(format!(
+                    "the OTLP header list is malformed ({e}); nothing is exported until it is fixed"
+                ));
+            }
+        };
+        return Resolved::On(Box::new(Effective {
+            settings: s,
+            provenance,
+            headers,
+            parsed_headers,
+            headers_source,
+        }));
+    }
     let mut field = |key: &str, saved: Value, var_name: Option<&str>, settings: &mut Map<String, Value>| {
         let (value, source) = match var_name.and_then(var) {
             Some(v) => (Value::String(v), format!("env:{}", var_name.unwrap_or_default())),
@@ -419,6 +507,7 @@ pub fn resolve(
         ("stream_activity", json!(cfg.stream_activity)),
         ("stream_traces", json!(cfg.stream_traces)),
         ("stream_metrics", json!(cfg.stream_metrics)),
+        ("metrics_interval_secs", json!(cfg.metrics_interval_secs)),
         ("max_attribute_bytes", json!(cfg.max_attribute_bytes)),
         ("max_content_bytes", json!(cfg.max_content_bytes)),
         ("trace_sample_ratio", json!(cfg.trace_sample_ratio)),
@@ -464,17 +553,14 @@ pub fn resolve(
         );
     }
 
-    let (headers, headers_source) = match var("OTEL_EXPORTER_OTLP_HEADERS") {
-        Some(h) => (h, "env"),
-        None => match secret.filter(|s| !s.trim().is_empty()) {
-            Some(h) => (h.trim().to_string(), "secret"),
-            None => (String::new(), "none"),
-        },
-    };
     // A header list that does not parse is refused whole: sending a half-read credential is worse
     // than sending none, and the operator is told which name to fix.
-    let parsed_headers = match parse_headers(&headers) {
-        Ok(pairs) => pairs,
+    let Headers {
+        list: headers,
+        parsed: parsed_headers,
+        source: headers_source,
+    } = match headers_of(&var, secret) {
+        Ok(found) => found,
         Err(e) => {
             return Resolved::Invalid(format!(
                 "the OTLP header list is malformed ({e}); nothing is exported until it is fixed"
@@ -510,6 +596,15 @@ mod tests {
     fn module(enabled: bool, settings: Value) -> ModuleChoice {
         ModuleChoice {
             provider: OTLP.into(),
+            enabled,
+            settings: settings.as_object().cloned().unwrap_or_default(),
+        }
+    }
+
+    /// A module of `provider`, for the providers that are not OTLP.
+    fn module_as(provider: &str, enabled: bool, settings: Value) -> ModuleChoice {
+        ModuleChoice {
+            provider: provider.into(),
             enabled,
             settings: settings.as_object().cloned().unwrap_or_default(),
         }
@@ -569,6 +664,56 @@ mod tests {
         let saved = module(true, json!({"endpoint": "https://otlp.example.com"}));
         let e = on(resolve(Some(&saved), &env_of(&[]), None, &alone()));
         assert_eq!(e.str("endpoint"), "https://otlp.example.com");
+    }
+
+    #[test]
+    fn a_loki_module_resolves_its_own_fields_with_no_otel_override() {
+        let saved = module_as(
+            LOKI,
+            true,
+            json!({"url": "http://127.0.0.1:3100", "tenant_id": "acme", "stream_traces": false, "stream_metrics": false}),
+        );
+        // The standard OTLP variables never reach a Loki module: a Loki URL is not an OTLP
+        // endpoint, and an endpoint left in the service environment belongs to no one here.
+        let env = env_of(&[("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otlp.example.com")]);
+        let e = on(resolve(Some(&saved), &env, Some("x-honeycomb-team=k".into()), &alone()));
+        assert_eq!(e.str("provider"), LOKI);
+        assert_eq!(e.str("url"), "http://127.0.0.1:3100");
+        assert_eq!(e.str("tenant_id"), "acme");
+        assert_eq!(
+            e.settings["structured_metadata"],
+            json!(true),
+            "absent keys take their default"
+        );
+        assert_eq!(e.str("endpoint"), "", "an OTLP endpoint variable does not become a Loki URL");
+        assert_eq!(e.provenance["url"], "module");
+        assert_eq!(e.headers_source, "secret");
+        assert_eq!(e.settings["resource_attributes"]["service.name"], json!(DEFAULT_SERVICE_NAME));
+
+        // The same rules a save is held to, now over the effective values.
+        let traces_on = module_as(LOKI, true, json!({"url": "http://127.0.0.1:3100", "stream_traces": true}));
+        let why = match resolve(Some(&traces_on), &env_of(&[]), None, &alone()) {
+            Resolved::Invalid(why) => why,
+            other => panic!(
+                "expected invalid: {:?}",
+                header_names(&match other {
+                    Resolved::On(e) => e.headers,
+                    _ => String::new(),
+                })
+            ),
+        };
+        assert!(why.contains("logs only"), "{why}");
+        for broken in ["", "ftp://loki:3100", "https://user:pass@loki"] {
+            let saved = module_as(
+                LOKI,
+                true,
+                json!({"url": broken, "stream_traces": false, "stream_metrics": false}),
+            );
+            assert!(
+                matches!(resolve(Some(&saved), &env_of(&[]), None, &alone()), Resolved::Invalid(_)),
+                "url {broken:?}"
+            );
+        }
     }
 
     #[test]

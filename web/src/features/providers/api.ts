@@ -2,12 +2,16 @@
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request } from "../../http";
 import type { FindingsCard, QuotaActionReply, QuotaActionRequest, QuotaCard } from "../sessions/types";
-import type { DownloadableSkillset, ModelOption, ModelProvider, PluginListing, ProviderHealth, ProviderTestResult, ProviderUsageReport, SaveProviderRequest } from "./types";
+import type { DownloadableSkillset, ModelOption, ModelProvider, PluginListing, ProviderHealth, ProviderTestResult, ProviderUsageReport, PriceFeedStatus, SaveProviderRequest } from "./types";
 
 export interface ProvidersApi {
   providers(): Promise<ModelProvider[]>;
   saveProvider(id: string, body: SaveProviderRequest): Promise<ModelProvider>;
   deleteProvider(id: string): Promise<unknown>;
+  /** GET /api/price-feed: the configured price feed's URL and last fetch (issue #1038). */
+  priceFeed(): Promise<PriceFeedStatus>;
+  /** PUT /api/price-feed: set (or, with `""`, turn off) the price feed URL (issue #1038). */
+  savePriceFeed(url: string): Promise<PriceFeedStatus>;
   /** Probes the provider from the Mothership; can take ~5 s. */
   providerHealth(id: string): Promise<ProviderHealth>;
   /** POST /api/providers/{id}/test: one token through the colony's own route; names the URL and status (issue #1018). */
@@ -30,6 +34,8 @@ export const providersHttp: ProvidersApi = {
   providers: () => request("/api/providers"),
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),
+  priceFeed: () => request("/api/price-feed"),
+  savePriceFeed: (url) => put("/api/price-feed", { url }),
   providerHealth: (id) => request(`/api/providers/${enc(id)}/health`),
   testProvider: (id) => post(`/api/providers/${enc(id)}/test`),
   providerUsage: (id, days = 7) => request(`/api/providers/${enc(id)}/usage?days=${days}`),

@@ -7,7 +7,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -76,11 +76,36 @@ export function preflight(model, routes) {
   return null;
 }
 
+/** The skills of the mounted skill packs (docs/skill-packs.md): per comma-separated
+ * COLONIZER_PLUGIN_DIRS entry, every `skills/<name>/` child directory holding a SKILL.md —
+ * `paths` for the config's skills.paths (absolute in-VM paths, scanned as-is) and `names` for the
+ * permission allowlist, both sorted by name. The mothership mounts each pack read-only, so a
+ * missing or unreadable one is skipped silently: absence just means the pack shipped no skills. */
+export function packSkills(pluginDirs = []) {
+  const found = [];
+  for (const raw of pluginDirs) {
+    const dir = String(raw ?? '').trim();
+    if (!dir) continue;
+    let entries;
+    try { entries = readdirSync(join(dir, 'skills'), { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.isDirectory() && existsSync(join(dir, 'skills', entry.name, 'SKILL.md'))) found.push({ name: entry.name, path: join(dir, 'skills', entry.name) });
+    }
+  }
+  // Skill names are unique across packs (checked at boot), so the name sort needs no tiebreak.
+  found.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { paths: found.map((skill) => skill.path), names: found.map((skill) => skill.name) };
+}
+
 /** Inline config (OPENCODE_CONFIG_CONTENT): one `@ai-sdk/anthropic` provider per route in use,
  * pointing at the gateway, plus the colonizer MCP server. `timeout` maps `timeout_secs` to ms.
  * `disabledTools` (harness-validated OpenCode tool ids) are denied on top of the `*` allow;
- * `edit` is one permission for write, edit and apply_patch, and MCP tools are not covered. */
-export function opencodeConfig({ routes, model, smallModel, mcp, disabledTools = [] }) {
+ * `edit` is one permission for write, edit and apply_patch, and MCP tools are not covered.
+ * `skills` (packSkills' result, the COLONIZER_PLUGIN_DIRS mounts) add skills.paths and a `skill`
+ * permission that denies every skill but the packs' own — OpenCode keeps config key order and the
+ * LAST matching pattern wins, so the deny-all `*` sits first and the pack names after. When the
+ * harness switched the skill tool itself off, the plain string deny stays and no skill loads. */
+export function opencodeConfig({ routes, model, smallModel, mcp, disabledTools = [], skills = { paths: [], names: [] } }) {
   const small = smallModel || model;
   const used = [];
   for (const m of [model, small]) { const s = splitModel(m, routes); if (!s.error && !used.some((u) => u.route.provider === s.route.provider)) used.push(s); }
@@ -92,8 +117,12 @@ export function opencodeConfig({ routes, model, smallModel, mcp, disabledTools =
     const context = s.route.context_tokens ?? DEFAULT_CONTEXT_TOKENS;
     provider[s.route.provider].models[s.name] = { name: s.name, limit: { context, output: Math.min(32_000, Math.floor(context / 4)) } };
   }
-  const permission = disabledTools.length ? { '*': 'allow', ...Object.fromEntries(disabledTools.map((id) => [id, 'deny'])) } : 'allow';
-  return { provider, model, small_model: small, permission, autoupdate: false, share: 'disabled', ...(mcp ? { mcp } : {}) };
+  const permission = disabledTools.length || skills.paths.length ? {
+    '*': 'allow',
+    ...Object.fromEntries(disabledTools.map((id) => [id, 'deny'])),
+    ...(skills.paths.length && !disabledTools.includes('skill') ? { skill: { '*': 'deny', ...Object.fromEntries(skills.names.map((name) => [name, 'allow'])) } } : {}),
+  } : 'allow';
+  return { provider, model, small_model: small, permission, autoupdate: false, share: 'disabled', ...(skills.paths.length ? { skills: { paths: skills.paths } } : {}), ...(mcp ? { mcp } : {}) };
 }
 
 /** COLONIZER_LOOP* gate the MCP server's loop tools, so they flow into its `environment` — but
@@ -408,6 +437,11 @@ async function main() {
   // Harness-level tool switch (module.json `disabled_tools`, names validated at boot): deny those
   // tools in every turn's inline config, whatever else stays allowed.
   const disabledTools = (env.COLONIZER_DISABLED_TOOLS ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  // Skill packs (docs/skill-packs.md) arrive mounted read-only, one directory per entry of
+  // COLONIZER_PLUGIN_DIRS; their skills ride the inline config as skills.paths. Computed once
+  // here: every turn rebuilds the config for a possibly set_model'd model, and the packs are part
+  // of that rebuild like the routes are.
+  const skills = packSkills((env.COLONIZER_PLUGIN_DIRS ?? '').split(','));
   const fatal = preflight(model, routes);
   if (fatal) fail(fatal);
 
@@ -422,8 +456,10 @@ async function main() {
   writeFileSync(instrPath, instructionsText(env));
   const makeEnv = (bridge, current = model) => ({
     ...env,
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...opencodeConfig({ routes, model: current, smallModel: smallExplicit || current, disabledTools, mcp: { colonizer: colonizerMcp({ moduleDir, bridge, env }) } }), instructions: [instrPath] }),
-    OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLE_AUTOUPDATE: '1', OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...opencodeConfig({ routes, model: current, smallModel: smallExplicit || current, disabledTools, skills, mcp: { colonizer: colonizerMcp({ moduleDir, bridge, env }) } }), instructions: [instrPath] }),
+    // EXTERNAL_SKILLS stops OpenCode's scans of ~/.claude/skills and ~/.agents/skills: a fresh VM's
+    // home holds none, and the only skills a colony sees are the packs in the config above.
+    OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLE_AUTOUPDATE: '1', OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_DISABLE_LSP_DOWNLOAD: '1', OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
   });
 
   emit({ type: 'model_changed', model, previous: null });

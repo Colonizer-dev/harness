@@ -1,7 +1,7 @@
 // Remote access, phones, push & API tokens API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request } from "../../http";
-import type { ApiTokenMeta, CreatedApiToken, LinkDevices, LinkInvite, NewApiToken, PhoneInvite, Phones, PushPresenceBody, PushSubscribeBody, PushSubscriptionPatch, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "./types";
+import type { ApiTokenMeta, CratefieldPushState, CreatedApiToken, LinkDevices, LinkInvite, NewApiToken, PhoneInvite, Phones, PushPresenceBody, PushSubscribeBody, PushSubscriptionPatch, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "./types";
 
 export interface RemoteApi {
   /** GET /api/push/key: the VAPID public key the browser subscribes with (issue #516). */
@@ -18,6 +18,12 @@ export interface RemoteApi {
   testPushSubscription(id: string): Promise<{ sent: boolean }>;
   /** POST /api/push/presence: the focused-tab report; 404 once the endpoint is no longer subscribed. */
   pushPresence(body: PushPresenceBody): Promise<void>;
+  /** GET /api/push/cratefield: the Cratefield delivery channel (issue #1085) — the switch and the relay queue's bookkeeping. */
+  cratefieldPush(): Promise<CratefieldPushState>;
+  /** PUT /api/push/cratefield: switches delivery through Cratefield on or off. 409 when enabling while remote access has no link; disabling clears the queue and tells the relay to drop its subscription, and stays off even when the relay cannot be told. */
+  setCratefieldPush(enabled: boolean): Promise<CratefieldPushState>;
+  /** POST /api/push/cratefield/test: one test notification queued and flushed at once; 409 while the channel is off. */
+  testCratefieldPush(): Promise<CratefieldPushState>;
   /** GET /api/remote: the remote-access switch, the tunnel host and the live link (issue #535, docs/protocol.md §6.10). */
   remote(): Promise<RemoteStatus>;
   /** PUT /api/remote: switches the tunnel on or off. 502 when the relay refused the registration — the switch stays off; 500 when the key file is broken and needs a reset. */
@@ -68,6 +74,9 @@ export const remoteHttp: RemoteApi = {
   updatePushSubscription: (id, body) => request(`/api/push/subscriptions/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
   testPushSubscription: (id) => post(`/api/push/subscriptions/${enc(id)}/test`),
   pushPresence: (body) => post("/api/push/presence", body),
+  cratefieldPush: () => request("/api/push/cratefield"),
+  setCratefieldPush: (enabled) => put("/api/push/cratefield", { enabled }),
+  testCratefieldPush: () => post("/api/push/cratefield/test"),
   remote: () => request("/api/remote"),
   setRemote: (enabled) => put("/api/remote", { enabled }),
   resetRemote: () => post("/api/remote/reset"),

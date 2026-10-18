@@ -136,7 +136,7 @@ export function LoopsView({
       </div>
 
       <LoopSection title="Built-in" label="Built-in loops" meta="Always here, and yours to switch on.">
-        <MergeLoopCard repos={repos} />
+        <MergeLoopCard repos={repos} onOpenColony={onOpenColony} />
         <SupplyChainLoopCard onOpenColony={onOpenColony} />
         <TsAnyLoopCard onOpenColony={onOpenColony} />
         <DocsLoopCard onOpenColony={onOpenColony} />

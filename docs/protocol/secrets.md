@@ -23,7 +23,7 @@ read once at startup and cached, so macOS asks for access then, not in the middl
   keys: the gateway adds them to routed requests, they never enter a microVM), `injected` (handed to
   the colony as an msb `--secret ENV@hosts`: the guest sees a placeholder and msb substitutes the
   value only on TLS to `hosts` — the Claude token for `api.anthropic.com`, the Jev key for
-  `api.typesafe.ai`, and colony secrets), or `none` (the mothership's own use only).
+  `api.typesafe.ai`, the [Living Brain](living-brain.md) token for its MCP host, and colony secrets), or `none` (the mothership's own use only).
 - `GET /api/secrets/health` → the `keychain` object alone.
 - `PUT /api/secrets/{id}` `{"value": "…", "location"?: "keychain"|"file"}` → the row. One line, at
   most 16 KB. Without `location` the secret stays where it is (a new one follows the rule above).

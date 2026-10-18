@@ -726,6 +726,13 @@ async fn check_all(app: &Shared) {
                 }
             }
             Decision::Flag(reason) => {
+                // The stall hook (issue #1192) on the final flag path too: a colony out of nudges
+                // is the other stall the operator may take. The hook runs before the flag goes out
+                // (the turn is spawned, not awaited), so the colony reads as needing you whether
+                // or not a turn follows.
+                if reason == "nudges_exhausted" {
+                    crate::playbook::on_unmatched_stall(app, &s).await;
+                }
                 // Matched on the pair so only the two *starting* states get the boot wording: a
                 // `stalled` from the nudge path, or from a state that does not exist yet, keeps the
                 // mid-run line and cannot silently inherit starting-only meaning (issue #760).

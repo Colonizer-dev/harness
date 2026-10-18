@@ -58,6 +58,16 @@ const SHANNON_TARGET: &str = "<local-url>";
 const SHANNON_REPORT_CAP: u64 = 8 * 1024 * 1024;
 /// The most results one report may ingest; each costs a host-side model call, so a huge report is cut off.
 const MAX_SHANNON_FINDINGS: usize = findings::MAX_PER_COLONY * 2;
+/// The vendored security-audit skill pack (docs/skill-packs.md), off by default. When an org has
+/// switched it on, a Security preset hunter is briefed to run the skill's audit workflow on its focus
+/// instead of an open-ended hunt; the brief says so, and nothing loads the pack for the run.
+const SECURITY_AUDIT_PACK: &str = "security-audit";
+/// Where a hunter told to run the security-audit workflow writes the audit run: under `/harness/out`,
+/// the session's `out/` on the host, so it lands beside the colony's own output and outside the
+/// checked-out target — no ignore rule needed, where the skill's own default under the home directory
+/// would have it stop and ask for an external path. Nothing else writes under `/harness/out/security-audit`
+/// (the synthesis report is `/harness/out/redteam-report.jsonl`; a Shannon colony writes `/harness/out/shannon`).
+const SECURITY_AUDIT_OUT: &str = "/harness/out/security-audit/run-1";
 
 /// The eight focus areas a run's hunters are drawn from, cycled as `i % 8`. Each brief names its own
 /// focus and lists the others, so the swarm keeps out of one another's way. Burn-down hunt colonies
@@ -563,8 +573,9 @@ fn leads_for(raid: &[RaidLead], i: usize, n: usize) -> Vec<&RaidLead> {
 /// The runner brief one hunter gets, as the request body of `POST /api/sessions`. Hunters are
 /// numbered from 1 in both the title and the brief, so the role line matches the UI. `raid` is the
 /// bench raid set for the raided repository ([`raid_leads`]); a hunter with no share of it is
-/// briefed exactly as before.
-fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Value {
+/// briefed exactly as before. `security_audit` says the org's colonies load the security-audit skill
+/// pack ([`security_audit_loaded`]); only a Security preset brief reacts to it.
+fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead], security_audit: bool) -> Value {
     let names = run.preset.focus_names();
     let focus = names[i % names.len()];
     let others: Vec<&str> = names
@@ -597,7 +608,7 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Valu
         )
     };
     let instructions = if run.preset == Preset::Security {
-        security_instructions(run, i, n, module, &others, fix, &raid)
+        security_instructions(run, i, n, module, &others, fix, &raid, security_audit)
     } else {
         format!(
             "You are red-team hunter {} of {n} raiding {}, using the {module} module.\n\
@@ -703,9 +714,52 @@ fn prescan_leads_for(run: &RedTeamRun, i: usize, n: usize) -> Vec<&crate::presca
         .collect()
 }
 
+/// Whether the org's colonies load the security-audit skill pack ([`SECURITY_AUDIT_PACK`]): the
+/// agent module its colonies launch on carries a `plugins` setting naming the pack — the claude-code
+/// module's list with the org's `agent.skillsets` overrides on top — and loads skill packs at all
+/// when it names none of its own. The same decision boot.rs makes when it mounts
+/// `/opt/colonizer/plugins/<name>`, read again at every launch, so an org flipping the switch
+/// between raids changes only the raids after it. Nothing here loads the pack for the run: an org
+/// that has not switched it on briefs exactly as before.
+async fn security_audit_loaded(app: &Shared, org: &str) -> bool {
+    let org_settings = app.org_settings(org);
+    let modules = app.modules.read().await.clone();
+    let choice = crate::orgs::effective_agent(&modules, &org_settings);
+    let dirs = |module: &crate::modules::AgentModule| {
+        crate::sessions::agent_env(module, &choice)
+            .get("COLONIZER_PLUGIN_DIRS")
+            .and_then(Value::as_str)
+            .map(crate::plugins::parse_list)
+            .unwrap_or_default()
+    };
+    let module = app.agents.iter().find(|a| a.id == choice.provider);
+    let mut names = module.map(dirs).unwrap_or_default();
+    if names.is_empty() && module.is_some_and(|m| m.skill_packs) {
+        names = app
+            .agents
+            .iter()
+            .find(|a| a.id == "claude-code")
+            .map(dirs)
+            .unwrap_or_default();
+    }
+    names.iter().any(|name| name == SECURITY_AUDIT_PACK)
+}
+
 /// A security hunter's instructions: its focus named and described, the others listed, the proof
-/// a finding needs, the rules of engagement, and its share of the pre-scan leads.
-fn security_instructions(run: &RedTeamRun, i: usize, n: usize, module: &str, others: &[&str], fix: &str, raid: &str) -> String {
+/// a finding needs, the rules of engagement, and its share of the pre-scan leads. With the
+/// security-audit skill pack loaded in the colony ([`security_audit_loaded`]), one more paragraph
+/// swaps the open-ended hunt for the skill's own audit workflow on the hunter's focus.
+#[allow(clippy::too_many_arguments)]
+fn security_instructions(
+    run: &RedTeamRun,
+    i: usize,
+    n: usize,
+    module: &str,
+    others: &[&str],
+    fix: &str,
+    raid: &str,
+    security_audit: bool,
+) -> String {
     let (focus, detail) = SECURITY_FOCUSES[i % SECURITY_FOCUSES.len()];
     let mine = prescan_leads_for(run, i, n);
     let prescan = if mine.is_empty() {
@@ -722,6 +776,28 @@ fn security_instructions(run: &RedTeamRun, i: usize, n: usize, module: &str, oth
              {}\n",
             lines.join("\n"),
         )
+    };
+    let pack = if security_audit {
+        format!(
+            "\n\
+             \n\
+             The security-audit skill pack is loaded in this colony — your org switched it on, and the\n\
+             skill is mounted at /opt/colonizer/plugins/{SECURITY_AUDIT_PACK} — so run its full audit on\n\
+             your focus area instead of an open-ended hunt. Select {SECURITY_AUDIT_OUT} as the run's output\n\
+             directory: naming it up front keeps the skill outside the checked-out target — no ignore\n\
+             rule needed — and off its home-directory default, so the run's artifacts land where the\n\
+             harness reads them. The audit's parallel isolated agents are your subagents; stay within the\n\
+             subagent limits your colony runs under. The microVM is the OS-enforced sandbox the skill's\n\
+             validation needs only when outbound networking is denied: before executing target code, check\n\
+             that a request to a public host fails, and if it succeeds, do not execute target code —\n\
+             leave such leads needs_validation, as the skill itself says. Validate findings.json with the\n\
+             skill's validate-findings.cjs. File only its confirmed records with the findings tool — one\n\
+             finding per record, the record's evidence as the evidence, a severity as above — and leave\n\
+             needs_validation and rejected records in findings.json, out of the findings tool and the\n\
+             issue tracker."
+        )
+    } else {
+        String::new()
     };
     format!(
         "You are red-team hunter {} of {n} raiding {} for security defects, using the {module} module.\n\
@@ -742,7 +818,7 @@ fn security_instructions(run: &RedTeamRun, i: usize, n: usize, module: &str, oth
          and never use real credentials — create throwaway accounts and test keys on the local instance.\n\
          \n\
          Report what you find with the findings tool, with a severity (critical, high, medium or low) and\n\
-         the proof as its evidence.\n\
+         the proof as its evidence.{pack}\n\
          \n\
          {fix}{prescan}{raid}",
         i + 1,
@@ -872,6 +948,9 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
             .await;
     }
     let names = run.preset.focus_names();
+    // Whether the org's colonies load the security-audit skill pack, decided once per launch: the
+    // briefs a launch writes are the briefs its hunters live with.
+    let security_audit = run.preset == Preset::Security && security_audit_loaded(app, &run.org).await;
     for i in 0..n {
         // A stop may have landed while this swarm was being created: its terminal state wins, and
         // no more hunters launch.
@@ -895,7 +974,7 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
                 }
             }
         } else {
-            hunter_brief(run, i, n, &raid)
+            hunter_brief(run, i, n, &raid, security_audit)
         };
         match launch_hunter(app.clone(), brief).await {
             Ok(session) => {
@@ -3564,20 +3643,23 @@ mod tests {
         // Hunter i of 3 gets leads i, i+3, i+6 — each lead chased by exactly one hunter.
         let lead = |k: usize| format!("src/bug-{k}.rs:{}", k * 100);
         let dealt: Vec<Vec<String>> = (0..3)
-            .map(|i| lead_files(hunter_brief(&run, i, 3, &raid)["instructions"].as_str().unwrap()))
+            .map(|i| lead_files(hunter_brief(&run, i, 3, &raid, false)["instructions"].as_str().unwrap()))
             .collect();
         assert_eq!(dealt[0], [lead(0), lead(3), lead(6)]);
         assert_eq!(dealt[1], [lead(1), lead(4)]);
         assert_eq!(dealt[2], [lead(2), lead(5)]);
         // The paragraph says why the leads are there and suspends the focus split for them alone.
-        let briefed = hunter_brief(&run, 0, 3, &raid)["instructions"].as_str().unwrap().to_string();
+        let briefed = hunter_brief(&run, 0, 3, &raid, false)["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(
             briefed.contains("The bench's raid set holds known injected bugs"),
             "{briefed}"
         );
         assert!(briefed.contains("chase them first"), "{briefed}");
         // An empty raid set (no pool, or nothing for this repo) briefs exactly as before.
-        let plain = hunter_brief(&run, 0, 3, &[]);
+        let plain = hunter_brief(&run, 0, 3, &[], false);
         let plain = plain["instructions"].as_str().unwrap();
         assert!(!plain.contains("raid set"), "{plain}");
         let elsewhere = [raid_entry("other/repo", "src/elsewhere.rs", 1, "Someone else's bug.")];
@@ -3590,7 +3672,7 @@ mod tests {
         };
         assert!(pool_leads.is_empty());
         assert_eq!(
-            hunter_brief(&run, 0, 3, &pool_leads)["instructions"].as_str().unwrap(),
+            hunter_brief(&run, 0, 3, &pool_leads, false)["instructions"].as_str().unwrap(),
             plain,
             "a raid set holding only other repositories' entries changes nothing"
         );
@@ -3604,7 +3686,7 @@ mod tests {
                 commit: None,
             })
             .collect();
-        let solo = hunter_brief(&raid_run("acme/repo"), 0, 1, &long)["instructions"]
+        let solo = hunter_brief(&raid_run("acme/repo"), 0, 1, &long, false)["instructions"]
             .as_str()
             .unwrap()
             .matches("\n- ")
@@ -3692,7 +3774,7 @@ mod tests {
         let run = security_run("acme/shop");
         for n in [1, 3, 8] {
             for i in 0..n {
-                let brief = hunter_brief(&run, i, n, &[]);
+                let brief = hunter_brief(&run, i, n, &[], false);
                 let text = brief["instructions"].as_str().unwrap();
                 let (name, detail) = SECURITY_FOCUSES[i % 8];
                 assert!(text.contains(&format!("Your assignment is {name}. {detail}")), "{text}");
@@ -3717,20 +3799,99 @@ mod tests {
             }
         }
         // Cycling wraps exactly like the general preset: hunter 9 of 9 is focus 1 again.
-        let wrapped = hunter_brief(&run, 8, 9, &[]);
+        let wrapped = hunter_brief(&run, 8, 9, &[], false);
         assert_eq!(wrapped["title"], format!("Red-team hunter 9/9: {}", SECURITY_FOCUSES[0].0));
         // Autofix on swaps the rule the same way.
         let mut fixing = security_run("acme/shop");
         fixing.autofix = true;
-        let text = hunter_brief(&fixing, 0, 3, &[])["instructions"].as_str().unwrap().to_string();
+        let text = hunter_brief(&fixing, 0, 3, &[], false)["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(text.contains("autofix is on") && !text.contains("NEVER open"), "{text}");
+    }
+
+    #[test]
+    fn a_security_brief_carries_the_audit_pack_guidance_only_when_the_pack_is_loaded() {
+        let run = security_run("acme/shop");
+        // With the pack loaded, the brief swaps the open-ended hunt for the skill's own audit, and
+        // says where the run goes, how its subagents are bounded, when target code may run, and what
+        // may be filed.
+        let text = hunter_brief(&run, 0, 3, &[], true)["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("The security-audit skill pack is loaded"), "{text}");
+        assert!(text.contains("run its full audit on"), "{text}");
+        assert!(text.contains("/opt/colonizer/plugins/security-audit"), "{text}");
+        assert!(text.contains("/harness/out/security-audit/run-1"), "{text}");
+        assert!(text.contains("your subagents"), "{text}");
+        assert!(text.contains("outbound networking is denied"), "{text}");
+        assert!(text.contains("do not execute target code"), "{text}");
+        assert!(text.contains("needs_validation"), "{text}");
+        assert!(text.contains("validate-findings.cjs"), "{text}");
+        assert!(
+            text.contains("File only its confirmed records with the findings tool"),
+            "{text}"
+        );
+        assert!(text.contains("rejected records in findings.json"), "{text}");
+        // Without the pack, none of it: the brief is exactly what it always was.
+        let plain = hunter_brief(&run, 0, 3, &[], false);
+        let without = plain["instructions"].as_str().unwrap();
+        assert!(!without.contains("security-audit"), "{without}");
+        // A general run never carries the guidance, pack or no pack: only the security preset reads it.
+        let general = raid_run("acme/repo");
+        let general = hunter_brief(&general, 0, 3, &[], true);
+        let text = general["instructions"].as_str().unwrap();
+        assert!(!text.contains("security-audit"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_orgs_skillset_switch_decides_whether_the_audit_pack_reaches_the_brief() {
+        let root = temp_root();
+        // A claude-code-shaped module carrying the Skillsets setting, the declaration the real
+        // manifest makes (boot.rs's own test helper builds the same).
+        let module = crate::modules::AgentModule::test("claude-code").schema(json!({
+            "type": "object",
+            "properties": {
+                "plugins": {
+                    "type": "string", "format": "plugin-dirs", "title": "Skillsets",
+                    "default": "archify", "env": "COLONIZER_PLUGIN_DIRS"
+                },
+            }
+        }));
+        let app = crate::tests::test_app_with_agents(&root, vec![module], |_| {});
+        // Off by default: the run's pack detection is exactly as off as the mount would be.
+        assert!(!security_audit_loaded(&app, "acme").await);
+        // The org switching the skillset on is enough; nothing else loads the pack.
+        let mut all = app.all_org_settings();
+        all.insert(
+            "acme".into(),
+            crate::orgs::OrgSettings {
+                agent: Some(crate::orgs::AgentOverrides {
+                    skillsets: Some(std::collections::BTreeMap::from([("security-audit".into(), true)])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        app.save_org_settings(&all).await.unwrap();
+        assert!(security_audit_loaded(&app, "acme").await);
+        assert!(
+            !security_audit_loaded(&app, "other").await,
+            "an org that did not switch it on does not load it"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn general_runs_are_briefed_exactly_as_before() {
         let run = raid_run("acme/repo");
         assert_eq!(run.preset, Preset::General, "general is the default preset");
-        let text = hunter_brief(&run, 0, 3, &[])["instructions"].as_str().unwrap().to_string();
+        let text = hunter_brief(&run, 0, 3, &[], false)["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let expected = "You are red-team hunter 1 of 3 raiding acme/repo, using the general module.\n\
              \n\
              Your assignment is error handling and edge cases.\n\
@@ -3755,7 +3916,10 @@ mod tests {
             leads: vec![lead("P1", crate::prescan::FOCUS_SECRETS)],
             ..Default::default()
         });
-        assert_eq!(hunter_brief(&odd, 0, 3, &[])["instructions"].as_str().unwrap(), expected);
+        assert_eq!(
+            hunter_brief(&odd, 0, 3, &[], false)["instructions"].as_str().unwrap(),
+            expected
+        );
         // A run file written before presets reads as general with no pre-scan.
         let old: RedTeamRun =
             serde_json::from_value(json!({"id": "rt_old", "repo": "acme/repo", "modules": ["general"]})).unwrap();

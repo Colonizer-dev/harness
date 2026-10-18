@@ -4,6 +4,8 @@ export interface ModuleProviderInfo {
   description?: string;
   /** Agent rows only: the runner serves the loop MCP tools `loop_next` and `loop_stop` (issue #643). */
   loop_tools?: boolean;
+  /** Agent rows only: the module loads skill packs (issue #1164). */
+  skill_packs?: boolean;
 }
 
 /** A small JSON-Schema subset: an object whose properties are scalar settings. */
@@ -92,13 +94,45 @@ export interface ObservabilityStatus {
   error?: string | null;
   endpoint?: string;
   protocol?: string;
+  service_name?: string;
+  /** Where each setting came from, keyed by setting name: "module", "env:<VAR>" or "default". */
+  provenance?: Record<string, string>;
+  restarts?: number;
   headers?: { source: "env" | "secret" | "none"; names: string[] };
-  exporter?: { state?: string; exported?: number; last_error?: string | null; dropped?: Record<string, number> } | null;
+  exporter?: ObservabilityExporterStatus | null;
+}
+
+/** The exporter add-on's status.json, passed through by GET /api/observability/status. */
+export interface ObservabilityExporterStatus {
+  state?: string;
+  endpoint?: string;
+  heartbeat_unix?: number;
+  last_success_unix?: number | null;
+  last_error?: string | null;
+  next_retry_unix?: number | null;
+  consecutive_failures?: number;
+  exported?: number;
+  bytes_sent?: number;
+  backlog_bytes?: number;
+  dropped?: Record<string, number>;
+  export_failures?: number;
+  signals?: Record<string, ObservabilitySignalStatus>;
+}
+
+/** One signal (logs, traces, metrics): state is ok | backing_off | auth_failed | off. */
+export interface ObservabilitySignalStatus {
+  state?: string;
+  endpoint?: string;
+  consecutive_failures?: number;
+  last_success_unix?: number | null;
+  last_error?: string | null;
+  records_sent?: number;
+  bytes_sent?: number;
 }
 
 /** POST /api/observability/test: what the backend answered for each signal. */
 export interface ObservabilityTest {
   ok: boolean;
   error?: string;
-  signals?: Record<string, { ok: boolean; status?: number; error?: string; rejected?: number }>;
+  signals?: Record<string, { ok: boolean; status?: number; error?: string; rejected?: number; message?: string; auth_failed?: boolean }>;
 }
