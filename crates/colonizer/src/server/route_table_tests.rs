@@ -114,11 +114,16 @@ fn test_code_at(text: &str) -> Option<usize> {
     while let Some(found) = text[from..].find(ATTR) {
         let at = from + found;
         let mut rest = text[at + ATTR.len()..].trim_start();
-        // Skip any further attributes before the item's own keyword.
-        while let Some(body) = rest.strip_prefix("#[") {
-            match body.find(']') {
-                Some(end) => rest = body[end + 1..].trim_start(),
-                None => break,
+        // Skip any further attributes (and line comments trailing them, as in
+        // `#[allow(...)] // why`) before the item's own keyword.
+        while rest.starts_with("#[") || rest.starts_with("//") {
+            if let Some(comment) = rest.strip_prefix("//") {
+                rest = comment.find('\n').map_or("", |nl| &comment[nl + 1..]).trim_start();
+            } else {
+                match rest[2..].find(']') {
+                    Some(end) => rest = rest[2 + end + 1..].trim_start(),
+                    None => break,
+                }
             }
         }
         if rest
