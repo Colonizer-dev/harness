@@ -485,19 +485,34 @@ note "ok: app.old behind a dangling app symlink was put back, and the install fi
 #    installer over the slot its msb was still running from. The process is started through a symlink
 #    outside the slot, the way the mothership itself runs, so this only passes with the
 #    real-executable check and not the command line.
-note "== install refused when the target slot is in use"
+note "== install skips a slot in use and lands in the next free one"
 fresh_home
 must_install "$versions/v1" "clean v1 before the in-use target test"
 start_in_slot_via_symlink "$home/.local/share/colonizer/app-b"
+must_install "$versions/v2" "install past an in-use app-b"
+expect_colonizer "install past an in-use app-b" "colonizer 2"
+[ -f "$home/.local/share/colonizer/app-b/vendor/microsandbox/bin/msb" ] ||
+  bad "install past an in-use app-b: expected the in-use slot's binary to be left untouched"
+[ "$(readlink "$app")" = app-c ] ||
+  bad "install past an in-use app-b: expected app to point at app-c, got $(readlink "$app")"
+note "ok: an install skipped the in-use app-b and landed in app-c, leaving app-b untouched"
+stop_bg
+
+note "== install refused when every app slot is in use"
+fresh_home
+must_install "$versions/v1" "clean v1 before the all-slots-in-use test"
+for letter in b c d e f g h i j k l m n o p q r s t u v w x y z; do
+  start_in_slot_via_symlink "$home/.local/share/colonizer/app-$letter"
+done
 rc=0
 install_from_release "$versions/v2" || rc=$?
-[ "$rc" -ne 0 ] || bad "in-use target slot: expected the installer to refuse app-b in use"
-grep -q "in use by pid(s)" "$log" ||
-  bad "in-use target slot: expected the refusal to name the slot and pid(s); it said: $(cat "$log")"
-[ -f "$home/.local/share/colonizer/app-b/vendor/microsandbox/bin/msb" ] ||
-  bad "in-use target slot: expected the in-use slot's binary to be left untouched"
-expect_colonizer "in-use target slot" "colonizer 1"
-note "ok: an install whose target slot is in use was refused and left it untouched"
+[ "$rc" -ne 0 ] || bad "all slots in use: expected the installer to refuse when no slot is free"
+grep -q "every app slot is in use" "$log" ||
+  bad "all slots in use: expected the refusal to say every slot is in use; it said: $(cat "$log")"
+[ -f "$home/.local/share/colonizer/app-a/vendor/microsandbox/bin/msb" ] ||
+  bad "all slots in use: expected the current slot's binary to be left untouched"
+expect_colonizer "all slots in use" "colonizer 1"
+note "ok: an install with every slot in use was refused and left them untouched"
 stop_bg
 
 # 7. A running process in the slot an install would remove: the slot is kept, not deleted, and a note
