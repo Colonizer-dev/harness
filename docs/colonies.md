@@ -1243,7 +1243,10 @@ each other is `bench.mjs jev`
 ([bench.md, Grading Jev compaction](bench.md#grading-jev-compaction)). This is separate from the
 Jev routing second opinion (`jev_shadow_mode`,
 [protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is shadow-only unless
-`jev_routing_act` lets it pick the tier.
+`jev_routing_act` lets it pick the tier. It is also separate from the per-turn routing shadow
+(`turn_route_shadow`, on by default), which measures at every orchestrator turn end what tier that
+turn needed and what switching would cost, and never changes a model
+([protocol.md §6.1d](protocol.md#61d-per-turn-model-routing-shadow)).
 
 ## Rate limits on notifications and the judge
 

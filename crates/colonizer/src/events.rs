@@ -937,7 +937,28 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             cost_usd,
             model_usage,
             ..
-        } => finish_turn(app, id, rt, is_error, result, cost_usd, model_usage).await,
+        } => {
+            // Per-turn routing in shadow (#1152) reads the usage this turn grew by, so take the
+            // cumulative before `finish_turn` updates it, and measure off the loop — spawned, so
+            // event processing never waits on it and a subagent's turn end routes nothing.
+            let subagent = origin == Origin::Subagent;
+            let usage_before = if subagent {
+                None
+            } else {
+                app.session(id).await.and_then(|s| s.model_usage)
+            };
+            let turn_usage = model_usage.clone().filter(|u| u.is_object());
+            finish_turn(app, id, rt, is_error, result, cost_usd, model_usage).await;
+            if !subagent {
+                tokio::spawn(crate::turn_routing::on_turn_end(
+                    app.clone(),
+                    id.to_string(),
+                    subagent,
+                    usage_before,
+                    turn_usage,
+                ));
+            }
+        }
         // Forwarded to the browser above and acted on nowhere here.
         AgentEvent::UserMessage { .. } | AgentEvent::Other => {}
     }
