@@ -1,0 +1,25 @@
+# Datasources for the Colonizer dashboards. The compose stack that runs these services lands with
+# issue #862; until then this pins the uids the provisioned dashboards query, so the names on the
+# panels are stable whether you point Grafana at the local stack or a remote one.
+apiVersion: 1
+deleteDatasources: []
+datasources:
+  - name: Colonizer Prometheus
+    type: prometheus
+    uid: colonizer-prom
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+  - name: Colonizer Loki
+    type: loki
+    uid: colonizer-loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+  - name: Colonizer Tempo
+    type: tempo
+    uid: colonizer-tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
