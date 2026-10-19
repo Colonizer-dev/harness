@@ -1230,6 +1230,7 @@ mod tests {
             price_feed_id: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
+            host_sensitive_models: Vec::new(),
             quota: None,
             normalize_cache_ttl: false,
             trusted: false,

@@ -1246,6 +1246,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &task_signals,
     )
     .await;
+    // The cheapest-host hint (issue #1039): the agent module opts this colony's open-weight models
+    // into starting on the cheapest healthy host serving them. The flag is read here; the rewrite
+    // runs after every model substitution below is final.
+    let prefer_cheapest_host = flag("prefer_cheapest_host").unwrap_or(false);
     let route_settings = crate::routing::RoutingSettings {
         enabled: flag("route_per_task").unwrap_or(true),
         chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
@@ -1386,6 +1390,53 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
     runner_env.remove("COLONIZER_MODEL_LOW");
     runner_env.remove("COLONIZER_MODEL_HIGH");
+    // The cheapest-host rewrite (issue #1039), the last hand on the model vars: every substitution
+    // above is final, and only the host prefix of a `provider/model` ever changes. Open-weight
+    // models only — a closed model, or one any operator marked host-sensitive, keeps its named
+    // host, as does a model nobody prices or a host that is degraded, out of quota or has its
+    // tools disabled. The tier vars are stripped just above, so of MODEL_VARS only the vars still
+    // in the env move; the summary model is not on that list and never does. A model the operator
+    // named at launch (`--model` / the MCP `start`) is their statement of intent and is never
+    // rewritten — provenance.rs says so, and the playbook's own switch writes the same override,
+    // so boot leaving it alone is consistent. The candidate filter shares the sensitivity inputs
+    // `resolve_sensitivity_model`/`model_fix` resolved against, so the policy cannot move a colony
+    // onto a host the gateway would then 403.
+    let operator_named = [
+        s.model_override.as_deref().map(|_| "COLONIZER_MODEL"),
+        s.subagent_model_override.as_deref().map(|_| "COLONIZER_SUBAGENT_MODEL"),
+    ]
+    .into_iter()
+    .flatten();
+    let mut cheapest_host: Vec<(String, String)> = Vec::new();
+    if prefer_cheapest_host {
+        let feed = app.price_feed.entries();
+        let state = |p: &providers::Provider| crate::model_hosts::host_state(app, p);
+        let eligible = |p: &providers::Provider| providers::provider_eligible(sensitivity, overrides, p);
+        for var in providers::MODEL_VARS {
+            if operator_named.clone().any(|named| named == var) {
+                continue;
+            }
+            let Some(current) = runner_env.get(var).and_then(Value::as_str).map(str::to_string) else {
+                continue;
+            };
+            let Some(rerouted) = crate::model_hosts::reroute_model(&configured, Some(&feed), &current, &state, &eligible) else {
+                continue;
+            };
+            runner_env.insert(var.into(), Value::String(rerouted.clone()));
+            if var == "COLONIZER_MODEL" {
+                effective_model = rerouted.clone();
+            }
+            cheapest_host.push((current, rerouted));
+        }
+        if !cheapest_host.is_empty() {
+            let said = cheapest_host
+                .iter()
+                .map(|(from, to)| format!("{from} → {to}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log.info(format!("cheapest host: {said}")).await;
+        }
+    }
     let model_changed = !effective_model.is_empty() && effective_model != module_model;
     let mut message = format!("model routing: {}", tier_decision.reason);
     if model_changed {
@@ -1418,7 +1469,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
-    let record = json!({
+    let mut record = json!({
         // Which decision this is and how Jev took part (issue #583), so a report can compare
         // Jev-acted decisions against rule ones by outcome without re-deriving either.
         "point": crate::routing::DECISION_POINT,
@@ -1440,6 +1491,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "cost": cost_record,
         "sensitivity": sensitivity.as_str(),
     });
+    // What the cheapest-host policy moved (issue #1039), so a boot can be checked against the
+    // ranking `GET /api/model-hosts` shows. Absent when the policy is off or moved nothing.
+    if !cheapest_host.is_empty() {
+        record["cheapest_host"] = json!(
+            cheapest_host
+                .iter()
+                .map(|(from, to)| json!({ "from": from, "to": to }))
+                .collect::<Vec<_>>()
+        );
+    }
     app.update_session(id, |x| {
         x.model_routing = Some(record.clone());
         x.sensitivity = Some(sensitivity.as_str().to_string());
