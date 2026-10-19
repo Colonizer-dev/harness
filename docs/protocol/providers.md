@@ -292,7 +292,7 @@ tried, and the original answer (without `x-colonizer-fallback`) stands. Failover
 provider's `fallback_model`, or everything at once with `COLONIZER_QUOTA_FALLBACK=0`.
 `GET /api/providers` carries `quota_exhausted` (`{reset_at, reset_unix}`, null while healthy) per
 provider, and there a quota-exhausted provider reads `health.degraded: true` whatever its failure rate
-says (the status poll's `model_providers` applies the plain rate rule only). `GET /api/status` carries `quota`: `{paused, kind, reason, reset_at, reset_unix, providers, provider_details}` —
+says (the status poll's `model_providers` applies the plain rate rule only). `GET /api/status` carries `quota`: `{paused, kind, scope, held, reason, reset_at, reset_unix, providers, provider_details}` —
 `paused` when every routable provider (every `used_by` non-empty one, or every provider when none
 is used) is exhausted — `kind: "provider"` — or when the Claude account itself hit a session,
 weekly, hourly or Opus limit — `kind: "account"`, with or without providers — with the earliest reset and the queue holder's own `reason`, which names providers by their display
@@ -302,7 +302,20 @@ pause carries one `anthropic` entry named `Claude` with the roles still on Claud
 queue admits nothing; the cockpit banners it in its own words: the plan by name ("BytePlus plan
 limit reached" — only the Claude account itself is ever called Claude), the roles it affects, the
 reset as a local time and a countdown, and a parked-colony count and Resume all only when a colony
-is parked. A colony whose turn dies on an exhausted provider
+is parked.
+
+**Scoped Claude hold** ([#1129]). `scope` says which queue a pause reaches: `"queue"` (the default,
+and how a build predating the field reads) holds every queued colony, while `"claude"` holds only the
+queued colonies that spend the Claude account and lets the rest start; `null` when nothing is paused.
+`held` counts those colonies, and is 0 for a queue-wide pause. The scoped hold is the Claude
+account's own cap with no usable fallback, with the sandbox module's `claude_quota_pauses_queue`
+switched off, so `paused` is false and `kind` stays `"account"`: `reason` then names the held count
+and says the rest keep starting. A colony counts as held when its agent module mounts the Claude
+login (only claude-code does) and one of its model roles is left on a Claude model — its org
+overrides and its own launch overrides included; an agent module this build does not know is held
+too. A provider's own plan being out is never scoped: the whole queue waits.
+
+A colony whose turn dies on an exhausted provider
 is parked ([#213]): `status` `parked` with a `parked` record (see `Session` above), the worktree
 kept, its slot released and `attention.reason` `provider_quota_exhausted`. The queue's 5 s tick
 resumes parked colonies whose provider recovered — reset passed, or the provider deleted — requeueing

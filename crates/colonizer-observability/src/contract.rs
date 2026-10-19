@@ -68,6 +68,11 @@ pub struct Settings {
     /// Whether a Loki record's other attributes ride as structured metadata (Loki ≥ 2.9) rather
     /// than inside one JSON line.
     pub structured_metadata: bool,
+    /// Where the `file` provider writes (#850): relative to the data dir; empty for the default
+    /// `<data>/observability/otlp`.
+    pub dir: String,
+    /// The `file` provider's total size cap across its files, in MiB (#850).
+    pub max_mb: u64,
     /// Per-signal endpoints (`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, …), used as they are.
     pub logs_endpoint: Option<String>,
     pub traces_endpoint: Option<String>,
@@ -111,6 +116,8 @@ impl Default for Settings {
             url: String::new(),
             tenant_id: String::new(),
             structured_metadata: true,
+            dir: String::new(),
+            max_mb: 512,
             logs_endpoint: None,
             traces_endpoint: None,
             metrics_endpoint: None,
@@ -344,6 +351,18 @@ mod tests {
             serde_json::from_str(r#"{"provider":"loki","url":"http://loki:3100","structured_metadata":false}"#).unwrap();
         assert_eq!(s.url, "http://loki:3100");
         assert!(!s.structured_metadata);
+    }
+
+    #[test]
+    fn the_file_fields_default_to_an_empty_dir_and_512_mib() {
+        // Additive: a contract from a mothership that knows no file provider still parses, and a
+        // file contract carries its two fields verbatim for the sink to resolve.
+        let s: Settings = serde_json::from_str(r#"{"provider":"file","dir":"otlp/here","max_mb":16}"#).unwrap();
+        assert_eq!(s.dir, "otlp/here");
+        assert_eq!(s.max_mb, 16);
+        let d: Settings = serde_json::from_str(r#"{"provider":"file"}"#).unwrap();
+        assert_eq!(d.dir, "");
+        assert_eq!(d.max_mb, 512, "the module schema's default");
     }
 
     #[test]

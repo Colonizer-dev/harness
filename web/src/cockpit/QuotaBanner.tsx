@@ -6,7 +6,8 @@
 // re-shows the banner. It names the plan that ran out by its display name — "BytePlus plan limit
 // reached"; only the Claude account's own cap is ever called Claude — with the roles it affects, the
 // reset as a local time and a countdown, and Resume all only when a colony is actually parked.
-// Rendered to static markup in the tests: no DOM.
+// Rendered to static markup in the tests: no DOM. The scoped hold (issue #1129) shares the
+// fallback's plain warn box: nothing is paused and nothing is parked, so there is no resume-all.
 import { useState, type ReactElement } from "react";
 
 import { PROVIDER_CATALOG } from "../providerCatalog";
@@ -50,22 +51,35 @@ export function quotaParkedSessions(sessions: Session[]): Session[] {
 }
 
 /**
- * Identity of a quota pause for dismissal: a new reset, or a new pause scope, is a new banner.
- * The backend's `reason` is deliberately NOT part of the key: it embeds the live waiting count
- * (e.g. "… (3 waiting)"), so keying on it would re-show the banner every time the count moves.
+ * Whether the Claude account is out but its hold is scoped to the colonies that spend it (#1129):
+ * the queue runs, so nothing is paused and nothing is parked — the banner says what waits instead.
+ * An older mothership sends no `scope`, which reads as the whole queue holding, as before.
  */
-export const quotaBannerKey = (quota: StatusQuota): string =>
-  `${quota.reset_unix ?? ""}|${quota.reset_at ?? ""}|${quotaPauseKind(quota)}`;
+export function quotaScopedToClaude(quota: StatusQuota): boolean {
+  return quota.kind === "account" && quota.scope === "claude";
+}
 
 /**
- * The quota to banner, or null when there is none or the operator dismissed this one: a pause, or
- * the Claude account being out while its fallback model carries the work (issue #1130).
+ * Identity of a quota pause for dismissal: a new reset, a new pause scope or a new hold scope is a
+ * new banner. The backend's `reason` is deliberately NOT part of the key: it embeds the live
+ * waiting count (e.g. "… (3 waiting)"), so keying on it would re-show the banner every time the
+ * count moves.
+ */
+export const quotaBannerKey = (quota: StatusQuota): string =>
+  `${quota.reset_unix ?? ""}|${quota.reset_at ?? ""}|${quotaPauseKind(quota)}|${quota.scope ?? "queue"}`;
+
+/**
+ * The quota to banner, or null when there is none or the operator dismissed this one: a pause, the
+ * Claude account being out while its fallback model carries the work (issue #1130), or the same
+ * account out with its hold scoped to its own colonies (#1129).
  */
 export const visibleQuotaBanner = (
   quota: StatusQuota | null | undefined,
   dismissed: ReadonlySet<string>,
 ): StatusQuota | null =>
-  quota && (quota.paused || quota.fallback) && !dismissed.has(quotaBannerKey(quota)) ? quota : null;
+  quota && (quota.paused || quota.fallback || quotaScopedToClaude(quota)) && !dismissed.has(quotaBannerKey(quota))
+    ? quota
+    : null;
 
 /**
  * The fallback banner's words — "Claude out, running on MiniMax until 19:51" — or null when the
@@ -86,6 +100,29 @@ export function quotaFallbackParts(
   return {
     title: `Claude out, running on ${fallback.provider_name}${until}`,
     effect: `Roles that use Claude run on ${fallback.model} and go back to Claude by themselves at the reset. Restricted tasks need a trusted provider and park if it is not.`,
+  };
+}
+
+/**
+ * The scoped hold's words — "Resets at 19:51 · in 2 h 10 min. 1 queued colony on Claude waits;
+ * colonies on other providers keep starting." — or null unless the Claude account's hold is scoped to
+ * its own colonies (#1129). The reset reads as a local time and a countdown, as the pause banner's
+ * does. With nothing held it still says the rest keep starting.
+ */
+export function quotaScopedParts(
+  quota: StatusQuota,
+  nowMs: number = Date.now(),
+  timeZone?: string,
+): { title: string; effect: string } | null {
+  if (!quotaScopedToClaude(quota)) return null;
+  const held = Math.max(0, quota.held ?? 0);
+  const reset = resetWords(quota, nowMs, timeZone);
+  const waiting = held === 0
+    ? ""
+    : `${held} queued ${held === 1 ? "colony" : "colonies"} on Claude ${held === 1 ? "waits" : "wait"}; `;
+  return {
+    title: "Claude session limit reached",
+    effect: `${reset.charAt(0).toUpperCase()}${reset.slice(1)}. ${waiting}colonies on other providers keep starting.`,
   };
 }
 
@@ -200,7 +237,8 @@ export function QuotaBanner({
   onResumeAll,
   onDismiss,
 }: {
-  /** The paused quota; null or unpaused renders nothing. */
+  /** The paused quota, the one the fallback carries, or the one scoped to its own colonies; null
+   *  or a quota with none of those renders nothing. */
   quota: StatusQuota | null | undefined;
   /** Every colony the mothership knows, so the banner can count (and resume) the parked ones. */
   sessions: Session[];
@@ -209,17 +247,19 @@ export function QuotaBanner({
 }): ReactElement | null {
   const [busy, setBusy] = useState(false);
   const carried = quota ? quotaFallbackParts(quota) : null;
-  if (quota && carried) {
+  const scoped = quota ? quotaScopedParts(quota) : null;
+  const shown = carried ?? scoped;
+  if (quota && shown) {
     return (
       <div className="px-6 pt-4">
         <div
           role="status"
-          aria-label={`${carried.title}. ${carried.effect}`}
+          aria-label={`${shown.title}. ${shown.effect}`}
           className="flex flex-wrap items-start gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn"
         >
           <span className="min-w-0 flex-1 basis-64">
-            <strong className="font-semibold">{carried.title}</strong>
-            <span className="text-small-lg">{` · ${carried.effect}`}</span>
+            <strong className="font-semibold">{shown.title}</strong>
+            <span className="text-small-lg">{` · ${shown.effect}`}</span>
           </span>
           <button type="button" onClick={onDismiss} className="ml-auto shrink-0 cursor-pointer text-small-lg font-semibold hover:underline">
             Dismiss

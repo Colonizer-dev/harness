@@ -141,7 +141,7 @@ impl Relay {
         if !contract.mothership_version.is_empty() && contract.mothership_version != own {
             return None;
         }
-        let transport = Transport::new(&contract.settings, headers).ok()?;
+        let transport = Transport::new(&contract.settings, &contract.data_dir, headers).ok()?;
         // The exporter's own policy: the content gate closed, like every export this build makes.
         let policy = policy_for(&contract);
         let destination = exporter::destination_hash(&contract);

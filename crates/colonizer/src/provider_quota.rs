@@ -669,6 +669,33 @@ pub fn account_pause(reset_at: Option<String>, reset_unix: Option<i64>, waiting:
     }
 }
 
+/// The Claude account is out but only the colonies that spend it wait (issue #1129): `held` of the
+/// `waiting` queued colonies route through the account, so the reason says which ones wait and that
+/// the rest keep starting, instead of claiming the whole queue holds as [`account_pause`] does.
+pub fn claude_hold_pause(reset_at: Option<String>, reset_unix: Option<i64>, waiting: usize, held: usize) -> QuotaPause {
+    let others = waiting.saturating_sub(held);
+    let held_words = format!(
+        "{held} queued {} on Claude {}",
+        if held == 1 { "colony" } else { "colonies" },
+        if held == 1 { "waits" } else { "wait" }
+    );
+    let others_words = match others {
+        0 => String::new(),
+        1 => "; 1 more keeps starting".to_string(),
+        _ => format!("; {others} more keep starting"),
+    };
+    let reason = match &reset_at {
+        Some(reset) => format!("Claude account quota exhausted, resets {reset} — {held_words}{others_words}"),
+        None => format!("Claude account quota exhausted — {held_words}{others_words}"),
+    };
+    QuotaPause {
+        reason,
+        reset_at,
+        reset_unix,
+        providers: Vec::new(),
+    }
+}
+
 /// The queue holds when every routable provider is exhausted and at least one is: with no routable
 /// provider at all, every provider counts instead, so a fleet of spares still pauses together.
 /// `None` means admit as usual — including when nothing is exhausted, and when no provider exists.
@@ -1194,5 +1221,35 @@ mod tests {
             hit.reset_unix,
             Some(Utc.with_ymd_and_hms(2026, 9, 21, 15, 0, 0).unwrap().timestamp())
         );
+    }
+
+    /// The scoped hold names the colonies that wait and leaves the rest running (#1129), so the
+    /// reason never claims the whole queue holds the way `account_pause` does, and both counts read
+    /// as English whatever they are.
+    #[test]
+    fn the_scoped_hold_counts_the_claude_colonies_and_says_the_rest_start() {
+        let pause = claude_hold_pause(Some("19:51".into()), Some(1_800_000_000), 4, 1);
+        assert_eq!(
+            pause.reason,
+            "Claude account quota exhausted, resets 19:51 — 1 queued colony on Claude waits; 3 more keep starting"
+        );
+        assert!(pause.providers.is_empty(), "no provider is exhausted, only the account");
+        assert!(
+            !pause.reason.starts_with("queue paused"),
+            "the queue itself runs: {}",
+            pause.reason
+        );
+        // Every queued colony on Claude: nothing else is starting, so the tail is dropped.
+        let all = claude_hold_pause(None, None, 2, 2);
+        assert_eq!(
+            all.reason,
+            "Claude account quota exhausted — 2 queued colonies on Claude wait"
+        );
+        // One other colony, and a count raced by a colony admitted mid-tick: neither goes negative.
+        assert_eq!(
+            claude_hold_pause(None, None, 2, 1).reason,
+            "Claude account quota exhausted — 1 queued colony on Claude waits; 1 more keeps starting"
+        );
+        assert_eq!(claude_hold_pause(None, None, 1, 2).reason, all.reason);
     }
 }

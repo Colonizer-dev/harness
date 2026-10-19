@@ -646,6 +646,18 @@ pub fn suspend_waiting(modules: &ModulesConfig) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether the Claude account's own exhausted quota holds the whole colony queue, from the sandbox
+/// module. On by default: every queued colony waits for the account's reset, whatever it would have
+/// run on. Off, only the queued colonies that spend the Claude account wait — a colony on another
+/// agent module, or whose model roles are routed to configured providers, keeps starting (#1129).
+/// A module config written before the setting existed reads the schema default.
+pub fn claude_quota_pauses_queue(modules: &ModulesConfig) -> bool {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting(&modules.sandbox, &schema, "claude_quota_pauses_queue")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 /// The grace period a colony keeps its microVM after asking its question before the suspension above
 /// tears it down. Same clamp-as-read reasoning as [`hold_timeout`]: modules.json is not re-validated
 /// on load, and `chrono::Duration::minutes` panics out of bounds.
@@ -2005,6 +2017,25 @@ mod tests {
             !discard_vm(&bogus),
             "the saved false survives a provider this build does not know"
         );
+    }
+
+    /// The Claude account's exhausted quota holds the whole queue unless the operator switched that
+    /// off (#1129): today's behaviour is the default, so an install that never saved the setting is
+    /// unchanged.
+    #[test]
+    fn claude_quota_pauses_queue_defaults_on_and_reads_what_was_saved() {
+        assert!(claude_quota_pauses_queue(&ModulesConfig::default()), "the schema default");
+        let mut configured = ModulesConfig::default();
+        configured
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(false));
+        assert!(!claude_quota_pauses_queue(&configured), "the operator's word wins");
+        configured
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(true));
+        assert!(claude_quota_pauses_queue(&configured));
     }
 
     /// A hand-edited or restored modules.json is read as-is — `validate_settings` only guards the

@@ -101,7 +101,7 @@ pub struct Exporter {
     traces: Traces,
     destination: String,
     outbox: Option<Outbox>,
-    backoff: Option<(Instant, Duration)>,
+    pub(crate) backoff: Option<(Instant, Duration)>,
     last_metrics: Option<Instant>,
     /// The multi-source reader: fairness, rate limit, drained and deleted colonies.
     tailer: Tailer,
@@ -173,14 +173,14 @@ pub fn resource_for(policy: &Policy, contract: &Contract) -> ExportResource {
 /// limit), rather than skipping what the old one never received.
 pub(crate) fn destination_hash(contract: &Contract) -> String {
     let s = &contract.settings;
-    // A Loki contract carries an empty `endpoint` (its destination rides in `url`), so keying on
-    // the endpoint alone would hash every Loki destination identically and a URL change would
-    // share cursor state. The effective push URL is the destination instead; the OTLP key below
-    // is untouched, so an existing OTLP install keeps its cursors.
-    let endpoint = if s.provider == "loki" {
-        crate::loki::push_url(&s.url)
-    } else {
-        s.endpoint.clone()
+    // A Loki contract carries an empty `endpoint` (its destination rides in `url`), and a file
+    // contract does too (its destination is its directory, #850), so keying on the endpoint alone
+    // would hash every such destination identically and a change would share cursor state. The
+    // effective destination is the key instead; an existing OTLP install keeps its cursors.
+    let endpoint = match s.provider.as_str() {
+        "loki" => crate::loki::push_url(&s.url),
+        "file" => crate::file_sink::destination(&contract.data_dir, &s.dir),
+        _ => s.endpoint.clone(),
     };
     let key = format!("{}|{}|{}", endpoint, s.logs_endpoint.as_deref().unwrap_or(""), s.protocol);
     let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
@@ -257,7 +257,7 @@ impl Exporter {
                 contract.mothership_version
             ));
         }
-        let transport = Transport::new(&contract.settings, headers)?;
+        let transport = Transport::new(&contract.settings, &contract.data_dir, headers)?;
         let policy = policy_for(&contract);
         let resource = resource_for(&policy, &contract);
         let data_dir = contract.data_dir.clone();
@@ -552,15 +552,15 @@ impl Exporter {
                 Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
                     outbox.aggregates.export_failures = self.aggregates.export_failures;
-                    self.status.failure(signal_name(&request), "auth_failed", message);
+                    self.status.failure(signal_name(&request), "auth_failed", message, None);
                     self.status.state = "auth_failed";
                     self.outbox = Some(outbox);
                     return Some(Held::Auth);
                 }
-                Outcome::Retry { message, after } => {
+                Outcome::Retry { message, after, reason } => {
                     self.aggregates.export_failures += 1;
                     outbox.aggregates.export_failures = self.aggregates.export_failures;
-                    self.status.failure(signal_name(&request), "backing_off", message);
+                    self.status.failure(signal_name(&request), "backing_off", message, reason);
                     self.status.state = "retrying";
                     self.outbox = Some(outbox);
                     return Some(Held::Retry(after));
@@ -659,12 +659,12 @@ impl Exporter {
                 }
                 Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
-                    self.status.failure("metrics", "auth_failed", message);
+                    self.status.failure("metrics", "auth_failed", message, None);
                     break;
                 }
                 Outcome::Retry { message, .. } | Outcome::Refused { message, .. } => {
                     self.aggregates.export_failures += 1;
-                    self.status.failure("metrics", "backing_off", message);
+                    self.status.failure("metrics", "backing_off", message, None);
                     break;
                 }
             }
@@ -736,7 +736,7 @@ pub fn status_path(data_dir: &Path) -> PathBuf {
 /// `send-test-event`: one log record and one metric point to the configured backend, and the
 /// outcome of each, as JSON for the mothership's "Send test" button.
 pub async fn send_test(contract: &Contract, headers: Vec<(String, String)>) -> serde_json::Value {
-    let transport = match Transport::new(&contract.settings, headers) {
+    let transport = match Transport::new(&contract.settings, &contract.data_dir, headers) {
         Ok(t) => t,
         Err(e) => return serde_json::json!({"ok": false, "error": e}),
     };
