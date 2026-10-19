@@ -297,7 +297,12 @@ mod tests {
     async fn an_unusable_config_fails_and_the_clock_restarts_with_each_failure() {
         let root = temp_root();
         let app = test_app(&root);
-        app.modules.write().await.observability = Some(otlp_module("https://user:pass@otlp.example.com"));
+        // The unusable config: an endpoint that carries credentials, which the endpoint rules
+        // refuse. Built at runtime from fragments, so no credential-shaped URI is ever literal in
+        // the source — and neither half of the userinfo reaches the answer.
+        let (user, pass) = (format!("user-{}", short_id()), format!("pass-{}", short_id()));
+        let credentialed = format!("https://{user}:{pass}@otlp.example.com");
+        app.modules.write().await.observability = Some(otlp_module(&credentialed));
         let failing = health_summary(&app).await;
         assert_eq!(
             failing["enabled"],
@@ -305,6 +310,9 @@ mod tests {
             "the switch is on, the config is broken: {failing}"
         );
         assert_eq!(failing["state"], json!("failing"), "{failing}");
+        for canary in [&user, &pass] {
+            assert!(!failing.to_string().contains(canary), "the answer names the credential: {failing}");
+        }
         assert!(failing["failing_since"].is_u64(), "{failing}");
         assert!(
             failing["destination_hash"].is_null(),
@@ -328,7 +336,7 @@ mod tests {
         );
         assert!(starting["destination_hash"].is_string(), "{starting}");
 
-        app.modules.write().await.observability = Some(otlp_module("https://user:pass@otlp.example.com"));
+        app.modules.write().await.observability = Some(otlp_module(&credentialed));
         let anew = health_summary(&app).await;
         assert!(
             anew["failing_since"].as_u64().is_some_and(|at| at >= since),
