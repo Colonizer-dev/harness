@@ -189,6 +189,7 @@ const RECORD_COMMON: &[Rule] = &[
 const SPAN_COMMON: &[Rule] = &[
     s(TRUNCATED),
     s("colonizer.span.incomplete"),
+    s("colonizer.colony.id"),
     s("gen_ai.operation.name"),
     s("gen_ai.provider.name"),
     s("gen_ai.system"),
@@ -368,7 +369,6 @@ const EXPORT_GAP: &[Rule] = &[s("reason"), s("file"), s("bytes"), s("lines"), s(
 const MOTHERSHIP: &[Rule] = &[s("level"), s("target")];
 
 const INVOKE_AGENT: &[Rule] = &[
-    s("colonizer.colony.id"),
     h("colonizer.repo"),
     h("colonizer.org"),
     d("colonizer.pr.url"),

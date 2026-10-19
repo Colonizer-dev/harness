@@ -481,6 +481,7 @@ impl Builder<'_> {
     fn span(&self, colony: &str, trace: &ColonyTrace, open: &Open, end: u64, close: &Close) -> Item {
         let tid = trace_id(self.host_id, colony);
         let kind = open.at.kind.kind();
+        let s = Tier::Structure;
         let mut span = self
             .policy
             .span(kind, &open.subject)
@@ -489,8 +490,8 @@ impl Builder<'_> {
                 span_id(tid, kind, &open.at.key),
                 Some(span_id(tid, open.parent.kind.kind(), &open.parent.key)),
             )
-            .times(open.start, end);
-        let s = Tier::Structure;
+            .times(open.start, end)
+            .attr("colonizer.colony.id", colony, s);
         match open.at.kind {
             SpanKindName::Turn => {
                 if let Some(origin) = &open.origin {
@@ -600,9 +601,9 @@ impl Builder<'_> {
             .span(SpanKind::InvokeAgent, repo)
             .ids(tid, span_id(tid, SpanKind::InvokeAgent, colony), None)
             .times(start, end.max(start))
+            .attr("colonizer.colony.id", colony, s)
             .attr("gen_ai.operation.name", "invoke_agent", s)
             .attr("gen_ai.agent.id", colony, s)
-            .attr("colonizer.colony.id", colony, s)
             .attr("colonizer.outcome", outcome, s)
             .attr("gen_ai.usage.input_tokens", trace.tokens.input as i64, s)
             .attr("gen_ai.usage.output_tokens", trace.tokens.output as i64, s)
