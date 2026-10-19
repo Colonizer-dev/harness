@@ -98,6 +98,32 @@ export function sessionsMock(ms: MockState): SessionsApi {
       ms.colonyActivity("colony.resume", s.session);
       return clone(s.session);
     },
+    // POST /api/sessions/{id}/retry (issue #1073): a fresh colony on the failed one's repo, issue,
+    // instructions and stack parent, recorded as its retry.
+    retrySession: async (id) => {
+      await sleep(450);
+      const source = ms.find(id);
+      if (source.session.status !== "failed") throw new ApiError("only a failed colony can be retried", 409);
+      const next = Math.random().toString(16).slice(2, 10);
+      const parent = source.session.parent ? ms.sessions.get(source.session.parent)?.session ?? null : null;
+      const session = new MockSession(
+        {
+          ...baseSession(next, source.session.repo, source.session.issue ?? null, source.session.issue_title ?? "Retry"),
+          autopilot: source.session.autopilot,
+          autofix: source.session.autofix,
+          automerge: source.session.automerge,
+          supply_chain: source.session.supply_chain ?? null,
+          parent: parent?.id ?? null,
+          base: parent?.branch ?? "main",
+          retry_of: source.session.id,
+        },
+        false,
+        source["instructions"],
+      );
+      ms.sessions.set(next, session);
+      ms.colonyActivity("colony.launch", session.session);
+      return clone(session.session);
+    },
     messageSession: async (id, text) => {
       await sleep(120);
       const s = ms.find(id);
