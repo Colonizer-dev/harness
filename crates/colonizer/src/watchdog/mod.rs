@@ -155,7 +155,8 @@ pub fn note_denials(activity: &mut Activity, kind: &str, event: &serde_json::Val
 }
 
 mod defeat;
-pub(crate) use defeat::flag_control_defeat;
+pub(crate) use defeat::{CONTROL_DEFEAT_PARK_REASON, flag_control_defeat};
+
 pub use defeat::{BoundaryTrail, CONTROL_DEFEAT_REASON, note_boundary, note_reach_call, note_reach_result};
 
 /// How long a colony may sit in `starting` after its boot has *finished* and its agent still has

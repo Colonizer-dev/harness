@@ -159,6 +159,7 @@ const PARK_REASONS: Record<string, string> = {
   provider_retry: "gateway error, retrying automatically",
   repo_pr_rate_limit: "repo's daily PR cap reached",
   no_push_access: "host can't push to this repo yet",
+  control_defeat: "security hold — control may have been bypassed",
 };
 
 /** The short local date/time a parked colony can resume at, e.g. "27 Sep, 14:05"; "" for a timestamp that will not parse. */
