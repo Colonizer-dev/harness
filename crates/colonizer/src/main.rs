@@ -126,6 +126,7 @@ mod prescan;
 mod presets;
 mod previews;
 mod price_feed;
+mod promptdecode;
 mod protocol;
 mod provenance;
 mod provider_history;
