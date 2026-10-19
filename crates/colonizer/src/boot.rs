@@ -954,6 +954,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         other => other,
     };
+    // Screen the issue for hidden input text (issue #1277).
+    let issue = match issue {
+        Some(mut issue) => {
+            crate::promptdecode::screen_launch(app, &s.id, &app.org_settings(&s.org), &mut issue).await;
+            Some(issue)
+        }
+        other => other,
+    };
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked
