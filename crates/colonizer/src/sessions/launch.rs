@@ -100,6 +100,11 @@ pub struct NewSession {
     /// — so it is skipped by serde and `Default` leaves it empty for every ordinary launch.
     #[serde(skip)]
     pub(crate) handoff: Option<crate::handoff::Seed>,
+    /// The failed colony a retry replaces (issue #1073): recorded on the new colony as `retry_of`,
+    /// which is how a retry of a retry finds its lineage. Never part of the JSON body — the route
+    /// that builds it (`retry`) is in-process — so it is skipped by serde like `handoff`.
+    #[serde(skip)]
+    pub(crate) retry_of: Option<String>,
 }
 
 /// A launch-time model choice, trimmed: empty is none, and a `<provider>/<model>` must name a
@@ -669,6 +674,7 @@ pub async fn create(
         parent: parent.clone(),
         stack: req.stack,
         stack_fork: None,
+        retry_of: req.retry_of.clone(),
         origin: req.origin.clone(),
         auto_note: None,
         launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
@@ -927,6 +933,117 @@ pub async fn create(
     tokio::spawn(crate::summaries::summarize_colony(app.clone(), session.id.clone()));
     Ok(Json(session))
 }
+
+/// `POST /api/sessions/{id}/retry` (issue #1073): a **failed** colony cannot be resumed — it never
+/// got a worktree — so recovery meant re-dispatching by hand with the same repo, issue,
+/// instructions and stack parent. This starts the colony that dispatch would have started, and
+/// records `retry_of` on it so the lineage is visible in the cockpit.
+///
+/// It goes through [`create`], like every other launch path, so idempotency, the duplicates
+/// service (`check_launch`) and stack admission all apply: a retry never doubles live work, because
+/// a *failed* colony holds no issue (`duplicates::holds_issue`) and a retry of the same failure
+/// finds no live holder. `allow_duplicate` is deliberately not set — the issue is that a retry
+/// should be refused when the work is genuinely already running, not that it may double it.
+///
+/// A colony that is live, or that `resume` can bring back, is refused with a **409** naming the
+/// other route: retrying a resumable colony would throw away its worktree for nothing.
+pub async fn retry(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+) -> ApiResult<Session> {
+    let source = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if source.status != SessionStatus::Failed {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "colony `{id}` is {}, not failed{}",
+                source.status.as_str(),
+                if crate::lifecycle::can_resume(source.status, source.cleaned_up, source.git_admin_dir.is_some()) {
+                    " — resume it instead"
+                } else {
+                    ""
+                }
+            ),
+        ));
+    }
+    let req = NewSession {
+        repo: source.repo.clone(),
+        issue: source.issue,
+        title: source.issue_title.clone(),
+        instructions: source.instructions.clone(),
+        autopilot: Some(source.autopilot),
+        verify: source.verify.clone(),
+        autofix: source.autofix,
+        automerge: source.automerge,
+        // Deliberately not `allow_duplicate`, and not `external_ref`: this is a *new* colony, so
+        // the caller's stable name for the old one must not be claimed twice.
+        allow_duplicate: false,
+        allow_epic: false,
+        queue_behind_holder: false,
+        supply_chain: source.supply_chain.clone(),
+        supply_chain_targets: source.supply_chain_targets.clone(),
+        model_tier: source.model_tier.clone(),
+        model_override: source.model_override.clone(),
+        subagent_model_override: source.subagent_model_override.clone(),
+        claude_account: source.claude_account.clone(),
+        after: retry_parent(&app.sessions.read().await, source.parent.as_deref()),
+        stack: source.stack,
+        origin: source.origin.clone(),
+        external_ref: None,
+        host: None,
+        serialize: None,
+        handoff: None,
+        retry_of: Some(source.id.clone()),
+    };
+    // An empty `HeaderMap`, never the caller's: an `Idempotency-Key` on a retry names the *original*
+    // launch, and answering with that colony instead of a new one would be worse than no key at all.
+    // Two retries of one failure are still safe — the first takes the issue, the second is refused.
+    create(State(app), scoped, axum::http::HeaderMap::new(), Json(req)).await
+}
+
+/// The stack parent a retry should use: the source colony's parent, unless that parent is itself
+/// gone or `Failed`, in which case the newest colony that retried it takes its place — so a retry
+/// stacked under a dead parent still lands instead of being refused for a branch that will never
+/// come. Bounded by [`RETRY_PARENT_WALK`] and a visited set: a cycle in the lineage walks out
+/// rather than forever.
+///
+/// Only `Failed` and a missing record move the parent on. Every other state is `create`'s own
+/// business: `restack::queue_decision` answers a `Merged` parent (start from the default branch), a
+/// stopped or parked one (wait for it), and a `Closed` or `NoChanges` one (refuse, with a reason).
+pub(crate) fn retry_parent(sessions: &[Session], parent: Option<&str>) -> Option<String> {
+    let mut current = parent?.to_string();
+    let mut seen: HashSet<String> = HashSet::new();
+    for _ in 0..RETRY_PARENT_WALK {
+        if !seen.insert(current.clone()) {
+            return Some(current);
+        }
+        let Some(record) = sessions.iter().find(|s| s.id == current) else {
+            // Gone from the record entirely (purged): nothing to stack on and nothing to replace it.
+            return None;
+        };
+        if record.status != SessionStatus::Failed {
+            return Some(current);
+        }
+        let Some(replacement) = sessions
+            .iter()
+            .filter(|s| s.retry_of.as_deref() == Some(record.id.as_str()))
+            .max_by_key(|s| s.created_at)
+            .map(|s| s.id.clone())
+        else {
+            return Some(current);
+        };
+        current = replacement;
+    }
+    Some(current)
+}
+
+/// How far `retry_parent` follows a lineage of retries. Far past any real chain — a depth cap and a
+/// visited set together, so a corrupt record cannot spin.
+const RETRY_PARENT_WALK: usize = 16;
 
 #[cfg(test)]
 mod tests;

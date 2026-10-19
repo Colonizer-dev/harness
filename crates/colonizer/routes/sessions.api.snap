@@ -6,5 +6,6 @@
 /api/sessions/{id}/messages                          POST   unauth=401    token=session>=operate activity=-
 /api/sessions/{id}/prewarm                           POST   unauth=401    token=session>=operate activity=-
 /api/sessions/{id}/question                          GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/retry                             POST   unauth=401    token=owner            activity=-
 /api/sessions/{id}/seen                              POST   unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/terminal                          GET    unauth=401    token=owner            activity=-
