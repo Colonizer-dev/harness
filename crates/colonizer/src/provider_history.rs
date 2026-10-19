@@ -192,6 +192,19 @@ impl History {
         self.inner.lock().unwrap().get(provider)?.balance.last().cloned()
     }
 
+    /// When this provider's last outage began (issue #1068): the most recent `outage` event with no
+    /// `recovered` after it, or `None` when it is answering. The window the cockpit's provider health
+    /// reads, so a provider down since Tuesday says so rather than merely looking degraded. Events
+    /// are pruned past [`KEEP_DAYS`], so an outage older than the window reads as no outage at all.
+    pub(crate) fn outage_since(&self, provider: &str) -> Option<DateTime<Utc>> {
+        let map = self.inner.lock().unwrap();
+        map.get(provider)?.events.iter().fold(None, |since, e| match e.kind.as_str() {
+            "outage" => Some(e.at),
+            "recovered" => None,
+            _ => since,
+        })
+    }
+
     /// Forgets a deleted provider's history.
     pub(crate) fn forget(&self, provider: &str) {
         if self.inner.lock().unwrap().remove(provider).is_some() {

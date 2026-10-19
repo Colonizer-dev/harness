@@ -14,9 +14,10 @@ export interface ProviderStatus {
   label: string;
 }
 
-/** The row's status dot: quota out first, then the gateway's own health verdict, then whether it was ever used. */
+/** The row's status dot: quota out first, then an outage colonies are parked on (#1068), then the gateway's own health verdict, then whether it was ever used. */
 export function providerStatus(provider: ModelProvider): ProviderStatus {
   if (provider.quota_exhausted) return { tone: "err", label: "Quota out" };
+  if (provider.outage_since) return { tone: "err", label: "Outage" };
   const health = provider.health;
   if (health?.degraded) return health.failure_pct >= 25 ? { tone: "err", label: "Failing" } : { tone: "warn", label: "Degraded" };
   if (!provider.has_key && provider.auth !== "none") return { tone: "warn", label: "No key" };

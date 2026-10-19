@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{self};
 
 use crate::protocol::{AgentEvent, AgentState, Origin, QuestionRisk};
+// `PROVIDER_OUTAGE_REASON` (issue #1068) rides the glob with `PROVIDER_RETRY_REASON`.
 #[allow(unused_imports)]
 use crate::{lifecycle::*, publish::*, queue::*, sessions::*};
 
@@ -99,28 +100,28 @@ pub(crate) fn gateway_retry_attention(cause: &str, attempt: u32, max_attempts: u
     })
 }
 
-/// The hold once the automatic retries are spent, or when they are off (issue #1093).
-pub(crate) fn gateway_held_attention(cause: &str, max_attempts: u64) -> Value {
-    let detail = match max_attempts {
-        0 => format!("Stopped on {}; automatic retry is off", gateway_error_phrase(cause)),
-        1 => format!(
-            "Stopped on repeated gateway errors{}; the automatic retry did not get through",
-            if cause.is_empty() {
-                String::new()
-            } else {
-                format!(" ({cause})")
-            }
-        ),
-        n => format!(
-            "Stopped on repeated gateway errors{}; {n} automatic retries did not get through",
-            if cause.is_empty() {
-                String::new()
-            } else {
-                format!(" ({cause})")
-            }
-        ),
-    };
-    json!({"reason": AUTOPILOT_HELD_REASON, "since": Utc::now(), "nudges": 0, "cause": GATEWAY_ERROR_CAUSE, "detail": detail})
+/// The attention a colony parks with when the retry ladder ran out and the provider is still
+/// unreachable (issue #1068): the reason is [`PROVIDER_OUTAGE_REASON`] — nobody has to act, the
+/// queue resumes it by itself once a probe answers — while `provider` and `alert_at` let the card
+/// name what it waits for and when the cockpit also flags it. A provider the error did not name is
+/// left out and the card speaks of "the provider".
+pub(crate) fn provider_outage_attention(provider: Option<&str>, alert_at: DateTime<Utc>) -> Value {
+    let mut attention = json!({
+        "reason": PROVIDER_OUTAGE_REASON,
+        "since": Utc::now(),
+        "nudges": 0,
+        "cause": GATEWAY_ERROR_CAUSE,
+        "summary": match provider {
+            Some(p) => format!("Waiting for {p}"),
+            None => "Waiting for the provider".to_string(),
+        },
+        "detail": "The provider is unreachable; the colony waits and resumes on its own once it answers again",
+        "alert_at": alert_at,
+    });
+    if let Some(provider) = provider {
+        attention["provider"] = Value::String(provider.to_string());
+    }
+    attention
 }
 
 /// The hold for a turn that ended on an error a retry cannot fix (issue #1093): the detail is the
@@ -1189,19 +1190,51 @@ pub(crate) async fn finish_turn(
                             .await;
                         }
                     } else {
+                        // Issue #1068: the ladder is spent and the provider is still unreachable. A
+                        // hold here was fatal for what is usually a blip — a fifteen-minute outage
+                        // ended the colony — so the colony parks waiting for the provider instead
+                        // (releasing its slot), and the queue resumes it by itself once a probe says
+                        // it answers (queue.rs). Only after `provider_outage_alert_minutes` of that
+                        // does the cockpit flag it for a person.
+                        let provider = crate::retry::turn_error_provider(&error_text);
+                        let waiting = provider.as_deref().unwrap_or("the provider");
+                        let alert_at = Utc::now() + crate::orgs::provider_outage_alert(&modules);
                         app.session_log(
                             id,
                             "warn",
                             format!(
-                                "autopilot: not publishing, {reason} after {max_attempts} automatic retries; last error: {error_text}"
+                                "autopilot: not publishing, {reason} after {max_attempts} automatic retries; waiting for {waiting} and retrying on its own; last error: {error_text}"
                             ),
                         )
                         .await;
-                        app.update_session(id, |x| {
-                            x.attention = Some(gateway_held_attention(&cause, max_attempts));
-                            x.provider_retries = 0;
-                        })
+                        // The counter resets so a provider that comes back and fails again starts a
+                        // fresh ladder rather than parking on the first error.
+                        app.update_session(id, |x| x.provider_retries = 0).await;
+                        let parked = crate::lifecycle::park_colony(
+                            app,
+                            &s,
+                            PROVIDER_OUTAGE_REASON,
+                            None,
+                            format!("waiting for {waiting}, which is unreachable"),
+                            format!("waiting for {waiting}; the colony resumes on its own once it answers again"),
+                        )
                         .await;
+                        // Issue #1068: the park's attention names the provider and the deadline, so
+                        // the card says what the colony waits for — only while the park is still ours.
+                        if parked {
+                            // The outage window the cockpit's provider health reads, keyed by the
+                            // provider the colony's own traffic went to — the name in the error need
+                            // not be a provider id.
+                            if let Some(routed) = crate::queue::outage_provider(app, &s) {
+                                app.gateway.history.record_event(&routed, "outage", Utc::now());
+                            }
+                            app.update_session(id, |x| {
+                                if x.parked.as_ref().is_some_and(|p| p.reason == PROVIDER_OUTAGE_REASON) {
+                                    x.attention = Some(provider_outage_attention(provider.as_deref(), alert_at));
+                                }
+                            })
+                            .await;
+                        }
                     }
                 }
                 Autopilot::Hold(reason) => {
