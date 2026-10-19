@@ -480,6 +480,25 @@ async fn maybe_redrive_subagent_turn(
     if now - armed_at < TURN_LOST_GRACE {
         return;
     }
+    // A settlement can land while the lead's own turn is still alive — mid-way through a long
+    // tool call it made after launching the subagent, a model request in flight through the
+    // gateway, an open question — and none of those emit anything for minutes. Interrupting then
+    // would kill a live turn, so the window is left armed for a later tick: the call's result or
+    // the model's output stands it down, and a turn that really is dead still reaches the
+    // stall nudge, which interrupts before it speaks. Someone else's flag on the record (a
+    // control-defeat card is a person's to look at) is not overwritten or talked over either.
+    let foreign_flag = s
+        .attention
+        .as_ref()
+        .and_then(|a| a["reason"].as_str())
+        .is_some_and(|reason| !WATCHDOG_REASONS.contains(&reason));
+    if foreign_flag
+        || !rt.open_tool_calls.lock().await.is_empty()
+        || rt.open_question.lock().await.is_some()
+        || app.gateway.colony_busy(&s.id)
+    {
+        return;
+    }
     {
         let mut claim = rt.turn_lost_since.lock().await;
         if *claim != Some(armed_at) {
