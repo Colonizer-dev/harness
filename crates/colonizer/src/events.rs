@@ -337,6 +337,14 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
         "tool_result" => {
             if let Some(id) = event["tool_call_id"].as_str() {
                 rt.open_tool_calls.lock().await.remove(id);
+                // A foreground Task answers its call with the subagent's report and never gets a
+                // `subagent_end` (the runner emits that only for a background task's
+                // notification), so its result is what settles it. Left in the set, it would keep
+                // the set non-empty for the rest of the run and no later settlement could arm the
+                // re-drive. A background launch ack (`background: true`) is not a settlement.
+                if event.get("agent").is_none() && event.get("background").and_then(Value::as_bool) != Some(true) {
+                    rt.open_subagents.lock().await.remove(id);
+                }
             }
         }
         "turn_end" => {
@@ -363,7 +371,9 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
     // lines that clear `final_text_at` stand the re-drive down. Deliberately narrow: even a
     // `working` status must not mask a dead turn, or the settlement would stall-proof itself.
     match kind {
-        "assistant_text" | "thinking" | "tool_result" | "question" | "turn_end" if event.get("agent").is_none() => {
+        "assistant_text" | "assistant_text_delta" | "thinking" | "tool_result" | "question" | "turn_end"
+            if event.get("agent").is_none() =>
+        {
             *rt.turn_lost_since.lock().await = None;
         }
         _ => {}

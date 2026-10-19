@@ -86,8 +86,10 @@ pub struct StatusQuery {
 /// capacity figures and health only — built from scratch, never the full body with fields removed.
 /// Fleet peers poll this endpoint without a token, so `fleet::summary_from_status_json` reads
 /// exactly these keys and defaults the rest. NEVER add identity here: no repo or issue names, no
-/// org names, no paths or URLs, no hostnames or host ids, no GitHub or Claude account details.
-async fn reduced_status(app: &Shared) -> Value {
+/// org names, no paths or URLs, no hostnames or host ids, no GitHub or Claude account details. The
+/// one sanctioned exception (#860): `observability.destination_hash`, a truncated SHA-256 of the
+/// protocol and endpoint — a verifier that two members share a backend, not a name.
+pub(crate) async fn reduced_status(app: &Shared) -> Value {
     let modules = app.modules.read().await.clone();
     let sessions = app.sessions.read().await;
     let queue_depth = sessions
@@ -154,6 +156,9 @@ async fn reduced_status(app: &Shared) -> Value {
     if let Some(sync) = crate::fleet_sync::health_summary(app).await {
         body["fleet_sync"] = sync;
     }
+    // The observability verdict (issue #860): a state, the age of a failure and a destination
+    // hash — the endpoint and every header stay on the machine.
+    body["observability"] = crate::observability::fleet::health_summary(app).await;
     body
 }
 

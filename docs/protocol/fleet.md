@@ -211,7 +211,8 @@ the order below.
 | 7 | `sync_backlog` | the member's drains have ended with rows unsent for ≥ 60 min; reason "Sync behind by N rows" | degraded | check its network, then restart colonizer there | yes |
 | 8 | `sync_rate_limited` | the member's drain is backing off after a 429 or 503 | degraded | it backs off by itself; wait a few minutes | yes |
 | 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
-| 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
+| 10 | `observability_failing` | the member's observability exporter has been failing for more than 10 min; reason "Observability failing for N min". Export off is a choice, never a fault | degraded | check this member's observability settings | yes |
+| 11 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
 
 The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
 A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
@@ -220,12 +221,15 @@ finding, such as a revoked token, still wins), and a member that never answered 
 `disk_total_bytes` (omitted when unknown) for the disk percentage.
 
 The sync and runner signals ride the same poll. A member's reduced `GET /api/status` (the body a
-caller without the API token gets) carries two more keys, both ages, counts and classes only:
+caller without the API token gets) carries three more keys — ages, counts and classes only, plus
+one destination hash:
 
 ```json
 {"runner": {"last_tick_age_s": 3},
  "fleet_sync": {"state": "error", "backlog_rows": 5, "oldest_unsent_age_s": 5400,
-                "last_error_class": "error", "consent": true}}
+                "last_error_class": "error", "consent": true},
+ "observability": {"enabled": true, "state": "failing", "failing_since": 1790000000,
+                   "destination_hash": "1a2b3c4d5e6f7a8b9c0d1e2f"}}
 ```
 
 - `runner.last_tick_age_s` — seconds since the queue loop last came round (`null` before its first
@@ -239,8 +243,16 @@ caller without the API token gets) carries two more keys, both ages, counts and 
   oldest row's wait, `null` with no backlog. `last_error_class` is `unauthorized` (401),
   `forbidden` (403), `rate_limited` (429/503, backing off), `error` (anything else) or `null`.
   `consent` is the operator's answer; with it off, no backlog is claimed.
+- `observability` (issue #860) — always present on this colonizer version, so an owner can tell
+  export switched off (`enabled: false`, `state: "off"`) from an older member that reports no
+  block at all. `state` is `off`, `starting` (on, not yet known either way), `ok`, or `failing` —
+  the exporter's process is down, or its backend is refusing or unreachable. `failing_since` is
+  when the member first saw the current failure, unix seconds, `null` while it is not failing.
+  `destination_hash` is a truncated SHA-256 of the protocol and endpoint, `null` when the config
+  is too broken to resolve one — the only thing that identifies the backend, and only as a hash:
+  no endpoint, header or error text crosses machines.
 
-`GET /api/hosts` rows carry them on as `runner_tick_age_s` and `fleet_sync`, each omitted when the
-peer did not report it. A peer on an older colonizer reports neither, so its sync and runner
-signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog that
-grows from it does.
+`GET /api/hosts` rows carry them on as `runner_tick_age_s`, `fleet_sync` and `observability`, each
+omitted when the peer did not report it. A peer on an older colonizer reports none of them, so
+those signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog
+that grows from it does.

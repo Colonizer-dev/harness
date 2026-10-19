@@ -22,10 +22,18 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [Metrics push](observability/metrics-push.md): the metric catalogue the exporter pushes, its
   interval and failure semantics, and how its names map to the pull catalogue.
 - [Environment configuration](observability/configuration.md): the `OTEL_*` variables, their precedence, and what an upgrade changes.
+- [Backend recipes](observability/backends.md): endpoint, header and ingest-limit notes for Grafana Cloud, Datadog, Honeycomb, Elastic, SigNoz, New Relic, the local example stack and a plain collector.
+- [Limits and cost](observability/limits-and-cost.md): the backend limits the exporter's caps stay under, measured volume per record and per colony-hour, and the levers that lower the bill.
 - [Mothership log](observability/mothership-log.md): the process's own JSON lines, what is rotated,
   redacted, filtered, and dropped when the disk is behind.
 - [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
   provisioning they assume, and the lint that keeps their queries honest.
+- [Archived colonies and offline export](observability/archive-export.md): reaching colonies that
+  live only in the local archive (`--include-archive`), and writing an export to a file instead of
+  a backend.
+- [Observability across a fleet](fleet.md#observability-across-a-fleet): the same backend on every
+  member, the resource attributes that join them into one dataset, and the hash key a `hashed`
+  fleet must share.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 - [Conformance](observability/conformance.md): the run against a real OpenTelemetry Collector that
@@ -215,6 +223,9 @@ span goes out when it ends; the root goes out once, at the colony's outcome. Str
 content. [Traces](observability/traces.md) has the span names, attributes, ids and sampling.
 
 ## Examples
+
+Fuller per-backend recipes, with the header each wants and the ingest limits that bite, are on
+[the backend recipes page](observability/backends.md).
 
 These follow each vendor's public OTLP documentation; check it for your region or site.
 

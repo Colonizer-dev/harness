@@ -256,10 +256,45 @@ runner are doing, so the badge covers them too:
   "Sync behind by N rows". The drain runs every five minutes, so that is a dozen drains in a row.
 - A member whose queue loop has not ticked for five minutes or more (it ticks every five seconds)
   reads **degraded**, "Colony runner not ticking", with "restart colonizer on this machine".
+- A member whose observability exporter has been failing for more than ten minutes reads
+  **degraded**, "Observability failing", with "check this member's observability settings" — the
+  backend stopped taking its telemetry. Export switched off is **not** degraded: that is a choice
+  like sync off.
 - A member whose operator has not turned history sync on is **not** degraded: that is a choice,
   not a fault. It shows a grey "History sync off" note under the badge instead.
 
-A member running an older colonizer reports neither, and those signals stay unmeasured.
+A member running an older colonizer reports none of them, and those signals stay unmeasured.
+
+## Observability across a fleet
+
+[Observability](observability.md) is configured per install, so a fleet runs one exporter per
+member — and when every member configures the same backend, the fleet is one dataset. The resource
+every export carries does the joining: `service.instance.id` is the member's own host id, so a
+Grafana dashboard sees one series per machine, and `colonizer.fleet.role` says `owner` or
+`member`, so the same dashboard can slice the fleet by role. (A lone mothership — a fleet of one —
+is its own `colonizer.fleet.id`; a member cannot know its owner's host id, so a fleet's rows join
+on these labels, not on a shared fleet id.) Configure each member the same way — same endpoint,
+same protocol — and give each machine its own copy of the headers secret under
+Settings → Secrets; nothing is shared automatically.
+
+A fleet running **Repository names = hashed** must go one step further and copy
+`<data>/observability/hash.key` between the members. The key salts the repository-name hash, and
+two members with two keys hash the same repository to two different values, which quietly breaks
+every per-repo join. The key is 32 random bytes, mode 0600, created on first use — copy it to a
+member before its first export, or accept that hashes written under the old key no longer join.
+
+The owner's [member health](#member-health) badge covers the exporter too (issue #860): a member
+whose exporter has been failing for more than ten minutes reads **degraded**, "Observability
+failing", so an operator watching a fleet's telemetry go quiet on one machine has the badge to
+match. The member's status answer carries only a state, the age of the failure and a hash of the
+destination — the endpoint itself never crosses machines, so the poll behind the badge leaks
+nothing about the backend
+([protocol.md](protocol.md#member-health-issue-764)).
+
+There is no relay yet, and it is worth saying plainly: a member whose network cannot reach the
+backend has no fallback — every member dials the backend itself, or exports nothing. An
+owner-relayed export ([#861](https://github.com/Colonizer-dev/harness/issues/861)) is an open
+idea, not built.
 
 ## Network policy
 

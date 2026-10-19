@@ -1,0 +1,43 @@
+# Tempo for the Colonizer observability example stack: OTLP traces in from Alloy, kept on a
+# docker volume, span metrics out to Prometheus. Single binary, single tenant, local backend.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+
+metrics_generator:
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: false
+
+overrides:
+  defaults:
+    global:
+      # Pairing rule: Tempo's per-trace limit must stay >= the mothership exporter's
+      # max_trace_bytes (default 4194304, crates/colonizer-observability): a trace the exporter
+      # kept under its own limit must not be the one Tempo rejects as TRACE_TOO_LARGE. Tempo's
+      # default 5 MB (5000000) gives that headroom; raise the exporter's limit past it and this
+      # has to rise with it.
+      max_bytes_per_trace: 5000000
+    metrics_generator:
+      # Processors are off unless a tenant asks for them; these two feed the dashboards'
+      # span-metrics and service-graph panels.
+      processors: [service-graphs, span-metrics]
+
+usage_report:
+  reporting_enabled: false

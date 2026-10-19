@@ -1,1 +1,0 @@
-**A loop whose prompt has an emoji near the 60th character can be created.** The name the cockpit makes from the prompt is now cut by characters rather than UTF-16 units, so it never ends in half an emoji, which the server refused as invalid JSON.

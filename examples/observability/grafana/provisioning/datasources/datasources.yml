@@ -1,6 +1,7 @@
-# Datasources for the Colonizer dashboards. The compose stack that runs these services lands with
-# issue #862; until then this pins the uids the provisioned dashboards query, so the names on the
-# panels are stable whether you point Grafana at the local stack or a remote one.
+# Datasources for the Colonizer dashboards, provisioned by the compose stack in this directory
+# (grafana/README.md). The uids (`colonizer-prom`, `colonizer-loki`, `colonizer-tempo`) are the
+# contract every dashboard queries, so a dashboard works unchanged against the local stack or a
+# remote one.
 apiVersion: 1
 deleteDatasources: []
 datasources:
@@ -17,9 +18,30 @@ datasources:
     access: proxy
     url: http://loki:3100
     editable: false
+    jsonData:
+      derivedFields:
+        # Every exported log carries trace_id as Loki structured metadata (loki/loki.yaml keeps
+        # it there), and matcherType `label` matches that field directly — no log-line regex. The
+        # link's value becomes the trace id Tempo is queried with.
+        - name: trace_id
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: colonizer-tempo
   - name: Colonizer Tempo
     type: tempo
     uid: colonizer-tempo
     access: proxy
     url: http://tempo:3200
     editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: colonizer-loki
+        # The default filter matches the trace id against the log LINE; ours sits in structured
+        # metadata, so filter on that instead with a custom query.
+        filterByTraceID: false
+        customQuery: true
+        query: '{service_name=~".+"} | trace_id="$${__span.traceId}"'
+        # Shown as columns in the linked logs view: the span attribute to the Loki field.
+        tags:
+          - key: colonizer.colony.id
+            value: colonizer_colony_id

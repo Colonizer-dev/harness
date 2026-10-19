@@ -59,6 +59,10 @@ pub struct HostSummary {
     /// A fleet member's history-push drain state, as its status reported it (issue #764).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet_sync: Option<PeerSync>,
+    /// A fleet member's observability verdict, as its status reported it (issue #860); omitted
+    /// when unknown — an older peer, or this host's own row (only members get a health badge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<crate::observability::fleet::PeerObservability>,
 }
 
 /// A member's `fleet_sync` block of the reduced `/api/status` (`fleet_sync::health_summary`).
@@ -101,6 +105,8 @@ pub struct PeerObservation {
     /// What its last answer said about its queue loop and its history push.
     pub runner_tick_age_s: Option<i64>,
     pub fleet_sync: Option<PeerSync>,
+    /// What its last answer said about its observability exporter (issue #860).
+    pub observability: Option<crate::observability::fleet::PeerObservability>,
 }
 
 impl FleetCache {
@@ -124,6 +130,7 @@ impl FleetCache {
             disk_total_bytes: known.as_ref().and_then(|k| k.disk_total_bytes),
             runner_tick_age_s: known.as_ref().and_then(|k| k.runner_tick_age_s),
             fleet_sync: known.as_ref().and_then(|k| k.fleet_sync.clone()),
+            observability: known.as_ref().and_then(|k| k.observability.clone()),
         })
     }
 
@@ -161,6 +168,7 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
         health: HostHealth::Online,
         runner_tick_age_s: crate::queue::last_tick_age_s(),
         fleet_sync: None,
+        observability: None,
     }
 }
 
@@ -219,6 +227,9 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
     let fleet_sync = body
         .get("fleet_sync")
         .and_then(|sync| serde_json::from_value::<PeerSync>(sync.clone()).ok());
+    let observability = body
+        .get("observability")
+        .and_then(|obs| serde_json::from_value::<crate::observability::fleet::PeerObservability>(obs.clone()).ok());
     Some(HostSummary {
         id,
         name,
@@ -235,6 +246,7 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
         health: HostHealth::Online,
         runner_tick_age_s,
         fleet_sync,
+        observability,
     })
 }
 
@@ -264,6 +276,7 @@ async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
         health: HostHealth::Unreachable,
         runner_tick_age_s: None,
         fleet_sync: None,
+        observability: None,
     };
     cache.insert(base_url.to_string(), placeholder.clone());
     placeholder
@@ -287,6 +300,9 @@ pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     }
     let client = reqwest::Client::builder()
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        // No redirects, like `post_owner` and the sync drain: a peer's answer must come from the
+        // peer itself, not from wherever a 3xx would carry the poll.
+        .redirect(reqwest::redirect::Policy::none())
         .build();
     let client = match client {
         Ok(client) => client,
@@ -439,6 +455,28 @@ mod tests {
         assert!(sync.consent);
     }
 
+    /// Issue #860: a member's observability verdict rides the same status answer, and an older
+    /// peer that reports none stays unmeasured.
+    #[test]
+    fn a_members_observability_verdict_is_read_from_its_status() {
+        let mut body = peer_status_body("peer-123", "peer-box");
+        body["observability"] = json!({"enabled": true, "state": "failing", "failing_since": 1000,
+                                        "destination_hash": "0123456789abcdef012345"});
+        let row = summary_from_status_json("http://peer:7878", &body).unwrap();
+        let observability = row.observability.expect("parsed");
+        assert!(observability.enabled);
+        assert_eq!(observability.destination_hash.as_deref(), Some("0123456789abcdef012345"));
+        assert_eq!(observability.failing_for_s(1600), Some(600));
+
+        // Absent — an older member — reads as unmeasured, and off as a choice, not a fault.
+        let older = summary_from_status_json("http://peer:7878", &peer_status_body("peer-123", "peer-box")).unwrap();
+        assert!(older.observability.is_none());
+        let mut off = peer_status_body("peer-123", "peer-box");
+        off["observability"] = json!({"enabled": false, "state": "off", "failing_since": null, "destination_hash": null});
+        let off = summary_from_status_json("http://peer:7878", &off).unwrap();
+        assert_eq!(off.observability.expect("parsed").failing_for_s(999_999), None);
+    }
+
     /// A peer answering without our token serves the reduced status (no id, no hostname): the row
     /// still parses off the configured URL, while a body with no `host` or `runtime` is not one.
     #[tokio::test]
@@ -512,6 +550,7 @@ mod tests {
             health: HostHealth::Online,
             runner_tick_age_s: None,
             fleet_sync: None,
+            observability: None,
         };
         app.fleet_cache
             .last_known

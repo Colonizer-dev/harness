@@ -6,7 +6,7 @@
 import { useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from "react";
 import { ApiContext } from "../context";
 import { Avatar } from "../components/Avatar";
-import { cx, timeAgo } from "../components/ui";
+import { cx, isUrl, timeAgo } from "../components/ui";
 import type { OrgInfo, RepoMeta } from "../types";
 
 // --- Language colours (GitHub linguist) ------------------------------------------------------
@@ -376,11 +376,14 @@ export function RepoCard({ repo }: { repo: string }): ReactElement | null {
         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-meta-lg text-faint">
           <span>★ {meta.stars}</span>
           {meta.pushed_at && <span>pushed {timeAgo(meta.pushed_at)}</span>}
-          {meta.homepage && (
-            <a href={meta.homepage} target="_blank" rel="noreferrer" className="truncate hover:text-text">
-              {meta.homepage.replace(/^https?:\/\//, "")}
-            </a>
-          )}
+          {meta.homepage &&
+            (isUrl(meta.homepage) ? (
+              <a href={meta.homepage} target="_blank" rel="noreferrer" className="truncate hover:text-text">
+                {meta.homepage.replace(/^https?:\/\//, "")}
+              </a>
+            ) : (
+              <span className="truncate">{meta.homepage}</span>
+            ))}
         </div>
       </div>
 
