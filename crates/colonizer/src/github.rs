@@ -2508,7 +2508,14 @@ impl PublishOps for GitPublishOps<'_> {
                 .s
                 .verification
                 .as_ref()
-                .is_some_and(|v| !v.pre_publish_red.is_empty());
+                .is_some_and(|v| !v.pre_publish_red.is_empty())
+            // Issue #1301: verification could not run due to resource exhaustion — open as draft
+            // so the change is not merged without verification.
+            || self
+                .s
+                .verification
+                .as_ref()
+                .is_some_and(|v| v.infra_retry.is_some());
         let mut create = self.app.gh([
             "pr",
             "create",
