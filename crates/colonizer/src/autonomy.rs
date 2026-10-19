@@ -739,6 +739,9 @@ async fn ask(app: &App, model: &str, prompt: &str, max_tokens: u64, timeout: Dur
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
+        // No redirects, like the gateway's own client (gateway/mod.rs): a 3xx must not carry the
+        // provider's key to a host nobody configured.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,

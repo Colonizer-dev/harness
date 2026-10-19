@@ -22,7 +22,7 @@ use crate::{
     api_tokens::{Need, Scope, ScopedToken},
     client_error,
     sessions::Session,
-    util::{short_id, write_private},
+    util::{private_host, resolves_to_public, short_id, write_private},
 };
 use axum::{
     Extension, Json,
@@ -32,7 +32,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{net::IpAddr, path::PathBuf, sync::LazyLock};
+use std::{path::PathBuf, sync::LazyLock};
 use tokio::sync::Mutex;
 
 /// The routes, their scoped-token rule and their activity, registered in `features::ALL`.
@@ -264,57 +264,16 @@ fn colony_event(name: &str) -> bool {
     LIFECYCLE_EVENTS.contains(&name) || matches!(name, "attention" | "needs_rebase")
 }
 
-/// Whether an address names this machine, its network or a link-local service — refused to a
-/// scoped token, so a token cannot make the mothership POST to what only the mothership can reach.
-/// A literal check: a public name that resolves to a private address is not caught here.
-fn private_host(url: &reqwest::Url) -> bool {
-    let Some(host) = url.host_str() else { return true };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return private_ip(ip);
-    }
-    let name = host.trim_end_matches('.').to_ascii_lowercase();
-    name == "localhost"
-        || name.ends_with(".localhost")
-        || name.ends_with(".local")
-        || name.ends_with(".internal")
-        || !name.contains('.')
-}
-
-fn private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                // 100.64.0.0/10: carrier-grade NAT, where tailnets live.
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return private_ip(IpAddr::V4(v4));
-            }
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-        }
-    }
-}
-
 fn bad(message: &str) -> crate::AppError {
     client_error(StatusCode::BAD_REQUEST, message)
 }
 
 /// Checks a new subscription: the address, the events and the secret. `scoped` is the token making
 /// it, when one is. The secret comes back as a plain `String`: every subscription has one (issue
-/// #900), so a caller never has to hold the option.
-fn validate(req: &NewSubscription, scoped: Option<&ScopedToken>) -> Result<(String, Vec<String>, String), crate::AppError> {
+/// #900), so a caller never has to hold the option. A scoped token's address is also resolved
+/// (`util::resolves_to_public`): a public name that answers with this machine's or its network's
+/// address is refused with the literals, and so is a name that does not resolve at all.
+async fn validate(req: &NewSubscription, scoped: Option<&ScopedToken>) -> Result<(String, Vec<String>, String), crate::AppError> {
     let url = req.url.trim().to_string();
     if url.len() > MAX_URL || !webhook_valid(&url) {
         return Err(bad("url must be an http:// or https:// address"));
@@ -323,10 +282,17 @@ fn validate(req: &NewSubscription, scoped: Option<&ScopedToken>) -> Result<(Stri
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(bad("put credentials in the secret, not in the url"));
     }
-    if scoped.is_some() && private_host(&parsed) {
-        return Err(bad(
-            "a scoped token's webhook must be a public address, not this machine or its network",
-        ));
+    if scoped.is_some() {
+        if private_host(&parsed) {
+            return Err(bad(
+                "a scoped token's webhook must be a public address, not this machine or its network",
+            ));
+        }
+        if !resolves_to_public(parsed.host_str().unwrap_or_default()).await {
+            return Err(bad(
+                "a scoped token's webhook must resolve to a public address; a name that does not resolve is refused",
+            ));
+        }
     }
     let mut events: Vec<String> = Vec::new();
     for name in &req.events {
@@ -368,7 +334,7 @@ pub async fn create(
     Json(req): Json<NewSubscription>,
 ) -> ApiResult<Value> {
     let scoped = scoped.map(|Extension(token)| token);
-    let (url, events, secret) = validate(&req, scoped.as_ref())?;
+    let (url, events, secret) = validate(&req, scoped.as_ref()).await?;
     let _guard = STORE.lock().await;
     let mut list = load(&app);
     let token = scoped.as_ref().map(|t| t.id.clone());
