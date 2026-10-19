@@ -547,9 +547,12 @@ export function knownProbes(root) {
 
 /**
  * Every problem `check` finds, as `{ errors, warnings }`. With `base`, CHANGELOG.md may change only in
- * a release: one that adds the `## [vX.Y.Z]` heading matching the crate version.
+ * a release: one that adds the `## [vX.Y.Z]` heading matching the crate version. With `release`, no
+ * fragment may be left except those named in `later`: fragments that landed after the release pull
+ * request assembled its own, which belong to the next release (scripts/release-prep.mjs works them
+ * out from git history).
  */
-export function check(root, { base, release, allowChangelogEdit = false } = {}) {
+export function check(root, { base, release, later = new Set(), allowChangelogEdit = false } = {}) {
   const errors = [];
   const warnings = [];
   const dir = join(root, FRAGMENT_DIR);
@@ -573,10 +576,18 @@ export function check(root, { base, release, allowChangelogEdit = false } = {}) 
 
   if (release) {
     if (!releases(changelog).includes(release)) errors.push(`CHANGELOG.md has no "## [${release}] - <date>" section`);
-    if (fragments.length) {
+    const left = fragments.filter((f) => !later.has(f.file));
+    if (left.length) {
       errors.push(
-        `${fragments.length} fragment(s) left in ${FRAGMENT_DIR}/ at ${release}: run ` +
+        `${left.length} fragment(s) left in ${FRAGMENT_DIR}/ at ${release} (${left.map((f) => f.file).join(', ')}): run ` +
           `node scripts/changelog.mjs assemble --version ${release} in the release pull request`,
+      );
+    }
+    const next = fragments.filter((f) => later.has(f.file));
+    if (next.length) {
+      warnings.push(
+        `${next.length} fragment(s) in ${FRAGMENT_DIR}/ at ${release} landed after the release assembled its own ` +
+          `and belong to the next release: ${next.map((f) => f.file).join(', ')}`,
       );
     }
   }
