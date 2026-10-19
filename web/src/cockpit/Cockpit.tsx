@@ -426,7 +426,7 @@ export function Cockpit({
     for (const drop of outbox.dropped) {
       if (queuedAnswers.current.has(drop.id)) {
         queuedAnswers.current.delete(drop.id);
-        toast(droppedText("answer", drop.status), "error");
+        toast(droppedText("answer", drop.status, drop.error), "error");
       }
     }
   }, [outbox.dropped, toast]);

@@ -21,7 +21,7 @@ export interface OutboxItem {
 export interface OutboxStatus {
   pending: number;
   delivered: string[];
-  dropped: { id: string; status: number }[];
+  dropped: { id: string; status: number; error?: string }[];
 }
 
 /** The part of a SessionStream the queueing decision needs, so tests can pass a stub. */
@@ -95,9 +95,12 @@ export function sendOrQueue(stream: Sender, command: ClientCommand, questions?: 
 
 /** Why a dropped item was dropped, as the toast reads it. A 409 usually means the thing the user
  *  wanted already happened — the question is no longer open, the colony is in no mood for messages
- *  — so the wording stays calm about it instead of crying error. */
-export function droppedText(kind: "answer" | "message", status: number): string {
+ *  — so the wording stays calm about it instead of crying error. Server explanations for messages are
+ *  shown verbatim when available (issue #1287). */
+export function droppedText(kind: "answer" | "message", status: number, error?: string): string {
   if (status === 409) {
+    // For messages, prefer the server's explanation (e.g., colony finished reason).
+    if (kind === "message" && error) return error;
     return kind === "answer"
       ? "The question was no longer open, or had changed — it may already have been answered."
       : "The colony isn't taking messages right now, so the queued message wasn't sent.";
