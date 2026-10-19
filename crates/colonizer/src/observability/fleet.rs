@@ -311,7 +311,10 @@ mod tests {
         );
         assert_eq!(failing["state"], json!("failing"), "{failing}");
         for canary in [&user, &pass] {
-            assert!(!failing.to_string().contains(canary), "the answer names the credential: {failing}");
+            assert!(
+                !failing.to_string().contains(canary),
+                "the answer names the credential: {failing}"
+            );
         }
         assert!(failing["failing_since"].is_u64(), "{failing}");
         assert!(
