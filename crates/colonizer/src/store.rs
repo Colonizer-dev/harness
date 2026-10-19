@@ -1558,6 +1558,7 @@ pub(crate) mod tests {
             1,
             "the agent's native transcripts/, read by txcript as a directory",
         ),
+        ("ua_graph.rs", 1, "the VM-written out/knowledge-graph.json"),
         ("validation.rs", 1, "review.md handed to `gh --body-file` by path"),
         ("verify.rs", 1, "the verify command's working directory"),
         (

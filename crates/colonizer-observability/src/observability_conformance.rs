@@ -249,6 +249,7 @@ fn contract(root: &Root, endpoint: &str, edit: impl FnOnce(&mut Settings)) -> Pa
         data_dir: root.0.clone(),
         settings,
         policy: colonies(),
+        relay_members: Vec::new(),
     };
     let path = contract::path(&root.0);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -448,7 +449,7 @@ async fn gate_open_phase(endpoint: &str, canaries: &Canaries, output: &Path, bas
         compression: "none".into(),
         ..Settings::default()
     };
-    let transport = Transport::new(&settings, Vec::new()).unwrap();
+    let transport = Transport::new(&settings, std::path::Path::new("."), Vec::new()).unwrap();
     match transport.send(&requests[0]).await {
         Outcome::Sent { rejected, .. } => assert_eq!(rejected, 0, "the collector refused records"),
         other => panic!("gate-open: the collector refused the request: {other:?}"),

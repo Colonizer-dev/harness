@@ -284,7 +284,12 @@ async fn logs_and_traces_reach_the_grpc_collector() {
         _ => Reply::Ok,
     }))
     .await;
-    let transport = Transport::new(&settings(&collector.url), canary_headers(&canaries)).unwrap();
+    let transport = Transport::new(
+        &settings(&collector.url),
+        std::path::Path::new("."),
+        canary_headers(&canaries),
+    )
+    .unwrap();
 
     let (logs, traces) = (logs_request("grpc transport test"), traces_request("exporter.tick"));
     assert_eq!(
@@ -462,7 +467,12 @@ async fn a_status_that_quotes_a_header_is_scrubbed() {
         move |_| Reply::Failed(Status::unauthenticated(format!("Bearer {token} is not a valid key")))
     }))
     .await;
-    let transport = Transport::new(&settings(&collector.url), canary_headers(&canaries)).unwrap();
+    let transport = Transport::new(
+        &settings(&collector.url),
+        std::path::Path::new("."),
+        canary_headers(&canaries),
+    )
+    .unwrap();
     match transport.send(&logs_request("auth")).await {
         Outcome::Unauthorized { status, message } => {
             assert_eq!(status, Code::Unauthenticated as u16);
@@ -476,9 +486,14 @@ async fn a_status_that_quotes_a_header_is_scrubbed() {
 async fn a_dead_endpoint_is_a_scrubbed_retry() {
     let canaries = Canaries::new();
     // Port 9 (discard) on loopback: nothing listens, so the lazy channel's first call fails.
-    let transport = Transport::new(&settings("http://127.0.0.1:9"), canary_headers(&canaries)).unwrap();
+    let transport = Transport::new(
+        &settings("http://127.0.0.1:9"),
+        std::path::Path::new("."),
+        canary_headers(&canaries),
+    )
+    .unwrap();
     match transport.send(&logs_request("dead")).await {
-        Outcome::Retry { message, after } => {
+        Outcome::Retry { message, after, .. } => {
             assert_eq!(after, None);
             assert!(!message.contains(&bearer(&canaries)), "{message}");
             assert!(!message.contains(&api_key(&canaries)), "{message}");

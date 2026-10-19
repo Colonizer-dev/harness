@@ -203,13 +203,24 @@ export const UNDERSTAND_ANYTHING_DENIED = new Map([
   ],
 ]);
 
-export const UNDERSTAND_ANYTHING_PROMPT_APPEND = [
+const UNDERSTAND_ANYTHING_PROMPT_LINES = [
   '- You have the understand-anything skillset: it keeps a knowledge graph of this repository under `.ua/` and answers lookups, guided tours and diff-impact questions from it.',
   '- Do not run the full `/understand` analysis — a PreToolUse hook refuses it. It is a multi-agent pass over the whole repository and upstream warns about the tokens it costs.',
   '- If `.ua/` already holds a graph in this colony, read it. Otherwise stay with the file-scoped and incremental commands: `/understand-explain <file>`, `/understand-diff`, `/understand-chat`.',
   '- `/understand-dashboard` and `/understand-figma` are refused too: one needs a vite server and a `pnpm install`, the other the Figma API, and neither can reach the network here.',
   '- `.ua/` is git-ignored by the colony and never part of the pull request.',
-].join('\n');
+];
+
+export const UNDERSTAND_ANYTHING_PROMPT_APPEND = UNDERSTAND_ANYTHING_PROMPT_LINES.join('\n');
+
+/**
+ * The graph colony's variant (issue #1015): the mothership launched it to run exactly the full
+ * pass, so the line that refuses `/understand` drops out — the dashboard and Figma refusals
+ * stand, since that colony has no more network than any other.
+ */
+export const UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND = UNDERSTAND_ANYTHING_PROMPT_LINES.filter(
+  (line) => !line.includes('Do not run the full `/understand`'),
+).join('\n');
 
 /**
  * mattpocock-skills (github.com/mattpocock/skills, MIT), an optional vendored skillset staged from a
@@ -323,11 +334,14 @@ export function skillNameFromInput(toolInput = {}) {
  * Only the three skills above are refused, and only by exact name: `/understand-diff` and the rest
  * are the file-scoped commands the guard points the colony at instead. A name another plugin
  * namespaces (`other-pack:understand`) is that plugin's skill, not this one's, so it stays allowed.
+ * `fullPass` — the graph colony's one licence (issue #1015) — lets `/understand` through and
+ * refuses the other two all the same.
  */
-export function understandAnythingDenial(toolName, toolInput = {}, pluginDirs = []) {
+export function understandAnythingDenial(toolName, toolInput = {}, pluginDirs = [], fullPass = false) {
   if (toolName !== 'Skill' || !understandAnythingMounted(pluginDirs)) return null;
   const [namespace, skill] = splitSkillName(toolInput);
   if (namespace !== null && namespace !== UNDERSTAND_ANYTHING_PLUGIN) return null;
+  if (fullPass && skill === 'understand') return null;
   const reason = UNDERSTAND_ANYTHING_DENIED.get(skill);
   return reason ? `understand-anything: ${reason}` : null;
 }
@@ -898,9 +912,14 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
   // Cost guard (issue #1014): only when the plugin is actually mounted, so a colony that never got
-  // the skillset sees neither the prompt block nor the gate.
+  // the skillset sees neither the prompt block nor the gate. The graph colony (issue #1015) is
+  // launched to run exactly the full pass, so it gets the variant without the refusal line and
+  // keeps its licence in the hook below.
   const understandAnything = understandAnythingMounted(pluginDirs);
-  if (understandAnything) appended.push(UNDERSTAND_ANYTHING_PROMPT_APPEND);
+  const uaFullPass = env.COLONIZER_UA_FULL_PASS === '1';
+  if (understandAnything) {
+    appended.push(uaFullPass ? UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND : UNDERSTAND_ANYTHING_PROMPT_APPEND);
+  }
   // mattpocock-skills (issue #1016), gated the same way: the pre-seeded setup configuration and the
   // colony-wins precedence rules reach the system prompt only when the pack is mounted.
   const mattpocockSkills = mattpocockSkillsMounted(pluginDirs);
@@ -1059,7 +1078,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
       matcher: 'Skill',
       hooks: [
         async (input) => {
-          const reason = understandAnythingDenial(input.tool_name, input.tool_input, pluginDirs);
+          const reason = understandAnythingDenial(input.tool_name, input.tool_input, pluginDirs, uaFullPass);
           if (!reason) return { continue: true };
           return {
             continue: true,

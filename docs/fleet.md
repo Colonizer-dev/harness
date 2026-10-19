@@ -185,6 +185,12 @@ shows where it stands.
 Background drains stay stopped after a 401 or a 403; a manual `fleet sync` tries again. Leaving
 and re-joining starts the drain state over, since a new membership is a new owner's view.
 
+**The owner may relay it.** An owner with observability export can also relay what members push to
+its own backend, under each member's identity — off by default, structure only, and always in the
+member's preview: the pairing answer and every rows answer carry a `relays` flag, and while it says
+the owner relays, the preview's "includes" line ends by saying so. The switch, the consent trail and
+the double-send guard are in [Fleet relay](observability/fleet-relay.md).
+
 ### Reading it on the owner
 
 Settings → Fleet on the owner has a **Fleet history** section: every member's synced colonies,

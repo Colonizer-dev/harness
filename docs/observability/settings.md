@@ -69,6 +69,7 @@ rides as structured metadata or inside the line, never as a label.
 | Max backlog (days) | `7` | Older events are dropped rather than exported late; `0` keeps everything. |
 | Max read rate (MiB/s) | `8` | A ceiling so the exporter never crowds a running colony. |
 | Start from | `now` | Where a new endpoint starts: `now` sends only what is written from then on; `backlog` also sends what the ledgers hold, back to Max backlog. Settled once per endpoint. |
+| Relay fleet members' history | off | Relay what fleet members push to this owner on to this backend, under each member's identity — structure only, and members see it in their push preview ([Fleet relay](fleet-relay.md)). |
 
 ## What is sent, and what is never sent
 

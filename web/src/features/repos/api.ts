@@ -1,7 +1,7 @@
 // Repositories, code & issues API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, query, repoPath, request } from "../../http";
-import type { CreatedIssue, Draft, EditsRequest, FileCommit, Issue, IssueDraft, IssueDrafts, MapFileDetail, PackagesDependencies, PackagesPublished, Repo, RepoBlame, RepoBlob, RepoBranches, RepoCoverage, RepoGitSummary, RepoLoc, RepoMap, RepoMeta, RepoPackages, RepoTree, ScanPending, SupplyChain, TouchedFiles } from "./types";
+import type { CreatedIssue, Draft, EditsRequest, FileCommit, Issue, IssueDraft, IssueDrafts, MapFileDetail, PackagesDependencies, PackagesPublished, Repo, RepoBlame, RepoBlob, RepoBranches, RepoCoverage, RepoGitSummary, RepoGraph, RepoLoc, RepoMap, RepoMeta, RepoPackages, RepoTree, ScanPending, SupplyChain, TouchedFiles } from "./types";
 
 export interface ReposApi {
   repos(): Promise<Repo[]>;
@@ -25,6 +25,8 @@ export interface ReposApi {
   orgSupplyChain(org: string, refresh?: boolean): Promise<SupplyChain | ScanPending>;
   // The Code page (code.rs), read from the mothership's bare clone.
   repoLoc(repo: string): Promise<RepoLoc>;
+  /** GET /api/understand-anything/graphs/{owner}/{repo}: the repo's knowledge-graph state and cost. */
+  repoGraph(repo: string): Promise<RepoGraph>;
   repoCoverage(repo: string): Promise<RepoCoverage>;
   repoGitSummary(repo: string): Promise<RepoGitSummary>;
   repoBranches(repo: string): Promise<RepoBranches>;
@@ -72,6 +74,7 @@ export const reposHttp: ReposApi = {
   orgDependencies: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/dependencies${refresh ? "?refresh=1" : ""}`),
   orgSupplyChain: (org, refresh) => request(`/api/orgs/${enc(org)}/packages/supply-chain${refresh ? "?refresh=1" : ""}`),
   repoLoc: (repo) => request(`${repoPath(repo)}/loc`),
+  repoGraph: (repo) => request(`/api/understand-anything/graphs/${repo.split("/").map(enc).join("/")}`),
   repoCoverage: (repo) => request(`${repoPath(repo)}/coverage`),
   repoGitSummary: (repo) => request(`${repoPath(repo)}/git-summary`),
   repoBranches: (repo) => request(`${repoPath(repo)}/branches`),
@@ -91,3 +94,7 @@ export const reposHttp: ReposApi = {
   mapRepo: (repo) => post(`/api/maps/${repo.split("/").map(enc).join("/")}`),
   touched: () => request("/api/touched"),
 };
+
+/** GET /api/understand-anything/graphs/{owner}/{repo}/knowledge-graph.json — the built graph itself,
+ *  raw; where the Code page's "Open knowledge graph" link goes. */
+export const repoGraphJsonPath = (repo: string) => `/api/understand-anything/graphs/${repo.split("/").map(enc).join("/")}/knowledge-graph.json`;

@@ -1157,7 +1157,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             agent_choice.settings.insert((*key).into(), Value::String((*value).into()));
         }
     }
+    // A graph colony runs the one pass every other colony is refused (ua_graph.rs, issue #1015):
+    // mount the understand-anything skillset whatever its org has switched on, the way a mapping
+    // colony gets archify.
+    let graph_colony = s.origin.as_deref() == Some(crate::ua_graph::ORIGIN);
+    if graph_colony {
+        let plugins = agent_choice
+            .settings
+            .get("plugins")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let with = crate::plugins::with_skillset(plugins, crate::understand_anything::NAME);
+        agent_choice.settings.insert("plugins".into(), Value::String(with));
+    }
     let mut runner_env = agent_env(&agent, &agent_choice);
+    // The graph colony's licence for the full `/understand` pass: the runner's cost guard
+    // (issue #1014) stands down for exactly this colony, which reads the variable.
+    if graph_colony {
+        runner_env.insert("COLONIZER_UA_FULL_PASS".into(), Value::String("1".into()));
+    }
     // The exec policy is the operator's rule about commands, not a model setting: it follows the
     // colony to this module pick, or the boot refuses when the pick cannot apply it.
     // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
@@ -1765,6 +1783,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         target: crate::services::GUEST_DIR.into(),
         read_only: false,
     });
+    // The repository's shared knowledge graph (issue #1015): on a repo the org opted into, every
+    // colony gets the newest stored graph under .ua/ — bound read-only when its base is the
+    // graph's commit, else seeded writable to refresh — and a note pointing at it. The graph
+    // colony itself gets only the seed (ua_graph.rs).
+    let ua_opted_in = orgs::builds_ua_graph(&org_settings, &s.repo);
+    if let Some(placed) = crate::ua_graph::placement(app, &s, &bare, &base, ua_opted_in).await {
+        crate::ua_graph::place(&wt, &placed, &mut mounts)?;
+        if let Some(note) = &placed.note {
+            prompt.push_str(note);
+        }
+    }
     // Skill packs (docs/skill-packs.md), mounted read-only from the mothership. A module that
     // loads packs reads its own runner env first — how a claude-code colony's `plugins` setting
     // arrives — and, when it declares `skill_packs` but carries no list of its own, draws from the
@@ -1783,6 +1812,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // force-append every claude-code map already gets through its own settings, extended to
         // any module that loads packs.
         enabled = crate::plugins::parse_list(&crate::maps::with_archify(&enabled.join(",")));
+    }
+    if graph_colony {
+        // The graph colony loads the understand-anything skillset whatever its org switched on
+        // (ua_graph.rs) — the force-append above, for the pass the cost guard refuses elsewhere.
+        enabled = crate::plugins::parse_list(&crate::plugins::with_skillset(
+            &enabled.join(","),
+            crate::understand_anything::NAME,
+        ));
     }
     let mut plugin_names = crate::plugins::parse_list(
         runner_env
@@ -2251,18 +2288,34 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     )?;
     // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
     // credential files about to be committed, and the agent goes to ignore or inspect them. The
-    // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise.
+    // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise —
+    // and on a repo opted into the shared graph (#1015) every colony carries `.ua/`, whether or
+    // not it loads the skillset. Also when the worktree already holds a `.ua/`: a colony resumed
+    // after the org opted out keeps its seeded graph, which must stay just as excluded.
     let placeholders = crate::path_policy::exclude_lines(&planned);
+    let ua_carried = ua_opted_in || wt.join(".ua").is_dir();
+    let mut ua_names = plugin_names.clone();
+    if ua_carried && !ua_names.iter().any(|name| name == crate::understand_anything::NAME) {
+        ua_names.push(crate::understand_anything::NAME.to_string());
+    }
     let mut excludes = placeholders.clone();
-    excludes.extend(crate::path_policy::ua_exclude_lines(&plugin_names));
+    excludes.extend(crate::path_policy::ua_exclude_lines(&ua_names));
     crate::path_policy::write_list(&vm_dir.join(crate::path_policy::EXCLUDE_FILE), &excludes)?;
     // The placeholders into the repository's shared `info/exclude` (#1279): a git that strips the
     // environment — the host's own calls, an agent's startup snapshot — never sees the
     // `core.excludesFile` above, and for a linked worktree it reads `info/exclude` from the common
-    // dir, which is the bare repo. Only the placeholders: the understand-anything lines are a
-    // per-colony view (see `ua_exclude_lines`), so they stay guest-side. Best effort: the env arm
-    // still covers the guest's own shells.
-    if let Err(e) = crate::path_policy::write_repo_exclude(&bare, &placeholders.join("\n")) {
+    // dir, which is the bare repo. The placeholders, and on an opted-in repository (or one whose
+    // worktree carries a `.ua/`) the `.ua/` lines too: the host's own staging git reads only this
+    // file, and a seeded knowledge graph must not be swept into a pull request. The skillset's
+    // lines for every other colony stay guest-side (see `ua_exclude_lines`). Best effort: the env
+    // arm still covers the guest's own shells.
+    let mut repo_excludes = placeholders;
+    if ua_carried {
+        repo_excludes.extend(crate::path_policy::ua_exclude_lines(&[
+            crate::understand_anything::NAME.to_string()
+        ]));
+    }
+    if let Err(e) = crate::path_policy::write_repo_exclude(&bare, &repo_excludes.join("\n")) {
         log.warn(format!("path policy: could not update the repository's info/exclude: {e}"))
             .await;
     }

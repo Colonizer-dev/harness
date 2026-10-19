@@ -18,6 +18,87 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.17] - 2026-10-19
+
+### Added
+
+- **Observability can replay archived colonies (`--include-archive`) and write an offline export to a file (`colonizer observability export`).** Both `observability backfill` and the new `observability export` accept `--include-archive`, which also reads colonies that live only in the local log archive: the latest revision of each bundle, only the ledgers the exporter already reads (`events`, `harness`, `gateway`, `findings` — credential files are never opened), with disk winning when a colony exists in both places and ids derived from the bundle's original host id so a replay still matches what was exported live; archived colonies export structure only. Watch the retention window ([#606](https://github.com/Colonizer-dev/harness/issues/606)): a sweep can delete bundles before a backfill reads them. `colonizer observability export --out FILE|DIR` writes the OTLP/JSON requests the exporter would have sent — one request per line, files 0600, an existing directory getting `logs.jsonl` and `traces.jsonl` inside — without contacting any backend, for an OpenTelemetry Collector to replay elsewhere or as a support bundle; `--since`/`--until`/`--signals logs,traces` narrow it, and `--content` includes conversation text only after a typed `yes` on a terminal — the flag stands in for the install switch, so an organisation's opt-in and each colony's sensitivity still apply. ([#859])
+- **A fleet owner may relay members' synced history to its own observability backend, and members are told before they push.**
+
+  A new **Relay fleet members' history** setting (`relay_fleet_history`, off by default, shared by
+  every observability provider) lets an owner relay what its members' history push leaves under
+  `<data>/fleet-ingest/` — their finished colonies' records and event, harness and gateway logs — to
+  the owner's own backend, under each member's identity (`service.instance.id` = the member's host
+  id, `colonizer.relayed_by` = the owner's; the same ids the member would have produced, so a backend
+  deduplicates the two copies). Structure only, always: the relay fails closed, ignoring the owner's
+  content switches. Consent stays on the member's side: the owner's pairing answer and
+  every rows answer carry a `relays` flag, and while it is true the member's push preview
+  (`GET /api/fleet/sync/preview`) ends its "includes" line with "the owner relays this history to its
+  own observability backend under this host's identity (structure only, never conversation
+  content)". The relay runs in the add-on, keeps its position in
+  `<data>/observability/fleet-relay.json`, and exports the setting to the add-on's contract, which
+  also gains a `relay_members` list — the member-reported exporter descriptions the double-send guard
+  reads once a member's exporter is enabled with the same destination hash; those reports arrive with
+  #860, and until then an owner whose backend a member already exports to should leave the relay
+  off. ([#861])
+- **understand-anything: a shared knowledge graph, built once per commit of main and handed to every colony on the repository.** An org's `ua_graph` setting — off by default, read like `merge_prs` (`owner/name`, an org's name, or `*`) — names the repositories the mothership builds a graph for. A dedicated "Knowledge graph" colony runs the full `/understand` pass the cost guard refuses everywhere else: once, then incrementally whenever a 10-minute tick sees main move past the stored graph (a failed pass is retried at most once an hour). Every colony on the repository then finds the newest graph at `.ua/knowledge-graph.json` — bound read-only when its base is the graph's commit, else a writable copy plus a note in its brief to refresh only the changed files — and `.ua/` stays git-excluded either way. The graph colony's cost runs through the model router like any colony's and shows on the cockpit's Code page ("Open knowledge graph" for the raw JSON, owner-only, "graph jobs: $X"), as does `GET /api/understand-anything/graphs/{owner}/{name}`. Until the pinned plugin is prebuilt host-side — `/understand` needs `packages/core/dist/index.js`, which the pin ships as TypeScript source; a follow-up issue tracks the build — the graph colony refuses to launch. ([#1015])
+- **Observability: the exporter add-on installs itself — `colonizer add observability`.** The
+  command downloads the running release's SHA256SUMS and platform archive, verifies the sha256,
+  unpacks the matching `colonizer-observability` into `<data>/addons/observability/<version>/` (the
+  slot the supervisor already searches) and enables the module when its saved settings permit,
+  reporting it plainly when a release does not ship the add-on asset yet.
+  `colonizer remove observability` disables the module and removes the binary — `--purge` also drops
+  the saved settings, the add-on's ledger offsets and the `observability-headers` secret — and
+  `colonizer observability status` prints the add-on's health from
+  `GET /api/observability/status` (`--json` for the raw payload). The cockpit's Observability pane
+  offers the same flow through `PUT` and `DELETE /api/observability/addon`. ([#1060])
+
+### Fixed
+
+- **One untaggable release no longer blocks every later tag.** The release train's tag job now skips an older merged release that fails the gate when a newer release commit supersedes it (a notice, not a failure), and the gate accepts fragments that landed on `main` while the release pull request was open, since they belong to the next release. A fragment that was there when the release was cut still blocks its tag. `node scripts/release-prep.mjs tags` prints what the job would do. ([#1396])
+- The Release workflow runs the same history-aware changelog gate as the release train, so a tag whose leftover fragments landed during the release freeze publishes instead of failing at "Check the changelog covers the tag".
+
+## [v0.2.16] - 2026-10-19
+
+### Added
+
+- **A fleet member's observability is part of its health badge.** A member's reduced
+  `/api/status` answer — the one fleet peers poll without a token — now carries an `observability`
+  block, `{enabled, state, failing_since, destination_hash}`, always present on this version so an
+  owner can tell export switched off from an older member that reports nothing. When a member's
+  exporter has been failing for more than ten minutes, the owner's member list reads **degraded**,
+  "Observability failing", with "check this member's observability settings" underneath (the worst
+  problem still wins; export off is a choice, never a fault). The destination is named only as a
+  truncated SHA-256 of the protocol and endpoint: no endpoint, header or error text crosses
+  machines. docs/fleet.md gains "Observability across a fleet" — the same backend on every member,
+  the resource attributes that join them into one dataset in Grafana, and the
+  `<data>/observability/hash.key` a `repo_names = hashed` fleet must copy between its members to
+  keep hashes joinable. ([#860])
+- **Observability: a runnable local Grafana stack, per-backend recipes, and the limits and costs written down.** `examples/observability/grafana/` gains a compose stack — Alloy as the collector, Loki, Tempo, Prometheus and Grafana with provisioned dashboards — that the exporter reaches with one loopback endpoint, plus the Alloy, Loki and Tempo configs tuned to the exporter's caps, a README walking through it, and a CI check of those example configs. Two docs pages join the observability guide: [Backend recipes](docs/observability/backends.md), with the endpoint, the header and the ingest limits for Grafana Cloud, Datadog, Honeycomb, Elastic, SigNoz, New Relic, the local stack and a plain `otelcol-contrib` collector, and [Limits and cost](docs/observability/limits-and-cost.md), which maps each backend limit to the exporter setting that stays under it, reports the volume measured on the repository's fixtures (per record, per trace and per colony-hour) with the method, and lists the levers — sampling, the stream switches, the metrics interval, gzip — that lower the bill. ([#862])
+- **mattpocock-skills: an optional thirteen-skill engineering pack, staged non-interactively with its setup pre-seeded.** [mattpocock/skills](https://github.com/mattpocock/skills) (v1.3.1, MIT) is vendored as `mattpocock-skills`, off by default like ponytail and security-audit: an operator adds it to the claude-code module's Skillsets list, and a new **mattpocock-skills allowlist** setting narrows it to a comma-separated subset of its thirteen skills (`tdd`, `diagnosing-bugs`, `code-review`, `to-spec`, `implement-spec`, `to-tickets`, `triage`, `improve-codebase-architecture`, `codebase-design`, `domain-modeling`, `pr`, `handoff`, `writing-for-agents`). Only that curated set is staged — each skill with the sibling files it reads, minus its Codex stub — and staging is an allowlist that fails on any other skill: the interactive ones (`grill-me` and friends) would stall a colony on an interview, and `setup-matt-pocock-skills` is never staged because the runner pre-seeds the per-repo configuration it would write (issue tracker, triage labels, domain docs) in the system prompt, where the consumer skills find it — so no setup prompt ever reaches the cockpit, and a PreToolUse hook refuses the excluded names and any skill the allowlist does not name. Where a skill conflicts with how a colony runs, the colony's rules are stated in the prompt and win: no merging, pushing or branch-making, the pull request description in the colony's pr.md format, and assumptions stated instead of confirmation rounds. Two of the thirteen (`code-review`, `pr`) share their names with ECC's commands; the namespaced addresses (`mattpocock-skills:code-review` vs `ecc:code-review`) keep them distinct, and both packs can be enabled together. ([#1016])
+
+### Security
+
+- **Webhook deliveries can no longer be redirected onto the mothership's own network, and the
+  autonomy judge no longer follows redirects at all.** The notify module's delivery clients (the
+  fan-out loop, the host-line path, the outbox's retries and replays) followed redirects with no
+  host check: a webhook receiver could answer a signed POST with a 302 to
+  `http://169.254.169.254/` or a LAN address and the mothership would follow it. They now follow a
+  redirect only while it stays an http(s) address on a public host — the hop's name resolved, so a
+  public-looking name pointed at a private address is refused too — keeping the default ten-hop
+  limit; the first URL never passes through a redirect policy, so the owner's own webhook keeps
+  pointing wherever the owner chose, their own machine included. At the same time a scoped token's
+  webhook, already refused when its address was literally private, is now also resolved at save
+  time: a public name that answers with a private address — or with none at all — is refused. The
+  fleet status poll and the autonomy judge's client follow no redirects now either, the latter
+  because a redirect would carry the provider's API key to a host nobody configured. The cockpit
+  renders a link an outside feed left in the mothership's data (a repository's homepage, an
+  advisory url) as a link only when it starts with http(s), so a `javascript:` scheme stored in a
+  feed reads as plain text. Repo CI script paths in pre-publish checks are quoted for the guest's
+  shell, so a script name with a space runs as one command. A private address is also recognised in
+  its IPv4-compatible, NAT64 and 6to4 IPv6 forms, and `0.0.0.0/8` and site-local `fec0::/10` count as
+  private. ([#1374])
+
 ## [v0.2.15] - 2026-10-19
 
 ### Added
@@ -3159,6 +3240,10 @@ Macs. ([#74])
 [#856]: https://github.com/Colonizer-dev/harness/issues/856
 [#857]: https://github.com/Colonizer-dev/harness/issues/857
 [#858]: https://github.com/Colonizer-dev/harness/issues/858
+[#859]: https://github.com/Colonizer-dev/harness/issues/859
+[#860]: https://github.com/Colonizer-dev/harness/issues/860
+[#861]: https://github.com/Colonizer-dev/harness/issues/861
+[#862]: https://github.com/Colonizer-dev/harness/issues/862
 [#863]: https://github.com/Colonizer-dev/harness/issues/863
 [#864]: https://github.com/Colonizer-dev/harness/issues/864
 [#865]: https://github.com/Colonizer-dev/harness/issues/865
@@ -3213,6 +3298,8 @@ Macs. ([#74])
 [#1001]: https://github.com/Colonizer-dev/harness/issues/1001
 [#1004]: https://github.com/Colonizer-dev/harness/issues/1004
 [#1014]: https://github.com/Colonizer-dev/harness/issues/1014
+[#1015]: https://github.com/Colonizer-dev/harness/issues/1015
+[#1016]: https://github.com/Colonizer-dev/harness/issues/1016
 [#1018]: https://github.com/Colonizer-dev/harness/issues/1018
 [#1029]: https://github.com/Colonizer-dev/harness/issues/1029
 [#1036]: https://github.com/Colonizer-dev/harness/issues/1036
@@ -3221,6 +3308,7 @@ Macs. ([#74])
 [#1051]: https://github.com/Colonizer-dev/harness/issues/1051
 [#1054]: https://github.com/Colonizer-dev/harness/issues/1054
 [#1055]: https://github.com/Colonizer-dev/harness/issues/1055
+[#1060]: https://github.com/Colonizer-dev/harness/issues/1060
 [#1062]: https://github.com/Colonizer-dev/harness/issues/1062
 [#1072]: https://github.com/Colonizer-dev/harness/issues/1072
 [#1074]: https://github.com/Colonizer-dev/harness/issues/1074
@@ -3302,6 +3390,10 @@ Macs. ([#74])
 [#1276]: https://github.com/Colonizer-dev/harness/issues/1276
 [#1279]: https://github.com/Colonizer-dev/harness/issues/1279
 [#1331]: https://github.com/Colonizer-dev/harness/issues/1331
+[#1374]: https://github.com/Colonizer-dev/harness/issues/1374
+[#1396]: https://github.com/Colonizer-dev/harness/issues/1396
+[v0.2.17]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.17
+[v0.2.16]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.16
 [v0.2.15]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.15
 [v0.2.14]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.14
 [v0.2.13]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.13
