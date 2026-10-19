@@ -429,6 +429,9 @@ async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
         return true;
     }
     let mut attention = None;
+    // Check if the failure is due to mirror corruption that couldn't be recovered
+    let is_unrecoverable_mirror_corruption = message.contains("repo cache corruption detected but unrecoverable")
+        || (message.contains("mirror") && message.contains("corrupt") && message.contains("needs attention"));
     app.update_session(id, |s| {
         s.status = SessionStatus::Failed;
         s.error = Some(truncate(message, 2000));
@@ -438,7 +441,13 @@ async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
         // A warm-up this failed boot was still carrying dies with it; a held answer stays for a
         // manual resume to deliver.
         s.prewarm = None;
-        attention = s.clear_attention();
+        // For unrecoverable mirror corruption, set attention so the session doesn't hold a slot silently.
+        if is_unrecoverable_mirror_corruption {
+            s.attention = Some(json!({"reason": "repo_cache_corruption_unrecoverable", "since": Utc::now()}));
+            attention = None;
+        } else {
+            attention = s.clear_attention();
+        }
     })
     .await;
     app.note_cleared_attention(id, attention).await;
