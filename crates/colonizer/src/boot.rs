@@ -1903,6 +1903,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
+    let mut pack_hosts: Vec<(&str, Vec<String>)> = Vec::new();
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         let mut resolved = Vec::new();
@@ -1933,6 +1934,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // So are two packs defining the same ant (issue #1163): Claude Code
         // loads `agents/<file>.md` by name.
         crate::plugins::check_ant_uniqueness(&resolved)?;
+        // Collect the MCP hosts each enabled pack declares, for the egress policy.
+        for (pack_name, pack_dir) in resolved.iter() {
+            if let Ok(hosts) = crate::plugins::mcp_hosts(pack_dir)
+                && !hosts.is_empty()
+            {
+                pack_hosts.push((pack_name, hosts));
+            }
+        }
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its
@@ -2278,8 +2287,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
     // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
-    // its vendor's declared hosts without the operator restating them.
-    let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
+    // its vendor's declared hosts without the operator restating them. Enabled packs' declared MCP
+    // hosts join too, so the agent reaches the tool servers the packs' skills call.
+    let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent), &pack_hosts);
     // The fleet floor (#690): when this mothership belongs to a fleet, the owner's policy clamps
     // the colony's own — local tightens, never loosens. Refused loosenings are logged and recorded.
     if let Some(floor) = crate::fleet_policy::load(&app.cfg.config_dir).and_then(|p| p.floor(&s.org, &s.repo)) {
@@ -3572,7 +3582,7 @@ mod tests {
             };
             // The default policy is Open with no operator entries: today's fence, plus the
             // always-blocked deny set every colony carries (#303).
-            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None);
+            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None, &[]);
             let (profiles, rules, record) =
                 colony_network(mesh.clone(), routes, gateway, &resolved, &["api.anthropic.com".into()]);
             // `public` alone, never the broad `host` profile (#375) — in every combination, so a
@@ -4009,10 +4019,18 @@ mod tests {
 
     /// A minimal pack on disk: a manifest and one skill, the shape `plugins::validate` accepts.
     fn pack(data_dir: &std::path::Path, name: &str, skill: &str) {
+        pack_with_mcp(data_dir, name, skill, None);
+    }
+
+    /// A pack with an optional `mcp.json` file declaring remote servers and hosts.
+    fn pack_with_mcp(data_dir: &std::path::Path, name: &str, skill: &str, mcp_config: Option<&str>) {
         let dir = data_dir.join("plugins").join(name);
         std::fs::create_dir_all(dir.join("skills").join(skill)).unwrap();
         std::fs::write(dir.join("plugin.json"), "{}").unwrap();
         std::fs::write(dir.join("skills").join(skill).join("SKILL.md"), "---\n").unwrap();
+        if let Some(mcp) = mcp_config {
+            std::fs::write(dir.join("mcp.json"), mcp).unwrap();
+        }
     }
 
     /// An install whose assets carry the guest binary (an ELF-magic stand-in; `linux_binary` checks
@@ -4140,6 +4158,83 @@ mod tests {
         );
         let info = said(&app, "packs", "info").await;
         assert!(info.iter().any(|line| line == "loading 2 plugin directories"), "{info:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An allowlist colony with a remote-MCP pack gets its declared hosts allowed and others
+    /// refused. Pack hosts are collected from mcp.json and recorded in egress.json with the
+    /// pack's provenance (issue #1165).
+    #[tokio::test]
+    async fn an_allowlist_colony_with_pack_hosts_allows_declared_hosts_only() {
+        let root = crate::app::tests::temp_root();
+        let app = pack_boot_app(&root, vec![claude_module(), pi_module(true)]).await;
+        // A pack with a remote MCP server declaring two hosts.
+        let mcp_config = r#"{
+            "mcpServers": {
+                "example_tool": {
+                    "url": "https://example-tool.example.com",
+                    "hosts": ["tool.example.com", "api.example.io"]
+                }
+            }
+        }"#;
+        pack_with_mcp(&app.cfg.data_dir, "with_tools", "demo", Some(mcp_config));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // Allowlist mode with the pack enabled.
+        let mut modules = crate::config::ModulesConfig::default();
+        modules
+            .sandbox
+            .settings
+            .insert("egress".into(), serde_json::json!("allowlist"));
+        *app.modules.write().await = modules.clone();
+        std::fs::write(
+            root.join("config/modules.json"),
+            serde_json::to_string_pretty(&modules).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("config/orgs.json"),
+            json!({"acme": {"agent": {"skillsets": {"with_tools": true}}}}).to_string(),
+        )
+        .unwrap();
+        resume_boot(app.clone(), "packs").await;
+        // Read the egress.json record written during boot.
+        let egress_data = app.store().read_file("packs", "egress.json").await.unwrap().unwrap();
+        let egress_record: serde_json::Value = serde_json::from_slice(&egress_data).unwrap();
+        // The pack's hosts should be in the allow list.
+        let allow = egress_record["allow"]
+            .as_array()
+            .expect("allow is an array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            allow.contains(&"tool.example.com"),
+            "pack host tool.example.com should be in allow list: {allow:?}"
+        );
+        assert!(
+            allow.contains(&"api.example.io"),
+            "pack host api.example.io should be in allow list: {allow:?}"
+        );
+        // The packs array should record which pack contributed each host.
+        let packs = egress_record["packs"]
+            .as_array()
+            .expect("packs field exists in allowlist mode with pack hosts");
+        assert_eq!(packs.len(), 1, "exactly one pack contributed: {packs:?}");
+        assert_eq!(packs[0]["pack"].as_str(), Some("with_tools"));
+        let pack_allow = packs[0]["allow"]
+            .as_array()
+            .expect("pack allow is an array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(pack_allow.len(), 2, "pack contributed both hosts: {pack_allow:?}");
+        assert!(pack_allow.contains(&"tool.example.com"));
+        assert!(pack_allow.contains(&"api.example.io"));
+        // A non-declared host should not be in the allow list.
+        assert!(
+            !allow.contains(&"other.example.com"),
+            "non-declared host should not be in allow list"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
