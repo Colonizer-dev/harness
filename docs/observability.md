@@ -26,6 +26,9 @@ colonizer.dev. Observability goes only to the endpoint you name.
   redacted, filtered, and dropped when the disk is behind.
 - [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
   provisioning they assume, and the lint that keeps their queries honest.
+- [Observability across a fleet](fleet.md#observability-across-a-fleet): the same backend on every
+  member, the resource attributes that join them into one dataset, and the hash key a `hashed`
+  fleet must share.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 
