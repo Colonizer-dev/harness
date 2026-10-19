@@ -82,6 +82,25 @@ ponytail     5.3.2     any           plugin  9c0a3f9af533fea03d3d30b7435abaacbd1
 # docs/skill-packs.md.
 security-audit 2026.09.14-c1c8a8c any       plugin  53e708ebf770dfe35b57df0586a5058707081a870cd149ce30a2d57c51ed29b6  https://codeload.github.com/cloudflare/security-audit-skill/tar.gz/c1c8a8c1471069fb0e188eeaff69b8e8db6564a8
 
+# mattpocock-skills is github.com/mattpocock/skills at tag v1.3.1. MIT (LICENSE is staged with it).
+# Pinned by tag, so the daily updater follows the repo's latest release like ECC's and superpowers'
+# pins. Staged as a thirteen-skill plugin (skills/<name>/, flattened from upstream's
+# skills/<category>/<name>/): the curated non-interactive set — engineering's tdd, diagnosing-bugs,
+# code-review, to-spec, implement-spec, to-tickets, triage, improve-codebase-architecture,
+# codebase-design, domain-modeling and pr, productivity's handoff and writing-for-agents — each with
+# the sibling files it reads by relative path, minus its agents/ Codex stub. Not staged: the
+# interactive skills (grill-me, grilling, grill-with-docs, wait-what, to-questionnaire, teach,
+# ask-matt), which work by interviewing the user and would stall a colony;
+# setup-matt-pocock-skills, whose per-repo config is pre-seeded in the claude-code runner's system
+# prompt instead; the skills Colonizer does not curate (implement, prototype, research, retro,
+# wayfinder, wizard) and the in-progress, misc and deprecated categories; and everything else
+# upstream ships (.agents/, .changeset/, .github/, .out-of-scope/, docs/, scripts/, the root READMEs
+# and package files). Both manifests are generated, because upstream's lists the nested category
+# paths and names excluded skills. The skill list above is an allowlist: a new upstream skill fails
+# staging until it is added to this arm of scripts/fetch-vendor.sh and to this comment. Off by
+# default; see docs/skill-packs.md.
+mattpocock-skills 1.3.1    any           plugin  1847b1dab968d7dc8e87fdcad6613574557fd51301b66ba423c78d306bfa157b  https://codeload.github.com/mattpocock/skills/tar.gz/refs/tags/v1.3.1
+
 # fast-jev-compaction is github.com/tamaratran/fast-jev-compaction at commit e3f262a: Jev-scored
 # deletion of stale tool calls for colonies that switch compaction on. Pinned as a commit tarball,
 # not the npm fast-jev-compaction@0.4.0 release, which ships only the library dist/ (not the plugin
