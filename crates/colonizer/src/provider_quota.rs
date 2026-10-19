@@ -718,6 +718,64 @@ pub fn quota_pause(states: &[ProviderQuota], waiting: usize) -> Option<QuotaPaus
     })
 }
 
+/// A colony with nothing left to call: every provider it can reach and the Claude account are all
+/// out, so no request it makes can be answered (issue #1160).
+pub struct ChainExhaustion {
+    /// The provider whose recovery can carry the colony again — the first exhausted provider in
+    /// its chain, which is the account-fallback provider in the case #1160 was filed for. `None`
+    /// when Claude is the colony's only way through, so the account record is what the park rides
+    /// out.
+    pub provider: Option<String>,
+    pub reset_at: Option<String>,
+    pub reset_unix: Option<i64>,
+}
+
+/// Whether one colony's whole provider chain is exhausted (issue #1160). `allowed` is the colony's
+/// own `allowed_providers` allow-list — the providers its requests are actually routed to — or
+/// `None`/empty when it records none, which counts every configured provider. Every one of them
+/// must be out, AND `account_reset` must be `Some` while the account's cap holds: Claude is the
+/// other half of the chain for any colony that can still reach it, so a chain is never exhausted
+/// without it. `routable` on the states plays no part — the question is what THIS colony can
+/// reach, not what the org routes anywhere.
+///
+/// `reset_at` / `reset_unix` name the EARLIEST reset in the chain (the exhausted providers, the
+/// account): the first moment one way through comes back. Pure, so the schedule is tested with
+/// fixed values.
+pub fn chain_exhausted(
+    allowed: Option<&[String]>,
+    states: &[ProviderQuota],
+    account_reset: Option<(Option<String>, Option<i64>)>,
+) -> Option<ChainExhaustion> {
+    let (account_at, account_unix) = account_reset?;
+    let reachable: Vec<&ProviderQuota> = match allowed.filter(|list| !list.is_empty()) {
+        Some(list) => states.iter().filter(|s| list.iter().any(|id| id == &s.id)).collect(),
+        None => states.iter().collect(),
+    };
+    if reachable.iter().any(|s| !s.exhausted) {
+        return None;
+    }
+    let provider = reachable.first().map(|s| s.id.clone());
+    let resets: Vec<(Option<i64>, Option<&str>)> = reachable
+        .iter()
+        .map(|s| (s.reset_unix, s.reset_at.as_deref()))
+        .chain(std::iter::once((account_unix, account_at.as_deref())))
+        .collect();
+    let reset_unix = resets.iter().filter_map(|(unix, _)| *unix).min();
+    let reset_at = reset_unix
+        .and_then(|at| {
+            resets
+                .iter()
+                .find(|(unix, _)| *unix == Some(at))
+                .and_then(|(_, words)| words.map(str::to_string))
+        })
+        .or_else(|| resets.iter().find_map(|(_, words)| words.map(|w| w.to_string())));
+    Some(ChainExhaustion {
+        provider,
+        reset_at,
+        reset_unix,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1033,6 +1091,93 @@ mod tests {
             quota_pause(&[state("bailian", false, None, true)], 1).is_none(),
             "nothing exhausted, no pause"
         );
+    }
+
+    /// The account's cap, as the queue reads it: out, with its own reset.
+    fn account() -> (Option<String>, Option<i64>) {
+        (Some("19:51".into()), Some(1_790_000_000))
+    }
+
+    #[test]
+    fn the_chain_is_exhausted_when_the_account_and_every_allowed_provider_are_out() {
+        let states = [
+            state("bailian", true, Some(1_790_100_000), true),
+            state("zai", true, None, true),
+        ];
+        let allowed = vec!["bailian".to_string(), "zai".to_string()];
+        let hit = chain_exhausted(Some(&allowed), &states, Some(account())).expect("nothing left to call");
+        assert_eq!(hit.provider.as_deref(), Some("bailian"), "the first provider in the chain");
+        assert_eq!(hit.reset_unix, Some(1_790_000_000), "the earliest reset across the chain");
+        assert_eq!(hit.reset_at.as_deref(), Some("19:51"), "the account's words, which match it");
+    }
+
+    #[test]
+    fn one_healthy_allowed_provider_keeps_the_chain_open() {
+        let states = [
+            state("bailian", true, Some(1_790_100_000), true),
+            state("zai", false, None, false),
+        ];
+        let allowed = vec!["bailian".to_string(), "zai".to_string()];
+        assert!(
+            chain_exhausted(Some(&allowed), &states, Some(account())).is_none(),
+            "one way through is enough, routable or not"
+        );
+    }
+
+    #[test]
+    fn a_working_account_is_never_a_chain_exhaustion() {
+        let states = [state("bailian", true, Some(1_790_100_000), true)];
+        assert!(
+            chain_exhausted(None, &states, None).is_none(),
+            "the account record not holding means Claude still answers"
+        );
+    }
+
+    #[test]
+    fn the_allow_list_is_what_narrows_the_chain() {
+        let states = [
+            state("bailian", true, Some(1_790_100_000), true),
+            state("zai", false, None, false),
+        ];
+        // The healthy zai is outside the list, so it cannot carry a bailian-only colony.
+        let only_bailian = vec!["bailian".to_string()];
+        assert_eq!(
+            chain_exhausted(Some(&only_bailian), &states, Some(account()))
+                .and_then(|hit| hit.provider)
+                .as_deref(),
+            Some("bailian")
+        );
+        // The same healthy provider inside the list is a way through.
+        let both = vec!["bailian".to_string(), "zai".to_string()];
+        assert!(chain_exhausted(Some(&both), &states, Some(account())).is_none());
+        // An empty list records no allow-list at all, so it counts every configured provider.
+        assert!(chain_exhausted(Some(&[]), &states, Some(account())).is_none());
+    }
+
+    #[test]
+    fn a_colony_with_no_provider_of_its_own_is_exhausted_with_the_account_alone() {
+        let hit = chain_exhausted(None, &[], Some(account())).expect("Claude was its only route");
+        assert_eq!(hit.provider, None, "nothing to name but the account");
+        assert_eq!(hit.reset_unix, Some(1_790_000_000), "the account's reset, the only one named");
+    }
+
+    #[test]
+    fn the_reset_named_is_the_earliest_across_the_chain() {
+        let states = [
+            state("bailian", true, Some(1_790_100_000), true),
+            state("zai", true, Some(1_790_050_000), true),
+        ];
+        let allowed = vec!["bailian".to_string(), "zai".to_string()];
+        let hit = chain_exhausted(Some(&allowed), &states, Some(account())).expect("exhausted");
+        assert_eq!(
+            hit.reset_unix,
+            Some(1_790_000_000),
+            "the account's reset, the earliest of the three"
+        );
+        // With the account's reset the later of the two, zai's is the first way back.
+        let hit = chain_exhausted(Some(&allowed), &states, Some((None, Some(1_790_900_000)))).expect("exhausted");
+        assert_eq!(hit.reset_unix, Some(1_790_050_000));
+        assert_eq!(hit.reset_at.as_deref(), Some("reset"), "zai's words, the entry it belongs to");
     }
 
     #[test]

@@ -565,6 +565,10 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Quota-parked colonies whose provider recovered rejoin the queue on this same 5 s tick, ahead
     // of admission; a colony that only just parked keeps its terminal state until its reset passes.
     resume_quota_parked(app).await;
+    // A live colony whose whole provider chain is out parks on this same tick (issue #1160): the
+    // Claude account and every provider its requests can reach, so nothing it asks for can be
+    // answered. Where before such a colony held its microVM and had its agent re-ask every minute.
+    park_quota_exhausted_chains(app).await;
     // A colony parked on its repository's daily PR cap (issue #910) requeues the same tick a new
     // UTC day brings, since the cap is counted in UTC days.
     resume_repo_pr_rate_limit_parked(app).await;
@@ -1846,6 +1850,84 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
     }
 }
 
+/// A live colony whose whole provider chain is out parks on the same tick the queue pauses
+/// (issue #1160): the Claude account and every provider its requests can reach, so nothing it asks
+/// for can be answered. Parking releases the slot and, under the usual `discard_vm`, the microVM —
+/// where before such a colony held its VM and had its agent re-ask every minute, each request
+/// coming back `quota_exhausted`. The park names the exhausted provider, so the resume scheduler
+/// rides that record alone and wakes on whichever of the two plans refills first.
+///
+/// Only live colonies are considered — `Queued` is not live, so a colony the queue is already
+/// holding on the account's cap is left to that early return rather than parked twice.
+pub(crate) async fn park_quota_exhausted_chains(app: &Shared) {
+    // An account that works means no chain is exhausted, so this is a cheap early return and no
+    // work happens in the normal case.
+    let Some(account) = app
+        .gateway
+        .account_quota_state()
+        .filter(|_| app.gateway.is_account_quota_exhausted())
+    else {
+        return;
+    };
+    let envs = providers::runner_envs(app).await;
+    let states = providers::provider_quota_states(app, &envs);
+    let sessions: Vec<Session> = app
+        .sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status.is_live() && s.suspended.is_none())
+        .cloned()
+        .collect();
+    for s in &sessions {
+        let Some(hit) = provider_quota::chain_exhausted(
+            s.allowed_providers.as_deref(),
+            &states,
+            Some((account.reset_at.clone(), account.reset_unix)),
+        ) else {
+            continue;
+        };
+        let error = match (hit.provider.as_deref(), hit.reset_at.as_deref()) {
+            (Some(pid), Some(reset)) => format!("provider quota exhausted ({pid}, resets {reset})"),
+            (Some(pid), None) => format!("provider quota exhausted ({pid})"),
+            (None, Some(reset)) => format!("provider quota exhausted (resets {reset})"),
+            (None, None) => "provider quota exhausted".to_string(),
+        };
+        // The account fallback could not carry this colony's task either (#1130): say why, so the
+        // card reads the gateway's own words.
+        let error = match app.gateway.account_park_reason(&s.id).filter(|_| hit.provider.is_some()) {
+            Some(reason) => format!("{error}; {reason}"),
+            None => error,
+        };
+        park_colony(
+            app,
+            s,
+            provider_quota::QUOTA_EXHAUSTED_REASON,
+            hit.reset_at.clone(),
+            error,
+            "every provider this colony can reach is out of quota; parked, the worktree kept — it resumes on its own \
+             when one of them refills"
+                .into(),
+        )
+        .await;
+        // `park_colony` writes `{"reason", "since", "nudges"}` and nothing else, so the provider the
+        // resume scheduler watches for is stamped here. Without it the park is released only when
+        // nothing at all is exhausted, account record included — the very record it is riding out.
+        if let Some(pid) = hit.provider.as_deref() {
+            app.update_session(&s.id, |x| {
+                let parked = x.status == SessionStatus::Parked;
+                if parked && let Some(a) = x.attention.as_mut() {
+                    a["provider"] = json!(pid);
+                    a["reset_at"] = json!(hit.reset_at);
+                    a["reset_unix"] = json!(hit.reset_unix);
+                }
+                parked
+            })
+            .await;
+        }
+    }
+}
+
 /// Colonies parked because their repository's daily pull-request cap was reached (issue #910)
 /// rejoin the queue once the UTC day rolls over: the cap is counted in UTC days, so a new day is
 /// the whole reset, and the worktree never left. They rejoin sooner when the cap stops applying —
@@ -3096,6 +3178,92 @@ mod tests {
             !warm_log.contains("queued to resume"),
             "not the plain requeue route: {warm_log}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1160: a live colony whose whole chain is out — the Claude account and the one
+    /// provider its requests can reach — parks on the tick the queue pauses, instead of holding its
+    /// microVM and re-asking every minute. A colony that can still reach a healthy provider keeps
+    /// running. Each park names its provider, so the resume scheduler wakes on that plan alone.
+    #[tokio::test]
+    async fn the_tick_parks_a_live_colony_whose_whole_chain_is_out_and_requeues_it_when_one_refills() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-chain-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian", "zai"]);
+        let app = crate::tests::test_app(&root);
+        // A worktree git can read, so `park_colony` verifies it and discards the microVM: a cold
+        // park, which `resume_quota_parked` requeues like any other.
+        let admin = root.join("admin");
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut git = std::process::Command::new("git");
+        for leaked in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            git.env_remove(leaked);
+        }
+        let ok = git.args(["init", "-q", "--bare"]).arg(&admin).status().unwrap();
+        assert!(ok.success(), "a bare admin dir so git can read the worktree");
+        let running = |id: &str, allowed: &str| {
+            let mut s = colony("acme", SessionStatus::Running);
+            s.id = id.into();
+            s.git_admin_dir = Some(admin.to_string_lossy().into_owned());
+            s.worktree = worktree.to_string_lossy().into_owned();
+            s.allowed_providers = Some(vec![allowed.into()]);
+            s
+        };
+        *app.sessions.write().await = vec![running("stranded", "bailian"), running("working", "zai")];
+        for id in ["stranded", "working"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        // The Claude account is out and so is bailian, the plan the fallback model names; zai is fine.
+        app.gateway
+            .mark_account_quota_exhausted(Some("19:51".into()), Some(Utc::now().timestamp() + 3600));
+        app.gateway
+            .mark_quota_exhausted("bailian", Some("19:51".into()), Some(Utc::now().timestamp() + 3600));
+
+        park_quota_exhausted_chains(&app).await;
+        let sessions = app.sessions.read().await;
+        let stranded = sessions.iter().find(|s| s.id == "stranded").unwrap();
+        assert_eq!(
+            stranded.status,
+            SessionStatus::Parked,
+            "nothing this colony can reach can answer, so it parks"
+        );
+        let park = stranded.parked.as_ref().expect("a park record");
+        assert_eq!(park.reason, provider_quota::QUOTA_EXHAUSTED_REASON);
+        assert!(!park.vm_kept, "a verified worktree, so the microVM is discarded");
+        assert_eq!(
+            stranded.attention.as_ref().unwrap()["provider"],
+            "bailian",
+            "the resume scheduler rides the provider this park is waiting on"
+        );
+        assert!(
+            stranded.error.as_deref().unwrap_or_default().contains("bailian"),
+            "{:?}",
+            stranded.error
+        );
+        let working = sessions.iter().find(|s| s.id == "working").unwrap();
+        assert_eq!(
+            working.status,
+            SessionStatus::Running,
+            "one healthy provider in its chain is a way through"
+        );
+        drop(sessions);
+        let log = std::fs::read_to_string(app.session_dir("stranded").join("harness.jsonl")).unwrap_or_default();
+        assert!(log.contains("every provider this colony can reach is out of quota"), "{log}");
+
+        // The other half of #1160: the park rides out its own provider's plan, not the account record
+        // it was parked on, so the colony rejoins the queue the moment bailian's record lapses.
+        resume_quota_parked(&app).await;
+        assert_eq!(
+            app.session("stranded").await.unwrap().status,
+            SessionStatus::Parked,
+            "the plan it is waiting on still reads as out"
+        );
+        app.gateway
+            .mark_quota_exhausted("bailian", None, Some(Utc::now().timestamp() - 10));
+        resume_quota_parked(&app).await;
+        let back = app.session("stranded").await.unwrap();
+        assert_eq!(back.status, SessionStatus::Queued, "its own plan refilled, so it resumes");
+        assert!(back.parked.is_none(), "a requeue reads like a resume");
         let _ = std::fs::remove_dir_all(root);
     }
 
