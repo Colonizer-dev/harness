@@ -446,6 +446,69 @@ pub(crate) async fn release_with<G: ClaimGh>(gh: &G, live: &mut Live, release: R
     live.issues.remove(&key);
 }
 
+/// Clears a stale claim left by another colony: removes the labels and edits the comment to
+/// show it was released due to staleness. Best effort; failures are logged but not fatal.
+/// Called at launch when a label-only claim is old and the claimant has no branch or PR.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn clear_stale_with<G: ClaimGh>(
+    gh: &G,
+    live: &mut Live,
+    repo: &str,
+    issue: u64,
+    stale_colony: &str,
+    our_colony: &str,
+    our_host: &HostTag,
+    now: DateTime<Utc>,
+) {
+    let key = (repo.to_string(), issue);
+    let comments = match gh.comments(repo, issue).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                repo = %repo,
+                issue = issue,
+                error = %e,
+                "claims: could not read the comments on {repo}#{issue} to clear stale claim: {e}"
+            );
+            return;
+        }
+    };
+    let latest = find_claim_comment(&comments);
+    if !ours_or_stale(latest.as_ref().map(|(_, c, _)| c), stale_colony) {
+        tracing::warn!(
+            repo = %repo,
+            issue = issue,
+            "claims: leaving the claim on {repo}#{issue} alone: it now names another colony"
+        );
+        return;
+    }
+    // Best effort: either label may already be gone.
+    let _ = gh.remove_label(repo, issue, super::CLAIM_LABEL).await;
+    let _ = gh.remove_label(repo, issue, &our_host.label).await;
+    if let Some((id, _, previous)) = latest {
+        let branch = super::branch_prefix(issue) + stale_colony;
+        let reason = format!("released (stale: no branch or pull request after 24h; taken over by colony {our_colony})");
+        let view = View {
+            issue,
+            colony: stale_colony.to_string(),
+            previous,
+            branch,
+            status: reason,
+            pr_url: None,
+            terminal: true,
+        };
+        let _ = gh.edit_comment(repo, id, &render(&view, our_host, now)).await;
+    }
+    live.issues.remove(&key);
+    tracing::info!(
+        repo = %repo,
+        issue = issue,
+        stale_colony = %stale_colony,
+        our_colony = %our_colony,
+        "claims: cleared stale claim on {repo}#{issue} (colony {stale_colony} has no branch or pull request; taken over by {our_colony})"
+    );
+}
+
 /// One pass of status edits over `sessions`: a due edit per tracked issue, and at most one lookup
 /// of an untracked live colony's comment after a restart. Stops at the first push-back.
 pub(crate) async fn tick_with<G: ClaimGh>(
@@ -712,6 +775,25 @@ pub async fn release(app: &App, repo: &str, issue: u64, colony: &str, reason: &s
             colony,
             reason,
         },
+        &host,
+        Utc::now(),
+    )
+    .await;
+}
+
+/// Clears a stale claim left by another colony: removes the labels and marks it as released due to
+/// staleness. Called at launch when a label-only claim is old and the claimant has no branch or PR.
+pub async fn clear_stale(app: &App, repo: &str, issue: u64, stale_colony: &str, our_colony: &str) {
+    let host = host_tag(app).await;
+    let mut all = LIVE.lock().await;
+    let live = all.entry(app.cfg.config_dir.clone()).or_default();
+    clear_stale_with(
+        &RealGh { app },
+        live,
+        repo,
+        issue,
+        stale_colony,
+        our_colony,
         &host,
         Utc::now(),
     )

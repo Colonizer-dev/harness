@@ -178,7 +178,8 @@ pub enum ClaimKind {
 /// A competing remote claim: where it was found and what names it. `host`/`colony` come from
 /// parsing the claim comments, so a branch or PR match usually leaves them unknown. `merged` says
 /// a PullRequest claim's pull request has landed: open work and landed work block a waiter's turn
-/// differently (see [`claim_wait_conflict`]).
+/// differently (see [`claim_wait_conflict`]). `updated` and `author` are available only for
+/// label-only claims parsed from the comment; a branch or PR match reads them as `None`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteClaimInfo {
     pub kind: ClaimKind,
@@ -186,6 +187,21 @@ pub struct RemoteClaimInfo {
     pub host: Option<String>,
     pub colony: Option<String>,
     pub merged: bool,
+    /// The timestamp the claim comment was created, for staleness detection.
+    pub updated: Option<chrono::DateTime<chrono::Utc>>,
+    /// The GitHub login of the account that created the claim comment, for display.
+    pub author: Option<String>,
+}
+
+/// A claim is stale when it is label-only (no branch, no PR), was created over 24 hours ago, and
+/// the claimant has no live work on the issue.
+const STALE_CLAIM_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// Whether a remote claim has no live backing — no branch or open/merged PR — and is old enough
+/// to be stale. A claim with no known timestamp reads as not stale (unknown age is safe). Called
+/// only for label-only claims.
+pub fn is_claim_stale(info: &RemoteClaimInfo, now: chrono::DateTime<chrono::Utc>) -> bool {
+    info.kind == ClaimKind::Label && info.updated.is_some_and(|updated| now - updated >= STALE_CLAIM_AFTER)
 }
 
 /// The 409 text for a refused launch: the holding host and colony when the claim names them, else
@@ -280,6 +296,35 @@ pub fn ours_or_stale(claim: Option<&RemoteClaim>, colony: &str) -> bool {
 /// the error itself, which is why this is a separate function rather than a `?`.
 pub fn remote_result_or_fallback<T, E>(result: Result<Option<T>, E>) -> Option<T> {
     result.ok().flatten()
+}
+
+/// The `comments` array of a `gh issue view --json` answer, as `(id, body, created_at, author)`.
+/// The timestamp and author let the label-only path track staleness. Unparseable output reads as
+/// no comments rather than an error: the label check below still runs on the labels half.
+fn comment_bodies_with_metadata(value: &Value) -> Vec<(String, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> {
+    value
+        .get("comments")
+        .and_then(Value::as_array)
+        .map(|comments| {
+            comments
+                .iter()
+                .filter_map(|c| {
+                    let body = c.get("body").and_then(Value::as_str).map(str::to_string)?;
+                    let created_at = c
+                        .get("createdAt")
+                        .and_then(Value::as_str)
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc));
+                    let author = c
+                        .get("author")
+                        .and_then(|a| a.get("login"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    Some((body, created_at, author))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The `comments` array of a `gh issue view --json` answer, as bodies. Unparseable output reads
@@ -385,13 +430,23 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
 
     // The claim comment, if any, names the colony that left it — whichever signal below actually
     // matches, so the refusal names host and colony whenever the issue carries one, not only when
-    // the label is the strongest signal that fired.
+    // the label is the strongest signal that fired. For label-only claims, also extract the
+    // comment's creation timestamp and author for staleness detection.
     let bodies = comment_bodies(&issue_value);
     let claim = bodies.iter().rev().filter_map(|body| parse_claim(body)).next();
     let (host, colony) = (
         claim.as_ref().map(|c| c.host.clone()),
         claim.as_ref().map(|c| c.colony.clone()),
     );
+
+    // For the label-only path, capture the timestamp and author of the claim comment.
+    let comments_metadata = comment_bodies_with_metadata(&issue_value);
+    let claim_metadata = comments_metadata
+        .iter()
+        .rev()
+        .find(|(body, _, _)| parse_claim(body).is_some())
+        .map(|(_, created_at, author)| (*created_at, author.clone()));
+    let (updated, author) = claim_metadata.unwrap_or((None, None));
 
     // A live pull request is the strongest claim: reviewable work, wherever it runs.
     let prs = pr_tuples(&pr_value);
@@ -406,6 +461,8 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
             host,
             colony,
             merged: state.eq_ignore_ascii_case("merged"),
+            updated: None,
+            author: None,
         }));
     }
     // Then a live branch with the colony prefix.
@@ -421,9 +478,11 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
             host,
             colony,
             merged: false,
+            updated: None,
+            author: None,
         }));
     }
-    // Then the label itself.
+    // Then the label itself. For label-only claims, include the comment's timestamp and author.
     let labels = label_names(&issue_value);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
     if label_claimed(&label_refs) {
@@ -433,6 +492,8 @@ pub async fn check_remote_claim(app: &App, repo: &str, issue: u64) -> Result<Opt
             host,
             colony,
             merged: false,
+            updated,
+            author,
         }));
     }
     Ok(None)
@@ -464,6 +525,15 @@ pub async fn release_claim(app: &App, repo: &str, issue: u64, colony: &str, reas
         return;
     }
     live::release(app, repo, issue, colony, reason).await;
+}
+
+/// Clears a stale claim left by another colony: removes the labels and marks it as released due to
+/// staleness. Best effort; failures are logged but not fatal.
+pub async fn clear_stale_claim(app: &App, repo: &str, issue: u64, stale_colony: &str, our_colony: &str) {
+    if crate::authority::external_writes_blocked() {
+        return;
+    }
+    live::clear_stale(app, repo, issue, stale_colony, our_colony).await;
 }
 
 /// Publishes the claim off the serving path: call after the colony is admitted, never before.
@@ -727,6 +797,8 @@ mod tests {
             host: Some("mothership (id-1)".to_string()),
             colony: Some("abc123".to_string()),
             merged: false,
+            updated: None,
+            author: None,
         }
     }
 
@@ -746,6 +818,8 @@ mod tests {
             host: None,
             colony: None,
             merged: false,
+            updated: None,
+            author: None,
         };
         let message = remote_conflict_message(&branch, 7);
         assert!(message.contains("colonizer/issue-7-abc123"), "{message}");
@@ -756,6 +830,8 @@ mod tests {
             host: None,
             colony: None,
             merged: false,
+            updated: None,
+            author: None,
         };
         let message = remote_conflict_message(&pr, 7);
         assert!(message.contains("https://github.com/acme/app/pull/9"), "{message}");
@@ -773,6 +849,8 @@ mod tests {
             host: Some("box (host-id-1)".to_string()),
             colony: Some("holder".to_string()),
             merged: true,
+            updated: None,
+            author: None,
         };
         let reason = claim_wait_conflict(Some(&pr), 7, &["holder"]).expect("a merged pull request retires the waiter");
         assert!(reason.contains("merged") && reason.contains("done"), "{reason}");
@@ -790,6 +868,8 @@ mod tests {
             host: None,
             colony: None,
             merged: false,
+            updated: None,
+            author: None,
         };
         assert_eq!(claim_wait_conflict(Some(&branch), 7, &["holder"]), None);
         assert!(claim_wait_conflict(Some(&branch), 7, &["another"]).is_some());
@@ -799,6 +879,8 @@ mod tests {
             host: None,
             colony: Some("holder".to_string()),
             merged: false,
+            updated: None,
+            author: None,
         };
         assert_eq!(claim_wait_conflict(Some(&label), 7, &["holder"]), None);
         assert_eq!(claim_wait_conflict(None, 7, &["holder"]), None);
@@ -968,6 +1050,8 @@ mod tests {
             host: Some(seen.host.clone()),
             colony: Some(seen.colony.clone()),
             merged: false,
+            updated: None,
+            author: None,
         };
         let message = remote_conflict_message(&info, 7);
         assert!(
@@ -991,5 +1075,105 @@ mod tests {
         let refusal = remote_conflict_message(&info_with_identity(), 7);
         assert!(format!("{refusal}{UNREACHABLE_HOLDER_NOTE}").contains("allow_duplicate"));
         assert!(UNREACHABLE_HOLDER_NOTE.contains("unreachable"));
+    }
+
+    #[test]
+    fn claim_staleness_detection() {
+        use chrono::Duration;
+        let now = chrono::Utc::now();
+        let fresh = now - Duration::hours(12);
+        let stale = now - Duration::hours(25);
+
+        // Label-only claim older than 24h is stale.
+        let mut info = RemoteClaimInfo {
+            kind: ClaimKind::Label,
+            detail: CLAIM_LABEL.to_string(),
+            host: None,
+            colony: None,
+            merged: false,
+            updated: Some(stale),
+            author: None,
+        };
+        assert!(is_claim_stale(&info, now), "label-only 25h old is stale");
+
+        // Label-only claim younger than 24h is not stale.
+        info.updated = Some(fresh);
+        assert!(!is_claim_stale(&info, now), "label-only 12h old is not stale");
+
+        // Label-only claim with unknown timestamp is not stale (safe default).
+        info.updated = None;
+        assert!(!is_claim_stale(&info, now), "unknown timestamp is not stale");
+
+        // Branch claim is never stale, even if old.
+        info.kind = ClaimKind::Branch;
+        info.detail = "colonizer/issue-7-abc".to_string();
+        info.updated = Some(stale);
+        assert!(!is_claim_stale(&info, now), "branch claim is never stale");
+
+        // PR claim is never stale, even if old.
+        info.kind = ClaimKind::PullRequest;
+        info.detail = "https://github.com/acme/repo/pull/1".to_string();
+        assert!(!is_claim_stale(&info, now), "PR claim is never stale");
+    }
+
+    #[test]
+    fn comment_metadata_parsing_handles_missing_fields() {
+        let json = r#"{
+            "comments": [
+                {
+                    "body": "first comment",
+                    "createdAt": "2026-10-05T12:00:00Z",
+                    "author": {"login": "alice"}
+                },
+                {
+                    "body": "second comment (no timestamp)",
+                    "author": {"login": "bob"}
+                },
+                {
+                    "body": "third comment (no author)"
+                },
+                {
+                    "body": "fourth comment (no author.login)",
+                    "author": {}
+                }
+            ]
+        }"#;
+        let value: Value = serde_json::from_str(json).unwrap();
+        let results = comment_bodies_with_metadata(&value);
+        assert_eq!(results.len(), 4);
+        // First has all fields
+        assert_eq!(results[0].0, "first comment");
+        assert!(results[0].1.is_some());
+        assert_eq!(results[0].2, Some("alice".to_string()));
+        // Second missing timestamp
+        assert_eq!(results[1].0, "second comment (no timestamp)");
+        assert!(results[1].1.is_none());
+        assert_eq!(results[1].2, Some("bob".to_string()));
+        // Third missing both
+        assert_eq!(results[2].0, "third comment (no author)");
+        assert!(results[2].1.is_none());
+        assert!(results[2].2.is_none());
+        // Fourth missing author.login
+        assert_eq!(results[3].0, "fourth comment (no author.login)");
+        assert!(results[3].1.is_none());
+        assert!(results[3].2.is_none());
+    }
+
+    #[test]
+    fn comment_metadata_parses_rfc3339_timestamps() {
+        let json = r#"{
+            "comments": [
+                {
+                    "body": "test",
+                    "createdAt": "2026-10-05T12:34:56Z"
+                }
+            ]
+        }"#;
+        let value: Value = serde_json::from_str(json).unwrap();
+        let results = comment_bodies_with_metadata(&value);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_some());
+        let dt = results[0].1.unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2026-10-05");
     }
 }
