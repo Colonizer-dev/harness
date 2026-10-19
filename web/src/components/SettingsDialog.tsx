@@ -26,6 +26,7 @@ import { RemoteAccessPane } from "./RemoteAccessPane";
 import { TokensPane } from "./TokensPane";
 import { FleetPane } from "./FleetPane";
 import { SetupSection } from "./SetupSection";
+import { SecretsView } from "../cockpit/SecretsView";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
 import { PhonePane } from "./PhonePane";
 import { YourCockpitCard } from "./YourCockpitCard";
@@ -205,6 +206,7 @@ export function SettingsBody({
   remote,
   onRemoteChanged,
   initialSection,
+  initialFocusSecretId,
   setup,
   pull,
   onLaunch,
@@ -232,6 +234,8 @@ export function SettingsBody({
   remote: RemoteStatus | null;
   onRemoteChanged: (remote: RemoteStatus) => void;
   initialSection?: SectionId;
+  /** The focus id for the Secrets section when opened from openSecrets(). */
+  initialFocusSecretId?: string;
   setup: SetupView | null;
   pull: ImagePull;
   onLaunch: () => void;
@@ -263,18 +267,13 @@ export function SettingsBody({
     select(section);
   };
   const select = (id: SectionId) => {
-    // Secrets is a page of its own, not a pane: it lives in the cockpit's Secrets view.
-    if (id === "secrets") {
-      openSecrets?.();
-      return;
-    }
     lastSection.current = id;
     if (embedded) go(settingsPath(id));
     else setLocalSection(id);
   };
   // An external jump ("open providers") lands here once, unless the address already names a page.
   useEffect(() => {
-    if (embedded && initialSection && initialSection !== "secrets" && sectionFromSettingsPath(window.location.pathname) === null) {
+    if (embedded && initialSection && sectionFromSettingsPath(window.location.pathname) === null) {
       go(settingsPath(initialSection));
     }
     // Once, on mount: the body is keyed on the request that opened it.
@@ -638,6 +637,7 @@ export function SettingsBody({
     update,
     setUpdate,
     focusProvider,
+    initialFocusSecretId,
     orgs,
     onOrgSaved,
     onModuleSaved,
@@ -775,6 +775,7 @@ type SectionContext = {
   update: UpdateStatus | null;
   setUpdate: Dispatch<SetStateAction<UpdateStatus | null>>;
   focusProvider?: string;
+  initialFocusSecretId?: string;
   orgs?: OrgInfo[];
   onOrgSaved?: (saved: OrgInfo) => void;
   onModuleSaved: (saved: ModuleInfo) => void;
@@ -821,6 +822,7 @@ const SECTIONS: SectionEntry[] = [
     ),
   },
   { id: "connections", render: (c) => <ConnectionsPane status={c.status} onStatusChanged={c.onStatusChanged} back={c.back} /> },
+  { id: "secrets", render: (c) => <SecretsView focusId={c.initialFocusSecretId} focusRequest={c.initialFocusSecretId ? 1 : 0} /> },
   { id: "runtime", render: (c) => <RuntimePane status={c.status} back={c.back} /> },
   { id: "live-map", render: (c) => <LiveMapPane telemetry={c.telemetry} onChanged={c.onTelemetryChanged} back={c.back} /> },
   { id: "remote", render: (c) => <RemoteAccessPane remote={c.remote} onChanged={c.onRemoteChanged} back={c.back} /> },

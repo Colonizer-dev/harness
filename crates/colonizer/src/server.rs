@@ -1455,6 +1455,7 @@ mod tests {
             "/settings/models/providers",
             "/settings/runtime/module-source",
             "/settings/secrets",
+            "/settings/connections/secrets",
             "/colonies/abc123",
             "/colonies/abc123/terminal",
             "/orgs/Colonizer-dev",

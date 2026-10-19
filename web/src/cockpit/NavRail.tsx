@@ -14,7 +14,7 @@ import { useColonize } from "./Colonize";
 import { needFor } from "./feed";
 import { AllMark, WorkspacePanel } from "./WorkspaceMenu";
 
-export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "queues" | "loops" | "settings" | "memory" | "host" | "secrets" | "code" | "chat";
+export type CockpitView = "overview" | "home" | "colony" | "launch" | "inbox" | "history" | "queues" | "loops" | "settings" | "memory" | "host" | "code" | "chat";
 
 const EXPANDED_KEY = "colonizer.sidebarExpanded";
 
@@ -41,7 +41,6 @@ export function navTabs({ liveCount, pendingMemory }: { needCount: number; liveC
     { view: "loops", label: "Loops", count: "" },
     { view: "memory", label: "Memory", count: pendingMemory || "", urgent: pendingMemory > 0 },
     { view: "host", label: "Host", count: "" },
-    { view: "secrets", label: "Secrets", count: "" },
   ];
 }
 
@@ -112,12 +111,6 @@ const GLYPH: Record<string, ReactNode> = {
     <>
       <path d="M4.5 6.5A2 2 0 0 1 6.5 4.5h11a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2H11l-4 3.5v-3.5H6.5a2 2 0 0 1-2-2z" />
       <path d="M8.5 9.5h7M8.5 12.5h4.5" />
-    </>
-  ),
-  secrets: (
-    <>
-      <circle cx="8" cy="15" r="4" />
-      <path d="m10.8 12.2 8.2-8.2M16 7l2.5 2.5M13.5 9.5l2 2" />
     </>
   ),
   settings: (

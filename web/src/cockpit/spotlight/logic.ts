@@ -117,7 +117,6 @@ export const PAGES: readonly Page[] = [
   { view: "history", label: "History", words: "activity log audit past" },
   { view: "memory", label: "Memory", words: "notes remember learned" },
   { view: "host", label: "Host", words: "machine disk cpu storage health" },
-  { view: "secrets", label: "Secrets", words: "keys tokens passwords credentials" },
   { view: "launch", label: "Launch form", words: "new colony start manual" },
 ];
 

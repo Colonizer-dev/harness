@@ -143,4 +143,30 @@ describe("the shell every route renders inside", () => {
       expect(rail, `no left rail on ${path}`).toBeDefined();
     }
   });
+
+  it("renders the settings sidebar when navigating to Secrets paths", () => {
+    // Secrets is a settings page: whichever address reaches it (`/secrets` and `/settings/secrets`
+    // from older links, the canonical `/settings/connections/secrets`), it renders inside the
+    // settings layout, sidebar included, with Secrets as the current item (issue #1290).
+    expect(settingsPath("secrets")).toBe("/settings/connections/secrets");
+
+    for (const path of ["/secrets", "/settings/secrets", "/settings/connections/secrets"]) {
+      const html = renderAt(path, 1440);
+      const { rail } = shells(html);
+
+      // The rail marks Settings current, and the settings sidebar is present.
+      expect(rail, `no left rail on ${path}`).toBeDefined();
+      expect(currentItems(rail ?? ""), `${path} should mark settings as current view`).toContain("settings");
+      expect(html, `${path}: settings sidebar not found`).toMatch(/<nav[^>]*aria-label="Settings"[^>]*>/);
+
+      // Exactly one sidebar item is current and it's Secrets.
+      // Find the current button: data-nav button with aria-current="page" inside the settings sidebar,
+      // looking for "Secrets" in the inner span. The regex captures from the aria-current to the next span text.
+      const currentItemMatch = html.match(
+        /<nav[^>]*aria-label="Settings"[^>]*>[\s\S]*?<button[^>]*data-nav[^>]*aria-current="page"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/
+      );
+      expect(currentItemMatch, `${path}: current sidebar item not found`).not.toBeNull();
+      expect(currentItemMatch?.[1], `${path}: current sidebar item should be "Secrets"`).toBe("Secrets");
+    }
+  });
 });

@@ -40,8 +40,6 @@ export interface PageInfo {
   label: string;
   /** Plain-language one-liner, shown on the phone list and in search results. */
   hint: string;
-  /** Opens a cockpit view instead of a settings pane (Secrets has its own page). */
-  view?: "secrets";
 }
 
 /** The fixed pages, in the order each group lists them. Modules and workspaces are added by kind. */
@@ -53,7 +51,7 @@ export const FIXED_PAGES: readonly PageInfo[] = [
   { id: "providers", group: "models", slug: "providers", label: "Model providers", hint: "Claude and other model endpoints, and their keys" },
 
   { id: "connections", group: "connections", slug: "github-models", label: "GitHub & models", hint: "The code host and at least one model your colonies can think with" },
-  { id: "secrets", group: "connections", slug: "secrets", label: "Secrets", hint: "Every key and token Colonizer holds, in one place", view: "secrets" },
+  { id: "secrets", group: "connections", slug: "secrets", label: "Secrets", hint: "Every key and token Colonizer holds, in one place" },
   { id: "tokens", group: "connections", slug: "api-tokens", label: "API tokens", hint: "Scoped keys for CLIs, agents and CI" },
   { id: "living-brain", group: "connections", slug: "living-brain", label: "Living Brain", hint: "Send colony sessions to your team brain, and let colonies read it" },
 
@@ -106,16 +104,18 @@ export function sectionFromSlug(slug: string): SectionId | null {
   return FIXED_PAGES.find((p) => p.slug === slug)?.id ?? null;
 }
 
-/** The path for a section: `/settings/models/providers`. A section with its own view goes there. */
+/** The path for a section: `/settings/models/providers`. */
 export function settingsPath(id: SectionId): string {
-  const page = FIXED_PAGES.find((p) => p.id === id);
-  if (page?.view) return `/${page.view}`;
   return `/settings/${groupInfo(groupOf(id)).slug}/${encodeURIComponent(pageSlug(id)).replace(/%3A/gi, ":")}`;
 }
 
 /** The section a `/settings/<group>/<page>` path names; `null` for `/settings` itself or nonsense. */
 export function sectionFromSettingsPath(pathname: string): SectionId | null {
   const parts = pathname.split("/").filter(Boolean);
+  // Older links: `/secrets` and `/settings/secrets` name the Secrets page too (issue #1290).
+  if (pathname === "/secrets" || (parts[0] === "settings" && parts.length === 2 && parts[1] === "secrets")) {
+    return "secrets";
+  }
   if (parts[0] !== "settings" || parts.length < 3) return null;
   let slug = parts[2];
   try {
