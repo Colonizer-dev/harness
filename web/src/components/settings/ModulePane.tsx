@@ -5,6 +5,7 @@ import type { AutonomyStatus, Mem0Check, Mem0Status, ModelOption, ModuleInfo, Sc
 import { type ImagePull } from "../../useImagePull";
 import { Button, Spinner, Switch, cx, inputClass, seconds } from "../ui";
 import { ModuleProviderMark, isAdvancedField } from "../settingsGuide";
+import { HostRankingsPanel } from "../HostRankings";
 import { IconCheck, IconChevron } from "../icons";
 import { Pane, Row } from "./ui";
 import { AutonomyHealth } from "./AutonomyHealth";
@@ -283,11 +284,22 @@ export function ModulePane({
       (draft.settings.headroom === true || ["downloading", "unpacking", "failed"].includes(headroom.status?.state ?? ""));
     // The data-egress warning sits under the switch that asks for it, one divider group with it.
     const showJevWarning = module.kind === "agent" && key === "jev_compaction" && draft.settings.jev_compaction === true;
-    return showHeadroom || showJevWarning ? (
+    // The price ranking the cheapest-host policy routes by, under the switch that turns it on
+    // (issue #1039) — only when this module's schema actually declares the setting, so agent
+    // modules without it are untouched. Read for the orchestrator model the pane holds.
+    const showHostRankings =
+      module.kind === "agent" &&
+      key === "prefer_cheapest_host" &&
+      module.schema?.properties?.prefer_cheapest_host !== undefined &&
+      draft.settings.prefer_cheapest_host === true;
+    return showHeadroom || showJevWarning || showHostRankings ? (
       <div key={key} className="pb-2.5">
         {setting}
         {showHeadroom && <HeadroomRow headroom={headroom} />}
         {showJevWarning && <JevCompactionNotice />}
+        {showHostRankings && (
+          <HostRankingsPanel currentModel={typeof draft.settings.model === "string" ? draft.settings.model : undefined} />
+        )}
       </div>
     ) : (
       setting

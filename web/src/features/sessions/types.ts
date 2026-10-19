@@ -402,6 +402,8 @@ export interface Session {
    * cleared the bar. Shown on the colony view so what it really runs on is not hidden.
    */
   model_substitutions?: ModelSubstitution[];
+  /** The colony this one retries: null for a fresh colony (issue #1073). */
+  retry_of?: string | null;
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */

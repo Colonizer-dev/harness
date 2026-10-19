@@ -586,6 +586,17 @@ pub fn idle_park(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.watchdog, &schema, "idle_park_minutes").clamp(1, 1440) as i64)
 }
 
+/// How long a colony parked on an unreachable provider waits before the cockpit also flags it
+/// (issue #1068), from the watchdog module's `provider_outage_alert_minutes`. Clamped where read,
+/// for the reason [`idle_park`] is: modules.json is not re-validated on load and
+/// `chrono::Duration::minutes` panics out of bounds. A module config written before the setting
+/// existed reads the schema default of two hours — long enough to ride out an outage, short enough
+/// that a provider gone for a day is not something to sit out quietly.
+pub fn provider_outage_alert(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.watchdog, &schema, "provider_outage_alert_minutes").clamp(1, 10080) as i64)
+}
+
 /// How many times autopilot retries automatically after a turn dies on a *transient* provider error
 /// before it holds the colony for a person (issue #980), from the watchdog module. Zero turns the
 /// automatic retry off: the first transient error holds at once, the pre-#980 behaviour. Clamped
@@ -1927,6 +1938,35 @@ mod tests {
             .settings
             .insert("idle_park_minutes".into(), json!(u64::MAX));
         assert_eq!(idle_park(&configured), chrono::Duration::minutes(1440));
+    }
+
+    /// Issue #1068: the outage alert waits two hours by default, takes the operator's word over it,
+    /// and never reads a hand-edited number outside the schema's range — `Duration::minutes` panics
+    /// out of bounds and modules.json is not re-validated on load.
+    #[test]
+    fn the_provider_outage_alert_reads_the_watchdog_setting_with_a_two_hour_default() {
+        let modules = ModulesConfig::default();
+        assert_eq!(
+            provider_outage_alert(&modules),
+            chrono::Duration::hours(2),
+            "the schema default"
+        );
+        let mut configured = ModulesConfig::default();
+        configured
+            .watchdog
+            .settings
+            .insert("provider_outage_alert_minutes".into(), json!(30));
+        assert_eq!(provider_outage_alert(&configured), chrono::Duration::minutes(30));
+        configured
+            .watchdog
+            .settings
+            .insert("provider_outage_alert_minutes".into(), json!(0));
+        assert_eq!(provider_outage_alert(&configured), chrono::Duration::minutes(1));
+        configured
+            .watchdog
+            .settings
+            .insert("provider_outage_alert_minutes".into(), json!(u64::MAX));
+        assert_eq!(provider_outage_alert(&configured), chrono::Duration::minutes(10080));
     }
 
     /// Issue #980/#1093: the automatic-retry budget reads the watchdog setting, defaults to three,

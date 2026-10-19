@@ -4,7 +4,9 @@
 // and a value it does not recognise is shown as "Unknown: …" rather than dropped.
 import { createContext, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useApi } from "../context";
+import type { ModelHostRanking } from "../features/models/types";
 import type { ModelOption, ModelProvider } from "../types";
+import { HostRankings } from "./HostRankings";
 import { IconCheck, IconChevronDown } from "./icons";
 import { providerSecretId, useOpenSecrets } from "../secretsNav";
 import { ProviderMark } from "./providerMark";
@@ -34,6 +36,23 @@ function useProviders(): ModelProvider[] | null {
     };
   }, [api]);
   return providers;
+}
+
+/** The ranked provider hosts (GET /api/model-hosts, issue #1039); empty on an older mothership. */
+function useModelHosts(): ModelHostRanking[] | null {
+  const api = useApi();
+  const [hosts, setHosts] = useState<ModelHostRanking[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .modelHosts()
+      .then((list) => !cancelled && setHosts(list))
+      .catch(() => !cancelled && setHosts([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+  return hosts;
 }
 
 export type ParsedModel = { provider: string; model: string; known: boolean };
@@ -209,6 +228,7 @@ export function ModelPicker({
   onSetKey?: (providerId: string) => void;
 }) {
   const providers = useProviders();
+  const hosts = useModelHosts();
   const nav = useContext(SettingsNavContext);
   const openSecrets = useOpenSecrets();
   const setKey =
@@ -330,6 +350,8 @@ export function ModelPicker({
           )}
         </p>
       )}
+      {/* The ranked hosts for the picked model, when more than one connected provider serves it. */}
+      <HostRankings rankings={hosts ?? []} currentModel={value} />
     </div>
   );
 }
