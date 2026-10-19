@@ -102,6 +102,19 @@ fake_release() { # version dir [platform]
   (cd "$dir" && sha256sum "colonizer-$platform.tar.gz" > SHA256SUMS)
 }
 
+# Adds the observability add-on's tarball to a release fake_release already built, appending its
+# row to the SHA256SUMS fake_release wrote -- the installer re-reads that file fresh each run, the
+# same way the release workflow's one sha256sum invocation lists every tarball together (#1059).
+add_observability() { # dir [platform]
+  dir=$1
+  platform=${2:-linux-x86_64}
+  mkdir -p "$dir/colonizer-observability/bin"
+  printf '#!/bin/sh\necho colonizer-observability-fake\n' > "$dir/colonizer-observability/bin/colonizer-observability"
+  chmod 755 "$dir/colonizer-observability/bin/colonizer-observability"
+  tar -C "$dir" -czf "$dir/colonizer-observability-$platform.tar.gz" colonizer-observability
+  (cd "$dir" && sha256sum "colonizer-observability-$platform.tar.gz" >> SHA256SUMS)
+}
+
 install_from_release() { # release-url
   HOME="$home" COLONIZER_RELEASE_URL="file://$1" sh "$installer" > "$log" 2>&1
 }
@@ -581,5 +594,46 @@ if HOME="$home" COLONIZER_LOCAL_ARCHIVE="$scratch/missing.tar.gz" sh "$installer
 fi
 grep -q "is not a file" "$log" || bad "a missing local archive was not reported: $(cat "$log")"
 note "ok: COLONIZER_LOCAL_ARCHIVE installs without a download, and a missing file is refused"
+
+# 9. The observability add-on (#1059): installed beside colonizer when the release carries it,
+#    skipped with a note when it does not, and refused like the main archive when its bytes do not
+#    match SHA256SUMS.
+note "== observability add-on: installed beside colonizer when the release carries it"
+fresh_home
+fake_release 9 "$versions/v9-obs"
+add_observability "$versions/v9-obs"
+must_install "$versions/v9-obs" "fresh install with the observability add-on"
+expect_colonizer "fresh install with the observability add-on" "colonizer 9"
+[ -x "$app/bin/colonizer-observability" ] ||
+  bad "fresh install with the observability add-on: expected $app/bin/colonizer-observability to exist and be executable"
+[ "$("$app/bin/colonizer-observability")" = "colonizer-observability-fake" ] ||
+  bad "fresh install with the observability add-on: expected the installed add-on binary to run"
+note "ok: the observability add-on landed beside colonizer, executable"
+
+note "== observability add-on: an older release without it installs the app alone"
+fresh_home
+fake_release 10 "$versions/v10-noobs"
+must_install "$versions/v10-noobs" "fresh install without the observability add-on"
+expect_colonizer "fresh install without the observability add-on" "colonizer 10"
+[ ! -e "$app/bin/colonizer-observability" ] ||
+  bad "fresh install without the observability add-on: expected no colonizer-observability binary"
+grep -q "no colonizer-observability-linux-x86_64.tar.gz in this release" "$log" ||
+  bad "fresh install without the observability add-on: expected a note that the release carries no add-on; log: $(cat "$log")"
+note "ok: a release with no observability row in SHA256SUMS skipped it and installed colonizer alone"
+
+note "== observability add-on: tampered bytes are refused like the main archive, nothing installed"
+fresh_home
+fake_release 11 "$versions/v11-obstamper"
+add_observability "$versions/v11-obstamper"
+printf 'x' >> "$versions/v11-obstamper/colonizer-observability-linux-x86_64.tar.gz"
+rc=0
+install_from_release "$versions/v11-obstamper" || rc=$?
+[ "$rc" -ne 0 ] || bad "tampered observability add-on: expected the installer to exit non-zero"
+grep -q "checksum mismatch for colonizer-observability-linux-x86_64.tar.gz" "$log" ||
+  bad "tampered observability add-on: expected a checksum mismatch for the add-on; log: $(cat "$log")"
+if [ -e "$app" ] || [ -L "$app" ]; then
+  bad "tampered observability add-on: an app was left at $app"
+fi
+note "ok: a tampered observability tarball was refused and nothing was installed"
 
 note "all checks passed"

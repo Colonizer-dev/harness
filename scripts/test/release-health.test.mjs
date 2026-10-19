@@ -149,6 +149,11 @@ test('Colonizer-arm64.dmg is one of the assets every release is expected to carr
   assert.ok(ASSETS.includes('Colonizer-arm64.dmg'), `ASSETS is ${ASSETS.join(', ')}`);
 });
 
+test('the observability add-on tarballs are among the assets every release is expected to carry (#1059)', () => {
+  assert.ok(ASSETS.includes('colonizer-observability-linux-x86_64.tar.gz'), `ASSETS is ${ASSETS.join(', ')}`);
+  assert.ok(ASSETS.includes('colonizer-observability-darwin-arm64.tar.gz'), `ASSETS is ${ASSETS.join(', ')}`);
+});
+
 test('a release carrying every expected asset passes the release and checksum checks', async () => {
   const results = await releaseChecks(TAG, { fetchImpl: release() });
   assert.deepEqual(results.map((r) => r.text), [

@@ -83,9 +83,22 @@ pub(crate) fn decide(
     overrides: Option<&SensitivityOverrides>,
 ) -> AccountRoute {
     let Some(account) = account else { return AccountRoute::Claude };
-    let Some(provider) = usable_provider(fallback_model, providers, provider_out) else {
+    // A fallback that names no configured provider is no fallback at all: today's behaviour.
+    let Some(provider) = providers
+        .iter()
+        .find(|p| crate::providers::names_model_on(fallback_model, &p.id))
+    else {
         return AccountRoute::Claude;
     };
+    if provider_out(&provider.id) {
+        // Issue #1160: the account is out and so is the fallback it named, so there is nothing left to
+        // route to. Saying `Claude` here sends every one of the colony's turns back to the same 429.
+        let until = until_words(account.reset_at.as_deref(), account.reset_unix);
+        let name = display_name(provider);
+        return AccountRoute::Parked {
+            reason: format!("no provider left: Claude is out{until}; {name} is out of quota"),
+        };
+    }
     if let Some(class) = sensitivity
         && !crate::providers::model_eligible(class, overrides, providers, fallback_model)
     {
