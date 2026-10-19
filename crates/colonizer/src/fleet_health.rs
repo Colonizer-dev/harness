@@ -18,9 +18,11 @@
 //!   answer as `fleet_sync`.
 //! - `runner_tick_age`: how long ago the member's queue loop last ticked, reported beside it as
 //!   `runner.last_tick_age_s`.
+//! - `observability_failing_for_s`: how long the member's observability exporter has been failing,
+//!   reported beside it as `observability` (#860). Export off is a choice, never a fault.
 //!
-//! A member running an older colonizer reports neither, so those signals stay `None` and never
-//! fire.
+//! A member running an older colonizer reports none of them, so those signals stay `None` and
+//! never fire.
 
 use chrono::Duration;
 use serde::Serialize;
@@ -33,6 +35,10 @@ const HEARTBEAT_STOPPED: Duration = Duration::minutes(30);
 const BACKLOG_DEGRADED: Duration = Duration::minutes(60);
 /// Queue-loop tick age past which the colony runner reads as not ticking. It ticks every 5 s.
 const RUNNER_DEGRADED: Duration = Duration::minutes(5);
+/// How long a member's observability exporter must be failing before it degrades the member:
+/// telemetry gaps of a few minutes are not worth a badge, and an exporter that is merely
+/// restarting after a healthy run clears long before this.
+const OBSERVABILITY_FAILING_DEGRADED: Duration = Duration::minutes(10);
 /// Disk use, in percent, past which a member is degraded, then stopped.
 const DISK_DEGRADED_PERCENT: u64 = 90;
 const DISK_STOPPED_PERCENT: u64 = 95;
@@ -91,6 +97,9 @@ pub struct Signals {
     pub sync_consent: Option<bool>,
     /// How long ago the member's queue loop last ticked (wired).
     pub runner_tick_age: Option<Duration>,
+    /// How long the member's observability exporter has been failing (wired). `None` when export
+    /// is off, unreported (an older member) or not failing: off is a choice, never a fault.
+    pub observability_failing_for_s: Option<u64>,
 }
 
 /// The state, worst last: the derived order is what "the worst state wins" compares.
@@ -116,6 +125,7 @@ pub enum Reason {
     SyncBacklog { rows: u64 },
     SyncRateLimited,
     Unwatched,
+    ObservabilityFailing { minutes: u64 },
     NotChecked,
 }
 
@@ -132,7 +142,8 @@ impl Reason {
             Reason::SyncBacklog { .. } => 6,
             Reason::SyncRateLimited => 7,
             Reason::Unwatched => 8,
-            Reason::NotChecked => 9,
+            Reason::ObservabilityFailing { .. } => 9,
+            Reason::NotChecked => 10,
         }
     }
 
@@ -148,6 +159,7 @@ impl Reason {
             Reason::SyncBacklog { .. } => "sync_backlog",
             Reason::SyncRateLimited => "sync_rate_limited",
             Reason::Unwatched => "unwatched",
+            Reason::ObservabilityFailing { .. } => "observability_failing",
             Reason::NotChecked => "not_checked",
         }
     }
@@ -168,6 +180,7 @@ impl Reason {
             Reason::SyncBacklog { rows } => format!("Sync behind by {rows} rows"),
             Reason::SyncRateLimited => "Sync rate-limited (429)".into(),
             Reason::Unwatched => "Not watched".into(),
+            Reason::ObservabilityFailing { minutes } => format!("Observability failing for {}", human_minutes(*minutes as i64)),
             Reason::NotChecked => "Not checked yet".into(),
         }
     }
@@ -183,6 +196,7 @@ impl Reason {
             Reason::SyncBacklog { .. } => "check its network, then restart colonizer there",
             Reason::SyncRateLimited => "it backs off by itself; wait a few minutes",
             Reason::Unwatched => "re-join with this machine's URL so the owner can poll it",
+            Reason::ObservabilityFailing { .. } => "check this member's observability settings",
             Reason::NotChecked => "open the cockpit or wait for the next poll",
         }
     }
@@ -229,6 +243,16 @@ pub fn evaluate(signals: &Signals) -> Health {
     }
     if signals.runner_tick_age.is_some_and(|age| age >= RUNNER_DEGRADED) {
         findings.push((State::Degraded, Reason::RunnerDown));
+    }
+    if let Some(age) = signals.observability_failing_for_s.map(|secs| Duration::seconds(secs as i64))
+        && age > OBSERVABILITY_FAILING_DEGRADED
+    {
+        findings.push((
+            State::Degraded,
+            Reason::ObservabilityFailing {
+                minutes: age.num_minutes().max(0) as u64,
+            },
+        ));
     }
     if let Some(free) = signals.disk_free_bytes {
         match signals.disk_total_bytes.filter(|total| *total > 0) {
@@ -533,6 +557,40 @@ mod tests {
                 None,
             ),
             (
+                "observability failing past ten minutes",
+                |s| s.observability_failing_for_s = Some(601),
+                State::Degraded,
+                Some("observability_failing"),
+                Some("Observability failing for 10 min"),
+            ),
+            (
+                "observability failing under ten minutes",
+                |s| s.observability_failing_for_s = Some(599),
+                State::Ok,
+                None,
+                None,
+            ),
+            (
+                "tie: a stale heartbeat before failing observability",
+                |s| {
+                    s.heartbeat_age = Some(Duration::minutes(12));
+                    s.observability_failing_for_s = Some(3600);
+                },
+                State::Degraded,
+                Some("no_heartbeat"),
+                None,
+            ),
+            (
+                "worst wins: a stopped disk over failing observability",
+                |s| {
+                    s.disk_free_bytes = Some(10 * GIB);
+                    s.observability_failing_for_s = Some(3600);
+                },
+                State::Stopped,
+                Some("disk_full"),
+                None,
+            ),
+            (
                 "tie: a stalled runner before a stale heartbeat",
                 |s| {
                     s.heartbeat_age = Some(Duration::minutes(12));
@@ -643,6 +701,7 @@ mod tests {
             Reason::SyncBacklog { rows: 10 },
             Reason::SyncRateLimited,
             Reason::Unwatched,
+            Reason::ObservabilityFailing { minutes: 10 },
             Reason::NotChecked,
         ];
         let priorities: Vec<u8> = all.iter().map(Reason::priority).collect();

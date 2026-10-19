@@ -2,9 +2,9 @@
 
 The Grafana half of the observability epic ([#863](https://github.com/Colonizer-dev/harness/issues/863)):
 the provisioned datasources and dashboards a local stack loads. The stack itself — the compose file,
-the OpenTelemetry Collector, the fixture replay — is
-[#862](https://github.com/Colonizer-dev/harness/issues/862); until it lands, this directory is what
-you point your own Grafana at.
+Alloy, the fixture replay — is [#862](https://github.com/Colonizer-dev/harness/issues/862):
+[grafana/README.md](grafana/README.md) runs it. Pointing your own Grafana at the pieces below
+still works.
 
 - `grafana/provisioning/datasources/datasources.yml` — Prometheus, Loki and Tempo. Their uids
   (`colonizer-prom`, `colonizer-loki`, `colonizer-tempo`) are the contract every dashboard queries,

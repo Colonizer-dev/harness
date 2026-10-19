@@ -1627,8 +1627,11 @@ async fn tail_lines(path: &Path, lines: usize) -> Option<String> {
     file.read_to_end(&mut buf).await.ok()?;
     let text = String::from_utf8_lossy(&buf);
     let mut all: Vec<&str> = text.lines().collect();
-    if !from_start && text.contains('\n') {
-        all.remove(0); // the seek landed mid-line; the first `\n` ends that partial line
+    // The seek landed mid-line, so the first line is partial — but drop it only when a line follows
+    // it: a window that is one line (with or without the file's trailing `\n`) has nothing else to
+    // show, and that cut line is the only evidence there is.
+    if !from_start && all.len() > 1 {
+        all.remove(0);
     }
     let start = all.len().saturating_sub(lines);
     Some(all[start..].join("\n"))
@@ -1985,6 +1988,17 @@ pub(crate) mod tests {
         std::fs::write(&path, "x".repeat((1 << 20) + 64)).unwrap();
         let tail = tail_lines(&path, 10).await.expect("the file reads");
         assert!(!tail.is_empty(), "the window holds exactly one line, and it is the evidence");
+        // The usual shape of that output ends in a newline: still one line, still the evidence.
+        std::fs::write(&path, "x".repeat((1 << 20) + 64) + "\n").unwrap();
+        let tail = tail_lines(&path, 10).await.expect("the file reads");
+        assert!(!tail.is_empty(), "a trailing newline does not make the only line droppable");
+        // With a line after it, the seek's partial first line is the one dropped.
+        std::fs::write(&path, "x".repeat((1 << 20) + 64) + "\nerror: boom\n").unwrap();
+        let tail = tail_lines(&path, 10).await.expect("the file reads");
+        assert_eq!(
+            tail, "error: boom",
+            "the cut-off head is dropped, the whole line after it kept"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

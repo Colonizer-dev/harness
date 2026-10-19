@@ -1,1 +1,0 @@
-**Very large `max_backlog_days` or `max_read_mib_per_sec` export settings no longer overflow.** A backlog window or read rate too big to multiply out now saturates, so it keeps every line and reads at full speed, instead of wrapping around to a cutoff that dropped recent lines or a read rate far below the one asked for.

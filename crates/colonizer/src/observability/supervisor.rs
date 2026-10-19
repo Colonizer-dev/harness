@@ -55,6 +55,18 @@ pub(crate) async fn resolve(app: &App) -> Resolved {
     env::resolve(module.as_ref(), &process_env, secret, &id)
 }
 
+/// [`resolve`] for the fleet health block (#860): the same verdict and the same destination fields,
+/// with no identity filled in. The block hashes only the destination, and the reduced
+/// `/api/status` answer it rides is polled by strangers — it must not run the hostname probe, read
+/// or write the host id, or walk fleet state the way `resolve`'s `Identity` does. Nothing in the
+/// verdict or those fields depends on the identity (`resolve` folds it into `resource_attributes`
+/// alone, which the block never reads), so this tracks `resolve`'s answer exactly.
+pub(super) async fn resolve_for_fleet(app: &App) -> Resolved {
+    let module = app.modules.read().await.observability.clone();
+    let secret = util::read_secret(&app.cfg.config_dir.join("observability-headers"));
+    env::resolve(module.as_ref(), &process_env, secret, &env::Identity::default())
+}
+
 /// `owner` when this mothership has members, `member` when it has joined one, empty when it is
 /// alone — the same three states `fleet_policy.rs` reads, and the only two it can see.
 async fn fleet_role(app: &App) -> String {
@@ -72,8 +84,18 @@ pub(crate) fn contract_path(data_dir: &Path) -> PathBuf {
     data_dir.join("observability").join("exporter.json")
 }
 
-fn status_path(data_dir: &Path) -> PathBuf {
+pub(super) fn status_path(data_dir: &Path) -> PathBuf {
     data_dir.join("observability").join("status.json")
+}
+
+/// The supervisor's current state word for this data dir, "" before it has ever ticked — all the
+/// fleet health block (#860) needs of the runtime, so the `Runtime` itself stays private.
+pub(super) fn runtime_state(data_dir: &Path) -> &'static str {
+    runtimes()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(data_dir).map(|r| r.state))
+        .unwrap_or("")
 }
 
 /// The contract for `settings`: install ids, the data dir, and every colony's org, repo,
@@ -455,7 +477,7 @@ pub(crate) fn start_tasks(app: &Shared) {
 /// same completion the add-on's `loki::push_url` applies (a URL that already ends with the path,
 /// as Grafana Cloud hands them out, is kept as it is). The mothership links no add-on code, so the
 /// few lines live here.
-fn loki_push_url(base: &str) -> String {
+pub(super) fn loki_push_url(base: &str) -> String {
     let base = base.trim_end_matches('/');
     if base.ends_with("/loki/api/v1/push") {
         base.to_string()

@@ -1273,9 +1273,22 @@ mod tests {
         let public_body: Value = serde_json::from_str(&public_text).unwrap();
         let mut keys: Vec<&str> = public_body.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["host", "queue_depth", "runner", "runtime", "storage", "version"]);
+        assert_eq!(
+            keys,
+            [
+                "host",
+                "observability",
+                "queue_depth",
+                "runner",
+                "runtime",
+                "storage",
+                "version"
+            ]
+        );
         // Issue #764: the queue loop's age crosses over; `fleet_sync` only on a fleet member.
+        // Issue #860: the observability block is always present, off or on.
         assert!(public_body["runner"].get("last_tick_age_s").is_some());
+        assert_eq!(public_body["observability"]["state"], "off", "nothing configured");
         app.fleet_members
             .set_membership_for_tests(Some(crate::fleet_sync::Target {
                 owner_url: "http://owner.example:7878".into(),

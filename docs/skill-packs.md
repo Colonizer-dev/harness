@@ -335,6 +335,88 @@ validates `findings.json` with the skill's own validator, and files only the rec
 `security-audit` plugin entry, like every other vendored pack, and the daily vendored-plugin updater
 proposes each upstream move as a pull request; see [Plugin directories](protocol/plugins.md).
 
+### mattpocock-skills
+
+[mattpocock-skills](https://github.com/mattpocock/skills) (v1.3.1, MIT, © Matt Pocock) brings Matt
+Pocock's engineering skills: test-driven development, a bug-diagnosis loop, spec and ticket flows,
+review and triage over the issue tracker, and the deep-modules vocabulary behind them. Colonizer
+stages a curated **non-interactive** subset of thirteen, flattened from upstream's
+`skills/<category>/<name>/` to `skills/<name>/`; each skill keeps the sibling files it reads by
+relative path and drops its per-skill `agents/` Codex stub. Both manifests are generated (upstream's
+list the nested category paths and name excluded skills), and staging is an allowlist that fails on
+any skill the list does not name — see the `mattpocock-skills` comment in `vendor/vendor.lock`.
+
+| Skill | What it is for |
+| :--- | :--- |
+| `tdd` | Build features or fix bugs test-first, red-green-refactor |
+| `diagnosing-bugs` | The diagnosis loop for hard bugs and performance regressions |
+| `code-review` | Review changes since a fixed point along Standards and Spec axes, in parallel subagents |
+| `to-spec` | Turn the current conversation into a spec and publish it to the tracker |
+| `implement-spec` | Implement a `/to-spec` + `/to-tickets` plan in code |
+| `to-tickets` | Break a plan into tracer-bullet tickets with blocking edges, published to the tracker |
+| `triage` | Move issues through the triage state machine, categorise, verify, write agent briefs |
+| `improve-codebase-architecture` | Scan for deepening opportunities and report them as HTML, then work one through |
+| `codebase-design` | The deep-module vocabulary for designing or improving a module's interface |
+| `domain-modeling` | Build the project's domain model: GLOSSARY.md and ADRs |
+| `pr` | Write a PR body (its template does not apply here — see the precedence rule) |
+| `handoff` | Compact the conversation into a handoff document for another agent |
+| `writing-for-agents` | Write or edit documents meant for agents to read |
+
+**What is excluded, and why.** The interactive skills — `grill-me`, `grilling`, `grill-with-docs`,
+`wait-what`, `to-questionnaire`, `teach`, `ask-matt` — work by interviewing the user, which a colony
+never does: a question round would stall it, and free-form interview answers would bypass the
+colony's choice-card questions. `setup-matt-pocock-skills` is excluded because its job is already
+done: it scaffolds a per-repo configuration (issue tracker, triage labels, domain docs) that the
+claude-code runner pre-seeds in the system prompt (below). The remaining upstream skills
+(`implement`, `prototype`, `research`, `retro`, `wayfinder`, `wizard`, and the in-progress, misc and
+deprecated categories) are simply not curated. None of the excluded skills is staged at all, and the
+runner's Skill gate refuses them by name as a second line.
+
+**Off by default.** An operator switches it on in Settings → Skillsets by adding `mattpocock-skills`
+to the Claude Code module's `plugins` list, or per-org with the workspace's `agent.skillsets`
+override; nothing turns it on by itself. The module's **mattpocock-skills allowlist** setting then
+narrows it: a comma-separated list of the thirteen names, empty meaning all of them. Names outside
+the thirteen are ignored, so the setting can never let an excluded skill in. The runner holds every
+Skill call up to that allowlist (a `matcher: 'Skill'` PreToolUse hook), refusing a curated skill the
+list does not name.
+
+**The pre-seeded configuration.** Upstream's consumer skills (`triage`, `to-tickets`, `to-spec`,
+`implement-spec`, `code-review`) expect the setup skill's `## Agent skills` block and
+`docs/agents/*.md` files, and tell the agent to ask for `/setup-matt-pocock-skills` when they are
+missing. In a colony they never are: the system prompt carries the equivalent configuration — the
+issue tracker is this repository's GitHub issues (the `origin` remote), reached only through
+Colonizer's GitHub tools when they are available and otherwise not published to at all; the triage
+labels are the repository's existing labels, mapped from the five roles (`needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) with only labels that already exist
+ever applied and none ever created; the domain docs are single-context, the repository's `docs/`.
+The same prompt forbids running the setup skill and writing an `## Agent skills` section or
+`docs/agents/*` files, so no setup prompt ever reaches the cockpit.
+
+**Colonizer's rules win.** Where a skill conflicts with how a colony runs, the colony's own rules
+hold: never merge, push or create branches or worktrees (implement-spec's integration branch and
+per-ticket worktrees become work in the one working tree the harness publishes); the pull request
+description goes in the colony's pr.md format rather than the `pr` skill's
+Summary/Evidence/Merge Danger template, though what that skill gathered may inform it, and the
+pull-request size ceiling keeps applying; and where a skill says to stop and confirm with the user —
+`tdd`, `to-tickets`, `triage`, `to-spec` and `improve-codebase-architecture` do — the agent states
+its assumption and proceeds, asking through the colony's question tool only where Colonizer's own
+instructions already allow asking.
+
+**`code-review`, `pr` and ECC.** ECC exposes plugin *commands* under the same two names
+(`commands/code-review.md` and `commands/pr.md`, addressed `ecc:code-review` / `ecc:pr`), and a
+colony may enable both packs: the boot-time cross-pack uniqueness check (skills must be unique
+across enabled packs) scans `skills/` directories only, and ECC ships neither name there — nor does
+any other vendored pack. The namespaced addresses keep the two unambiguous
+(`mattpocock-skills:code-review` is the skill, `ecc:code-review` the command), and while the pack is
+mounted the runner's gate holds a bare `code-review` or `pr` call to the colony's mattpocock-skills
+allowlist like any other bare name from the pack.
+
+**Its pin.** The upstream tag and archive sha256 live in `vendor/vendor.lock` as the
+`mattpocock-skills` plugin entry, pinned by tag like ECC's and superpowers' so the daily
+vendored-plugin updater proposes each new release as a pull request; see
+[Plugin directories](protocol/plugins.md). A new upstream skill fails staging until a maintainer
+adds it to `scripts/fetch-vendor.sh` and the lock comment deliberately.
+
 ## Downloadable skillsets
 
 Some skillsets are too big, or carry native code, to ship in every release. Those are

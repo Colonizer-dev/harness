@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
 import type { Attention, Session } from "../types";
-import { AttentionBadge, StatusBadge, attentionText, autoFixLine, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel, supersededHeld, supersededTitle } from "./ui";
+import { AttentionBadge, StatusBadge, attentionText, autoFixLine, isAnsweredWaiting, isUrl, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel, supersededHeld, supersededTitle } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -323,5 +323,23 @@ describe("autoFixLine", () => {
     expect(autoFixLine({ auto_fixes: [fix("looping")] })).toBeNull();
     const looping: Attention = { reason: "looping", since: "2026-10-07T10:00:00Z", nudges: 0, signature: "pr_md_write" };
     expect(attentionText(looping)).toBe("Looping on pr_md_write — stopped, resume to continue");
+  });
+});
+
+// Only http(s) may become an href: the mothership passes feed free text (a repo's homepage field,
+// an OSV advisory url) through verbatim, so a `javascript:` scheme must not survive as a link.
+describe("isUrl", () => {
+  it("accepts only urls that start with http or https", () => {
+    expect(isUrl("https://osv.dev/vulnerability/GHSA-35jh-r3h4-6jhm")).toBe(true);
+    expect(isUrl("http://example.com/package")).toBe(true);
+  });
+
+  it("rejects any other scheme or non-url text a feed may carry, and empties", () => {
+    expect(isUrl("javascript:alert(1)")).toBe(false);
+    expect(isUrl(" data:text/html,<script>")).toBe(false);
+    expect(isUrl("example.com")).toBe(false);
+    expect(isUrl("")).toBe(false);
+    expect(isUrl(null)).toBe(false);
+    expect(isUrl(undefined)).toBe(false);
   });
 });
