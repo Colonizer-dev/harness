@@ -309,6 +309,9 @@ pub(crate) async fn status(
     if let (Some(into), Some(extra)) = (sandbox_status.as_object_mut(), capacity.status_json().as_object()) {
         into.extend(extra.clone());
     }
+    // The observability export's one word (#850): `off`, `ok` or `degraded` — the full story stays
+    // on `GET /api/observability/status`. Never blocks: it resolves in memory and reads two files.
+    let observability = crate::observability::compact_status(&app).await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
@@ -355,6 +358,7 @@ pub(crate) async fn status(
         "merge_steward": crate::merge_steward::status_json(&app).await,
         // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
         "ledger": app.ledger.snapshot(),
+        "observability": observability,
         "modules": {
             "source": modules.source.provider,
             "sandbox": modules.sandbox.provider,

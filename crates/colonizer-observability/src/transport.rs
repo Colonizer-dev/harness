@@ -12,6 +12,7 @@ use crate::proto::collector::logs::v1::ExportLogsServiceResponse;
 use crate::proto::collector::metrics::v1::ExportMetricsServiceResponse;
 use crate::proto::collector::trace::v1::ExportTraceServiceResponse;
 use prost::Message;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// The longest a `Retry-After` is honoured for; a longer one waits this long and asks again.
@@ -30,8 +31,14 @@ pub enum Outcome {
     },
     /// Worth retrying after a backoff: the network, a timeout, 408, 429, 5xx, or a status that says
     /// nothing about the records (404, 405, 415, …). `after` is the server's `Retry-After` (429 and
-    /// 503 only), capped at [`MAX_RETRY_AFTER`].
-    Retry { message: String, after: Option<Duration> },
+    /// 503 only), capped at [`MAX_RETRY_AFTER`]. `reason` names a hold that is the add-on's own
+    /// state rather than the backend's answer — `disk`, while the mothership's disk guard has the
+    /// file provider paused (#850) — so the health can say more than "backing off".
+    Retry {
+        message: String,
+        after: Option<Duration>,
+        reason: Option<&'static str>,
+    },
     /// The credential was refused (401, 403, 407): the records are fine, the key is not. Nothing is
     /// dropped; the batch waits for a working key.
     Unauthorized { status: u16, message: String },
@@ -85,7 +92,8 @@ fn http_date(value: &str) -> Option<SystemTime> {
 }
 
 /// One export destination: OTLP/HTTP by default, the native Loki push provider (#865) when
-/// `provider = "loki"`, or gRPC behind the `otlp-grpc` feature (#851).
+/// `provider = "loki"`, the local file sink (#850) when `provider = "file"`, or gRPC behind the
+/// `otlp-grpc` feature (#851).
 pub struct Transport {
     client: reqwest::Client,
     settings: Settings,
@@ -94,6 +102,8 @@ pub struct Transport {
     gzip: bool,
     /// Whether this transport pushes to Loki rather than speaking OTLP.
     loki: bool,
+    /// The `file` provider's sink (#850): `send` writes a line instead of POSTing.
+    file: Option<crate::file_sink::FileSink>,
     /// The gRPC transport, when `protocol = "grpc"` and this build has the feature for it.
     #[cfg(feature = "otlp-grpc")]
     grpc: Option<crate::grpc::GrpcTransport>,
@@ -112,10 +122,15 @@ impl std::fmt::Debug for Transport {
 }
 
 impl Transport {
-    pub fn new(settings: &Settings, headers: Vec<(String, String)>) -> Result<Transport, String> {
+    pub fn new(settings: &Settings, data_dir: &Path, headers: Vec<(String, String)>) -> Result<Transport, String> {
         let loki = settings.provider == "loki";
-        let encoding = if loki {
-            // Loki speaks its own JSON whatever the protocol says; the setting belongs to OTLP.
+        let file = settings.provider == "file";
+        let file_sink = file
+            .then(|| crate::file_sink::FileSink::new(data_dir, settings))
+            .transpose()?;
+        let encoding = if loki || file {
+            // Loki speaks its own JSON and the file sink writes OTLP/JSON lines (#850), whatever
+            // the protocol says; the setting belongs to OTLP on a network.
             Encoding::Json
         } else {
             match settings.protocol.as_str() {
@@ -150,6 +165,7 @@ impl Transport {
             encoding,
             gzip: settings.compression != "none",
             loki,
+            file: file_sink,
             #[cfg(feature = "otlp-grpc")]
             grpc,
         })
@@ -164,6 +180,9 @@ impl Transport {
         #[cfg(feature = "otlp-grpc")]
         if let Some(grpc) = &self.grpc {
             return grpc.send(request).await;
+        }
+        if let Some(sink) = &self.file {
+            return sink.write(request);
         }
         if self.loki {
             return self.post_loki(request).await;
@@ -193,6 +212,7 @@ impl Transport {
                 return Outcome::Retry {
                     message: self.scrub(&format!("{url}: {}", without_url(&e))),
                     after: None,
+                    reason: None,
                 };
             }
         };
@@ -233,6 +253,7 @@ impl Transport {
                 return Outcome::Retry {
                     message: self.scrub(&format!("{url}: {}", without_url(&e))),
                     after: None,
+                    reason: None,
                 };
             }
         };
@@ -268,7 +289,11 @@ impl Transport {
         let snippet = String::from_utf8_lossy(&bytes[..bytes.len().min(300)]).into_owned();
         let message = self.scrub(&format!("{url} answered {status}: {}", snippet.trim()));
         match classify(status) {
-            Class::Retry => Outcome::Retry { message, after },
+            Class::Retry => Outcome::Retry {
+                message,
+                after,
+                reason: None,
+            },
             Class::Unauthorized => Outcome::Unauthorized { status, message },
             Class::Refused => Outcome::Refused { status, message },
         }
