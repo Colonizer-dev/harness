@@ -94,12 +94,18 @@ bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `backfill`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
-`<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
-Its version must match the mothership's. Release tarballs do not ship it yet; build it with:
+`<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary;
+its version must match the mothership's. When the release publishes the add-on asset,
+`colonizer add observability` installs a verified copy of the matching version into that versioned
+slot from the running release and enables the module if its saved settings permit it.
+`colonizer remove observability` disables the module and removes the binary — with `--purge` it also
+drops the saved settings, the add-on's ledger offsets and the `observability-headers` secret — and
+`colonizer observability status` prints the add-on's health. Building it yourself with cargo and
+pointing `COLONIZER_OBSERVABILITY_BIN` at the result stays the development path:
 
 ```sh
 cargo build --release -p colonizer-observability
-cp target/release/colonizer-observability "$(dirname "$(command -v colonizer)")/"
+export COLONIZER_OBSERVABILITY_BIN="$PWD/target/release/colonizer-observability"
 ```
 
 `GET /api/observability/status` says whether export is on, why not, where each setting came from,
