@@ -192,6 +192,42 @@ fn turn_error_status(lowercase: &str) -> Option<u16> {
     digits.parse().ok().filter(|code| (100..600).contains(code))
 }
 
+/// Which of the router's two wordings a turn error used: "the connection to <p> failed" and
+/// "model router: <p> is unreachable" name the same provider and word it differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderShape {
+    Connection,
+    Unreachable,
+}
+
+/// The provider a turn's error names, spelled as the message spells it, with the wording it came in,
+/// or `None` when it names none. One copy of the extraction, shared with [`turn_error_cause`], which
+/// words the name the way the error did.
+///
+/// `message` is the error as written and `lowercase` the same text lowercased: the shape is matched
+/// on the lowercase copy but the name is taken from the original, so "Anthropic" keeps its capital.
+/// A name longer than 40 bytes is not one — an error that runs on without ever saying "failed" names
+/// the rest of its own sentence instead.
+fn named_provider(message: &str, lowercase: &str) -> Option<(ProviderShape, String)> {
+    let named = |prefix: &str, suffix: &str| -> Option<String> {
+        let start = lowercase.find(prefix)? + prefix.len();
+        let len = lowercase[start..].find(suffix)?;
+        let name = message.get(start..start + len)?.trim();
+        (!name.is_empty() && name.len() <= 40).then(|| name.to_string())
+    };
+    if let Some(name) = named("the connection to ", " failed") {
+        return Some((ProviderShape::Connection, name));
+    }
+    named("model router: ", " is unreachable").map(|name| (ProviderShape::Unreachable, name))
+}
+
+/// The provider a turn's error names, on its own, spelled as the error spells it (issue #1068), or
+/// `None` when it names none: a colony parked on an unreachable provider says what it waits for, so
+/// the bare name is what the park and its attention card need.
+pub fn turn_error_provider(message: &str) -> Option<String> {
+    named_provider(message, &message.to_ascii_lowercase()).map(|(_, name)| name)
+}
+
 /// A short name for what a transient turn error was, for the colony's attention card and log
 /// (issue #1093): the status and the failure, e.g. "502, connection to Anthropic" for the router's
 /// "502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)". Empty when the message
@@ -202,17 +238,11 @@ pub fn turn_error_cause(message: &str) -> String {
     if let Some(status) = turn_error_status(&text) {
         parts.push(status.to_string());
     }
-    // The provider's name as the message spells it, so "Anthropic" keeps its capital.
-    let named = |prefix: &str, suffix: &str| -> Option<String> {
-        let start = text.find(prefix)? + prefix.len();
-        let len = text[start..].find(suffix)?;
-        let name = message.get(start..start + len)?.trim();
-        (!name.is_empty() && name.len() <= 40).then(|| name.to_string())
-    };
-    let what = if let Some(provider) = named("the connection to ", " failed") {
-        Some(format!("connection to {provider}"))
-    } else if let Some(provider) = named("model router: ", " is unreachable") {
-        Some(format!("{provider} unreachable"))
+    let what = if let Some((shape, provider)) = named_provider(message, &text) {
+        Some(match shape {
+            ProviderShape::Connection => format!("connection to {provider}"),
+            ProviderShape::Unreachable => format!("{provider} unreachable"),
+        })
     } else if text.contains("overloaded") || text.contains("529") {
         Some("overloaded".to_string())
     } else if text.contains("timed out") || text.contains("timeout") {
@@ -516,6 +546,24 @@ mod tests {
         assert_eq!(turn_error_cause("read ECONNRESET"), "connection reset");
         assert_eq!(turn_error_cause("model timed out after 600 s"), "timed out");
         assert_eq!(turn_error_cause("something else"), "");
+    }
+
+    /// Issue #1068: the provider on its own, from either of the router's two wordings, spelled as
+    /// the error spells it — and nothing at all from a message that names no provider, or from one
+    /// that runs on past 40 bytes without saying what failed.
+    #[test]
+    fn the_turn_error_names_its_provider_on_its_own() {
+        for message in [
+            "API Error: 502 model router: the connection to Anthropic failed (UND_ERR_SOCKET)",
+            "API Error: 502 model router: Anthropic is unreachable (DNS lookup failed: ENOTFOUND)",
+        ] {
+            assert_eq!(turn_error_provider(message).as_deref(), Some("Anthropic"), "{message}");
+        }
+        assert_eq!(turn_error_provider("API Error: 503 service temporarily down"), None);
+        assert_eq!(turn_error_provider("read ECONNRESET"), None);
+        // Longer than 40 bytes is not a provider name but a sentence that never says "failed".
+        let rambling = format!("the connection to {} failed", "x".repeat(60));
+        assert_eq!(turn_error_provider(&rambling), None, "{rambling}");
     }
 
     /// Issue #1117: a verify run that died fetching before any test ran names the fetch and the

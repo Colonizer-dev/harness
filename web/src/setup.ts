@@ -5,9 +5,9 @@ import { meshBroken } from "./components/ui";
 import type { HarnessStatus, OsInfo, PullStatus, TelemetryStatus } from "./types";
 
 /** A row's place in the checklist, in display order. The live map is not one of the five. */
-export type SetupRowId = "machine" | "stack" | "github" | "claude" | "launch" | "map";
+export type SetupRowId = "machine" | "stack" | "github" | "model" | "launch" | "map";
 
-export const SETUP_ROW_IDS: SetupRowId[] = ["machine", "stack", "github", "claude", "launch"];
+export const SETUP_ROW_IDS: SetupRowId[] = ["machine", "stack", "github", "model", "launch"];
 export const LIVE_MAP_ROW_ID: SetupRowId = "map";
 
 /**
@@ -58,7 +58,7 @@ export interface SetupInput {
   /** How many sessions exist, any status. */
   sessionCount: number;
   /** The current time, milliseconds since the epoch — threaded in rather than read from the clock
-   *  so the Claude row's expiry advisory stays a pure function (the UI passes `Date.now()`). */
+   *  so the model row's expiry advisory stays a pure function (the UI passes `Date.now()`). */
   now: number;
 }
 
@@ -69,7 +69,7 @@ export interface SetupView {
   firstActionable: SetupRow | null;
   autoOpen: boolean;
   launchEnabled: boolean;
-  /** A required row (machine, GitHub, Claude) is unmet, or anything is blocked. Advisory rows (the stack, the first launch, the live map) never set it. */
+  /** A required row (machine, GitHub, model) is unmet, or anything is blocked. Advisory rows (the stack, the first launch, the live map) never set it. */
   attention: boolean;
 }
 
@@ -88,7 +88,7 @@ export function setupRows(input: SetupInput): SetupRow[] {
     machineRow(input.status),
     dismissable(stackRow(input), dismissed),
     githubRow(input.status),
-    claudeRow(input.status, input.now),
+    modelRow(input.status, input.now),
     launchRow(input),
     dismissable(mapRow(input.telemetry), dismissed),
   ];
@@ -182,7 +182,7 @@ export function shouldAutoOpen(rows: SetupRow[], sessionCount = 0): boolean {
  *  the colony fetches the image itself when it boots. */
 export function launchEnabled(rows: SetupRow[]): boolean {
   const byId = new Map(rows.map((row) => [row.id, row]));
-  return (["machine", "github", "claude"] as const).every((id) => byId.get(id)?.state === "done");
+  return (["machine", "github", "model"] as const).every((id) => byId.get(id)?.state === "done");
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +401,7 @@ function githubRow(status: HarnessStatus): SetupRow {
   };
 }
 
-function claudeRow(status: HarnessStatus, now: number): SetupRow {
+function modelRow(status: HarnessStatus, now: number): SetupRow {
   const claude = status.claude;
   const notes: string[] = [];
 
@@ -447,24 +447,43 @@ function claudeRow(status: HarnessStatus, now: number): SetupRow {
   const accountNote = claude.account_note?.trim();
   if (accountNote) notes.push(accountNote);
 
-  if (claude.configured) {
+  // Check if Claude is configured and healthy
+  const claudeHealthy = claude.configured && claude.health_status === "ok";
+  if (claudeHealthy) {
     return {
-      id: "claude",
-      title: "Claude",
+      id: "model",
+      title: "A model colonies can use",
       state: "done",
       gatesLaunch: true,
-      detail: [claude.source ?? "Configured", claude.account ?? null].filter(Boolean).join(" · "),
+      detail: [claude.source ?? "Claude", claude.account ?? null].filter(Boolean).join(" · "),
       notes,
       retry: false,
     };
   }
+
+  // Check if any model provider is configured and not degraded
+  const providers = status.model_providers ?? [];
+  const workingProvider = providers.find((p) => !p.degraded);
+  if (workingProvider) {
+    return {
+      id: "model",
+      title: "A model colonies can use",
+      state: "done",
+      gatesLaunch: true,
+      detail: workingProvider.name,
+      notes,
+      retry: false,
+    };
+  }
+
+  // Neither Claude (healthy) nor a working provider — blocked
   return {
-    id: "claude",
-    title: "Claude",
+    id: "model",
+    title: "A model colonies can use",
     state: "blocked",
     gatesLaunch: true,
-    detail: "Not configured",
-    fix: "Sign in with your Claude subscription, or paste a token from `claude setup-token`.",
+    detail: "No working model available",
+    fix: "Sign in with your Claude subscription, or add a model provider using an API key.",
     notes,
     retry: true,
   };

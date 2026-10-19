@@ -27,6 +27,7 @@ Commands:
   answer         Answer a colony's pending question: an option's number, its label, or free text
   stop           Stop a colony: the microVM goes away, the worktree is kept for a later `resume`
   resume         Start a stopped colony again, picking up its worktree where it was left
+  retry          Start a *failed* colony again from scratch, with the same settings (issue #1073); a colony `resume` can bring back should use `resume` instead
   pr             Print a colony's pull request URL and state, or --wait for its checks to settle
   map            Print a repository's architecture map as a text outline, or search it with --find
   mcp            Serve this harness to MCP clients over stdio (tools for listing, watching and driving colonies); the tool set follows the token's scope

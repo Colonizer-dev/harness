@@ -75,11 +75,12 @@ async fn a_transient_error_parks_for_an_automatic_retry() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// Issue #980: once the attempts are spent, a transient provider error holds the colony — the log
-/// names the provider's own error, and it never tells the operator to press Create PR over work that
-/// does not exist. Drives the real give-up branch through `finish_turn`.
+/// Issue #1068: once the attempts are spent and the provider is still unreachable, the colony parks
+/// waiting for it rather than being held — nobody has to act, and the queue resumes it by itself.
+/// The log names the provider's own error, and it never tells the operator to press Create PR over
+/// work that does not exist. Drives the real give-up branch through `finish_turn`.
 #[tokio::test]
-async fn spent_provider_retries_hold_naming_the_error() {
+async fn spent_provider_retries_park_waiting_for_the_provider() {
     let error_text = "API Error: 502 model router: Anthropic is unreachable";
     let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
     let rt = app.runtime("abc").await;
@@ -93,15 +94,57 @@ async fn spent_provider_retries_hold_naming_the_error() {
 
     let s = app.session("abc").await.unwrap();
     assert_eq!(
-        s.attention.as_ref().and_then(|a| a["reason"].as_str()),
-        Some("autopilot_held"),
-        "the exhausted retry holds the colony"
+        s.status,
+        SessionStatus::Parked,
+        "an outage parks the colony, it does not hold and stop it"
+    );
+    assert_eq!(
+        s.parked.as_ref().map(|p| p.reason.as_str()),
+        Some(crate::queue::PROVIDER_OUTAGE_REASON),
+        "parked for the provider's outage"
     );
     assert_eq!(s.provider_retries, 0, "and the sequence resets for a later error");
+    let attention = s.attention.expect("the park carries an attention");
+    assert_eq!(attention["reason"], crate::queue::PROVIDER_OUTAGE_REASON);
+    assert_eq!(attention["cause"], GATEWAY_ERROR_CAUSE);
+    assert_eq!(attention["provider"], "Anthropic", "the card names what it waits for");
+    assert_eq!(attention["summary"], "Waiting for Anthropic");
+    let alert_at: DateTime<Utc> = serde_json::from_value(attention["alert_at"].clone()).unwrap();
+    assert!(
+        alert_at > Utc::now() + chrono::Duration::hours(1) && alert_at <= Utc::now() + chrono::Duration::hours(2),
+        "the alert rides the watchdog's two-hour default: {alert_at}"
+    );
     let logged = rt.logs.lock().await.clone();
     let text = serde_json::to_string(&logged).unwrap();
-    assert!(text.contains(error_text), "the hold names the provider's error: {text}");
+    assert!(text.contains(error_text), "the park names the provider's error: {text}");
+    assert!(text.contains("retrying on its own"), "and says it waits: {text}");
     assert!(!text.contains("press Create PR"), "no Create PR over no work: {text}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1068: an outage on a provider the error does not name still parks — with no provider in the
+/// card, so it says "the provider" rather than inventing one.
+#[tokio::test]
+async fn an_outage_with_no_provider_named_speaks_of_the_provider() {
+    let error_text = "API Error: 503 service temporarily down";
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    app.update_session("abc", |x| {
+        x.autopilot = true;
+        x.provider_retries = 4;
+    })
+    .await;
+    finish_turn(&app, "abc", &rt, true, Some(error_text.into()), None, None).await;
+
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(
+        s.parked.as_ref().map(|p| p.reason.as_str()),
+        Some(crate::queue::PROVIDER_OUTAGE_REASON),
+        "{error_text}: an outage is an outage, named or not"
+    );
+    let attention = s.attention.expect("the park carries an attention");
+    assert!(attention.get("provider").is_none(), "no provider invented: {attention}");
+    assert_eq!(attention["summary"], "Waiting for the provider");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -149,10 +192,11 @@ async fn a_502_turn_end_retries_automatically_and_names_the_error() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// Issue #1093: three automatic retries that all fail on the gateway end in a hold that says so —
-/// "repeated gateway errors", the error named — and never one that asks for an answer.
+/// Issue #1068: three automatic retries that all fail on the gateway no longer end in a hold. The
+/// fourth parks the colony on the provider's outage, so a fifteen-minute outage no longer stops it —
+/// and the card names the provider and the deadline rather than asking anyone for an answer.
 #[tokio::test]
-async fn three_gateway_failures_then_a_hold_with_the_right_wording() {
+async fn three_gateway_failures_then_a_wait_on_the_provider_not_a_hold() {
     let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
     let rt = app.runtime("abc").await;
     app.update_session("abc", |x| x.autopilot = true).await;
@@ -171,15 +215,21 @@ async fn three_gateway_failures_then_a_hold_with_the_right_wording() {
     }
     finish_turn(&app, "abc", &rt, true, Some(SOCKET_RESET_502.into()), None, None).await;
     let s = app.session("abc").await.unwrap();
-    assert_eq!(s.status, SessionStatus::Running, "held in place, not parked again");
-    let attention = s.attention.expect("held");
-    assert_eq!(attention["reason"], "autopilot_held");
-    assert_eq!(attention["cause"], GATEWAY_ERROR_CAUSE);
     assert_eq!(
-        attention["detail"],
-        "Stopped on repeated gateway errors (502, connection to Anthropic); 3 automatic retries did not get through"
+        s.status,
+        SessionStatus::Parked,
+        "the give-up waits for the provider rather than holding in place"
     );
-    assert_eq!(s.provider_retries, 0);
+    assert_eq!(
+        s.parked.as_ref().map(|p| p.reason.as_str()),
+        Some(crate::queue::PROVIDER_OUTAGE_REASON),
+        "not a retry park: nothing is counting a ladder any more"
+    );
+    let attention = s.attention.expect("the park carries an attention");
+    assert_eq!(attention["reason"], crate::queue::PROVIDER_OUTAGE_REASON);
+    assert_eq!(attention["cause"], GATEWAY_ERROR_CAUSE);
+    assert_eq!(attention["provider"], "Anthropic");
+    assert_eq!(s.provider_retries, 0, "the ladder is fresh again for the next outage");
     let _ = std::fs::remove_dir_all(root);
 }
 

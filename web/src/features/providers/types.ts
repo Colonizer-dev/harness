@@ -243,6 +243,11 @@ export interface ModelProvider extends ProviderLimits {
   /** The last plan-balance reading the Mothership kept (issue #1204); null or absent until a reader has run. */
   balance?: ProviderBalance | null;
   /**
+   * When a provider outage began and no probe has answered since (issue #1068): RFC3339, or
+   * null/absent when the provider is answering. Colonies park on an outage rather than being held.
+   */
+  outage_since?: string | null;
+  /**
    * Models the endpoint itself lists (issue #1167), separate from the enabled `models`. Absent until
    * the Mothership discovers them; the page then says "N enabled · +M available".
    */
