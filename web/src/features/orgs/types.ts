@@ -81,6 +81,12 @@ export interface OrgSettings {
    */
   jev?: boolean | null;
   /**
+   * The context-mode module for this org (issue #1273, opt-in ELv2 MCP server): `off` disables it
+   * (the default); `shadow` passes MCP calls through but keeps native tools; `on` routes through
+   * the exec policy. The operator installs the pinned package.
+   */
+  context_mode?: "off" | "shadow" | "on" | null;
+  /**
    * The org layer of the exec policy (issue #924): JSON text shaped like the install's `exec_policy`
    * module setting and a repository's `.colonizer/exec-policy.json`. It sits between the two, and
    * layers only narrow. Absent, null or blank adds no org layer.

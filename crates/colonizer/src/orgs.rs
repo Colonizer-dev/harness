@@ -148,6 +148,21 @@ impl MergeMethod {
     }
 }
 
+/// The context-mode module switch for an org (issue #1273).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ContextMode {
+    /// The module is off; native tools only.
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// Shadow mode: passes MCP calls through but keeps native tools.
+    #[serde(rename = "shadow")]
+    Shadow,
+    /// On: routes through the exec policy.
+    #[serde(rename = "on")]
+    On,
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -167,6 +182,11 @@ pub struct OrgSettings {
     /// `Some(true)` follows the module settings, point by point.
     #[serde(default)]
     pub jev: Option<bool>,
+    /// The context-mode module for this org (issue #1273, opt-in ELv2 MCP server): `off` disables
+    /// it (the default); `shadow` passes MCP calls through but keeps native tools; `on` routes
+    /// through the exec policy. The operator installs the pinned package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_mode: Option<ContextMode>,
     /// Whether this org's claimed issues get the `colonizer:host:<host>` label and status edits to
     /// the claim comment (issue #919). `None` or `Some(true)` means yes; `Some(false)` keeps the
     /// claim to the label and one comment, which only a release edits.
@@ -1213,6 +1233,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("jev") {
         incoming.jev = saved.jev;
     }
+    if !named("context_mode") {
+        incoming.context_mode = saved.context_mode;
+    }
     if !named("claim_updates") {
         incoming.claim_updates = saved.claim_updates;
     }
@@ -1639,6 +1662,51 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&long).is_err(), "41 chars is one too many");
+    }
+
+    #[test]
+    fn context_mode_round_trips_and_survives_a_save_that_does_not_name_it() {
+        // Absent field deserializes to None.
+        let body = json!({});
+        let incoming: OrgSettings = serde_json::from_value(body).unwrap();
+        assert_eq!(incoming.context_mode, None);
+
+        // Each value round-trips.
+        for mode in ["off", "shadow", "on"] {
+            let body = json!({"context_mode": mode});
+            let parsed: OrgSettings = serde_json::from_value(body).unwrap();
+            let back = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(back["context_mode"], mode);
+        }
+
+        // Invalid value is rejected.
+        let bad = json!({"context_mode": "invalid"});
+        assert!(serde_json::from_value::<OrgSettings>(bad).is_err());
+
+        // Unnamed field survives a save that does not name it.
+        let saved = OrgSettings {
+            context_mode: Some(ContextMode::Shadow),
+            ..Default::default()
+        };
+        let body = json!({"max_parallel": 2});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.context_mode, Some(ContextMode::Shadow));
+
+        // Named value wins.
+        let body = json!({"context_mode": "on"});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.context_mode, Some(ContextMode::On));
+
+        // Validation accepts all valid modes.
+        for mode in [ContextMode::Off, ContextMode::Shadow, ContextMode::On] {
+            let org = OrgSettings {
+                context_mode: Some(mode),
+                ..Default::default()
+            };
+            assert!(validate(&org).is_ok());
+        }
     }
 
     #[test]

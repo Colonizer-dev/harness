@@ -1181,6 +1181,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
     let org_policy = orgs::org_exec_policy(&org_settings).map(|policy| (s.org.as_str(), policy));
     apply_exec_policy(&agent, &modules.agent, org_policy, &app.agents, &wt, &mut runner_env)?;
+    // The context-mode module (issue #1273): pass to guest only when not off.
+    if let Some(mode) = org_settings.context_mode
+        && mode != orgs::ContextMode::Off
+    {
+        let mode_str = match mode {
+            orgs::ContextMode::Off => "off",
+            orgs::ContextMode::Shadow => "shadow",
+            orgs::ContextMode::On => "on",
+        };
+        runner_env.insert("COLONIZER_CONTEXT_MODE".into(), Value::String(mode_str.into()));
+    }
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.
