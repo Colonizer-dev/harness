@@ -64,7 +64,7 @@ fn pin_for(lock: &str) -> Option<Pin> {
         })
 }
 
-fn dir(app: &App) -> PathBuf {
+pub(crate) fn dir(app: &App) -> PathBuf {
     app.cfg.data_dir.join("plugins").join(NAME)
 }
 

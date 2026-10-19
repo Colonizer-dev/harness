@@ -230,6 +230,7 @@ export function reposMock(ms: MockState): ReposApi {
         ],
       })),
     repoCoverage: () => ms.later(() => ({ measured: false as const, reason: "no coverage report found in CI artifacts" })),
+    repoGraph: () => ms.later(() => ({ enabled: false, commit: null, built_at: null, building: false, jobs: 0, cost_usd: 0 })),
     repoGitSummary: (repo) => ms.later(() => ({ repo, branches: 14, open_prs: 3, release: { tagName: "v0.1.9", name: "v0.1.9", publishedAt: "2026-09-24T14:00:00Z" }, latest_tag: null })),
     repoBranches: (repo) =>
       ms.later(() => ({

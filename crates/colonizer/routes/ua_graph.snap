@@ -1,0 +1,2 @@
+/api/understand-anything/graphs/{owner}/{name}       GET    unauth=401    token=owner            activity=-
+/api/understand-anything/graphs/{owner}/{name}/knowledge-graph.json GET    unauth=401    token=owner            activity=-

@@ -533,6 +533,20 @@ pub(crate) fn read_journal(data_dir: &Path, floor: &str, today: &str, offset_min
         .collect()
 }
 
+/// What the named colonies have cost in total over the whole journal — every day, not a window —
+/// for a caller that remembers the ids it launched (issue #1015: the graph colonies per repo).
+/// Rows with no cost yet count as zero.
+pub(crate) fn sessions_cost_usd(data_dir: &Path, ids: &[String]) -> f64 {
+    if ids.is_empty() {
+        return 0.0;
+    }
+    read_journal(data_dir, "", "9999-99-99", 0)
+        .into_iter()
+        .filter(|row| row.session.as_deref().is_some_and(|s| ids.iter().any(|id| id == s)))
+        .map(|row| row.cost_usd.unwrap_or(0.0))
+        .sum()
+}
+
 /// One org's row in one day of the history: its spend plus how many colonies ran that day and how
 /// long the bench spent scoring there.
 #[derive(Clone, Debug, Default)]

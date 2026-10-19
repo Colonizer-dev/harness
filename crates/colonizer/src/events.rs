@@ -726,6 +726,11 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 if became_idle && current.origin.as_deref().is_some_and(crate::maps::is_map_origin) {
                     tokio::spawn(crate::maps::on_idle(app.clone(), id.to_string()));
                 }
+                // A graph colony that just went idle may be done the same way: its knowledge
+                // graph is picked up and it stops itself (ua_graph.rs).
+                if became_idle && current.origin.as_deref() == Some(crate::ua_graph::ORIGIN) {
+                    tokio::spawn(crate::ua_graph::on_idle(app.clone(), id.to_string()));
+                }
             }
         }
         AgentEvent::Question {
