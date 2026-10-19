@@ -131,6 +131,10 @@ fn fix(value: &mut Value) {
         Value::Object(map) => {
             map.retain(|_, v| !v.is_null());
             for (key, v) in map.iter_mut() {
+                #[cfg(test)]
+                if break_id_for_conformance(key, v) {
+                    continue;
+                }
                 if key == "asInt"
                     && let Value::Number(n) = v
                 {
@@ -142,6 +146,30 @@ fn fix(value: &mut Value) {
         }
         Value::Array(items) => items.iter_mut().for_each(fix),
         _ => {}
+    }
+}
+
+/// The conformance run's `OTEL_CONFORMANCE_DEMO=break-ids` toggle (#864): when set, the OTLP/JSON
+/// fix-up writes trace and span ids in decimal instead of the spec's lowercase hex, so the real
+/// collector refuses the request and the conformance test demonstrates it catches the regression.
+/// Never set outside that test.
+#[cfg(test)]
+pub(crate) static BREAK_IDS_FOR_CONFORMANCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Rewrites one id key from lowercase hex to decimal while [`BREAK_IDS_FOR_CONFORMANCE`] is set.
+#[cfg(test)]
+fn break_id_for_conformance(key: &str, v: &mut Value) -> bool {
+    use std::sync::atomic::Ordering;
+    if !BREAK_IDS_FOR_CONFORMANCE.load(Ordering::SeqCst) || !matches!(key, "traceId" | "spanId" | "parentSpanId") {
+        return false;
+    }
+    let Value::String(hex) = v else { return false };
+    match u128::from_str_radix(hex, 16) {
+        Ok(n) => {
+            *v = Value::String(n.to_string());
+            true
+        }
+        Err(_) => false,
     }
 }
 

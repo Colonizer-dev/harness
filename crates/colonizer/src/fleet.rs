@@ -300,6 +300,9 @@ pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     }
     let client = reqwest::Client::builder()
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        // No redirects, like `post_owner` and the sync drain: a peer's answer must come from the
+        // peer itself, not from wherever a 3xx would carry the poll.
+        .redirect(reqwest::redirect::Policy::none())
         .build();
     let client = match client {
         Ok(client) => client,

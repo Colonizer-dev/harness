@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::{
+    net::IpAddr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
@@ -560,6 +561,200 @@ pub fn valid_repo(repo: &str) -> bool {
     })
 }
 
+/// Whether an IP address is one only this machine, its network or a link-local service reaches:
+/// loopback, the RFC1918 ranges, link-local (where the cloud metadata addresses live), unspecified,
+/// broadcast, multicast, `0.0.0.0/8` and carrier-grade NAT for IPv4 — and for IPv6 the same
+/// through any form that carries an IPv4 address (IPv4-mapped, IPv4-compatible, the NAT64 prefixes
+/// and 6to4), plus the unique-local, link-local and site-local scopes.
+pub fn private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                // 0.0.0.0/8: "this network"; Linux dials 0.x.x.x as this machine.
+                || v4.octets()[0] == 0
+                // 100.64.0.0/10: carrier-grade NAT, where tailnets live.
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            // ::ffff:a.b.c.d and the deprecated ::a.b.c.d answer for their IPv4 address.
+            if let Some(v4) = v6.to_ipv4() {
+                return private_ip(IpAddr::V4(v4));
+            }
+            let seg = v6.segments();
+            let embedded = |hi: u16, lo: u16| std::net::Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+            // NAT64 (64:ff9b::/96, 64:ff9b:1::/48) carries the IPv4 address in its last 32 bits, and a
+            // NAT64 gateway on the mothership's network would carry the request there.
+            if seg[0] == 0x64 && seg[1] == 0xff9b {
+                return private_ip(IpAddr::V4(embedded(seg[6], seg[7])));
+            }
+            // 6to4 (2002::/16) carries it in bits 16..48.
+            if seg[0] == 0x2002 {
+                return private_ip(IpAddr::V4(embedded(seg[1], seg[2])));
+            }
+            v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00 // unique-local, fc00::/7
+                || (seg[0] & 0xffc0) == 0xfe80 // link-local, fe80::/10
+                || (seg[0] & 0xffc0) == 0xfec0 // the deprecated site-local, fec0::/10
+        }
+    }
+}
+
+/// Whether the host a URL carries names this machine, its network or a link-local service — refused
+/// where a request must stay off them (a scoped token's webhook, in `notify::subscriptions`). A
+/// literal private address, or a name that means the same: `localhost` and its subdomains, `.local`,
+/// `.internal`, or a dotless single label. A literal check: a public name that resolves to a private
+/// address is not caught here — [`resolves_to_public`] does that at save time, and
+/// [`public_redirect_policy`] on every hop of a delivery.
+pub fn private_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else { return true };
+    private_host_str(host)
+}
+
+/// [`private_host`] on one host string, as `Url::host_str` gives it — an IPv6 literal still in its
+/// brackets, which come off before anything parses it.
+pub fn private_host_str(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return private_ip(ip);
+    }
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name.ends_with(".local")
+        || name.ends_with(".internal")
+        || !name.contains('.')
+}
+
+/// The pure core of [`resolves_to_public`]: there is at least one address, and every one of them is
+/// public. A name that round-robins a public and a private address is refused whole, rather than
+/// betting on which answer a delivery happens to get.
+pub fn all_public_ips(ips: &[IpAddr]) -> bool {
+    !ips.is_empty() && ips.iter().all(|ip| !private_ip(*ip))
+}
+
+/// Resolves `host` (tokio DNS, so the caller stays async) and answers whether every address it
+/// resolved to is public, by way of [`all_public_ips`]. A name that does not resolve is refused —
+/// the webhook would be broken anyway. An IPv6 literal's brackets come off first, so a caller may
+/// hand over `Url::host_str` untouched.
+pub async fn resolves_to_public(host: &str) -> bool {
+    #[cfg(test)]
+    {
+        if let Some(public) = test_resolves_to_public(host) {
+            return public;
+        }
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match tokio::net::lookup_host((host, 0)).await {
+        Ok(addrs) => all_public_ips(&addrs.map(|addr| addr.ip()).collect::<Vec<_>>()),
+        Err(_) => false,
+    }
+}
+
+/// A test seam for [`resolves_to_public`]: while the returned guard lives, hosts are answered by
+/// `resolve` — `Some` its addresses, `None` that it does not resolve — instead of the network. A
+/// published crate's tests reach nowhere outside their own crate, DNS included. Same shape and
+/// reasoning as [`faults`]: a thread-local, because `#[tokio::test]` defaults to a current-thread
+/// runtime, and production compiles this away.
+#[cfg(test)]
+fn test_resolves_to_public(host: &str) -> Option<bool> {
+    let resolved = RESOLVER.with_borrow(|stack| stack.last().map(|resolve| resolve(host)))?;
+    Some(resolved.is_some_and(|ips| all_public_ips(&ips)))
+}
+
+/// [`resolves_to_public`] for the one place that cannot await: a redirect policy, which reqwest
+/// calls synchronously. An IP literal is judged as it is; a name is looked up through the system
+/// resolver, on a multi-thread runtime inside `block_in_place` so the worker's other tasks move
+/// elsewhere while it blocks. Redirects are rare and the lookup is the one the hop's own connect
+/// would make anyway.
+fn hop_resolves_to_public(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return !private_ip(ip);
+    }
+    #[cfg(test)]
+    {
+        if let Some(public) = test_resolves_to_public(host) {
+            return public;
+        }
+    }
+    let lookup = || match (host, 0).to_socket_addrs() {
+        Ok(addrs) => all_public_ips(&addrs.map(|addr| addr.ip()).collect::<Vec<_>>()),
+        Err(_) => false,
+    };
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(lookup),
+        _ => lookup(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_resolver(resolve: TestResolve) -> ResolverGuard {
+    RESOLVER.with_borrow_mut(|stack| stack.push(resolve));
+    ResolverGuard
+}
+
+/// One installed resolver: a host's addresses, or `None` when it does not resolve.
+#[cfg(test)]
+pub(crate) type TestResolve = fn(&str) -> Option<Vec<IpAddr>>;
+
+/// Pops the resolver [`install_test_resolver`] pushed when dropped, so one test's answers cannot
+/// leak into the next.
+#[cfg(test)]
+pub(crate) struct ResolverGuard;
+
+#[cfg(test)]
+impl Drop for ResolverGuard {
+    fn drop(&mut self) {
+        RESOLVER.with_borrow_mut(|stack| {
+            stack.pop();
+        });
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESOLVER: std::cell::RefCell<Vec<TestResolve>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many hops a delivery client follows — the default policy's own limit, spelled out because a
+/// custom policy does not inherit one.
+const REDIRECT_HOPS: usize = 10;
+
+/// The decision [`public_redirect_policy`] makes about one hop: follow it only while it stays an
+/// http(s) address on a public host. A scheme change or a private host — this machine, its network,
+/// the cloud metadata address — refuses the hop, so a public receiver's 302 cannot aim the
+/// mothership's POST at somewhere the save-time check would never have allowed.
+pub fn follow_public_hop(url: &reqwest::Url) -> bool {
+    matches!(url.scheme(), "http" | "https") && !private_host(url)
+}
+
+/// The redirect policy for the notify module's delivery clients: [`follow_public_hop`] on every
+/// hop, then the hop's name resolved and refused unless every address is public (a public-looking
+/// name pointed at `169.254.169.254` passes the literal check), with the default policy's hop limit
+/// kept (a custom policy has none of its own). The first URL never passes through a redirect policy
+/// — the owner's webhook may point at their own machine — so this only ever narrows where a
+/// redirect may carry a POST.
+pub fn public_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= REDIRECT_HOPS {
+            attempt.error("too many redirects")
+        } else if follow_public_hop(attempt.url()) && hop_resolves_to_public(attempt.url().host_str().unwrap_or_default()) {
+            attempt.follow()
+        } else {
+            attempt.error("a redirect to a private or non-http(s) address is refused")
+        }
+    })
+}
+
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
@@ -768,6 +963,239 @@ mod tests {
         assert!(!valid_repo("owner/.."));
         assert!(!valid_repo("owner/repo/extra"));
         assert!(!valid_repo("owner"));
+    }
+
+    #[test]
+    fn private_ips_cover_both_families_and_their_special_ranges() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for bad in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254", // the cloud metadata address
+            "100.64.0.1",      // carrier-grade NAT, where tailnets live
+            "100.127.255.255", // the top of 100.64.0.0/10
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:10.0.0.1", // an IPv4-mapped address answers for its IPv4
+            "::ffff:169.254.169.254",
+            "::127.0.0.1",        // so does the deprecated IPv4-compatible form
+            "0.1.2.3",            // 0.0.0.0/8
+            "64:ff9b::a9fe:a9fe", // NAT64 to the metadata address
+            "64:ff9b:1::a00:1",   // the local-use NAT64 prefix, to 10.0.0.1
+            "2002:7f00:1::1",     // 6to4 around 127.0.0.1
+            "fec0::1",            // deprecated site-local
+        ] {
+            assert!(private_ip(ip(bad)), "{bad} is private");
+        }
+        for good in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "100.0.0.1",   // below 100.64.0.0/10
+            "100.128.0.1", // above it
+            "172.15.0.1",  // below 172.16.0.0/12
+            "172.32.0.1",  // above it
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "64:ff9b::808:808", // NAT64 to a public address
+            "2002:808:808::1",  // 6to4 around a public address
+        ] {
+            assert!(!private_ip(ip(good)), "{good} is public");
+        }
+    }
+
+    #[test]
+    fn private_host_names_cover_this_machine_and_its_neighborhood() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        for bad in [
+            "http://localhost/hook",
+            "http://api.localhost/hook",
+            "http://printer.local/hook",
+            "http://db.internal/hook",
+            "http://localhost./hook", // a trailing dot is still localhost
+            "http://intranet/hook",   // dotless: a name only this network knows
+            "http://127.0.0.1/hook",
+            "http://10.0.0.1/hook",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/hook",
+            "http://[fd00::1]/hook",
+            "http://[::ffff:169.254.169.254]/", // the URL parser writes it as ::ffff:a9fe:a9fe
+            "http://2852039166/",               // 169.254.169.254 as one decimal number
+            "http://0x7f.1/",                   // 127.0.0.1 in hex shorthand
+        ] {
+            assert!(private_host(&url(bad)), "{bad} names this machine or its network");
+        }
+        for good in [
+            "https://example.com/hook",
+            "http://hooks.example.com/hook",
+            "https://8.8.8.8/hook",
+            "https://[2606:4700:4700::1111]/hook",
+        ] {
+            assert!(!private_host(&url(good)), "{good} is a public address");
+        }
+    }
+
+    #[test]
+    fn the_all_public_core_refuses_no_address_and_any_private_one() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(!all_public_ips(&[]), "a name with no address is not public");
+        assert!(all_public_ips(&[ip("93.184.216.34"), ip("2606:4700::1")]));
+        assert!(
+            !all_public_ips(&[ip("93.184.216.34"), ip("10.0.0.5")]),
+            "one private address in the round-robin refuses the name"
+        );
+        assert!(!all_public_ips(&[ip("127.0.0.1")]));
+    }
+
+    #[test]
+    fn redirect_hops_are_followed_only_to_public_http_hosts() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert!(follow_public_hop(&url("https://example.com/x")));
+        assert!(follow_public_hop(&url("http://example.com/x")));
+        assert!(!follow_public_hop(&url("http://169.254.169.254/")));
+        assert!(!follow_public_hop(&url("http://10.0.0.1/")));
+        assert!(!follow_public_hop(&url("http://localhost/")));
+        assert!(!follow_public_hop(&url("http://printer.local/")));
+        assert!(
+            !follow_public_hop(&url("ftp://example.com/x")),
+            "the scheme must stay http(s)"
+        );
+        assert!(!follow_public_hop(&url("file:///etc/passwd")));
+    }
+
+    #[tokio::test]
+    async fn the_dns_check_reads_the_installed_resolver_without_the_network() {
+        fn resolve(host: &str) -> Option<Vec<IpAddr>> {
+            let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+            match host {
+                "public.example" => Some(vec![ip("93.184.216.34"), ip("2606:4700::1")]),
+                "roundrobin.example" => Some(vec![ip("93.184.216.34"), ip("10.0.0.5")]),
+                "intranet.example" => Some(vec![ip("10.0.0.5")]),
+                _ => None, // nothing else resolves
+            }
+        }
+        let _guard = install_test_resolver(resolve);
+        assert!(resolves_to_public("public.example").await);
+        assert!(!resolves_to_public("roundrobin.example").await);
+        assert!(!resolves_to_public("intranet.example").await);
+        assert!(
+            !resolves_to_public("nx.example").await,
+            "a name that does not resolve is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn localhost_resolves_to_a_private_address_and_is_refused() {
+        // /etc/hosts answers this one, so no network is reached; the seam above is not installed,
+        // which is the point — this is the real resolver path refusing a resolvable private name.
+        assert!(!resolves_to_public("localhost").await);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_private_host_is_refused_and_never_dialed() {
+        use std::io::{Read, Write};
+        let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (hop1, hop2) = (
+            first.local_addr().unwrap().to_string(),
+            second.local_addr().unwrap().to_string(),
+        );
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = first.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = conn.read(&mut buf); // the request head; the answer does not depend on it
+                let _ = conn.write_all(
+                    format!("HTTP/1.1 302 Found\r\nLocation: http://{hop2}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                );
+            }
+        });
+        let client = reqwest::Client::builder().redirect(public_redirect_policy()).build().unwrap();
+        let err = client
+            .get(format!("http://{hop1}/"))
+            .send()
+            .await
+            .expect_err("the 302 aims the request at 127.0.0.1, which the policy refuses");
+        // reqwest wraps the policy's refusal ("a redirect to a private … address is refused") as
+        // the source of its own "error following redirect", so the whole chain is checked.
+        let mut names_refusal = false;
+        let mut layer = Some(&err as &dyn std::error::Error);
+        while let Some(e) = layer {
+            names_refusal |= e.to_string().contains("private");
+            layer = e.source();
+        }
+        assert!(names_refusal, "the error names the refusal: {err}");
+        // And the refused hop was never dialed: the policy answers before any connection is made,
+        // so the second listener sees nothing for as long as we care to look.
+        second.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        loop {
+            match second.accept() {
+                Ok(_) => panic!("the refused hop was dialed anyway"),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() > deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("accepting on the second listener: {e}"),
+            }
+        }
+    }
+
+    /// A hop to a public-looking name that resolves to a private address is refused like a literal
+    /// one: the literal check alone would let `metadata.example` (pointed at 127.0.0.1 here, at
+    /// 169.254.169.254 in the wild) through.
+    #[tokio::test]
+    async fn a_redirect_to_a_name_resolving_privately_is_refused() {
+        use std::io::{Read, Write};
+        fn resolve(host: &str) -> Option<Vec<IpAddr>> {
+            (host == "metadata.example").then(|| vec!["127.0.0.1".parse().unwrap()])
+        }
+        let _guard = install_test_resolver(resolve);
+        let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop1 = first.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = first.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = conn.read(&mut buf);
+                let _ = conn.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://metadata.example/latest/meta-data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let client = reqwest::Client::builder().redirect(public_redirect_policy()).build().unwrap();
+        let err = client
+            .get(format!("http://{hop1}/"))
+            .send()
+            .await
+            .expect_err("the hop resolves privately");
+        let mut names_refusal = false;
+        let mut layer = Some(&err as &dyn std::error::Error);
+        while let Some(e) = layer {
+            names_refusal |= e.to_string().contains("private");
+            layer = e.source();
+        }
+        assert!(names_refusal, "refused by the policy, not by a failed connect: {err}");
+        assert!(
+            !hop_resolves_to_public("nx.example"),
+            "a hop that does not resolve is refused"
+        );
+        assert!(
+            !hop_resolves_to_public("[::ffff:7f00:1]"),
+            "a bracketed literal is judged as it is"
+        );
     }
 
     #[test]

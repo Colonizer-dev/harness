@@ -44,3 +44,14 @@ updates:
     groups:
       relay:
         patterns: ["*"]
+
+  # Dependabot only looks inside the directories listed here, so this entry cannot see
+  # images/colony-node/Dockerfile, whose digest is held to images.lock by colony-image.yml's
+  # drift check.
+  - package-ecosystem: docker
+    directory: /.github/ci/otel-collector
+    schedule:
+      interval: weekly
+    groups:
+      otel-collector:
+        patterns: ["*"]

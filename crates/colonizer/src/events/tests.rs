@@ -1930,3 +1930,45 @@ async fn a_relayed_task_call_neither_tracks_nor_disarms_a_relaunch_does_both() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A foreground Task never gets a `subagent_end` — the runner emits one only for a background
+/// task's notification — so its own result settles it. Otherwise its id stays in the set for the
+/// rest of the run and no later background settlement can arm the re-drive. A background launch
+/// ack is not a settlement, and a lead's streamed text is its continuation arriving.
+#[tokio::test]
+async fn a_foreground_task_settles_on_its_result_and_a_background_ack_does_not() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let task = |id: &str| json!({"type": "tool_call", "tool_call_id": id, "name": "Task"});
+
+    // A foreground Task: its call, then the report as its result, and no `subagent_end`.
+    note_turn_shape(&rt, &task("fg")).await;
+    note_turn_shape(&rt, &json!({"type": "tool_result", "tool_call_id": "fg", "output": "report"})).await;
+    assert!(rt.open_subagents.lock().await.is_empty(), "the foreground result settled it");
+
+    // A background Task: the launch ack leaves it tracked, and its settlement arms the window.
+    note_turn_shape(&rt, &task("bg")).await;
+    let ack = json!({"type": "tool_result", "tool_call_id": "bg", "output": "launched", "background": true});
+    note_turn_shape(&rt, &ack).await;
+    assert!(
+        rt.open_subagents.lock().await.contains("bg"),
+        "a launch ack is not a settlement"
+    );
+    note_turn_shape(
+        &rt,
+        &json!({"type": "subagent_end", "tool_call_id": "bg", "status": "completed"}),
+    )
+    .await;
+    assert!(
+        rt.turn_lost_since.lock().await.is_some(),
+        "with the foreground Task settled, the background one's settlement arms the window"
+    );
+
+    // The lead streaming its continuation stands the re-drive down; a subagent's delta does not.
+    let relayed = json!({"type": "assistant_text_delta", "delta": "x", "agent": {"id": "bg", "name": "explore"}});
+    note_turn_shape(&rt, &relayed).await;
+    assert!(rt.turn_lost_since.lock().await.is_some());
+    note_turn_shape(&rt, &json!({"type": "assistant_text_delta", "delta": "Both reports"})).await;
+    assert!(rt.turn_lost_since.lock().await.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
