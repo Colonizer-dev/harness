@@ -76,11 +76,11 @@ Only when the pack ships tool servers. An object of server entries (or one under
 
 - Local stdio: `command` plus optional `args` and `env`.
 - Remote: `url` plus a non-empty `hosts` (or `allowedHosts`) declaration. Both checkers
-  reject a remote entry without hosts (see Validation below). The declared hosts are not
-  enforced: nothing adds them to a colony's egress policy. In the default `open` mode a colony
-  reaches the public internet anyway; in `allowlist` mode the operator has to list them
-  ([sandbox-network.md](sandbox-network.md#egress-policy-303)). The boot path reads and checks
-  the declaration so a future gate can consume it.
+  reject a remote entry without hosts (see Validation below). In `allowlist` mode the declared
+  hosts join the colony's allow list, recorded in `egress.json` as the pack's contribution
+  (see [sandbox-network.md](sandbox-network.md#hosts-a-skill-pack-declares)); they are still
+  clamped by the fleet floor. In `open` mode they are not a fence — the `public` profile covers
+  them; a per-pack fence in open mode is future work.
 
 The harness validates `mcp.json` but does not start its servers itself. superpowers, archify,
 google-skills and the graft bundle ship none (archify's and google-skills' staging fails if one
