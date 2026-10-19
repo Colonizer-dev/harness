@@ -163,6 +163,15 @@ them so the form prefills.
   fallback that names no configured connection, or whose own plan is out, counts as no fallback. With
   the setting empty (the default) nothing changes: the queue pauses on the account's limit and
   colonies wait for the reset.
+- **Claude's quota and the queue.** With no fallback carrying the work, the Claude account's own
+  exhausted session or weekly limit pauses the queue: every queued colony waits for the reset, even
+  one that would run on another agent module or on a configured provider. The sandbox module's
+  `claude_quota_pauses_queue` (default on, no per-org override) narrows that: switched off, only the
+  queued colonies that spend the Claude account wait; colonies on another agent module, or whose
+  model roles are all routed to configured providers, keep starting. See
+  [docs/protocol/providers.md](protocol/providers.md) for the `scope`/`held` fields that describe
+  this and the cockpit banner they drive. Per-provider pauses are unchanged: when every routable
+  provider's plan is out, the whole queue still waits.
 - **Out-of-quota card.** Colonies blocked on an exhausted connection (every request since their last
   success answered with the quota error, and no `fallback_model` retry) show on one "Provider out of
   quota" card per connection — in the inbox's "Needs you" list and at the top of Settings →
