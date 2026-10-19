@@ -141,7 +141,10 @@ The table row above describes most of the payload. The full answer also carries 
 configured image, size, `max_parallel`, the `msb` version and the colony Claude binary), `modules` (each
 kind's provider), `assets` (where the app's files were found), `reclaim` (`{reclaimable, unpushed}`
 counts), `ledger` (the notification rate-limit tallies), `model_providers`, `quota` (§6.5) and
-`account_alerts` (below) and `backlog` (below). The
+`account_alerts` (below) and `backlog` (below). It also carries `observability`: the export's one
+word, `off` (not configured, or switched off), `ok` (running healthy) or `degraded` (meant to run
+and not healthy — the full story is `GET /api/observability/status`, [Observability](observability.md)).
+The
 `runtime` key is the other half: whether this machine can actually boot a colony — the checks the
 installer makes, answered whenever you ask.
 

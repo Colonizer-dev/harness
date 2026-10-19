@@ -140,7 +140,14 @@ async fn main() -> ExitCode {
                 });
             }
             loop {
-                let wait = exporter.tick().await;
+                // The tick races the stop signal (#850): a request still in flight when the
+                // mothership goes away is cancelled, not awaited — its batch is neither sent on
+                // nor committed, nothing further is written, and the restart replays it from the
+                // committed cursors.
+                let wait = tokio::select! {
+                    wait = exporter.tick() => wait,
+                    _ = stop_rx.changed() => break,
+                };
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {}
                     _ = stop_rx.changed() => break,

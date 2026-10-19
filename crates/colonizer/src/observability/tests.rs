@@ -246,6 +246,115 @@ async fn observability_ranges_are_checked_at_save_time() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// Plants a module choice straight into the in-memory store, past the save-time checks — the
+/// compact field must still read a coherent word for a module the cockpit's validation would
+/// never have let through, because the file on disk can say anything.
+async fn plant(app: &Shared, provider: &str, enabled: bool, settings: &[(&str, Value)]) {
+    app.modules.write().await.observability = Some(crate::config::ModuleChoice {
+        provider: provider.into(),
+        enabled,
+        settings: obs_settings(settings),
+    });
+}
+
+/// The compact `/api/status` field (#850): `off` when nothing is meant to run, `degraded` when
+/// something is meant to run and is not healthy, `ok` when it is. Every rung is checked from the
+/// same install so the ordering — verdict, then child, then the add-on's own word — is the one
+/// the handler implements.
+#[tokio::test]
+async fn compact_status_maps_off_degraded_and_ok() {
+    let root = crate::tests::temp_root();
+    let app = crate::tests::test_app(&root);
+    assert_eq!(
+        super::compact_status(&app).await,
+        "off",
+        "never configured is off, not a fault"
+    );
+
+    // Saved but switched off: still off — an operator who turned it off meant it off.
+    plant(&app, "otlp", false, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(super::compact_status(&app).await, "off");
+
+    // Saved on with a config that cannot resolve (no endpoint): degraded, not off — the module
+    // is meant to be running and is not.
+    plant(&app, "otlp", true, &[]).await;
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "configured but invalid is degraded"
+    );
+
+    // A config that resolves: degraded while no supervision loop has a child up.
+    plant(&app, "otlp", true, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "configured but the child is not running"
+    );
+
+    // The loop says running and the add-on has written no complaint: ok.
+    super::supervisor::test_set_runtime(&app.cfg.data_dir, "running");
+    assert_eq!(super::compact_status(&app).await, "ok", "running with no status.json is ok");
+
+    let status = |body: Value| {
+        let path = super::supervisor::status_path(&app.cfg.data_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body.to_string()).unwrap()
+    };
+    // The add-on's own word, first overall then per signal.
+    status(json!({"state": "retrying", "signals": {}}));
+    assert_eq!(super::compact_status(&app).await, "degraded", "the add-on is retrying");
+    status(json!({"state": "running", "signals": {"logs": {"state": "backing_off"}}}));
+    assert_eq!(super::compact_status(&app).await, "degraded", "a signal is backing off");
+    status(json!({"state": "running", "signals": {"logs": {"state": "ok"}}}));
+    assert_eq!(super::compact_status(&app).await, "ok");
+
+    // And the supervisor's verdict outranks a happy status.json.
+    super::supervisor::test_set_runtime(&app.cfg.data_dir, "refused");
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "refused is degraded whatever the file says"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The compact field reaches for the keychain (seconds) only once everything else says the install
+/// is healthy: a malformed header list in the secret is the one fault no other read can see, so an
+/// otherwise `ok` install that carries one must still read `degraded` — and the reads before that
+/// never pay for the keychain at all.
+#[tokio::test]
+async fn compact_status_reads_the_header_secret_only_when_the_rest_is_healthy() {
+    let root = crate::tests::temp_root();
+    let app = crate::tests::test_app(&root);
+    plant(&app, "otlp", true, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    let headers = app.cfg.config_dir.join("observability-headers");
+    std::fs::create_dir_all(headers.parent().unwrap()).unwrap();
+    // A pair with no `=`: under the add-on's own rules a malformed list sends nothing, so the
+    // exporter is not running what the operator configured.
+    std::fs::write(&headers, "Authorization: Basic not-a-pair").unwrap();
+
+    // Nothing is meant to run: off, and the secret is never consulted — the keychain read is the
+    // slow part of this poll and an install that never turned export on never pays for it.
+    plant(&app, "otlp", false, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(super::compact_status(&app).await, "off");
+
+    // Configured but no child up: degraded, again without the secret.
+    plant(&app, "otlp", true, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(super::compact_status(&app).await, "degraded");
+
+    // Healthy on every other count: now the secret is read, and its verdict is the last word.
+    super::supervisor::test_set_runtime(&app.cfg.data_dir, "running");
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "a malformed header list in the secret is an Invalid, not an ok install"
+    );
+    std::fs::write(&headers, "x-honeycomb-team=abc").unwrap();
+    assert_eq!(super::compact_status(&app).await, "ok", "a good list leaves it ok");
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// #861: `relay_fleet_history` defaults off, saves like any switch, reaches the add-on's contract
 /// settings, and the contract carries the relay list (empty until members report their own
 /// exporters, #860).

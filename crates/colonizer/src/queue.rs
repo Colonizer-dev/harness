@@ -600,9 +600,18 @@ pub(crate) async fn start_queued(app: &Shared) {
     suspend_waiting_colonies(app, &modules).await;
     // Every routable provider's plan out: the queue holds, and `/api/status` says why. Checked per
     // tick rather than per colony, so a recovered provider unpauses the whole queue at once.
-    if providers::quota_status(app).await.paused {
+    let quota = providers::quota_status(app).await;
+    if quota.paused {
         return;
     }
+    // The Claude account is out but its hold is scoped to its own colonies (#1129), so they wait and
+    // every other colony starts; the ids come off the poll above, and the snapshot behind them
+    // answers the suspended and prewarming colonies this tick never queued.
+    let claude = if quota.pauses_claude_only() {
+        Some(providers::ClaudeRoutes::snapshot(app).await)
+    } else {
+        None
+    };
     // Below the free-space floor: queued colonies that would start hold until the reclaim tick
     // frees room. The hold rides in `room`, not an early return: retiring a colony that can never
     // start takes no slot, and leaving it Queued would stall the queue head (and all the disk the
@@ -644,7 +653,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // of them — answering it is what the user has been waiting for (issue #562). The floor above
     // holds this back with every other start.
     if !held {
-        restore_suspended(app, &modules).await;
+        restore_suspended(app, &modules, claude.as_ref()).await;
     }
     // A colony routed to an account in trouble (issue #984) does not boot only to fail its first
     // turn: it holds its place in the queue until the account works again, exactly as the account's
@@ -669,6 +678,7 @@ pub(crate) async fn start_queued(app: &Shared) {
             |s| {
                 let (org_limit, repo_limit) = limits(&s.org);
                 !held
+                    && !quota.held_ids.contains(&s.id)
                     && !troubled_accounts.contains(&crate::account_health::account_of(s))
                     && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
             },
@@ -808,7 +818,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // launches above — has had its say: a pre-warm request (issue #701) boots a suspended colony's
     // question with whatever slots are left, never ahead of a colony that already holds an answer.
     if !held {
-        prewarm_requested(app, &modules).await;
+        prewarm_requested(app, &modules, claude.as_ref()).await;
     }
 }
 
@@ -1353,7 +1363,11 @@ async fn retire_and_rotate(app: &Shared, id: &str, revert: impl FnOnce(&mut Sess
 /// failed boot leaves it on the record. The link drop and the event-log rotation are the resume
 /// handler's, for the same reason: the fresh microVM's agentd numbers events from 1, and a stale
 /// log would swallow them.
-pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::ModulesConfig) {
+pub(crate) async fn restore_suspended(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    claude: Option<&providers::ClaudeRoutes>,
+) {
     let mut candidates: Vec<(DateTime<Utc>, String)> = {
         app.sessions
             .read()
@@ -1362,6 +1376,9 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
             // Issue #673: a merge covered this colony's work — the answer can wait until it is kept.
             .filter(|s| !crate::supersede::blocks_start(s))
+            // Issue #1129: a colony the scoped Claude hold covers waits for the reset, as it would
+            // have behind the whole-queue pause this tick no longer returns on.
+            .filter(|s| claude.is_none_or(|c| !c.holds(s)))
             .map(|s| (restore_key(s), s.id.clone()))
             .collect()
     };
@@ -1447,7 +1464,11 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
 /// question until an answer lands ([`deliver_prewarmed`]) or the timeout gives up
 /// ([`prewarm_expire`]). The link drop and the event-log rotation are this pass's, like the
 /// restore's: the fresh microVM's agentd numbers events from 1, and a stale log would swallow them.
-pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::ModulesConfig) {
+pub(crate) async fn prewarm_requested(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    claude: Option<&providers::ClaudeRoutes>,
+) {
     let timeout = orgs::prewarm_timeout(modules);
     let now = Utc::now();
     let mut candidates: Vec<(DateTime<Utc>, String)> = {
@@ -1463,6 +1484,8 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
                     // Issue #673: a merge covered this colony's work — like the restore pass, no
                     // warm-up until it is kept.
                     && !crate::supersede::blocks_start(s)
+                    // Issue #1129: a warm-up boots the colony, so the scoped Claude hold covers it too.
+                    && claude.is_none_or(|c| !c.holds(s))
             })
             .map(|s| (s.prewarm.as_ref().map(|p| p.requested_at).unwrap_or(now), s.id.clone()))
             .collect()
@@ -2837,6 +2860,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The Claude account's own cap holds the whole queue by default; switched off, only the queued
+    /// colonies that spend the account wait and every other one starts (#1129).
+    #[tokio::test]
+    async fn a_scoped_claude_quota_holds_only_the_colonies_that_spend_the_account() {
+        let root = std::env::temp_dir().join(format!("colonizer-claude-scope-{}", crate::util::short_id()));
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![
+                crate::modules::AgentModule::test("claude-code").needs_claude(true),
+                crate::modules::AgentModule::test("opencode").needs_claude(false),
+            ],
+            |_| {},
+        );
+        // The reclaim floor would otherwise pause admission on a host with less than the default 5G
+        // free, keeping every colony queued for a reason this test is not about.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("min_free_disk".into(), json!("0"));
+        let mut on_claude = colony("acme", SessionStatus::Queued);
+        on_claude.id = "on-claude".into();
+        on_claude.agent = "claude-code".into();
+        let mut on_opencode = colony("acme", SessionStatus::Queued);
+        on_opencode.id = "on-opencode".into();
+        on_opencode.agent = "opencode".into();
+        *app.sessions.write().await = vec![on_claude, on_opencode];
+        app.gateway
+            .mark_account_quota_exhausted(Some("10-05 19:51:58".into()), Some(Utc::now().timestamp() + 3600));
+
+        // The default: the account's cap pauses the queue, so both colonies keep their place.
+        start_queued(&app).await;
+        for id in ["on-claude", "on-opencode"] {
+            assert_eq!(
+                app.session(id).await.unwrap().status,
+                SessionStatus::Queued,
+                "{id} waits on the whole queue"
+            );
+        }
+
+        // Scoped: the opencode colony never mounts the Claude login, so it leaves the queue while
+        // the claude-code colony keeps its place.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(false));
+        start_queued(&app).await;
+        assert_eq!(
+            app.session("on-claude").await.unwrap().status,
+            SessionStatus::Queued,
+            "the colony that spends the Claude account still waits for the reset"
+        );
+        assert_ne!(
+            app.session("on-opencode").await.unwrap().status,
+            SessionStatus::Queued,
+            "a colony on another agent module keeps starting while the account is out"
+        );
+
+        // The same hold covers a boot that is not a fresh admission: an answered suspension comes
+        // back ahead of the queue, and it would land on the exhausted account.
+        let mut answered = waiting_colony("answered", "claude-code", Some("s1"));
+        answered.suspended = Some(Suspension {
+            at: Utc::now() - chrono::Duration::minutes(5),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        answered.pending_answer = Some(PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
+        });
+        app.sessions.write().await.push(answered);
+        std::fs::create_dir_all(app.session_dir("answered")).unwrap();
+        start_queued(&app).await;
+        let answered = app.session("answered").await.unwrap();
+        assert_eq!(
+            answered.status,
+            SessionStatus::WaitingForAnswer,
+            "the scoped hold keeps a Claude colony suspended as well as queued"
+        );
+        assert!(answered.suspended.is_some(), "it did not boot to deliver the answer");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn a_provider_pause_names_the_provider_by_its_display_name_never_claude() {
         let root = std::env::temp_dir().join(format!("colonizer-quota-name-{}", crate::util::short_id()));
@@ -4158,7 +4269,7 @@ mod tests {
         std::fs::create_dir_all(app.session_dir("answered")).unwrap();
         std::fs::create_dir_all(app.session_dir("second")).unwrap();
 
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let sessions = app.sessions.read().await;
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         let restored = by_id("answered");
@@ -4242,7 +4353,7 @@ mod tests {
         rt.activity.lock().await.question_since = Some(Utc::now());
         drop(rt);
 
-        prewarm_requested(&app, &modules).await;
+        prewarm_requested(&app, &modules, None).await;
         {
             let sessions = app.sessions.read().await;
             let s = sessions.iter().find(|s| s.id == "warming").unwrap();
@@ -4273,7 +4384,7 @@ mod tests {
 
         // No second boot: the restore pass leaves an answered warm-up alone — its own boot is the
         // one the answer rides.
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let s = app.session("delivered").await.unwrap();
         assert_eq!(
             s.status,
@@ -4367,7 +4478,7 @@ mod tests {
             answered_at: Some(Utc::now()),
         };
         app.update_session("warming", |x| x.pending_answer = Some(held)).await;
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let s = app.session("warming").await.unwrap();
         assert_eq!(s.status, SessionStatus::Starting, "the held answer got its boot back");
         assert!(
@@ -4384,7 +4495,7 @@ mod tests {
         let modules = app.modules.read().await.clone();
         *app.sessions.write().await = vec![warming_colony("stale", Utc::now() - chrono::Duration::minutes(10), None)];
         std::fs::create_dir_all(app.session_dir("stale")).unwrap();
-        prewarm_requested(&app, &modules).await;
+        prewarm_requested(&app, &modules, None).await;
         let s = app.session("stale").await.unwrap();
         assert!(
             s.status == SessionStatus::WaitingForAnswer && s.suspended.is_some(),
@@ -4429,8 +4540,8 @@ mod tests {
             std::fs::create_dir_all(app.session_dir(id)).unwrap();
         }
 
-        restore_suspended(&app, &modules).await;
-        prewarm_requested(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
+        prewarm_requested(&app, &modules, None).await;
         let sessions = app.sessions.read().await;
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(by_id("answered").status, SessionStatus::Starting, "the answers went first");
@@ -4500,7 +4611,7 @@ mod tests {
         std::fs::create_dir_all(app.session_dir("suspended-first")).unwrap();
         std::fs::create_dir_all(app.session_dir("answered-first")).unwrap();
 
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let sessions = app.sessions.read().await;
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(
@@ -4576,7 +4687,7 @@ mod tests {
         *app.sessions.write().await = snapshot;
         std::fs::create_dir_all(app.session_dir("held")).unwrap();
         std::fs::create_dir_all(app.session_dir("later")).unwrap();
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         {
             let sessions = app.sessions.read().await;
             let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
@@ -4598,7 +4709,7 @@ mod tests {
             x.superseded.as_mut().is_some_and(crate::supersede::Supersession::mark_kept)
         })
         .await;
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         assert_eq!(
             app.session("held").await.unwrap().status,
             SessionStatus::Starting,

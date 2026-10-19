@@ -169,7 +169,11 @@ impl GrpcTransport {
             &format!("{url} answered {}: {}", code_name(status.code()), status.message()),
         );
         match classify_status(status) {
-            GrpcClass::Retry(after) => Outcome::Retry { message, after },
+            GrpcClass::Retry(after) => Outcome::Retry {
+                message,
+                after,
+                reason: None,
+            },
             GrpcClass::Unauthorized => Outcome::Unauthorized {
                 // The gRPC code's number (0-16), where the HTTP transport carries a status code.
                 status: status.code() as u16,

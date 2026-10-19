@@ -17,6 +17,8 @@ import {
   quotaFallbackParts,
   quotaParkedSessions,
   quotaPauseKind,
+  quotaScopedParts,
+  quotaScopedToClaude,
   resumeQuotaParkedSessions,
   visibleQuotaBanner,
 } from "./QuotaBanner";
@@ -289,5 +291,45 @@ describe("the account fallback banner (issue #1130)", () => {
     expect(html).toContain("Claude out, running on MiniMax");
     expect(html).not.toContain("Resume all");
     expect(html).toContain("Dismiss");
+  });
+});
+
+describe("the scoped Claude hold (issue #1129)", () => {
+  const scoped = (overrides: Partial<StatusQuota> = {}): StatusQuota =>
+    accountQuota({
+      paused: false,
+      reason: "Claude account quota exhausted, resets 10-05 19:51:58 — 2 queued colonies on Claude wait; 1 more keeps starting",
+      kind: "account",
+      scope: "claude",
+      held: 2,
+      ...overrides,
+    });
+
+  it("only an account pause scoped to Claude counts, never a queue-wide one", () => {
+    expect(quotaScopedToClaude(scoped())).toBe(true);
+    expect(quotaScopedToClaude(quota({ scope: "claude" }))).toBe(false);
+    expect(quotaScopedToClaude(accountQuota({ scope: "queue" }))).toBe(false);
+    expect(quotaScopedToClaude(accountQuota())).toBe(false);
+  });
+
+  it("names the held count and says nothing when nothing is held", () => {
+    expect(quotaScopedParts(scoped(), NOW, "UTC")?.effect).toContain("2 queued colonies on Claude wait");
+    expect(quotaScopedParts(scoped({ held: 1 }), NOW)?.effect).toContain("1 queued colony on Claude waits");
+    const effect = quotaScopedParts(scoped({ held: 0 }), NOW)?.effect ?? "";
+    expect(effect).not.toMatch(/queued/);
+    expect(effect).toContain("colonies on other providers keep starting");
+    expect(quotaScopedParts(accountQuota(), NOW)).toBeNull();
+    expect(quotaScopedParts(quota({ paused: true }), NOW)).toBeNull();
+  });
+
+  it("banners although nothing is paused, keys per scope, and renders no resume-all", () => {
+    expect(visibleQuotaBanner(scoped(), new Set())).not.toBeNull();
+    expect(visibleQuotaBanner(scoped(), new Set([quotaBannerKey(scoped())]))).toBeNull();
+    expect(quotaBannerKey(scoped())).not.toBe(quotaBannerKey(accountQuota({ paused: true, scope: "queue" })));
+    const html = markup(scoped(), [nativelyParked("parked")]);
+    expect(html).toContain("Claude session limit reached");
+    expect(html).toContain("2 queued colonies on Claude wait");
+    expect(html).toContain("Dismiss");
+    expect(html).not.toContain("Resume all");
   });
 });
