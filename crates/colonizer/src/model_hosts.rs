@@ -173,6 +173,10 @@ fn by_blended_then_id(a: &ModelHost, b: &ModelHost) -> Ordering {
     by_blended(a, b).then_with(|| a.provider_id.cmp(&b.provider_id))
 }
 
+/// A serving provider with its health state and its price (and the feed entry the price came
+/// from, when the feed supplied it), gathered before the ranking is built.
+type HostEntry<'a> = (&'a Provider, HostState, Option<(Pricing, Option<&'a FeedEntry>)>);
+
 /// One canonical's hosts, ranked — or `None` when fewer than two candidates serve it, because a
 /// single-host model has no cheapest host to choose. Every configured provider that serves the
 /// canonical contributes a host, priced by [`priced`] and stamped with the health/quota state
@@ -183,7 +187,7 @@ fn host_ranking(
     canonical: &str,
     state: &impl Fn(&Provider) -> HostState,
 ) -> Option<ModelHostRanking> {
-    let entries: Vec<(&Provider, HostState, Option<(Pricing, Option<&FeedEntry>)>)> = providers
+    let entries: Vec<HostEntry<'_>> = providers
         .iter()
         .filter(|p| serves(p, canonical))
         .map(|provider| {
@@ -790,7 +794,7 @@ mod tests {
         let mut pricey = provider("pricey-trusted", &["glm-5"]);
         pricey.pricing = Some(pricing(1.0, 1.0, 0.0));
         let mut current = provider("zai", &["glm-5"]);
-        current.pricing = Some(pricing(0.5, 0.5, 0.0));
+        current.pricing = Some(pricing(2.0, 2.0, 0.0));
         let providers = [current, cheap, pricey];
         let refused = |p: &Provider| p.id != "cheap-untrusted";
         assert_eq!(
@@ -830,7 +834,7 @@ mod tests {
         let current = provider("zai", &["glm-5"]);
         let priced_current = {
             let mut c = current.clone();
-            c.pricing = Some(pricing(0.5, 0.5, 0.0));
+            c.pricing = Some(pricing(2.0, 2.0, 0.0));
             c
         };
         assert_eq!(
