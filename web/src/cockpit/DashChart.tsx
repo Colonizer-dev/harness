@@ -853,7 +853,7 @@ export function ColonyRow({
         <span className="truncate" style={{ color: TONE_COLOR[meta.tone] }} title={parkLine ?? undefined}>
           {meta.label}
         </span>
-        {session.placement && (
+        {session.placement && (session.status === "queued" || session.status === "blocked") && (
           <span className="max-w-full truncate text-meta-lg leading-tight text-faint" title={session.placement}>
             {session.placement}
           </span>

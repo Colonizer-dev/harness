@@ -8,6 +8,7 @@
 //! The host's own limits are here as well — a spend budget and a host-disk quota — because
 //! passing one ends a colony exactly the way the max session length does.
 
+use crate::queue_priority;
 use crate::store::SessionStore;
 use crate::{
     ApiResult, App, Shared, archive, client_error,
@@ -1204,6 +1205,10 @@ async fn resume_with(
             } else {
                 SessionStatus::Queued
             };
+            // Resumed colonies get a RESUMED priority to preserve their queue position ahead of fresh ones
+            if !admitted && x.priority.is_none() {
+                x.priority = Some(queue_priority::RESUMED as i32);
+            }
             x.error = None;
             x.attention = None;
             x.mesh = None;
@@ -1845,7 +1850,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::tests::{admit_resume, app_with_colony, colony, stopped_colony_with_worktree};
+    use crate::sessions::tests::{admit_create, admit_resume, app_with_colony, colony, stopped_colony_with_worktree};
     use crate::util::faults::{self, Op};
     use crate::util::short_id;
     use std::sync::Arc;
@@ -3639,5 +3644,251 @@ exit 0
             "the old run's straggler stays out of the new log: {log:?}"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ----- Resumed colonies queue priority (issue #1220) -----
+
+    /// Helper to create a stopped colony with its worktree for resumption testing.
+    fn resumable_colony(id: &str, org: &str) -> Session {
+        let mut s = stopped_colony_with_worktree(org, id.into());
+        s.branch = format!("colonizer/issue-42-{}", &id[..6]);
+        s
+    }
+
+    #[tokio::test]
+    async fn resumed_colony_gets_resumed_priority_when_queued() {
+        // Issue #1220: Resumed colonies get RESUMED priority to preserve their queue
+        // position ahead of fresh ones.
+        let sessions = RwLock::new(vec![]);
+
+        // Create colony A and admit it to the queue (no room)
+        admit_create(&sessions, "acme", 0, None, "colony_a".into()).await;
+        let colony_a = sessions.read().await[0].clone();
+        assert_eq!(colony_a.status, SessionStatus::Queued);
+        assert_eq!(colony_a.priority, None, "fresh colony has no priority yet");
+
+        // Transition to stopped to simulate it was running
+        {
+            let mut s = sessions.write().await;
+            s[0].status = SessionStatus::Stopped;
+            s[0].git_admin_dir = Some("git".into()); // Has worktree
+        }
+
+        // Resume colony A (still no room, so it goes to Queued)
+        admit_resume(&sessions, "acme", 0, None, "colony_a").await;
+        let resumed_a = sessions.read().await[0].clone();
+        assert_eq!(resumed_a.status, SessionStatus::Queued);
+        assert_eq!(
+            resumed_a.priority,
+            Some(queue_priority::RESUMED as i32),
+            "resumed colony queued should have RESUMED priority (5)"
+        );
+
+        // Create fresh colony B
+        admit_create(&sessions, "acme", 0, None, "colony_b".into()).await;
+        let fresh_b = sessions.read().await[1].clone();
+        assert_eq!(fresh_b.status, SessionStatus::Queued);
+        assert_eq!(fresh_b.priority, None, "fresh colony has no explicit priority");
+
+        // Verify queue ordering: resumed colony A should come before fresh colony B
+        // because A has priority 5 and B has priority 0 (with desc sorting on priority)
+        let sessions_read = sessions.read().await;
+        let (a_prio, a_created) = (
+            queue_priority::effective(&sessions_read[0], &Default::default(), Utc::now()),
+            sessions_read[0].created_at,
+        );
+        let (b_prio, b_created) = (
+            queue_priority::effective(&sessions_read[1], &Default::default(), Utc::now()),
+            sessions_read[1].created_at,
+        );
+
+        assert_eq!(a_prio, queue_priority::RESUMED);
+        assert_eq!(b_prio, 0);
+        // Compare with queue_key: A's key should come before B's (higher priority first)
+        let a_key = queue_priority::queue_key(a_prio, a_created);
+        let b_key = queue_priority::queue_key(b_prio, b_created);
+        assert!(
+            a_key < b_key,
+            "resumed colony A (priority 5) should come before fresh colony B (priority 0) in queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_colony_keeps_explicit_priority() {
+        // Issue #1220: A resumed colony with an explicit priority set should keep it,
+        // not be overwritten to RESUMED.
+        let sessions = RwLock::new(vec![]);
+
+        // Create and queue colony A
+        admit_create(&sessions, "acme", 0, None, "colony_a".into()).await;
+
+        // Set explicit priority (e.g., 15)
+        {
+            let mut s = sessions.write().await;
+            s[0].priority = Some(15);
+            s[0].status = SessionStatus::Stopped;
+            s[0].git_admin_dir = Some("git".into());
+        }
+
+        let colony_before_resume = sessions.read().await[0].clone();
+        assert_eq!(colony_before_resume.priority, Some(15));
+
+        // Resume the colony
+        admit_resume(&sessions, "acme", 0, None, "colony_a").await;
+
+        let colony_after_resume = sessions.read().await[0].clone();
+        assert_eq!(
+            colony_after_resume.priority,
+            Some(15),
+            "explicit priority 15 should be preserved, not overwritten to RESUMED (5)"
+        );
+        assert_eq!(colony_after_resume.status, SessionStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn multiple_resumed_colonies_maintain_fifo_within_same_priority() {
+        // Issue #1220: Multiple resumed colonies with the same priority should maintain
+        // FIFO ordering (oldest first).
+        let mut sessions_vec = vec![];
+
+        // Create three colonies with slight creation time differences
+        let mut colony_a = resumable_colony("colony_a", "acme");
+        let mut colony_b = resumable_colony("colony_b", "acme");
+        let mut colony_c = resumable_colony("colony_c", "acme");
+
+        // Ensure distinct creation times (older first)
+        colony_a.created_at = Utc::now() - chrono::Duration::minutes(3);
+        colony_b.created_at = Utc::now() - chrono::Duration::minutes(2);
+        colony_c.created_at = Utc::now() - chrono::Duration::minutes(1);
+
+        sessions_vec.push(colony_a);
+        sessions_vec.push(colony_b);
+        sessions_vec.push(colony_c);
+
+        let sessions = RwLock::new(sessions_vec);
+
+        // All three are stopped with worktrees
+        {
+            let mut s = sessions.write().await;
+            for sess in s.iter_mut() {
+                sess.status = SessionStatus::Stopped;
+            }
+        }
+
+        // Resume all three (no room for any of them immediately)
+        admit_resume(&sessions, "acme", 0, None, "colony_a").await;
+        admit_resume(&sessions, "acme", 0, None, "colony_b").await;
+        admit_resume(&sessions, "acme", 0, None, "colony_c").await;
+
+        let sessions_read = sessions.read().await;
+
+        // Verify all got RESUMED priority
+        for (_idx, colony_id) in [("colony_a", 0), ("colony_b", 1), ("colony_c", 2)].iter() {
+            let s = &sessions_read[*colony_id];
+            assert_eq!(
+                s.priority,
+                Some(queue_priority::RESUMED as i32),
+                "{} should have RESUMED priority",
+                colony_id
+            );
+            assert_eq!(s.status, SessionStatus::Queued);
+        }
+
+        // Verify FIFO ordering using queue_key
+        let keys: Vec<_> = sessions_read
+            .iter()
+            .map(|s| {
+                let prio = queue_priority::effective(s, &Default::default(), Utc::now());
+                (s.id.clone(), queue_priority::queue_key(prio, s.created_at))
+            })
+            .collect();
+
+        assert!(
+            keys[0].1 < keys[1].1,
+            "colony_a (created 3 min ago) should come before colony_b (created 2 min ago)"
+        );
+        assert!(
+            keys[1].1 < keys[2].1,
+            "colony_b (created 2 min ago) should come before colony_c (created 1 min ago)"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_colony_immediately_admitted_doesnt_get_resumed_priority() {
+        // When a resumed colony is immediately admitted (has room), it should NOT get
+        // RESUMED priority because it's not queued.
+        let sessions = RwLock::new(vec![]);
+
+        // Create colony A
+        admit_create(&sessions, "acme", 1, None, "colony_a".into()).await;
+        let colony_a = sessions.read().await[0].clone();
+        assert_eq!(colony_a.status, SessionStatus::Starting, "admitted immediately");
+
+        // Transition to stopped
+        {
+            let mut s = sessions.write().await;
+            s[0].status = SessionStatus::Stopped;
+            s[0].git_admin_dir = Some("git".into());
+            s[0].priority = None;
+        }
+
+        // Resume with room (max_parallel=1, and nothing running)
+        admit_resume(&sessions, "acme", 1, None, "colony_a").await;
+
+        let resumed_a = sessions.read().await[0].clone();
+        assert_eq!(resumed_a.status, SessionStatus::Starting, "resumed colony should be admitted");
+        assert_eq!(
+            resumed_a.priority, None,
+            "immediately admitted resume should not get RESUMED priority"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_priority_is_less_than_high_priority() {
+        // RESUMED (5) should be between Normal (0) and High (10)
+        let sessions = RwLock::new(vec![]);
+
+        // Create colonies
+        admit_create(&sessions, "acme", 0, None, "low".into()).await;
+        admit_create(&sessions, "acme", 0, None, "mid".into()).await;
+        admit_create(&sessions, "acme", 0, None, "high".into()).await;
+
+        // Set priorities
+        {
+            let mut s = sessions.write().await;
+            s[0].status = SessionStatus::Stopped;
+            s[0].priority = None; // Will become RESUMED (5) when resumed
+            s[0].git_admin_dir = Some("git".into());
+
+            s[1].status = SessionStatus::Stopped;
+            s[1].priority = Some(queue_priority::HIGH as i32); // Explicit high (10)
+            s[1].git_admin_dir = Some("git".into());
+
+            s[2].status = SessionStatus::Stopped;
+            s[2].priority = Some(queue_priority::HIGH as i32 + 5); // Explicit very high (15)
+            s[2].git_admin_dir = Some("git".into());
+        }
+
+        // Resume the first (low priority that will become RESUMED)
+        admit_resume(&sessions, "acme", 0, None, "low").await;
+        admit_resume(&sessions, "acme", 0, None, "mid").await;
+        admit_resume(&sessions, "acme", 0, None, "high").await;
+
+        let sessions_read = sessions.read().await;
+        let low_prio = queue_priority::effective(&sessions_read[0], &Default::default(), Utc::now());
+        let mid_prio = queue_priority::effective(&sessions_read[1], &Default::default(), Utc::now());
+        let high_prio = queue_priority::effective(&sessions_read[2], &Default::default(), Utc::now());
+
+        assert_eq!(low_prio, queue_priority::RESUMED);
+        assert_eq!(mid_prio, queue_priority::HIGH);
+        assert_eq!(high_prio, 15);
+
+        // Verify ordering: 15 > 10 > 5
+        let low_key = queue_priority::queue_key(low_prio, sessions_read[0].created_at);
+        let mid_key = queue_priority::queue_key(mid_prio, sessions_read[1].created_at);
+        let high_key = queue_priority::queue_key(high_prio, sessions_read[2].created_at);
+
+        assert!(high_key < mid_key, "priority 15 should come before priority 10");
+        assert!(mid_key < low_key, "priority 10 should come before priority 5");
     }
 }
