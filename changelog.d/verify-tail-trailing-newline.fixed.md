@@ -1,1 +1,0 @@
-**A failing verify whose output is one huge newline-terminated line keeps that line as evidence.** The earlier fix kept a >1 MiB single-line tail only when it had no newline at all; output ending in the usual trailing `\n` still had its only line dropped, leaving the fix prompt with an empty log. The possibly-partial first line is now dropped only when another line follows it.

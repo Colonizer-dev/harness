@@ -314,19 +314,22 @@ Without consent a plain `fleet sync` fails with the 409 and says how to give it.
 `fleet sync` also retries a push that stopped on a 401 or a 403, or is waiting out a
 `Retry-After`. With the global `--json` both print the mothership's answer.
 
-### Observability backfill
+### Observability backfill and offline export
 
 A destination starts at "now": the live exporter sends what is written from the moment it was
 configured (or, with **Start from = backlog**, only as far back as the backlog limit). The history
 before that line is on disk and never left the machine. `observability backfill` replays it through
 the same supervised add-on, at a bounded rate, with the same record and span ids the live exporter
 would have produced — and never touches the live exporter's cursors
-([Backfill](observability/backfill.md)).
+([Backfill](observability/backfill.md)). `--include-archive` also replays colonies that live only
+in the local archive, and `observability export` writes the requests to a file instead of sending
+them ([Archived colonies and offline export](observability/archive-export.md)).
 
 ```sh
 colonizer observability backfill --since 2026-01-01 --until 2026-06-30 --dry-run   # counts only
 colonizer observability backfill --since 2026-01-01 --until 2026-06-30 --rate 500  # send it
-colonizer observability backfill --repo acme/widgets --dry-run                     # one repository
+colonizer observability backfill --repo acme/widgets --include-archive --dry-run   # one repository, archived too
+colonizer observability export --out export.jsonl --since 2026-01-01               # offline, no network
 ```
 
 `--dry-run` prints the total records and ledger bytes, one line per signal and per org, and the
@@ -334,8 +337,33 @@ estimated encoded volume on the wire — it sends nothing and writes nothing, so
 narrowed as often as needed. Without it the run starts on the mothership and prints where to watch
 it: the cockpit's Settings → Modules → Observability, or the `backfill` object `GET
 /api/observability/status` carries (`state`, `records_sent`, `bytes_sent`, …). `DELETE
-/api/observability/backfill` stops it within one tick, and a restart resumes where it stopped. With
-the global `--json` both print the mothership's answer.
+/api/observability/backfill` stops it within one tick, and a restart resumes where it stopped.
+`observability export --out FILE|DIR` writes the OTLP/JSON requests themselves, one per line, mode
+0600 — an existing directory gets `logs.jsonl` and `traces.jsonl` inside — with `--since`,
+`--until`, `--signals logs,traces` and `--include-archive` narrowing what goes in; `--content`
+includes conversation text and asks for a typed `yes` first (a terminal is required, so a script
+cannot answer for you). It prints the files written and their counts. With the global `--json` all
+of these print the mothership's answer.
+
+### Observability reset
+
+`observability reset` forgets where the export got to, so it starts over — the mothership stops
+the supervised add-on, deletes its saved positions and lets the supervisor restart it from
+nothing ([Resetting](observability/reset.md)).
+
+```sh
+colonizer observability reset              # list, ask, delete
+colonizer observability reset --yes        # no prompt
+colonizer observability reset --hash-key   # also drop the pseudonymising key
+```
+
+It always lists what will be deleted first — `state.json`, plus `hash.key` with `--hash-key`,
+each with its size — then asks `y/N` unless `--yes`. When nobody can answer that question it
+refuses with exit code 2 rather than delete what nobody confirmed: stdin is not a terminal (a
+script, a pipe), or `--json` is in play. The ledgers, the file sink's output and everything else
+under `<data>/observability/` are never touched. With the global `--json` both answers print: the
+dry run's listing and the deletion's — or, when it refused, one JSON object naming what would have
+been deleted.
 
 ## `--json`
 

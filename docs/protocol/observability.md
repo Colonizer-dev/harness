@@ -2,7 +2,8 @@
 
 The Prometheus surface of the [`observability`](../observability.md) module kind. The catalogue, the
 scrape configuration and the privacy rules are in [Metrics (`GET /metrics`)"](../observability/metrics.md);
-this page is the wire contract.
+this page is the wire contract — the scrape route below, the module's `/api` surface (the backfill
+routes, the status route and the reset route) at the end.
 
 ## The route
 
@@ -77,18 +78,48 @@ the repository's compatibility rules. Bucket bounds, the `other` fold and the se
 outcomes are the current implementation; a change to any of them is a changelog entry. See
 [Metrics (`GET /metrics`)"](../observability/metrics.md) for the full table and the reasoning.
 
-## The backfill routes
+## The backfill and export routes
 
-The module's `/api` surface, beside the scrape route above: the history backfill (issue #858),
-served by the mothership and done by the add-on it supervises
-([Backfill](../observability/backfill.md)). Both are owner-only — the install's own API token.
+The module's `/api` surface, beside the scrape route above: the history backfill (issue #858) and
+the offline export (issue #859), served by the mothership and done by the add-on it supervises
+([Backfill](../observability/backfill.md),
+[Archived colonies and offline export](../observability/archive-export.md)). All three are
+owner-only — the install's own API token.
 
 | Route | Does |
 | :--- | :--- |
-| `POST /api/observability/backfill` | `{since?, until?, repo?, rate?, dry_run?}` → with `dry_run`, the counts summary (`{per_signal, per_org, records_sent, bytes_sent, …}`); otherwise `{started: true, progress: "GET /api/observability/status"}` and the replay runs beside the exporter. 409 when export is off or a backfill is already running; 503 when the add-on is missing or its version does not match. |
+| `POST /api/observability/backfill` | `{since?, until?, repo?, rate?, dry_run?, include_archive?}` → with `dry_run`, the counts summary (`{per_signal, per_org, records_sent, bytes_sent, …}`); otherwise `{started: true, progress: "GET /api/observability/status"}` and the replay runs beside the exporter. 409 when export is off or a backfill is already running; 503 when the add-on is missing or its version does not match. |
 | `DELETE /api/observability/backfill` | Cancels the running backfill: the child finishes its tick, writes `state: "cancelled"` and exits; → `{cancelled: true}`. 409 when none is running. |
+| `POST /api/observability/export` | `{out, since?, until?, signals?, include_archive?, content?}` — an offline export, run to completion inside the request: → the add-on's summary `{files, requests, logs, spans, colonies, archived}`. `out` must be an absolute path (the add-on writes beside the mothership) and `signals` only `logs` and `traces`, comma-separated; anything else is a 400 before the add-on is sought. 409 when export is off; 503 when the add-on is missing or mismatched; 502 with the add-on's message when the export fails. |
 
 `GET /api/observability/status` carries the backfill's progress as `backfill` while one runs:
 `{state: "running"|"complete"|"cancelled"|"failed", window, records_sent, bytes_sent, cursors,
 started_unix, updated_unix, …}`, read from the add-on's
 `<data>/observability/backfill.json` (`error` beside a `failed` state).
+
+## `GET /api/observability/status`
+
+The module's own page: whether export is on, why not, where each setting came from, the header
+*names* (never values), the add-on's own health and any backfill's progress. It answers
+**who may read it exactly as the scrape route does** — the owner and an unbounded `read`-or-better
+token (`200`); any token with a non-empty `orgs` or `repos`, a `fleet` token and a paired phone
+(`403`, the same words the table above gives for `/metrics`): the page is as install-wide as the
+catalogue is. Unlike the scrape route it is always `200` when the module is off — the page that
+says why nothing runs is the one an operator configuring it needs.
+
+`GET /api/status`, the cockpit's poll, carries the one word `observability`: `off`, `ok` or
+`degraded` ([the harness API](harness-api.md)).
+
+## `POST /api/observability/reset`
+
+Forgets where the export got to, so it starts over (issue #850; [Resetting](../observability/reset.md)).
+**Owner-only** — it is nowhere in a token's scope, unlike the status route above.
+
+`{dry_run?, hash_key?}` → with `dry_run`, `{dry_run: true, delete: [{path, bytes}, …]}` and nothing
+deleted; otherwise `{reset: true, deleted: [{path, bytes}, …]}`. It deletes
+`<data>/observability/state.json` — and with `hash_key` also `<data>/observability/hash.key` —
+nothing else: not the ledgers, not the file sink's output, not `status.json`. `409`, deleting
+nothing, in three cases: a backfill is registered, because a backfill reads `state.json` to know
+where history ends; another reset already holds this data directory's pending entry; or the
+exporter is still stopping — the child had not stopped within the settle window, and a live child
+would write its cursors back over the deletion.

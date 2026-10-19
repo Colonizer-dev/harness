@@ -35,6 +35,23 @@ pub struct Contract {
     pub settings: Settings,
     /// Every colony the mothership knows, by id. A colony missing here is structure-only.
     pub policy: BTreeMap<String, ColonyPolicy>,
+    /// What each fleet member reports about its own exporter (#861): whether it streams to this
+    /// owner's backend itself, so the relay can leave its rows alone. Filled by the mothership
+    /// from the members' fleet poll answers; `[]` until then.
+    #[serde(default)]
+    pub relay_members: Vec<RelayMember>,
+}
+
+/// One member's answer about its own exporting, as the mothership relays it (#861).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelayMember {
+    /// The member's host id: the `origin_host` its ingested rows carry.
+    pub host_id: String,
+    /// Whether the member runs its own exporter against this owner's destination.
+    pub enabled: bool,
+    /// The destination hash that exporter writes to; the relay compares it with its own.
+    pub destination_hash: String,
 }
 
 /// The effective exporter settings, every override already applied by the mothership.
@@ -51,6 +68,11 @@ pub struct Settings {
     /// Whether a Loki record's other attributes ride as structured metadata (Loki ≥ 2.9) rather
     /// than inside one JSON line.
     pub structured_metadata: bool,
+    /// Where the `file` provider writes (#850): relative to the data dir; empty for the default
+    /// `<data>/observability/otlp`.
+    pub dir: String,
+    /// The `file` provider's total size cap across its files, in MiB (#850).
+    pub max_mb: u64,
     /// Per-signal endpoints (`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, …), used as they are.
     pub logs_endpoint: Option<String>,
     pub traces_endpoint: Option<String>,
@@ -80,6 +102,10 @@ pub struct Settings {
     pub start_from: String,
     /// How often metrics are pushed.
     pub metrics_interval_secs: u64,
+    /// Relay the history members pushed to `<data>/fleet-ingest/` to this backend (#861). Off by
+    /// default: nothing of the members' is read or sent without it.
+    #[serde(default)]
+    pub relay_fleet_history: bool,
 }
 
 impl Default for Settings {
@@ -90,6 +116,8 @@ impl Default for Settings {
             url: String::new(),
             tenant_id: String::new(),
             structured_metadata: true,
+            dir: String::new(),
+            max_mb: 512,
             logs_endpoint: None,
             traces_endpoint: None,
             metrics_endpoint: None,
@@ -111,6 +139,7 @@ impl Default for Settings {
             max_read_mib_per_sec: 8,
             start_from: START_NOW.into(),
             metrics_interval_secs: 30,
+            relay_fleet_history: false,
         }
     }
 }
@@ -325,6 +354,18 @@ mod tests {
     }
 
     #[test]
+    fn the_file_fields_default_to_an_empty_dir_and_512_mib() {
+        // Additive: a contract from a mothership that knows no file provider still parses, and a
+        // file contract carries its two fields verbatim for the sink to resolve.
+        let s: Settings = serde_json::from_str(r#"{"provider":"file","dir":"otlp/here","max_mb":16}"#).unwrap();
+        assert_eq!(s.dir, "otlp/here");
+        assert_eq!(s.max_mb, 16);
+        let d: Settings = serde_json::from_str(r#"{"provider":"file"}"#).unwrap();
+        assert_eq!(d.dir, "");
+        assert_eq!(d.max_mb, 512, "the module schema's default");
+    }
+
+    #[test]
     fn another_contract_version_is_refused() {
         let dir = std::env::temp_dir().join(format!("colonizer-contract-{}", crate::testkit::unique()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -336,6 +377,11 @@ mod tests {
         assert_eq!(
             c.settings.service_name, "colonizer-mothership",
             "absent fields take their defaults"
+        );
+        assert!(!c.settings.relay_fleet_history, "the fleet relay is off unless asked for");
+        assert!(
+            c.relay_members.is_empty(),
+            "no member reports until the mothership fills it in"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -43,21 +43,23 @@ pub enum Tier {
     Content,
 }
 
-/// Whether content-tier values may leave the machine (P3/P4). Until the gate's conditions (install
-/// switch, org opt-in, known sensitivity) are wired in, it is always closed.
+/// Whether content-tier values may leave the machine (P3/P4). The gate's conditions — install
+/// switch, org opt-in, known sensitivity — are resolved by the caller: the live exporter and the
+/// backfill always hold a closed one, and only the offline export (`--content`) ever opens it,
+/// per colony.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ContentGate {
     open: bool,
 }
 
 impl ContentGate {
-    /// No content: the only gate outside tests.
+    /// No content: the live exporter's and the backfill's only gate.
     pub const fn closed() -> ContentGate {
         ContentGate { open: false }
     }
 
-    /// Content allowed, for tests of what the rest of the policy does to it.
-    #[cfg(test)]
+    /// Content allowed: the offline export's half of P3's install switch, held only once the
+    /// per-colony conditions there (org opt-in, known sensitivity) have passed.
     pub(crate) const fn open() -> ContentGate {
         ContentGate { open: true }
     }

@@ -16,8 +16,8 @@ use chrono::{DateTime, FixedOffset};
 use clap::{ArgAction, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::io::{Read as _, Write as _};
-use std::path::PathBuf;
+use std::io::{IsTerminal as _, Read as _, Write as _};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Everything worked. Also the informational commands (`--help`, `--version`, `version`).
@@ -437,6 +437,46 @@ enum ObservabilityCommand {
         /// Count what would be sent, per signal and per org, and send nothing
         #[arg(long)]
         dry_run: bool,
+        /// Also replay colonies that live only in the local archive
+        /// (docs/observability/archive-export.md)
+        #[arg(long)]
+        include_archive: bool,
+    },
+    /// Write the OTLP/JSON requests themselves to a local file instead of sending them — an
+    /// offline export for a collector's file receiver or a support bundle, no network
+    /// (docs/observability/archive-export.md)
+    Export {
+        /// Where to write: an existing directory gets logs.jsonl and traces.jsonl inside,
+        /// anything else is one file
+        #[arg(long, value_name = "FILE|DIR")]
+        out: PathBuf,
+        /// Only records written at or after this: RFC3339, YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Only records written before this, same forms (a bare date means its end)
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+        /// Which signals: comma-separated logs and traces (default both)
+        #[arg(long, value_name = "SIGNALS")]
+        signals: Option<String>,
+        /// Also export colonies that live only in the local archive
+        /// (docs/observability/archive-export.md)
+        #[arg(long)]
+        include_archive: bool,
+        /// Include conversation content, not just structure — asks for a typed yes first
+        #[arg(long)]
+        content: bool,
+    },
+    /// Forget where the export got to, so it starts over; --hash-key also drops its pseudonyms
+    /// (docs/observability/reset.md)
+    Reset {
+        /// Do not ask first; delete at once
+        #[arg(long)]
+        yes: bool,
+        /// Also delete the hash key, so records re-sent after the reset are pseudonymised afresh
+        /// and cannot be tied to the ones sent before it
+        #[arg(long)]
+        hash_key: bool,
     },
 }
 
@@ -2071,8 +2111,23 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                     repo,
                     rate,
                     dry_run,
+                    include_archive,
                 },
-        } => observability_backfill_command(cli, since, until, repo, rate, dry_run).await,
+        } => observability_backfill_command(cli, since, until, repo, rate, dry_run, include_archive).await,
+        Command::Observability {
+            command: ObservabilityCommand::Reset { yes, hash_key },
+        } => observability_reset_command(cli, yes, hash_key).await,
+        Command::Observability {
+            command:
+                ObservabilityCommand::Export {
+                    out,
+                    since,
+                    until,
+                    signals,
+                    include_archive,
+                    content,
+                },
+        } => observability_export_command(cli, out, since, until, signals, include_archive, content).await,
     }
 }
 
@@ -2204,7 +2259,8 @@ fn fleet_command(cli: &Cli, command: FleetCommand) -> i32 {
 /// with `--dry-run` count what would go — per signal and per org. A client of the running
 /// mothership like the colony commands; the sending is the supervised add-on's, at a bounded
 /// rate, and a real run answers only that it started: its progress is the status route's
-/// `backfill` (docs/observability/backfill.md).
+/// `backfill` (docs/observability/backfill.md). `--include-archive` (#859) also replays colonies
+/// that live only in the local archive.
 async fn observability_backfill_command(
     cli: &Cli,
     since: Option<String>,
@@ -2212,6 +2268,7 @@ async fn observability_backfill_command(
     repo: Option<String>,
     rate: Option<u64>,
     dry_run: bool,
+    include_archive: bool,
 ) -> i32 {
     let json = cli.json;
     client_command(cli, move |machine| async move {
@@ -2231,6 +2288,9 @@ async fn observability_backfill_command(
         }
         if dry_run {
             body.insert("dry_run".into(), json!(true));
+        }
+        if include_archive {
+            body.insert("include_archive".into(), json!(true));
         }
         let answer = machine
             .post("/api/observability/backfill", Some(&Value::Object(body)))
@@ -2288,6 +2348,222 @@ fn print_backfill_preview(answer: &Value) {
     if let Some(estimated) = estimated {
         println!("backend volume \u{2248} {:.1} MiB encoded (before gzip)", mib(estimated));
     }
+}
+
+/// `observability reset` (issue #850): forget where the export got to — the mothership stops the
+/// supervised child, deletes `state.json` (and with `--hash-key` the pseudonymising key) and lets
+/// the loop restart the child from nothing. A dry run goes first, always, so what will be deleted
+/// is listed from the mothership's own answer rather than guessed at on this side of the wire;
+/// then, unless `--yes`, a y/N prompt — and no prompt at all when there is nobody to answer one:
+/// a non-terminal stdin, or `--json`, whose output must stay a single JSON document to be worth
+/// parsing. Either way the command refuses with exit code 2 and deletes nothing (docs/cli.md).
+async fn observability_reset_command(cli: &Cli, yes: bool, hash_key: bool) -> i32 {
+    use std::io::IsTerminal as _;
+
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        let dry = machine
+            .post(
+                "/api/observability/reset",
+                Some(&json!({"dry_run": true, "hash_key": hash_key})),
+            )
+            .await?
+            .unwrap_or(Value::Null);
+        // A pipe, a script or `--json` has nobody to answer a prompt: refusing beats deleting what
+        // nobody confirmed, and it beats mixing a human question into a machine-readable answer.
+        // `--yes` says it out loud instead.
+        let nobody_answers = json || !std::io::stdin().is_terminal();
+        if nobody_answers && !yes {
+            const REFUSAL: &str = "observability reset deletes the exporter's saved positions; \
+                rerun it with --yes to delete them without asking";
+            if json {
+                println!(
+                    "{}",
+                    pretty(&json!({
+                        "reset": false,
+                        "delete": dry["delete"].clone(),
+                        "error": REFUSAL,
+                    }))?
+                );
+            } else {
+                print_reset_listing("would delete", &dry);
+                eprintln!("colonizer: {REFUSAL}");
+            }
+            return Ok(EXIT_USAGE);
+        }
+        if json {
+            println!("{}", pretty(&dry)?);
+        } else {
+            print_reset_listing("would delete", &dry);
+        }
+        if !yes {
+            print!("delete the above? [y/N] ");
+            let _ = std::io::stdout().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).map_err(anyhow::Error::from)?;
+            if !answer.trim().eq_ignore_ascii_case("y") && !answer.trim().eq_ignore_ascii_case("yes") {
+                println!("aborted; nothing was deleted");
+                return Ok(EXIT_OK);
+            }
+        }
+        let done = machine
+            .post("/api/observability/reset", Some(&json!({"hash_key": hash_key})))
+            .await?
+            .unwrap_or(Value::Null);
+        if json {
+            println!("{}", pretty(&done)?);
+        } else {
+            print_reset_listing("deleted", &done);
+            println!(
+                "the exporter restarts from scratch when the supervisor picks it up again (within \
+                 a tick){}",
+                if hash_key {
+                    "; new records are pseudonymised with a fresh key"
+                } else {
+                    ""
+                }
+            );
+        }
+        Ok(EXIT_OK)
+    })
+    .await
+}
+
+/// `observability export` (issue #859): an offline export — the OTLP/JSON requests the exporter
+/// would have sent, written to a local file or directory by the same add-on, no network
+/// (docs/observability/archive-export.md). A client of the running mothership like
+/// `observability backfill`. `--content` includes conversation text, the most sensitive thing an
+/// export can carry, so a person confirms it on the terminal before anything is sent.
+async fn observability_export_command(
+    cli: &Cli,
+    out: PathBuf,
+    since: Option<String>,
+    until: Option<String>,
+    signals: Option<String>,
+    include_archive: bool,
+    content: bool,
+) -> i32 {
+    if content && !confirm_content_export(&mut std::io::stdin().lock(), std::io::stdin().is_terminal()) {
+        return EXIT_ERROR;
+    }
+    // The add-on runs beside the mothership, so a relative --out would land there: resolve it
+    // against this directory before it travels.
+    let out = match std::path::absolute(&out) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("colonizer: --out cannot be made absolute: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        let body = export_body(
+            &out,
+            since.as_deref(),
+            until.as_deref(),
+            signals.as_deref(),
+            include_archive,
+            content,
+        );
+        let answer = machine
+            .post("/api/observability/export", Some(&body))
+            .await?
+            .unwrap_or(Value::Null);
+        if json {
+            println!("{}", pretty(&answer)?);
+            return Ok(EXIT_OK);
+        }
+        print_export_summary(&answer);
+        Ok(EXIT_OK)
+    })
+    .await
+}
+
+/// One line per file a reset answer names — the dry run's `delete` or the deed's `deleted` —
+/// `print_backfill_preview`'s shape: the path and its size, as the mothership measured both.
+fn print_reset_listing(what: &str, answer: &Value) {
+    let key = if answer["delete"].is_array() { "delete" } else { "deleted" };
+    if let Some(entries) = answer[key].as_array() {
+        for entry in entries {
+            println!(
+                "{what} {} ({} bytes)",
+                entry["path"].as_str().unwrap_or("?"),
+                entry["bytes"].as_u64().unwrap_or(0),
+            );
+        }
+    }
+}
+
+/// The `--content` confirmation: conversation text is the most sensitive thing an export can
+/// carry, so a person types `yes` before the mothership is called at all. The reader is a
+/// parameter so the tests can answer; a stdin that is not a terminal never confirms, so a pipe or
+/// a script cannot answer for the person, and nothing but exactly `yes` does.
+fn confirm_content_export(reader: &mut impl std::io::BufRead, interactive: bool) -> bool {
+    if !interactive {
+        eprintln!(
+            "colonizer: --content includes conversation text and needs a terminal to confirm it; re-run the command interactively"
+        );
+        return false;
+    }
+    eprintln!(
+        "warning: --content puts the colonies' conversation text (prompts, completions, tool input and output) in the export."
+    );
+    eprintln!(
+        "The flag stands in for the install switch only: an organisation's opt-in and each colony's sensitivity still apply, and the export policy's redaction still runs."
+    );
+    eprint!("Type yes to include conversation content: ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    reader.read_line(&mut answer).is_ok() && answer.trim() == "yes"
+}
+
+/// The export request's body: `out` already absolute, and only the flags given — an absent one is
+/// the add-on's default, not a null.
+fn export_body(
+    out: &Path,
+    since: Option<&str>,
+    until: Option<&str>,
+    signals: Option<&str>,
+    include_archive: bool,
+    content: bool,
+) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("out".into(), json!(out));
+    if let Some(v) = since {
+        body.insert("since".into(), json!(v));
+    }
+    if let Some(v) = until {
+        body.insert("until".into(), json!(v));
+    }
+    if let Some(v) = signals {
+        body.insert("signals".into(), json!(v));
+    }
+    if include_archive {
+        body.insert("include_archive".into(), json!(true));
+    }
+    if content {
+        body.insert("content".into(), json!(true));
+    }
+    Value::Object(body)
+}
+
+/// Prints an offline export's summary for a person: the files written, as the add-on named them,
+/// and what went into them.
+fn print_export_summary(answer: &Value) {
+    for file in answer["files"].as_array().into_iter().flatten() {
+        match file.as_str() {
+            Some(path) => println!("wrote {path}"),
+            None => println!("wrote {file}"),
+        }
+    }
+    println!(
+        "{} requests, {} log records, {} spans, {} colonies ({} from the archive)",
+        answer["requests"].as_u64().unwrap_or(0),
+        answer["logs"].as_u64().unwrap_or(0),
+        answer["spans"].as_u64().unwrap_or(0),
+        answer["colonies"].as_u64().unwrap_or(0),
+        answer["archived"].as_u64().unwrap_or(0),
+    );
 }
 
 /// Every client command resolves the mothership and the token first, so the flag errors surface
@@ -3745,6 +4021,21 @@ mod tests {
                 "8",
                 "--now",
             ][..],
+            &["observability", "backfill", "--include-archive", "--dry-run"][..],
+            &["observability", "export", "--out", "/tmp/export.jsonl"][..],
+            &[
+                "observability",
+                "export",
+                "--out",
+                "/tmp/dir",
+                "--since",
+                "2026-01-01",
+                "--until",
+                "2026-06-30",
+                "--signals",
+                "logs,traces",
+                "--include-archive",
+            ][..],
         ] {
             assert!(parse(args).is_ok(), "{args:?} should parse");
         }
@@ -4182,6 +4473,46 @@ mod tests {
         assert_eq!(body["preset"], json!("general"));
         assert_eq!(body["arm"], json!(false));
         assert!(parse(&["redteam", "start", "acme/app", "--preset", "offensive"]).is_err());
+    }
+
+    /// `observability export` sends the flags the API wants — only the ones given, `--out` beside
+    /// them — and `--content` is confirmed before the mothership is called: only a `yes` typed on
+    /// a terminal lets it through, so a pipe, a script or any other answer aborts.
+    #[test]
+    fn an_export_body_carries_its_flags_and_content_needs_a_typed_yes() {
+        let body = export_body(
+            Path::new("/tmp/export.jsonl"),
+            Some("2026-01-01"),
+            None,
+            Some("logs,traces"),
+            true,
+            true,
+        );
+        assert_eq!(body["out"], json!("/tmp/export.jsonl"));
+        assert_eq!(body["since"], json!("2026-01-01"));
+        assert_eq!(body["signals"], json!("logs,traces"));
+        assert_eq!(body["include_archive"], json!(true));
+        assert_eq!(body["content"], json!(true));
+        assert!(body.get("until").is_none(), "an absent flag does not travel");
+        // A bare export names only its out: the add-on's defaults decide everything else.
+        assert_eq!(
+            export_body(Path::new("/tmp/e"), None, None, None, false, false),
+            json!({"out": "/tmp/e"})
+        );
+
+        // Only exactly `yes`, typed on a terminal, confirms.
+        assert!(confirm_content_export(&mut &b"yes\n"[..], true));
+        assert!(
+            confirm_content_export(&mut &b"  yes  "[..], true),
+            "surrounding whitespace is nothing"
+        );
+        for mut answer in [&b"no\n"[..], &b"YES\n"[..], &b"yes please\n"[..], &b""[..], &b"\n"[..]] {
+            assert!(!confirm_content_export(&mut answer, true), "{answer:?} must not confirm");
+        }
+        assert!(
+            !confirm_content_export(&mut &b"yes\n"[..], false),
+            "no terminal: a pipe cannot answer for the person"
+        );
     }
 
     /// An argument nobody planned for is a usage error (exit 2), not a silently started server —

@@ -203,12 +203,93 @@ export const UNDERSTAND_ANYTHING_DENIED = new Map([
   ],
 ]);
 
-export const UNDERSTAND_ANYTHING_PROMPT_APPEND = [
+const UNDERSTAND_ANYTHING_PROMPT_LINES = [
   '- You have the understand-anything skillset: it keeps a knowledge graph of this repository under `.ua/` and answers lookups, guided tours and diff-impact questions from it.',
   '- Do not run the full `/understand` analysis — a PreToolUse hook refuses it. It is a multi-agent pass over the whole repository and upstream warns about the tokens it costs.',
   '- If `.ua/` already holds a graph in this colony, read it. Otherwise stay with the file-scoped and incremental commands: `/understand-explain <file>`, `/understand-diff`, `/understand-chat`.',
   '- `/understand-dashboard` and `/understand-figma` are refused too: one needs a vite server and a `pnpm install`, the other the Figma API, and neither can reach the network here.',
   '- `.ua/` is git-ignored by the colony and never part of the pull request.',
+];
+
+export const UNDERSTAND_ANYTHING_PROMPT_APPEND = UNDERSTAND_ANYTHING_PROMPT_LINES.join('\n');
+
+/**
+ * The graph colony's variant (issue #1015): the mothership launched it to run exactly the full
+ * pass, so the line that refuses `/understand` drops out — the dashboard and Figma refusals
+ * stand, since that colony has no more network than any other.
+ */
+export const UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND = UNDERSTAND_ANYTHING_PROMPT_LINES.filter(
+  (line) => !line.includes('Do not run the full `/understand`'),
+).join('\n');
+
+/**
+ * mattpocock-skills (github.com/mattpocock/skills, MIT), an optional vendored skillset staged from a
+ * curated list (scripts/fetch-vendor.sh). The consumer skills assume a per-repo configuration that
+ * upstream's setup skill writes into CLAUDE.md and docs/agents/ — an interactive step a colony never
+ * runs, so the runner pre-seeds that configuration in the system prompt instead and a PreToolUse hook
+ * refuses the setup skill and the interactive skills the staging already leaves out.
+ */
+export const MATTPOCOCK_SKILLS_PLUGIN = 'mattpocock-skills';
+
+/** The curated skills the staging copies, by their bare name — the default allowlist. */
+export const MATTPOCOCK_SKILLS_DEFAULT = [
+  'code-review',
+  'codebase-design',
+  'diagnosing-bugs',
+  'domain-modeling',
+  'handoff',
+  'improve-codebase-architecture',
+  'implement-spec',
+  'pr',
+  'tdd',
+  'to-spec',
+  'to-tickets',
+  'triage',
+  'writing-for-agents',
+];
+
+/**
+ * The skills this gate never allows, whatever the setting says: the interactive ones (they work by
+ * interviewing the user) and the setup skill (its configuration is pre-seeded below). None of them is
+ * staged, so this is the second line, not the first.
+ */
+export const MATTPOCOCK_SKILLS_EXCLUDED = new Set([
+  'grill-me',
+  'grilling',
+  'grill-with-docs',
+  'wait-what',
+  'to-questionnaire',
+  'teach',
+  'ask-matt',
+  'setup-matt-pocock-skills',
+]);
+
+/**
+ * The per-repo configuration the setup skill would have written (`## Agent skills` in CLAUDE.md plus
+ * docs/agents/*.md), pre-seeded in the system prompt instead: what the consumer skills — triage,
+ * to-tickets, to-spec, implement-spec, code-review — read when they say it "should have been provided
+ * to you". `repo` is where issues live, `docs` where the domain docs live; both default to this
+ * repository's own answers.
+ */
+export function mattpocockSkillsConfig({ repo, docs } = {}) {
+  return [
+    `  - **Issue tracker:** ${repo ?? 'this repository (the `origin` remote)'}, on GitHub. Reach it only through the colony's GitHub tools when they are available; with none, do not create, comment on, close or label issues there — report what you would have filed instead.`,
+    "  - **Triage labels:** the labels the repository already carries, mapped from the five roles by upstream's default vocabulary — `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. Only apply a label that already exists; never create one. A role with no matching label stays unapplied and is named in the report instead.",
+    "  - **Domain docs:** single-context — " + (docs ?? "the repository's `docs/`") + ', plus a root `GLOSSARY.md` where one exists.',
+  ].join('\n');
+}
+
+/**
+ * What the colony is told when the pack is mounted: the pre-seeded configuration above, and where
+ * these skills conflict with how a colony runs, the colony's rules win.
+ */
+export const MATTPOCOCK_SKILLS_PROMPT_APPEND = [
+  '- You have the mattpocock-skills skillset: thirteen non-interactive engineering skills, addressed as `mattpocock-skills:<name>`.',
+  '- Never run `/mattpocock-skills:setup-matt-pocock-skills` — a PreToolUse hook refuses it — and never write an `## Agent skills` section or `docs/agents/*` files. The per-repo configuration those skills expect is pre-seeded here:',
+  mattpocockSkillsConfig(),
+  '- Where a skill conflicts with how this colony runs, the colony wins. Never merge, push, or create branches or worktrees, in implement-spec or anywhere else: the changes stay in the working tree and the harness publishes the pull request.',
+  '- Write a pull request description in the colony\'s own pr.md format rather than the `pr` skill\'s Summary/Evidence/Merge Danger template — though what that skill gathered may inform it — and keep to the colony\'s pull-request size ceiling.',
+  '- Where a skill says to stop and confirm with the user before proceeding (tdd, to-tickets, triage, to-spec and improve-codebase-architecture do), state the assumption you would have confirmed and proceed, or use the colony\'s question tool only where its own instructions already allow asking.',
 ].join('\n');
 
 /**
@@ -253,13 +334,69 @@ export function skillNameFromInput(toolInput = {}) {
  * Only the three skills above are refused, and only by exact name: `/understand-diff` and the rest
  * are the file-scoped commands the guard points the colony at instead. A name another plugin
  * namespaces (`other-pack:understand`) is that plugin's skill, not this one's, so it stays allowed.
+ * `fullPass` — the graph colony's one licence (issue #1015) — lets `/understand` through and
+ * refuses the other two all the same.
  */
-export function understandAnythingDenial(toolName, toolInput = {}, pluginDirs = []) {
+export function understandAnythingDenial(toolName, toolInput = {}, pluginDirs = [], fullPass = false) {
   if (toolName !== 'Skill' || !understandAnythingMounted(pluginDirs)) return null;
   const [namespace, skill] = splitSkillName(toolInput);
   if (namespace !== null && namespace !== UNDERSTAND_ANYTHING_PLUGIN) return null;
+  if (fullPass && skill === 'understand') return null;
   const reason = UNDERSTAND_ANYTHING_DENIED.get(skill);
   return reason ? `understand-anything: ${reason}` : null;
+}
+
+/**
+ * Whether mattpocock-skills is one of the mounted plugin directories, by the same rule as
+ * `understandAnythingMounted`: the directory's last segment is the pack's name.
+ */
+export function mattpocockSkillsMounted(pluginDirs = []) {
+  return pluginDirs.some((dir) => String(dir ?? '').trim().split('/').pop() === MATTPOCOCK_SKILLS_PLUGIN);
+}
+
+/**
+ * The colony's mattpocock-skills allowlist, from the module setting: comma-separated names out of
+ * the curated thirteen, an unset or empty value meaning all of them. A name outside the curated set
+ * is ignored — the interactive and setup skills are never staged, so no setting can allow them here;
+ * a later setting would opt them in.
+ */
+export function mattpocockSkillsAllowlist(value) {
+  const names = String(value ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (!names.length) return [...MATTPOCOCK_SKILLS_DEFAULT];
+  return names.filter((name) => MATTPOCOCK_SKILLS_DEFAULT.includes(name));
+}
+
+/**
+ * Why a Skill call is refused when mattpocock-skills is mounted, or null when it is allowed. The
+ * setup skill and the interactive ones are refused outright — none is staged, so this is the second
+ * line — and a curated skill the colony's allowlist does not name is refused too. As for
+ * understand-anything, another pack's namespace (`other-pack:tdd`) is that pack's skill and stays
+ * allowed.
+ */
+export function mattpocockSkillsDenial(toolName, toolInput = {}, pluginDirs = [], allowlist = MATTPOCOCK_SKILLS_DEFAULT) {
+  if (toolName !== 'Skill' || !mattpocockSkillsMounted(pluginDirs)) return null;
+  const [namespace, skill] = splitSkillName(toolInput);
+  if (namespace !== null && namespace !== MATTPOCOCK_SKILLS_PLUGIN) return null;
+  if (skill === 'setup-matt-pocock-skills') {
+    return (
+      'mattpocock-skills: /setup-matt-pocock-skills is never run here. The configuration it would write — ' +
+      'issue tracker, triage labels, domain docs — is already in the system prompt; read it there, and never ' +
+      'write an "## Agent skills" section or docs/agents/* files.'
+    );
+  }
+  if (MATTPOCOCK_SKILLS_EXCLUDED.has(skill)) {
+    return (
+      `mattpocock-skills: the "${skill}" skill is interactive — it works by interviewing the user — and no colony runs it. ` +
+      'State the assumptions you would have asked about and proceed, or use the colony\'s question tool only where its own instructions allow asking.'
+    );
+  }
+  if (MATTPOCOCK_SKILLS_DEFAULT.includes(skill) && !allowlist.includes(skill)) {
+    return `mattpocock-skills: the "${skill}" skill is not in this colony's allowlist. Do the work without it; the operator widens the list in Settings.`;
+  }
+  return null;
 }
 
 /** The built-in crew pack, whose ants ship with this module (crew/agents/*.md; crew/plugin.json names it). */
@@ -775,9 +912,18 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
   // Cost guard (issue #1014): only when the plugin is actually mounted, so a colony that never got
-  // the skillset sees neither the prompt block nor the gate.
+  // the skillset sees neither the prompt block nor the gate. The graph colony (issue #1015) is
+  // launched to run exactly the full pass, so it gets the variant without the refusal line and
+  // keeps its licence in the hook below.
   const understandAnything = understandAnythingMounted(pluginDirs);
-  if (understandAnything) appended.push(UNDERSTAND_ANYTHING_PROMPT_APPEND);
+  const uaFullPass = env.COLONIZER_UA_FULL_PASS === '1';
+  if (understandAnything) {
+    appended.push(uaFullPass ? UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND : UNDERSTAND_ANYTHING_PROMPT_APPEND);
+  }
+  // mattpocock-skills (issue #1016), gated the same way: the pre-seeded setup configuration and the
+  // colony-wins precedence rules reach the system prompt only when the pack is mounted.
+  const mattpocockSkills = mattpocockSkillsMounted(pluginDirs);
+  if (mattpocockSkills) appended.push(MATTPOCOCK_SKILLS_PROMPT_APPEND);
   // Keyed on the skill file, not the directory name, so an operator's own copy of superpowers switches on too.
   for (const dir of pluginDirs) {
     const skill = readText(join(dir, SUPERPOWERS_SKILL));
@@ -932,7 +1078,27 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
       matcher: 'Skill',
       hooks: [
         async (input) => {
-          const reason = understandAnythingDenial(input.tool_name, input.tool_input, pluginDirs);
+          const reason = understandAnythingDenial(input.tool_name, input.tool_input, pluginDirs, uaFullPass);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (mattpocockSkills) {
+    // The allowlist gate for mattpocock-skills (issue #1016), on the same Skill-matcher layer: it
+    // refuses the setup and interactive skills outright and any curated skill the colony's
+    // mattpocock-skills setting does not name. The reason points at the pre-seeded configuration
+    // the system prompt carries instead of the setup skill.
+    const mattpocockAllowlist = mattpocockSkillsAllowlist(env.COLONIZER_MATTPOCOCK_SKILLS);
+    preToolUse.push({
+      matcher: 'Skill',
+      hooks: [
+        async (input) => {
+          const reason = mattpocockSkillsDenial(input.tool_name, input.tool_input, pluginDirs, mattpocockAllowlist);
           if (!reason) return { continue: true };
           return {
             continue: true,
@@ -943,10 +1109,10 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
     });
   }
   if (antSkillsets) {
-    // Per-ant skillsets (issue #1163), right after the understand-anything guard so that denial
-    // still applies first: an ant whose agent file lists `skillsets` may load only the skills those
-    // packs ship. The gate fails open — an unknown ant, an ant without a list, and a skill no
-    // mounted pack ships all pass — so only the whitelist violation itself is ever refused.
+    // Per-ant skillsets (issue #1163), after the understand-anything and mattpocock-skills guards
+    // so those denials still apply first: an ant whose agent file lists `skillsets` may load only
+    // the skills those packs ship. The gate fails open — an unknown ant, an ant without a list, and
+    // a skill no mounted pack ships all pass — so only the whitelist violation itself is ever refused.
     preToolUse.push({
       matcher: 'Skill',
       hooks: [

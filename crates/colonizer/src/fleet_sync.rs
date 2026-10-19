@@ -110,13 +110,16 @@ pub struct RowsBody {
     rows: Vec<IngestRow>,
 }
 
-/// The owner's answer to a rows batch: which rows it holds now, and which it refused, by name.
+/// The owner's answer to a rows batch: which rows it holds now, which it refused by name, and
+/// whether it relays what members push to its own observability backend (#861).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RowsAnswer {
     #[serde(default)]
     pub accepted: Vec<String>,
     #[serde(default)]
     pub rejected: Vec<RejectedRow>,
+    #[serde(default)]
+    pub relays: bool,
 }
 
 /// A row the owner refused by name. `missing_payloads` lists the hashes it does not hold, which
@@ -208,6 +211,10 @@ pub struct DrainState {
     /// a backlog, cleared by the first that leaves none. A lower bound on the oldest row's wait.
     #[serde(default)]
     pub backlog_since: Option<DateTime<Utc>>,
+    /// The relay flag the owner's latest rows answer carried (#861): `None` before the first
+    /// answer. The preview prefers it over the pairing answer's copy — the fresher word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_relays: Option<bool>,
 }
 
 impl DrainState {
@@ -671,6 +678,9 @@ impl Drainer<'_> {
                 Ok(Answer::Success(bytes)) => {
                     let answer: RowsAnswer = serde_json::from_slice(&bytes)
                         .map_err(|_| Stop::Error("the owner's answer to a batch was not the expected JSON".into()))?;
+                    // The relay flag rides every answer (#861): what the preview says until the
+                    // next one replaces it.
+                    self.state.owner_relays = Some(answer.relays);
                     let accepted: BTreeSet<&str> = answer.accepted.iter().map(String::as_str).collect();
                     for at in &ready {
                         if accepted.contains(pending[*at].row.id.as_str()) {
@@ -1000,11 +1010,18 @@ pub async fn trigger(State(app): State<Shared>) -> Result<Json<DrainReport>, App
 }
 
 /// What the push would send from `data_dir`: every finished colony's row and logs, and how much
-/// of that the current membership's owner has not acknowledged yet.
-fn preview_of(data_dir: &Path, origin: &Origin, member_id: &str) -> Result<Value> {
+/// of that the current membership's owner has not acknowledged yet. `owner_relays` is the pairing
+/// answer's relay flag (#861); the drain state's fresher copy wins once a rows answer brought one.
+fn preview_of(data_dir: &Path, origin: &Origin, member_id: &str, owner_relays: Option<bool>) -> Result<Value> {
     let all = collect(data_dir, origin, &DrainState::default())?;
     let state = DrainState::load(data_dir);
     let current = state.member_id.as_deref() == Some(member_id);
+    let relays = if current {
+        state.owner_relays.or(owner_relays)
+    } else {
+        owner_relays
+    }
+    .unwrap_or(false);
     let (mut payloads, mut payload_bytes, mut omitted, mut row_bytes) = (0usize, 0u64, 0usize, 0u64);
     let (mut pending, mut pending_bytes) = (0usize, 0u64);
     for p in &all {
@@ -1027,7 +1044,14 @@ fn preview_of(data_dir: &Path, origin: &Origin, member_id: &str) -> Result<Value
         "total_bytes": payload_bytes + row_bytes,
         "pending_colonies": pending,
         "pending_bytes": pending_bytes,
-        "includes": "each finished colony's record (repo, issue, branch, pull request, status, summary, cost, model use, timings) and its event, harness and gateway logs",
+        "includes": format!(
+            "each finished colony's record (repo, issue, branch, pull request, status, summary, cost, model use, timings) and its event, harness and gateway logs{}",
+            if relays {
+                "; the owner relays this history to its own observability backend under this host's identity (structure only, never conversation content)"
+            } else {
+                ""
+            }
+        ),
         "excludes": "running colonies, transcripts, stats, settings, secrets and tokens",
     }))
 }
@@ -1041,7 +1065,8 @@ pub async fn preview(State(app): State<Shared>) -> ApiResult<Value> {
     let origin =
         Origin::for_config(&app.cfg.config_dir).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")))?;
     let data_dir = app.cfg.data_dir.clone();
-    let mut answer = tokio::task::spawn_blocking(move || preview_of(&data_dir, &origin, &target.member_id))
+    let owner_relays = app.fleet_members.owner_relays().await;
+    let mut answer = tokio::task::spawn_blocking(move || preview_of(&data_dir, &origin, &target.member_id, owner_relays))
         .await
         .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")))?
         .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
@@ -1165,7 +1190,10 @@ pub async fn post_rows(
             &format!("at most {MAX_BATCH_ROWS} rows per batch"),
         ));
     }
-    let mut answer = RowsAnswer::default();
+    let mut answer = RowsAnswer {
+        relays: crate::observability::settings::relays_fleet_history(&app).await,
+        ..RowsAnswer::default()
+    };
     let mut good = Vec::new();
     for row in body.rows {
         if let Some(error) = check_row(&row) {

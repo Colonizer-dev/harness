@@ -402,7 +402,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       DMG_NOTARIZED: ${{ needs.bundle.outputs.dmg_notarized == 'yes' && 'yes' || 'no' }}
     steps:
+      # Full history: the changelog gate below tells a fragment that landed during the release freeze
+      # (it belongs to the next release) from one this release should have folded.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Check the tag against the crate versions
         run: |
@@ -413,8 +417,10 @@ jobs:
 
       # The section for the tag exists, and no changelog.d/ fragment was left out of it: a fragment
       # still pending at the tagged commit is an entry this release would ship without.
+      # Same gate as the release train's tag job (release-prep.mjs verify): a fragment merged during
+      # the freeze belongs to the next release and passes here exactly as it passed there.
       - name: Check the changelog covers the tag
-        run: node scripts/changelog.mjs check --release "$TAG"
+        run: node scripts/release-prep.mjs verify "$TAG"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

@@ -4,7 +4,8 @@
 #
 # - tag: after a `release: vX.Y.Z` pull request is merged, puts the lightweight tag on its merge commit
 #   (what scripts/changelog.mjs check --release and the crate versions allow, nothing else) and starts
-#   the Release workflow on it. It runs first, on every trigger, so a merged release is never waiting
+#   the Release workflow on it. An older release that fails the gate is skipped with a notice when a
+#   newer release commit supersedes it (`release-prep.mjs tags` decides). It runs first, on every trigger, so a merged release is never waiting
 #   behind a new proposal, and it is the part that survives a push event that never arrived.
 # - propose: when main has pending changelog.d/ fragments and its last few CI runs are green, opens
 #   `release: vX.Y.Z` (patch bumps only) with auto-merge on. Never while a release pull request is open,
@@ -70,32 +71,19 @@ jobs:
           git fetch --tags --force origin
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
-          range="origin/main"
-          [ -z "$last" ] || range="$last..origin/main"
-          # Oldest first; a release commit is the squash of a `release: vX.Y.Z` pull request.
-          git log --first-parent --reverse --format='%H%x09%s' "$range" |
-            sed -nE 's/^([0-9a-f]+)\trelease: (v[0-9]+\.[0-9]+\.[0-9]+)( \(#[0-9]+\))?$/\1 \2/p' > "$RUNNER_TEMP/releases"
-          if [ ! -s "$RUNNER_TEMP/releases" ]; then
-            echo "No merged release is waiting for its tag."
-            exit 0
-          fi
+          # Oldest first, every merged `release: vX.Y.Z` commit since the latest tag gets a decision:
+          # `tag` (the gate passes on that commit, with the script from main), `skip` (it fails, but a
+          # newer release commit supersedes it: a notice, not a failure) or `fail` (it fails and nothing
+          # newer exists). Fragments that landed after a release assembled its own do not fail it.
           status=0
-          while read -r sha version; do
-            if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
-              echo "$version is already tagged."
-              continue
-            fi
-            # The gate runs on the commit about to be tagged, with the script from main.
-            rm -rf "$RUNNER_TEMP/at"
-            git worktree add --detach "$RUNNER_TEMP/at" "$sha" >/dev/null
-            if ! node scripts/release-prep.mjs verify "$version" --root "$RUNNER_TEMP/at"; then
-              echo "::error::$version at $sha is not ready to tag; see the errors above. Fix it on main, then run this workflow again."
-              git worktree remove --force "$RUNNER_TEMP/at"
-              status=1
-              break
-            fi
-            git worktree remove --force "$RUNNER_TEMP/at"
+          node scripts/release-prep.mjs tags --ref origin/main > "$RUNNER_TEMP/decisions" || status=$?
+          cat "$RUNNER_TEMP/decisions"
+          if [ ! -s "$RUNNER_TEMP/decisions" ]; then
+            [ "$status" -ne 0 ] || echo "No merged release is waiting for its tag."
+            exit "$status"
+          fi
+          while read -r action version sha; do
+            [ "$action" = tag ] || continue
             if [ "$DRY_RUN" = true ]; then
               echo "Dry run: would tag $version at $sha and dispatch Release."
               continue
@@ -104,7 +92,8 @@ jobs:
             git push origin "refs/tags/$version"
             gh workflow run release.yml --ref "$version"
             echo "Tagged $version at $sha and started Release on it."
-          done < "$RUNNER_TEMP/releases"
+          done < "$RUNNER_TEMP/decisions"
+          [ "$status" -eq 0 ] || echo "::error::A merged release is not ready to tag; see the errors above. Fix it on main, then run this workflow again."
           exit "$status"
 
   propose:
