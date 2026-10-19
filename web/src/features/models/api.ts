@@ -1,10 +1,12 @@
 // The header model switcher's API methods (issue #1051). The root `Api` interface composes `ModelsApi`.
 import { del, enc, post, put, request } from "../../http";
-import type { ModelAssignments, ModelPlans, ModelProfile, ModelProfileBody, ModelSwitchReply, ModelSwitchRequest } from "./types";
+import type { ModelAssignments, ModelHostRanking, ModelPlans, ModelProfile, ModelProfileBody, ModelSwitchReply, ModelSwitchRequest } from "./types";
 
 export interface ModelsApi {
   /** GET /api/models/assignments: the effective model per role, install-wide and per org, with sources, modules and models. */
   modelAssignments(): Promise<ModelAssignments>;
+  /** GET /api/model-hosts: each canonical model on 2+ connected providers, its hosts ranked by price; empty on an older mothership. */
+  modelHosts(): Promise<ModelHostRanking[]>;
   /** POST /api/models/switch: validated as a whole, then saved; `apply: "running"` also restarts the scope's colonies. */
   switchModels(body: ModelSwitchRequest): Promise<ModelSwitchReply>;
   /** GET /api/models/plans: each plan in use, with its limit state, request counts and plan balance. */
@@ -21,6 +23,7 @@ export interface ModelsApi {
 
 export const modelsHttp: ModelsApi = {
   modelAssignments: () => request("/api/models/assignments"),
+  modelHosts: () => request("/api/model-hosts"),
   switchModels: (body) => post("/api/models/switch", body),
   modelPlans: () => request("/api/models/plans"),
   modelProfiles: () => request("/api/models/profiles"),
