@@ -3,13 +3,15 @@
 // `npm run build:demo` shows the switcher and a switch is visible in Settings afterwards.
 import { isLive } from "../../components/ui";
 import { ApiError } from "../../http";
-import { clone, sleep } from "../../mockShared";
+import { ago, clone, sleep } from "../../mockShared";
 import type { MockState } from "../../mockState";
 import type { OrgSettings } from "../orgs/types";
 import type { ModelsApi } from "./api";
 import type {
   AgentModuleRoles,
   ModelAssignments,
+  ModelHost,
+  ModelHostRanking,
   ModelPlans,
   ModelProfile,
   ModelRoleRow,
@@ -95,6 +97,100 @@ function mockModels(ms: MockState): SwitchableModel[] {
     );
   });
   return [...claude, ...routed];
+}
+
+/**
+ * The mothership's blended $/1M-token rate (crates/colonizer/src/model_hosts.rs,
+ * `blended_per_mtok`): three parts input to one part output, and when a cache-read rate is known one
+ * of those three input parts is priced at it instead. The fixtures derive their blended rates from
+ * the prices beside them with this, so the demo build shows exactly what the mothership produces
+ * rather than numbers a change to that formula would silently leave behind.
+ */
+export function blendedPerMtok(input: number, output: number, cacheRead: number | null): number {
+  return cacheRead != null && cacheRead > 0
+    ? (2 * input + cacheRead + output) / 4
+    : (3 * input + output) / 4;
+}
+
+/**
+ * The mock install's ranked hosts (issue #1039): an open-weight DeepSeek model on three providers —
+ * the cheapest priced by the feed, one priced only locally (no verified date), one with no price at
+ * all — and a host-sensitive GLM the cheapest-host policy will not touch, one of its hosts degraded.
+ */
+function hostRankings(): ModelHostRanking[] {
+  const host = (over: Partial<ModelHost> & Pick<ModelHost, "provider_id" | "provider_name" | "model">): ModelHost => ({
+    input_per_mtok: null,
+    output_per_mtok: null,
+    cache_read_per_mtok: null,
+    blended_per_mtok: null,
+    last_verified_at: null,
+    source: null,
+    healthy: true,
+    degraded: false,
+    out_of_quota: false,
+    quota_reset_at: null,
+    tools_limited: false,
+    host_sensitive: false,
+    ...over,
+  });
+  return [
+    {
+      model: "deepseek-v4-flash",
+      eligible: true,
+      hosts: [
+        host({
+          provider_id: "deepinfra",
+          provider_name: "DeepInfra",
+          model: "deepinfra/deepseek-v4-flash",
+          input_per_mtok: 0.2,
+          output_per_mtok: 0.8,
+          cache_read_per_mtok: 0.05,
+          blended_per_mtok: blendedPerMtok(0.2, 0.8, 0.05),
+          last_verified_at: ago(3),
+          source: "https://deepinfra.com/prices",
+        }),
+        host({
+          provider_id: "deepseek",
+          provider_name: "DeepSeek",
+          model: "deepseek/deepseek-v4-flash",
+          input_per_mtok: 0.27,
+          output_per_mtok: 1.1,
+          cache_read_per_mtok: 0.07,
+          blended_per_mtok: blendedPerMtok(0.27, 1.1, 0.07),
+        }),
+        host({ provider_id: "novita", provider_name: "Novita", model: "novita/deepseek-v4-flash" }),
+      ],
+    },
+    {
+      model: "glm-5.3",
+      eligible: false,
+      hosts: [
+        host({
+          provider_id: "zai",
+          provider_name: "Z.AI",
+          model: "zai/glm-5.3",
+          input_per_mtok: 0.48,
+          output_per_mtok: 1.7,
+          cache_read_per_mtok: 0.14,
+          blended_per_mtok: blendedPerMtok(0.48, 1.7, 0.14),
+          healthy: false,
+          degraded: true,
+          host_sensitive: true,
+        }),
+        host({
+          provider_id: "deepinfra",
+          provider_name: "DeepInfra",
+          model: "deepinfra/glm-5.3",
+          input_per_mtok: 0.55,
+          output_per_mtok: 1.9,
+          cache_read_per_mtok: 0.16,
+          blended_per_mtok: blendedPerMtok(0.55, 1.9, 0.16),
+          last_verified_at: ago(3 * 24 * 60),
+          source: "https://deepinfra.com/prices",
+        }),
+      ],
+    },
+  ];
 }
 
 function agentEntry(ms: MockState) {
@@ -374,6 +470,7 @@ export function modelsMock(ms: MockState): ModelsApi {
       await sleep(120);
       return clone(assignments(ms));
     },
+    modelHosts: () => ms.later(hostRankings),
     switchModels: async (body) => {
       await sleep(200);
       return clone(switchModels(ms, body));

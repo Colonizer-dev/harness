@@ -37,7 +37,7 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
   const githubViaToken = github?.source === "saved token";
 
   return (
-    <Pane title="GitHub & Claude" subtitle="The two accounts colonies need before the first one starts" back={back}>
+    <Pane title="GitHub & models" subtitle="The code host and at least one model your colonies can think with" back={back}>
       <div className="space-y-4">
         <ConnectionCard
           name="GitHub"
@@ -85,6 +85,8 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
           {claude?.configured && <ClaudeHealth status={claude.health_status} checkedAt={claude.health_checked_at} />}
           <ClaudeLoginSection claude={claude} onStatusChanged={onStatusChanged} />
         </ConnectionCard>
+
+        {/* Models card will show available model providers and orchestrator selection */}
       </div>
     </Pane>
   );

@@ -6,7 +6,9 @@ import { ApiContext } from "../context";
 import type { ModelOption } from "../types";
 import { ModelPicker, formatModel, parseModel } from "./ModelPicker";
 
-const api = { providers: () => new Promise(() => {}) } as unknown as Api;
+// Both fetches stay pending: renderToStaticMarkup runs no effects, so the picker's static markup
+// never contains provider or host data, only the menus' own chrome.
+const api = { providers: () => new Promise(() => {}), modelHosts: () => new Promise(() => {}) } as unknown as Api;
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(<ApiContext.Provider value={api}>{node}</ApiContext.Provider>);
 
 const MODELS: ModelOption[] = [
@@ -49,5 +51,11 @@ describe("ModelPicker", () => {
     const html = wrap(<ModelPicker value="bailian/qwen3.8-max" onChange={() => {}} models={MODELS} />);
     expect(html).not.toContain("Unknown:");
     expect(html).toContain("qwen3.8-max");
+  });
+
+  it("shows no host ranking before the ranked hosts arrive", () => {
+    const html = wrap(<ModelPicker value="deepseek/deepseek-v4-flash" onChange={() => {}} models={MODELS} />);
+    expect(html).toContain("deepseek-v4-flash");
+    expect(html).not.toContain("Hosts for");
   });
 });
