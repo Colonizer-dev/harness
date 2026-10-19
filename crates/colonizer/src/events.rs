@@ -148,7 +148,17 @@ pub(crate) fn verify_network_held_attention(cause: &str) -> Value {
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
 /// A turn that errored after writing a fresh `pr.md` still goes on to verification (issue #1176): the
 /// error may be a late one (a subagent's model, a closing call) and the claim check is the gate.
-fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
+/// Issue #1268: when background subagents are still running, autopilot waits before publishing,
+/// but only if the turn is otherwise ready to publish or would wait on a missing PR description;
+/// errors take priority and are held or retried immediately.
+fn autopilot_step(
+    errored: bool,
+    transient: bool,
+    interrupted: bool,
+    open_question: bool,
+    pr_written: bool,
+    subagents_running: bool,
+) -> Autopilot {
     if open_question {
         Autopilot::Wait("a question is open")
     } else if interrupted {
@@ -157,6 +167,17 @@ fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_questi
         Autopilot::Retry("the agent's turn ended with a transient provider error")
     } else if errored && !pr_written {
         Autopilot::Hold("the agent's turn ended with an error")
+    } else if errored && pr_written && subagents_running {
+        // Issue #1268: if the lead has errored but written pr.md, wait for subagents to settle
+        // before publishing. The lead will be re-driven when the last subagent settles (its next
+        // turn, or the turn_lost watchdog). This avoids premature publishing via the #1176 path.
+        Autopilot::Wait("background subagents are still running")
+    } else if errored && pr_written {
+        // Issue #1176: an error after writing a fresh pr.md goes on to verify and publish
+        // (the error may be late, and the claim check is the gate) — only when subagents are done.
+        Autopilot::Publish
+    } else if subagents_running {
+        Autopilot::Wait("background subagents are still running")
     } else if !pr_written {
         Autopilot::Wait(crate::idle_park::PR_NOT_WRITTEN)
     } else {
@@ -1093,7 +1114,8 @@ pub(crate) async fn finish_turn(
             )
             .await;
         }
-        let step = autopilot_step(errored, transient, interrupted, open_question, pr_written);
+        let subagents_running = !rt.open_subagents.lock().await.is_empty();
+        let step = autopilot_step(errored, transient, interrupted, open_question, pr_written, subagents_running);
         // #761, #1175: a description that redaction changed is still published, because the
         // value is already replaced in what goes out. The note says out loud that the colony had a
         // secret in hand; only a secret in the diff blocks, and that is the publish path's own check.

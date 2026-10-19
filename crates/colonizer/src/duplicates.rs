@@ -31,7 +31,13 @@
 use crate::claims::{ClaimKind, RemoteClaimInfo};
 use crate::sessions::{Session, SessionStatus};
 use crate::supersede::SupplyChainTarget;
+use chrono::Utc;
 use serde::Serialize;
+
+/// Helper for serde: skip serializing when the bool is false.
+fn is_false(b: &bool) -> bool {
+    !b
+}
 
 /// The title prefix the Packages view's hand-off gives a colony it starts on one risk. A colony
 /// from before targets were recorded on the session claims its package by this title alone.
@@ -112,6 +118,15 @@ pub struct Holder {
     pub what: String,
     /// Whether `queue_behind_holder` would wait for this holder instead of being refused.
     pub queueable: bool,
+    /// For a remote claim, the GitHub login of the account that created the claim comment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    /// For a remote claim, when the claim was created (RFC3339 format), for displaying relative time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
+    /// For a label-only remote claim with no branch or PR, a hint that the claim may be stale.
+    #[serde(skip_serializing_if = "is_false")]
+    pub stale_hint: bool,
 }
 
 /// A launch refused as a duplicate: the holder, and the words the 409 says it in.
@@ -272,6 +287,9 @@ fn local_holder(held: &Session, kind: HoldKind, what: String) -> Holder {
         issue: held.issue,
         what,
         queueable: kind == HoldKind::Issue,
+        claimed_by: None,
+        claimed_at: None,
+        stale_hint: false,
     }
 }
 
@@ -360,6 +378,7 @@ pub fn check(
 
 /// The holder a GitHub claim names.
 fn remote_holder(info: &RemoteClaimInfo, issue: u64) -> Holder {
+    let stale_hint = info.kind == ClaimKind::Label;
     Holder {
         kind: HoldKind::RemoteClaim,
         colony: info.colony.clone(),
@@ -369,6 +388,9 @@ fn remote_holder(info: &RemoteClaimInfo, issue: u64) -> Holder {
         issue: Some(issue),
         what: format!("#{issue}"),
         queueable: false,
+        claimed_by: info.author.clone(),
+        claimed_at: info.updated.map(|dt| dt.to_rfc3339()),
+        stale_hint,
     }
 }
 
@@ -385,8 +407,16 @@ pub fn remote_refusal(info: &RemoteClaimInfo, issue: u64, holder_down: bool) -> 
     }
 }
 
+/// Result of a launch duplicate check: whether a stale remote claim was detected and will be
+/// cleared in the background.
+#[derive(Debug)]
+pub struct CheckLaunchResult {
+    pub stale_claim_detected: bool,
+}
+
 /// The whole launch-time answer: the local rules, then — for an issue, unless `allow_duplicate` —
-/// the GitHub claim another mothership may hold. `Ok(true)` means queue behind a local holder.
+/// the GitHub claim another mothership may hold. Returns a result indicating whether to queue
+/// behind a local holder and whether a stale remote claim was detected for activity logging.
 /// A failed GitHub lookup degrades to the local answer rather than refusing the launch.
 #[allow(clippy::result_large_err)]
 pub async fn check_launch(
@@ -395,7 +425,7 @@ pub async fn check_launch(
     allow_duplicate: bool,
     queue_behind_holder: bool,
     unreachable_ids: &[String],
-) -> Result<bool, Refusal> {
+) -> Result<CheckLaunchResult, Refusal> {
     let recorded = crate::supply_chain_loop::recorded(app).await;
     let queue = match check(
         &app.sessions.read().await,
@@ -412,7 +442,9 @@ pub async fn check_launch(
         .issue
         .filter(|_| crate::claims::should_check_remote(work.issue, allow_duplicate))
     else {
-        return Ok(queue);
+        return Ok(CheckLaunchResult {
+            stale_claim_detected: false,
+        });
     };
     let checked = crate::claims::check_remote_claim(app, &work.repo, issue).await;
     if let Err(e) = &checked {
@@ -425,7 +457,9 @@ pub async fn check_launch(
         );
     }
     let Some(info) = crate::claims::remote_result_or_fallback(checked) else {
-        return Ok(queue);
+        return Ok(CheckLaunchResult {
+            stale_claim_detected: false,
+        });
     };
     if queue {
         // Issue #321: the waiter tolerates only a claim of ours — the holder it queues behind, or
@@ -441,8 +475,39 @@ pub async fn check_launch(
                 holder: remote_holder(&info, issue),
                 message,
             }),
-            None => Ok(true),
+            None => Ok(CheckLaunchResult {
+                stale_claim_detected: false,
+            }),
         };
+    }
+    // Check if the remote claim is stale (label-only, no branch/PR, older than 24h).
+    // If so, clear it and allow the launch to proceed. Must await the clear before returning
+    // to avoid a race where our publish adds the label after the clear removes it.
+    if crate::claims::is_claim_stale(&info, Utc::now()) {
+        if let Some(colony) = &info.colony {
+            let our_id = crate::util::short_id();
+            let host_display = info.host.as_deref().unwrap_or("unknown");
+            let age = Utc::now() - info.updated.unwrap_or(Utc::now());
+            let age_hours = age.num_hours();
+            tracing::info!(
+                repo = %work.repo,
+                issue = issue,
+                stale_colony = %colony,
+                "claims: stale remote claim detected on #{issue}; clearing it to allow launch"
+            );
+            // Clear the stale claim before returning: a race where our publish adds the label
+            // after the clear removes it would leave us without our own claim.
+            crate::claims::clear_stale_claim(app, &work.repo, issue, colony, &our_id).await;
+            // Record the action for the operator to see in the session log.
+            let note = format!(
+                "cleared stale remote claim from colony {} (host: {}, age: {}h)",
+                colony, host_display, age_hours
+            );
+            app.session_log(&our_id, "info", note).await;
+        }
+        return Ok(CheckLaunchResult {
+            stale_claim_detected: true,
+        });
     }
     let holder_down = info
         .host

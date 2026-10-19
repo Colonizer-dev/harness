@@ -579,4 +579,10 @@ export interface DuplicateHolder {
   /** The held work in words: `#7`, `lodash / ghsa-1`. */
   what: string;
   queueable: boolean;
+  /** For a remote claim, the GitHub login of the account that created the claim comment. */
+  claimed_by?: string;
+  /** For a remote claim, when the claim was created (RFC3339 format), for displaying relative time. */
+  claimed_at?: string;
+  /** For a label-only remote claim, whether it looks stale (older than 24h with no branch or PR). */
+  stale_hint?: boolean;
 }

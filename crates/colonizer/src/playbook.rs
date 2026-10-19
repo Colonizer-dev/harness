@@ -182,7 +182,8 @@ const TOOLCHAIN_MESSAGE: &str = "Playbook: installing a toolchain (rustup, swift
 /// sentence after the `Playbook: ` prefix is the runner's own deny reason (execpolicy.mjs), so the
 /// agent hears one explanation wherever the wall comes from.
 const GIT_READ_ONLY_MESSAGE: &str = "Playbook: `.git` is read-only by design: never run `git add`, `git commit` or \
-    `git stash`, and don't write under `.git/` or debug the read-only mount. Leave your changes in the working tree; \
+    `git stash`, and don't write under `.git/` or debug the read-only mount. Don't read or test `.git/objects`, `.git/refs`, \
+    or other `.git/` internals — the harness has all the git information you need. Leave your changes in the working tree; \
     the harness commits them and opens the pull request when you finish.";
 
 fn strings(items: &[&str]) -> Vec<String> {

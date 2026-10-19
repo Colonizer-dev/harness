@@ -108,14 +108,21 @@ signal until it restarts. While a backfill
 `backfill`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
-`<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary;
-its version must match the mothership's. When the release publishes the add-on asset,
-`colonizer add observability` installs a verified copy of the matching version into that versioned
-slot from the running release and enables the module if its saved settings permit it.
-`colonizer remove observability` disables the module and removes the binary — with `--purge` it also
-drops the saved settings, the add-on's ledger offsets and the `observability-headers` secret — and
-`colonizer observability status` prints the add-on's health. Building it yourself with cargo and
-pointing `COLONIZER_OBSERVABILITY_BIN` at the result stays the development path:
+`<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
+Its version must match the mothership's. Releases carry it as its own tarball,
+`colonizer-observability-<platform>.tar.gz` (`linux-x86_64`, `darwin-arm64`), checksummed in
+SHA256SUMS and attested the same way as the main artifacts — not inside the app's own tarball, so a
+default install does not pull it in. `scripts/install-release.sh` and `colonizer setup` install it
+beside `colonizer` whenever the release carries it; an older release without it installs the app
+alone — as do installs from a local archive or the macOS DMG, which have no SHA256SUMS row to opt
+in from; `colonizer setup`, or a re-run of the installer from a release that carries it, adds it.
+When the release publishes the add-on asset, `colonizer add observability` installs a verified copy
+of the matching version into that versioned slot from the running release and enables the module if
+its saved settings permit it. `colonizer remove observability` disables the module and removes the
+binary — with `--purge` it also drops the saved settings, the add-on's ledger offsets and the
+`observability-headers` secret — and `colonizer observability status` prints the add-on's health.
+Building it yourself with cargo and pointing `COLONIZER_OBSERVABILITY_BIN` at the result stays the
+development path:
 
 ```sh
 cargo build --release -p colonizer-observability

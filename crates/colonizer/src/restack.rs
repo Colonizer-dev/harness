@@ -54,14 +54,13 @@ pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: b
             "colony `{parent_id}`'s pull request was closed without merging, so there is nothing to queue for; \
              pass `stack: true` to build on its branch anyway"
         )),
-        // No branch to queue for and none to stack on either: the stacked rule's own refusal.
-        SessionStatus::NoChanges | SessionStatus::Failed => match stack::stacked_on(parent_id, Some(parent)) {
+        // A parent with no changes refuses: there is nothing to queue for or stack on.
+        // A failed parent waits: it may recover (issue #1066).
+        SessionStatus::NoChanges => match stack::stacked_on(parent_id, Some(parent)) {
             Stacked::Refuse(reason) => Stacked::Refuse(reason),
-            other => panic!(
-                "a {status} parent has no branch to lend: {other:?}",
-                status = parent.status.as_str()
-            ),
+            other => panic!("a changeless parent has no branch to lend: {other:?}"),
         },
+        SessionStatus::Failed => Stacked::Wait,
     }
 }
 
@@ -254,17 +253,22 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_with_no_branch_to_lend_refuses_by_name_and_reason() {
-        for (status, why) in [
-            (SessionStatus::Failed, "failed"),
-            (SessionStatus::NoChanges, "made no changes"),
-        ] {
-            let reason = refuses(queue_decision("parent", Some(&parent(status)), false));
-            assert!(reason.contains("parent"), "the parent is named: {reason}");
-            assert!(reason.contains(why), "{}: {reason}", status.as_str());
-        }
+    fn a_parent_with_no_changes_refuses_by_name_and_reason() {
+        let reason = refuses(queue_decision("parent", Some(&parent(SessionStatus::NoChanges)), false));
+        assert!(reason.contains("parent"), "the parent is named: {reason}");
+        assert!(reason.contains("made no changes"), "{reason}");
         let reason = refuses(queue_decision("ghost", None, false));
         assert!(reason.contains("ghost"), "{reason}");
+    }
+
+    #[test]
+    fn a_failed_parent_makes_the_child_wait() {
+        // Issue #1066: a failed parent may recover, so the child waits for it to do so rather than
+        // being retired to the queue.
+        match queue_decision("parent", Some(&parent(SessionStatus::Failed)), false) {
+            Stacked::Wait => {} // Expected
+            other => panic!("a failed parent may recover: {other:?}"),
+        }
     }
 
     #[test]

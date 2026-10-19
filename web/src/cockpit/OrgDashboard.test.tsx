@@ -78,11 +78,12 @@ describe("OrgDashboard", () => {
     expect(html).toContain("no merged colonies with PR times yet");
     expect(html).toContain("no settled checks in range yet");
     expect(html).toContain("API error rate: no data source yet");
-    // Real figures: 1 merged of 4 colonies, 1 failed of 4, $6 rollup ÷ 1 merged.
+    // Real figures: 1 merged of 4 colonies, 1 failed of 4, $6 period spend ÷ 1 merged in range.
     expect(html).toContain("25% of 4 colonies");
     expect(html).toContain("25.0%");
     expect(html).toContain("1 failed of 4");
     expect(html).toContain("$6.00");
+    expect(html).toContain("1 merged in range");
     // No provider tallies by default: the API-error tile stays empty, not zero.
     expect(html).not.toContain("0.00%");
   });
@@ -172,5 +173,36 @@ describe("OrgDashboard", () => {
     const html = renderToStaticMarkup(<OrgDashboard org={ACME} sessions={[]} history={null} range={30} compare={false} onBack={noop} />);
     expect(html).toContain("No colonies right now.");
     expect(html).toContain("no colonies in scope");
+  });
+
+  it("uses period spend ÷ merged in range for Cost per merged PR, not rollup (issue #1275)", () => {
+    // Org with $0 rollup (cost_usd) but $484 measured in history
+    const orgZeroRollup: OrgEntry = { ...ACME, spend: { cost_usd: 0, routed_cost_usd: null, tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, models: [] } };
+    // History with $484 over a range: this is the period spend
+    const historyWith484: SpendHistory = {
+      days: [
+        histDay("2026-09-13", 1, 0, 100),
+        histDay("2026-09-14", 1, 0, 96),
+        histDay("2026-09-15", 1, 0, 120),
+        histDay("2026-09-16", 1, 0, 88),
+        histDay("2026-09-17", 1, 0, 80),
+      ],
+    };
+    // 309 sessions merged overall, 5 of them merged in the range (one per day matching the 5-day history)
+    const manyMerged = Array.from({ length: 304 }, (_, i) => session({ id: `old-${i}`, status: "merged", created_at: "2026-08-01T09:00:00Z" }));
+    const inRange = [
+      session({ id: "m1", status: "merged", created_at: "2026-09-13T09:00:00Z" }),
+      session({ id: "m2", status: "merged", created_at: "2026-09-14T09:00:00Z" }),
+      session({ id: "m3", status: "merged", created_at: "2026-09-15T09:00:00Z" }),
+      session({ id: "m4", status: "merged", created_at: "2026-09-16T09:00:00Z" }),
+      session({ id: "m5", status: "merged", created_at: "2026-09-17T09:00:00Z" }),
+    ];
+    const allSessions = [...manyMerged, ...inRange];
+    const html = renderToStaticMarkup(<OrgDashboard org={orgZeroRollup} sessions={allSessions} history={historyWith484} range={7} compare onBack={noop} />);
+    // 484 / 5 = 96.80; expect this value, not "$0.00" (which would happen if using rollup)
+    expect(html).toContain("$96.80");
+    expect(html).toContain("5 merged in range");
+    // The Spend tile should show the same 484, confirming both use the same period
+    expect(html).toContain("$484.00");
   });
 });

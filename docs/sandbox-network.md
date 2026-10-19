@@ -405,10 +405,11 @@ ingress too ([`types.rs:272-279`][policy-none]), and the mesh-off published port
 allow, rules: <the --net-rule tokens> }` with no profile rules
 ([`common.rs:848-967`][cli-netpolicy]).
 
-Each boot records what it resolved — mode, allow, block, sources, module, always_blocked, rules,
-profiles, `applied_at` — at `<session dir>/egress.json`, and `GET /api/sessions/{id}/egress`
-serves it (404 for a colony that last booted before this existed), so the fleet view can answer
-what a colony could reach, and whose hosts widened it, without reading the boot log.
+Each boot records what it resolved — mode, allow, block, sources, module, packs, fleet_refused,
+always_blocked, rules, profiles, `applied_at` — at `<session dir>/egress.json`, and `GET
+/api/sessions/{id}/egress` serves it (404 for a colony that last booted before this existed), so
+the fleet view can answer what a colony could reach, and whose hosts widened it, without reading
+the boot log.
 
 ### Hosts an agent module declares
 
@@ -433,6 +434,23 @@ covers these hosts.
 Each boot records which module contributed and the entries it added: the `module` object,
 `{agent, allow}`, in `<session dir>/egress.json`, served by `GET /api/sessions/{id}/egress` (see
 [Modes and settings](#modes-and-settings)).
+
+### Hosts a skill pack declares
+
+Each skill pack's `mcp.json` may declare remote MCP servers, each with a `url` and a
+non-empty `hosts` (or `allowedHosts`) list. The hosts are the destinations the tool servers
+the pack's skills call, validated at boot time (see [skill-packs.md](skill-packs.md#mcpjson)).
+
+In `allowlist` mode a pack's declared hosts join the colony's allow list, so the agent reaches
+the tool servers without the operator restating them. They are validated and compiled exactly
+as module and operator hosts are, and a host the operator or the module already listed is not
+repeated. Nothing here can reopen a blocked destination: the operator's `egress_block` and the
+always-blocked deny set still compile ahead of every allow. `open` mode is unchanged, because
+the `public` profile covers these hosts; a per-pack fence in open mode is future work.
+
+Each boot records which packs contributed and the entries each added: the `packs` array,
+each entry `{pack, allow}`, in `<session dir>/egress.json`, served alongside the module
+record (see [Modes and settings](#modes-and-settings)).
 
 When a tool call is denied, the claude-code runner adds a `denial: {class, hint}` field to the
 errored `tool_result` event and tells the agent the same hint once per class; see

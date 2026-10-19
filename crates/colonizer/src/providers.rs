@@ -1353,6 +1353,28 @@ pub(crate) fn claude_used_by(providers: &[Provider], envs: &[Map<String, Value>]
     used
 }
 
+/// Every configured provider's quota state, for the queue's verdicts: `routable` marks the
+/// providers the org's model settings actually send traffic to, so an unused spare never holds a
+/// colony. Shared by the status poll and the queue's chain check (issue #1160), which read the
+/// same store.
+pub(crate) fn provider_quota_states(app: &App, envs: &[Map<String, Value>]) -> Vec<provider_quota::ProviderQuota> {
+    let exhausted = app.gateway.quota_exhausted();
+    app.providers()
+        .iter()
+        .map(|p| {
+            let hit = exhausted.iter().find(|(id, _, _)| id == &p.id);
+            provider_quota::ProviderQuota {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                exhausted: hit.is_some(),
+                reset_at: hit.and_then(|(_, reset, _)| reset.clone()),
+                reset_unix: hit.and_then(|(_, _, unix)| *unix),
+                routable: !used_by(&p.id, envs).is_empty(),
+            }
+        })
+        .collect()
+}
+
 /// Whether a colony booted on `agent` with `choice`'s settings spends the Claude account (issue
 /// #1129) — the colony-level half of the scoped hold, so the queue and the restore line ask one
 /// question per colony instead of holding the whole queue. An agent module nobody knows is treated
@@ -1533,21 +1555,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
     }
     let envs = runner_envs(app).await;
     let providers = app.providers();
-    let exhausted = app.gateway.quota_exhausted();
-    let states: Vec<provider_quota::ProviderQuota> = providers
-        .iter()
-        .map(|p| {
-            let hit = exhausted.iter().find(|(id, _, _)| id == &p.id);
-            provider_quota::ProviderQuota {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                exhausted: hit.is_some(),
-                reset_at: hit.and_then(|(_, reset, _)| reset.clone()),
-                reset_unix: hit.and_then(|(_, _, unix)| *unix),
-                routable: !used_by(&p.id, &envs).is_empty(),
-            }
-        })
-        .collect();
+    let states = provider_quota_states(app, &envs);
     match provider_quota::quota_pause(&states, waiting) {
         Some(pause) => {
             let details = pause

@@ -60,7 +60,7 @@ pub(crate) fn stacked_on(parent_id: &str, parent: Option<&Session>) -> Stacked {
         SessionStatus::NoChanges => Stacked::Refuse(format!(
             "colony `{parent_id}` made no changes, so it has no branch to build on"
         )),
-        SessionStatus::Failed => Stacked::Refuse(format!("colony `{parent_id}` failed, so it has no branch to build on")),
+        SessionStatus::Failed => Stacked::Wait,
     }
 }
 
@@ -218,15 +218,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_or_changeless_parent_is_refused_by_name_and_reason() {
-        for (status, why) in [
-            (SessionStatus::Failed, "failed"),
-            (SessionStatus::NoChanges, "made no changes"),
-        ] {
-            let reason = refuses(stacked_on("parent", Some(&parent(status))));
-            assert!(reason.contains("parent"), "the parent is named: {reason}");
-            assert!(reason.contains(why), "{}: {reason}", status.as_str());
-        }
+    fn a_failed_parent_makes_the_child_wait_for_recovery() {
+        // Issue #1066: a failed parent is not necessarily finished — it may be resumed and succeed.
+        // Rather than retire the child immediately, the queue waits for the parent to recover.
+        assert!(
+            matches!(stacked_on("parent", Some(&parent(SessionStatus::Failed))), Stacked::Wait),
+            "a failed parent may be resumed and publish yet"
+        );
+    }
+
+    #[test]
+    fn a_changeless_parent_is_refused_by_name_and_reason() {
+        let reason = refuses(stacked_on("parent", Some(&parent(SessionStatus::NoChanges))));
+        assert!(reason.contains("parent"), "the parent is named: {reason}");
+        assert!(reason.contains("made no changes"), "{reason}");
     }
 
     #[test]
@@ -434,16 +439,16 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_that_cannot_lend_a_branch_yet_makes_a_fresh_boot_wait_or_refuse() {
+    fn a_parent_that_cannot_lend_a_branch_yet_makes_a_fresh_boot_wait() {
         match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Running)), true) {
             BootBase::Wait { colony } => assert_eq!(colony, "parent"),
             other => panic!("a running parent has not pushed yet: {other:?}"),
         }
-        let reason = match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Failed)), true) {
-            BootBase::Refuse(reason) => reason,
-            other => panic!("a failed parent can never provide a branch: {other:?}"),
+        // Issue #1066: a failed parent may recover, so the child waits rather than refusing.
+        match boot_base(None, Some("parent"), Some(&parent(SessionStatus::Failed)), true) {
+            BootBase::Wait { colony } => assert_eq!(colony, "parent"),
+            other => panic!("a failed parent may recover: {other:?}"),
         };
-        assert!(reason.contains("parent") && reason.contains("failed"), "{reason}");
     }
 
     #[test]
