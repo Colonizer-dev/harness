@@ -38,6 +38,7 @@ export interface SessionsApi {
   createSession(body: NewSessionRequest): Promise<Session>;
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
+  retrySession(id: string): Promise<Session>;
   /**
    * POST /api/sessions/{id}/messages: send the colony's agent a message over HTTP, deduped on a fresh
    * client id. The cockpit uses it where no chat stream is open — Retry on a colony held on gateway
@@ -84,6 +85,7 @@ export const sessionsHttp: SessionsApi = {
   createSession: (body) => post("/api/sessions", body),
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
+  retrySession: (id) => post(`/api/sessions/${enc(id)}/retry`),
   messageSession: (id, text) => post(`/api/sessions/${enc(id)}/messages`, { id: outboxId(), text }),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   setSessionPriority: (id, priority) => post(`/api/sessions/${enc(id)}/priority`, { priority }),

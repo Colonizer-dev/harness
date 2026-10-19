@@ -941,6 +941,7 @@ mod tests {
             parent: None,
             stack: false,
             stack_fork: None,
+            retry_of: None,
             origin: None,
             auto_note: None,
             launched_by_token: None,
