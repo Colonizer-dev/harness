@@ -42,7 +42,8 @@ describe("providerStatus", () => {
 
 describe("gaugeOf", () => {
   it("handles an unknown balance, a total, no total, and an exhausted plan", () => {
-    expect(gaugeOf(base)).toEqual({ pctLeft: null, text: "balance unknown", tone: "idle" });
+    expect(gaugeOf(base)).toEqual({ pctLeft: null, text: "no balance API", tone: "idle" });
+    expect(gaugeOf({ ...base, quota: { url: "https://example.com", pointer: "/balance" } })).toEqual({ pctLeft: null, text: "balance unknown", tone: "idle" });
     expect(gaugeOf({ ...base, balance: { at: "x", remaining: 620, limit: 1000 } })).toMatchObject({ pctLeft: 62, text: "62%", tone: "ok" });
     expect(gaugeOf({ ...base, balance: { at: "x", remaining: 90, limit: 1000 } }).tone).toBe("err");
     expect(gaugeOf({ ...base, balance: { at: "x", remaining: 3_100_000 } })).toMatchObject({ pctLeft: null, text: "3.1M left" });
