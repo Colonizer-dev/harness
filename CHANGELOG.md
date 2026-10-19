@@ -18,6 +18,47 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.16] - 2026-10-19
+
+### Added
+
+- **A fleet member's observability is part of its health badge.** A member's reduced
+  `/api/status` answer — the one fleet peers poll without a token — now carries an `observability`
+  block, `{enabled, state, failing_since, destination_hash}`, always present on this version so an
+  owner can tell export switched off from an older member that reports nothing. When a member's
+  exporter has been failing for more than ten minutes, the owner's member list reads **degraded**,
+  "Observability failing", with "check this member's observability settings" underneath (the worst
+  problem still wins; export off is a choice, never a fault). The destination is named only as a
+  truncated SHA-256 of the protocol and endpoint: no endpoint, header or error text crosses
+  machines. docs/fleet.md gains "Observability across a fleet" — the same backend on every member,
+  the resource attributes that join them into one dataset in Grafana, and the
+  `<data>/observability/hash.key` a `repo_names = hashed` fleet must copy between its members to
+  keep hashes joinable. ([#860])
+- **Observability: a runnable local Grafana stack, per-backend recipes, and the limits and costs written down.** `examples/observability/grafana/` gains a compose stack — Alloy as the collector, Loki, Tempo, Prometheus and Grafana with provisioned dashboards — that the exporter reaches with one loopback endpoint, plus the Alloy, Loki and Tempo configs tuned to the exporter's caps, a README walking through it, and a CI check of those example configs. Two docs pages join the observability guide: [Backend recipes](docs/observability/backends.md), with the endpoint, the header and the ingest limits for Grafana Cloud, Datadog, Honeycomb, Elastic, SigNoz, New Relic, the local stack and a plain `otelcol-contrib` collector, and [Limits and cost](docs/observability/limits-and-cost.md), which maps each backend limit to the exporter setting that stays under it, reports the volume measured on the repository's fixtures (per record, per trace and per colony-hour) with the method, and lists the levers — sampling, the stream switches, the metrics interval, gzip — that lower the bill. ([#862])
+- **mattpocock-skills: an optional thirteen-skill engineering pack, staged non-interactively with its setup pre-seeded.** [mattpocock/skills](https://github.com/mattpocock/skills) (v1.3.1, MIT) is vendored as `mattpocock-skills`, off by default like ponytail and security-audit: an operator adds it to the claude-code module's Skillsets list, and a new **mattpocock-skills allowlist** setting narrows it to a comma-separated subset of its thirteen skills (`tdd`, `diagnosing-bugs`, `code-review`, `to-spec`, `implement-spec`, `to-tickets`, `triage`, `improve-codebase-architecture`, `codebase-design`, `domain-modeling`, `pr`, `handoff`, `writing-for-agents`). Only that curated set is staged — each skill with the sibling files it reads, minus its Codex stub — and staging is an allowlist that fails on any other skill: the interactive ones (`grill-me` and friends) would stall a colony on an interview, and `setup-matt-pocock-skills` is never staged because the runner pre-seeds the per-repo configuration it would write (issue tracker, triage labels, domain docs) in the system prompt, where the consumer skills find it — so no setup prompt ever reaches the cockpit, and a PreToolUse hook refuses the excluded names and any skill the allowlist does not name. Where a skill conflicts with how a colony runs, the colony's rules are stated in the prompt and win: no merging, pushing or branch-making, the pull request description in the colony's pr.md format, and assumptions stated instead of confirmation rounds. Two of the thirteen (`code-review`, `pr`) share their names with ECC's commands; the namespaced addresses (`mattpocock-skills:code-review` vs `ecc:code-review`) keep them distinct, and both packs can be enabled together. ([#1016])
+
+### Security
+
+- **Webhook deliveries can no longer be redirected onto the mothership's own network, and the
+  autonomy judge no longer follows redirects at all.** The notify module's delivery clients (the
+  fan-out loop, the host-line path, the outbox's retries and replays) followed redirects with no
+  host check: a webhook receiver could answer a signed POST with a 302 to
+  `http://169.254.169.254/` or a LAN address and the mothership would follow it. They now follow a
+  redirect only while it stays an http(s) address on a public host — the hop's name resolved, so a
+  public-looking name pointed at a private address is refused too — keeping the default ten-hop
+  limit; the first URL never passes through a redirect policy, so the owner's own webhook keeps
+  pointing wherever the owner chose, their own machine included. At the same time a scoped token's
+  webhook, already refused when its address was literally private, is now also resolved at save
+  time: a public name that answers with a private address — or with none at all — is refused. The
+  fleet status poll and the autonomy judge's client follow no redirects now either, the latter
+  because a redirect would carry the provider's API key to a host nobody configured. The cockpit
+  renders a link an outside feed left in the mothership's data (a repository's homepage, an
+  advisory url) as a link only when it starts with http(s), so a `javascript:` scheme stored in a
+  feed reads as plain text. Repo CI script paths in pre-publish checks are quoted for the guest's
+  shell, so a script name with a space runs as one command. A private address is also recognised in
+  its IPv4-compatible, NAT64 and 6to4 IPv6 forms, and `0.0.0.0/8` and site-local `fec0::/10` count as
+  private. ([#1374])
+
 ## [v0.2.15] - 2026-10-19
 
 ### Added
@@ -3159,6 +3200,8 @@ Macs. ([#74])
 [#856]: https://github.com/Colonizer-dev/harness/issues/856
 [#857]: https://github.com/Colonizer-dev/harness/issues/857
 [#858]: https://github.com/Colonizer-dev/harness/issues/858
+[#860]: https://github.com/Colonizer-dev/harness/issues/860
+[#862]: https://github.com/Colonizer-dev/harness/issues/862
 [#863]: https://github.com/Colonizer-dev/harness/issues/863
 [#864]: https://github.com/Colonizer-dev/harness/issues/864
 [#865]: https://github.com/Colonizer-dev/harness/issues/865
@@ -3213,6 +3256,7 @@ Macs. ([#74])
 [#1001]: https://github.com/Colonizer-dev/harness/issues/1001
 [#1004]: https://github.com/Colonizer-dev/harness/issues/1004
 [#1014]: https://github.com/Colonizer-dev/harness/issues/1014
+[#1016]: https://github.com/Colonizer-dev/harness/issues/1016
 [#1018]: https://github.com/Colonizer-dev/harness/issues/1018
 [#1029]: https://github.com/Colonizer-dev/harness/issues/1029
 [#1036]: https://github.com/Colonizer-dev/harness/issues/1036
@@ -3302,6 +3346,8 @@ Macs. ([#74])
 [#1276]: https://github.com/Colonizer-dev/harness/issues/1276
 [#1279]: https://github.com/Colonizer-dev/harness/issues/1279
 [#1331]: https://github.com/Colonizer-dev/harness/issues/1331
+[#1374]: https://github.com/Colonizer-dev/harness/issues/1374
+[v0.2.16]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.16
 [v0.2.15]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.15
 [v0.2.14]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.14
 [v0.2.13]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.13
