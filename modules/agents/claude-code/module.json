@@ -247,9 +247,16 @@
         "type": "string",
         "format": "plugin-dirs",
         "title": "Skillsets",
-        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. archify is on by default, so any colony can draw the repository as an architecture map for the Nest; the rest, ponytail and security-audit among them, are off until you switch them on. Stored as a comma-separated list of names.",
+        "description": "Claude Code plugin directories colonies load, read-only: the ones vendored with the app and any in the mothership's plugins folder. archify is on by default, so any colony can draw the repository as an architecture map for the Nest; the rest, ponytail, mattpocock-skills and security-audit among them, are off until you switch them on. Stored as a comma-separated list of names.",
         "default": "archify",
         "env": "COLONIZER_PLUGIN_DIRS"
+      },
+      "mattpocock_skills": {
+        "type": "string",
+        "title": "mattpocock-skills allowlist",
+        "description": "Which of the mattpocock-skills pack's skills a colony may load, as a comma-separated list. The pack is off by default (add mattpocock-skills to Skillsets first); this then narrows it. Names are from its thirteen skills — tdd, diagnosing-bugs, code-review, to-spec, implement-spec, to-tickets, triage, improve-codebase-architecture, codebase-design, domain-modeling, pr, handoff, writing-for-agents — and names outside that set are ignored: the pack's interactive skills are never staged, so they cannot be allowed here. Empty loads all thirteen.",
+        "default": "tdd,diagnosing-bugs,code-review,to-spec,implement-spec,to-tickets,triage,improve-codebase-architecture,codebase-design,domain-modeling,pr,handoff,writing-for-agents",
+        "env": "COLONIZER_MATTPOCOCK_SKILLS"
       },
       "caveman": {
         "type": "boolean",

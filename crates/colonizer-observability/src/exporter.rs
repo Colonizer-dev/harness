@@ -114,6 +114,12 @@ pub struct Exporter {
 /// The policy, built from the contract's settings: content gate closed (#848 has not landed), the
 /// hash key loaded for `repo_names = hashed` (without one, hashed names are dropped, never sent).
 pub fn policy_for(contract: &Contract) -> Policy {
+    policy_with_gate(contract, ContentGate::closed())
+}
+
+/// The same policy with the caller's content gate: the offline export's `--content` resolves P3's
+/// conditions per colony and holds an open gate for the lines that pass. Nothing else ever does.
+pub fn policy_with_gate(contract: &Contract, gate: ContentGate) -> Policy {
     let s = &contract.settings;
     let repo_names = if s.repo_names == "hashed" {
         RepoNames::Hashed
@@ -129,7 +135,7 @@ pub fn policy_for(contract: &Contract) -> Policy {
         max_content_bytes: s.max_content_bytes as usize,
         repo_names,
     };
-    Policy::new(config, ContentGate::closed(), key)
+    Policy::new(config, gate, key)
 }
 
 /// The resource every request carries: `service.name`, `service.version`, `service.instance.id`

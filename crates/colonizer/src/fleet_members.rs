@@ -642,6 +642,11 @@ async fn member_signals(app: &Shared, member: &Member) -> crate::fleet_health::S
         signals.disk_free_bytes = seen.disk_free_bytes;
         signals.disk_total_bytes = seen.disk_total_bytes;
         signals.runner_tick_age = seen.runner_tick_age_s.map(Duration::seconds);
+        // Issue #860: the exporter's failure age, measured at the poll like the heartbeat above.
+        signals.observability_failing_for_s = seen
+            .observability
+            .as_ref()
+            .and_then(|observability| observability.failing_for_s(seen.polled_at.timestamp()));
         if let Some(sync) = seen.fleet_sync {
             signals.sync_consent = Some(sync.consent);
             signals.last_sync_error = sync
@@ -1610,6 +1615,7 @@ mod tests {
             health: crate::fleet::HostHealth::Unreachable,
             runner_tick_age_s: None,
             fleet_sync: None,
+            observability: None,
         };
         app.fleet_cache.record_poll(&url, now, row).await;
 
@@ -1639,7 +1645,9 @@ mod tests {
             let state = app.fleet_members.state.read().await;
             state.members.iter().find(|m| m.id == member_id).unwrap().url.clone().unwrap()
         };
-        let poll = |runner: Option<i64>, sync: Option<crate::fleet::PeerSync>| {
+        let poll = |runner: Option<i64>,
+                    sync: Option<crate::fleet::PeerSync>,
+                    observability: Option<crate::observability::fleet::PeerObservability>| {
             let app = app.clone();
             let url = url.clone();
             async move {
@@ -1660,6 +1668,7 @@ mod tests {
                     health: crate::fleet::HostHealth::Online,
                     runner_tick_age_s: runner,
                     fleet_sync: sync,
+                    observability,
                 };
                 app.fleet_cache.record_poll(&url, now, row).await;
             }
@@ -1670,7 +1679,7 @@ mod tests {
             ..Default::default()
         };
 
-        poll(Some(3), Some(synced.clone())).await;
+        poll(Some(3), Some(synced.clone()), None).await;
         let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
         assert_eq!(health["state"], "ok", "{health}");
         assert_eq!(health["note"], Value::Null);
@@ -1682,7 +1691,7 @@ mod tests {
             last_error_class: Some("error".into()),
             consent: true,
         };
-        poll(Some(3), Some(behind)).await;
+        poll(Some(3), Some(behind), None).await;
         let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
         assert_eq!(health["state"], "degraded", "{health}");
         assert_eq!(health["code"], "sync_backlog");
@@ -1695,7 +1704,7 @@ mod tests {
                 consent: true,
                 ..Default::default()
             };
-            poll(Some(3), Some(rejected)).await;
+            poll(Some(3), Some(rejected), None).await;
             let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
             assert_eq!(health["state"], "stopped", "{state}: {health}");
             assert_eq!(health["code"], "sync_rejected");
@@ -1703,7 +1712,7 @@ mod tests {
             assert_eq!(health["hint"], "re-pair this machine");
         }
 
-        poll(Some(600), Some(synced)).await;
+        poll(Some(600), Some(synced.clone()), None).await;
         let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
         assert_eq!(health["state"], "degraded", "{health}");
         assert_eq!(health["code"], "runner_down");
@@ -1714,10 +1723,34 @@ mod tests {
             consent: false,
             ..Default::default()
         };
-        poll(Some(3), Some(off)).await;
+        poll(Some(3), Some(off), None).await;
         let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
         assert_eq!(health["state"], "ok", "consent off is not a fault: {health}");
         assert_eq!(health["note"], "History sync off");
+
+        // Issue #860: an exporter failing past ten minutes degrades the member; one that is merely
+        // behind, or switched off, does not.
+        let observability = |enabled: bool, state: &str, minutes: i64| crate::observability::fleet::PeerObservability {
+            enabled,
+            state: state.into(),
+            failing_since: (enabled && state == "failing")
+                .then(|| (Utc::now() - Duration::minutes(minutes)).timestamp().max(0) as u64),
+            destination_hash: Some("0123456789abcdef012345".into()),
+        };
+        poll(Some(3), Some(synced.clone()), Some(observability(true, "failing", 30))).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "observability_failing");
+        assert_eq!(health["reason"], "Observability failing for 30 min");
+        assert_eq!(health["hint"], "check this member's observability settings");
+
+        poll(Some(3), Some(synced.clone()), Some(observability(true, "failing", 2))).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "ok", "under ten minutes is not a fault: {health}");
+
+        poll(Some(3), Some(synced), Some(observability(false, "off", 0))).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "ok", "export off is a choice, not a fault: {health}");
     }
 
     #[tokio::test]

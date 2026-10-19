@@ -509,7 +509,7 @@ install_from_release "$versions/v2" || rc=$?
 [ "$rc" -ne 0 ] || bad "all slots in use: expected the installer to refuse when no slot is free"
 grep -q "every app slot is in use" "$log" ||
   bad "all slots in use: expected the refusal to say every slot is in use; it said: $(cat "$log")"
-[ -f "$home/.local/share/colonizer/app-a/vendor/microsandbox/bin/msb" ] ||
+[ -f "$home/.local/share/colonizer/app-a/bin/colonizer" ] ||
   bad "all slots in use: expected the current slot's binary to be left untouched"
 expect_colonizer "all slots in use" "colonizer 1"
 note "ok: an install with every slot in use was refused and left them untouched"

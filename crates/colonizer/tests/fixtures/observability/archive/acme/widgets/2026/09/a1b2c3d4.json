@@ -1,0 +1,28 @@
+{
+  "session": "a1b2c3d4",
+  "repo": "acme/widgets",
+  "org": "acme",
+  "issue": 325,
+  "title": "Session storage backend abstraction: same semantics, swappable store",
+  "status": "running",
+  "pr_url": null,
+  "cost_usd": 0.42,
+  "model_usage": {
+    "claude-sonnet-4-5": {
+      "cache_read_tokens": 1228800,
+      "cache_write_tokens": 38912,
+      "input_tokens": 184320,
+      "output_tokens": 9011
+    }
+  },
+  "model_tier": null,
+  "agent": "claude_code",
+  "created_at": "2026-09-24T09:30:00Z",
+  "updated_at": "2026-09-24T09:41:00Z",
+  "archived_at": "2026-10-19T05:04:25.208424155Z",
+  "mothership": "host-1",
+  "revision": 1,
+  "bundle": "acme/widgets/2026/09/a1b2c3d4.tar.zst",
+  "bytes": 465,
+  "fingerprint": "3 files, 533 bytes, newest mtime 1792386265099052723"
+}

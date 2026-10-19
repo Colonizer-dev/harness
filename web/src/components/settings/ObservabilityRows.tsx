@@ -27,6 +27,12 @@ export function observabilityLine(status: ObservabilityStatus | null): { tone: "
   }
 }
 
+/** Which add-on actions the pane offers (issue #1060): install when the status says the exporter
+ *  add-on is missing, remove when one is installed. Pure for the test. */
+export function addonActions(status: ObservabilityStatus | null): { install: boolean; remove: boolean } {
+  return { install: status?.state === "no_addon", remove: status?.addon != null };
+}
+
 /** One signal's row in the health card: the badge's tone and label, and one detail line. */
 export interface SignalRow {
   signal: string;
@@ -315,7 +321,7 @@ export function ObservabilityRows({ unsaved }: { unsaved: boolean }) {
   const id = useId();
   const [status, setStatus] = useState<ObservabilityStatus | null>(null);
   const [headers, setHeaders] = useState("");
-  const [busy, setBusy] = useState<"save" | "test" | null>(null);
+  const [busy, setBusy] = useState<"save" | "test" | "install" | "remove" | null>(null);
   const [test, setTest] = useState<ObservabilityTest | { ok: false; error: string } | null>(null);
 
   const load = useCallback(() => api.observabilityStatus().then(setStatus, () => setStatus(null)), [api]);

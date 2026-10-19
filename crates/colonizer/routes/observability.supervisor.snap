@@ -1,4 +1,5 @@
 /api/observability/backfill                          DELETE unauth=401    token=owner            activity=-
 /api/observability/backfill                          POST   unauth=401    token=owner            activity=-
+/api/observability/export                            POST   unauth=401    token=owner            activity=-
 /api/observability/status                            GET    unauth=401    token=owner            activity=-
 /api/observability/test                              POST   unauth=401    token=owner            activity=-

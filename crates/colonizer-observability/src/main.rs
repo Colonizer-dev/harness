@@ -5,20 +5,24 @@
 //! colonizer-observability --version [--json]
 //! colonizer-observability run --contract <data>/observability/exporter.json
 //! colonizer-observability send-test-event --contract <data>/observability/exporter.json
-//! colonizer-observability backfill --contract <data>/observability/exporter.json [--since <when>] [--until <when>] [--repo <owner/name>] [--rate <n>] [--dry-run]
+//! colonizer-observability backfill --contract <data>/observability/exporter.json [--since <when>] [--until <when>] [--repo <owner/name>] [--rate <n>] [--dry-run] [--include-archive]
+//! colonizer-observability export --contract <data>/observability/exporter.json --out <file|dir> [--since <when>] [--until <when>] [--signals logs,traces] [--include-archive] [--content]
 //! ```
 //!
-//! Both commands read one JSON line of secrets from stdin first (`{"headers": "k=v,…"}`). `run`
+//! Every command reads one JSON line of secrets from stdin first (`{"headers": "k=v,…"}`). `run`
 //! then exports until its stdin closes — the mothership's death ends it without a heartbeat — and
 //! exits 78 when the contract or version is refused. `backfill` (#858) replays the ledgers'
 //! on-disk history to the backend once, printing one JSON summary on stdout; it stops at its
 //! stdin's end too, and its flags are parsed by [`colonizer_observability::backfill::Options`].
-//! It never prints a header value.
+//! `export` (#859) is the offline backfill: it sends nothing, writing every OTLP request as one
+//! OTLP/JSON line to `--out` instead, and answers with one JSON summary line; the secrets line is
+//! read and dropped. It never prints a header value.
 
 #![allow(clippy::disallowed_macros)] // standalone add-on: no tracing subscriber; the mothership supervisor captures this stderr
 
-use colonizer_observability::backfill::{Backfill, Options};
+use colonizer_observability::backfill::{Backfill, Options as BackfillOptions};
 use colonizer_observability::contract::{self, CONTRACT, EXIT_REFUSED};
+use colonizer_observability::export::{self, Options as ExportOptions};
 use colonizer_observability::exporter::{self, Exporter};
 use colonizer_observability::relay::Relay;
 use std::path::PathBuf;
@@ -27,7 +31,7 @@ use tokio::io::AsyncReadExt;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: colonizer-observability (--version [--json] | run --contract <path> | send-test-event --contract <path> | backfill --contract <path> [--since <when>] [--until <when>] [--repo <owner/name>] [--rate <n>] [--dry-run])"
+        "usage: colonizer-observability (--version [--json] | run --contract <path> | send-test-event --contract <path> | backfill --contract <path> [--since <when>] [--until <when>] [--repo <owner/name>] [--rate <n>] [--dry-run] [--include-archive] | export --contract <path> --out <file|dir> [--since <when>] [--until <when>] [--signals logs,traces] [--include-archive] [--content])"
     );
     ExitCode::from(2)
 }
@@ -149,7 +153,7 @@ async fn main() -> ExitCode {
             let Some(path) = contract_arg(&args) else {
                 return usage();
             };
-            let opts = match Options::from_args(&args[1..]) {
+            let opts = match BackfillOptions::from_args(&args[1..]) {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("backfill: {e}");
@@ -195,6 +199,44 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS
+            }
+        }
+        Some("export") => {
+            let Some(path) = contract_arg(&args) else {
+                return usage();
+            };
+            let opts = match ExportOptions::from_args(&args[1..]) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("export: {e}");
+                    return usage();
+                }
+            };
+            // The secrets line is read and dropped: nothing is sent, so nothing needs a header.
+            if let Err(e) = read_headers() {
+                eprintln!("export: {e}");
+                return ExitCode::FAILURE;
+            }
+            // The whole export is blocking I/O; it runs off the async threads, like the archive
+            // reader it may spawn.
+            let exported = tokio::task::spawn_blocking(move || export::run(&path, &opts)).await;
+            match exported {
+                Ok(Ok(summary)) => {
+                    println!("{summary}");
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(e)) if e.starts_with("refused") => {
+                    eprintln!("export: {e}");
+                    ExitCode::from(EXIT_REFUSED as u8)
+                }
+                Ok(Err(e)) => {
+                    eprintln!("export: {e}");
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    eprintln!("export: {e}");
+                    ExitCode::FAILURE
+                }
             }
         }
         _ => usage(),

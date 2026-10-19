@@ -23,10 +23,18 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [Metrics push](observability/metrics-push.md): the metric catalogue the exporter pushes, its
   interval and failure semantics, and how its names map to the pull catalogue.
 - [Environment configuration](observability/configuration.md): the `OTEL_*` variables, their precedence, and what an upgrade changes.
+- [Backend recipes](observability/backends.md): endpoint, header and ingest-limit notes for Grafana Cloud, Datadog, Honeycomb, Elastic, SigNoz, New Relic, the local example stack and a plain collector.
+- [Limits and cost](observability/limits-and-cost.md): the backend limits the exporter's caps stay under, measured volume per record and per colony-hour, and the levers that lower the bill.
 - [Mothership log](observability/mothership-log.md): the process's own JSON lines, what is rotated,
   redacted, filtered, and dropped when the disk is behind.
 - [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
   provisioning they assume, and the lint that keeps their queries honest.
+- [Archived colonies and offline export](observability/archive-export.md): reaching colonies that
+  live only in the local archive (`--include-archive`), and writing an export to a file instead of
+  a backend.
+- [Observability across a fleet](fleet.md#observability-across-a-fleet): the same backend on every
+  member, the resource attributes that join them into one dataset, and the hash key a `hashed`
+  fleet must share.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 - [Conformance](observability/conformance.md): the run against a real OpenTelemetry Collector that
@@ -93,12 +101,18 @@ bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `backfill`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
-`<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
-Its version must match the mothership's. Release tarballs do not ship it yet; build it with:
+`<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary;
+its version must match the mothership's. When the release publishes the add-on asset,
+`colonizer add observability` installs a verified copy of the matching version into that versioned
+slot from the running release and enables the module if its saved settings permit it.
+`colonizer remove observability` disables the module and removes the binary — with `--purge` it also
+drops the saved settings, the add-on's ledger offsets and the `observability-headers` secret — and
+`colonizer observability status` prints the add-on's health. Building it yourself with cargo and
+pointing `COLONIZER_OBSERVABILITY_BIN` at the result stays the development path:
 
 ```sh
 cargo build --release -p colonizer-observability
-cp target/release/colonizer-observability "$(dirname "$(command -v colonizer)")/"
+export COLONIZER_OBSERVABILITY_BIN="$PWD/target/release/colonizer-observability"
 ```
 
 `GET /api/observability/status` says whether export is on, why not, where each setting came from,
@@ -216,6 +230,9 @@ span goes out when it ends; the root goes out once, at the colony's outcome. Str
 content. [Traces](observability/traces.md) has the span names, attributes, ids and sampling.
 
 ## Examples
+
+Fuller per-backend recipes, with the header each wants and the ingest limits that bite, are on
+[the backend recipes page](observability/backends.md).
 
 These follow each vendor's public OTLP documentation; check it for your region or site.
 

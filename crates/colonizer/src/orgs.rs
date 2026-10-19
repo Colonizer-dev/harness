@@ -201,6 +201,12 @@ pub struct OrgSettings {
     /// request, so merges stay off until the operator lists a repository here.
     #[serde(default)]
     pub merge_prs: Vec<String>,
+    /// The repositories of this org (full `owner/name`) the mothership builds an
+    /// Understand-Anything knowledge graph for (issue #1015): one dedicated colony per commit of
+    /// main, the newest graph handed to every colony of the repository. Empty — the default —
+    /// builds none.
+    #[serde(default)]
+    pub ua_graph: Vec<String>,
     /// The merge steward (issue #1172): whether Colonizer merges this org's colonies' own pull
     /// requests when they are green, and rebases them when they fall behind. `None` — the default —
     /// is `off`; the steward never calls GitHub for an org that has not opted in.
@@ -706,6 +712,13 @@ pub fn merges_prs(org: &OrgSettings, repo: &str) -> bool {
     in_list(org, &org.merge_prs, repo)
 }
 
+/// Whether the mothership builds an Understand-Anything knowledge graph for `repo` (issue #1015):
+/// the repository is in the org's `ua_graph` list, read like `merge_prs` above. Off until the
+/// operator opts in per repository.
+pub fn builds_ua_graph(org: &OrgSettings, repo: &str) -> bool {
+    in_list(org, &org.ua_graph, repo)
+}
+
 /// Whether a repository-list setting of `org` names `repo`: `owner/name`, the org as `owner`, or
 /// `*` for every repository of every visible org (issue #1212). The wildcard never reaches into an
 /// org that is hidden (issue #1213); naming the repository or the org outright still counts.
@@ -1006,6 +1019,11 @@ pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
             "merge_prs entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
         ));
     }
+    if let Some(bad) = settings.ua_graph.iter().find(|repo| !crate::repo_scope::valid_entry(repo)) {
+        return Err(format!(
+            "ua_graph entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
+        ));
+    }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
         return Err("budget must be 0 or more dollars (0 means no budget)".into());
     }
@@ -1213,6 +1231,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("merge_prs") {
         incoming.merge_prs = saved.merge_prs.clone();
+    }
+    if !named("ua_graph") {
+        incoming.ua_graph = saved.ua_graph.clone();
     }
     if !named("auto_merge") {
         incoming.auto_merge = saved.auto_merge;

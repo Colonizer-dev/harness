@@ -1,5 +1,6 @@
 // The understand-anything cost guard (issue #1014): what the colony is told when the skillset is
-// mounted, and which three skills the PreToolUse hook refuses.
+// mounted, and which three skills the PreToolUse hook refuses. Plus the graph colony's one
+// licence to run the full pass (issue #1015).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -7,6 +8,7 @@ import {
   buildOptions,
   skillNameFromInput,
   UNDERSTAND_ANYTHING_DENIED,
+  UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND,
   UNDERSTAND_ANYTHING_PROMPT_APPEND,
   understandAnythingDenial,
   understandAnythingMounted,
@@ -100,4 +102,29 @@ test('the installed hook denies the three skills and lets the rest through', asy
   // A subagent cannot get past it either — the whole-repository pass is expensive whoever runs it.
   const fromSubagent = await hook({ ...SKILL('understand'), agent_id: 'agent_01' });
   assert.equal(fromSubagent.hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('the graph colony runs the full pass and keeps the two network refusals', async () => {
+  // COLONIZER_UA_FULL_PASS (issue #1015) is the mothership's graph colony alone: its prompt
+  // variant drops the "do not run /understand" line, the hook lets `/understand` through, and
+  // the dashboard and Figma skills stay refused — that colony has no more network than any other.
+  assert.ok(UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND.length > 0);
+  assert.equal(UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND.includes('Do not run the full `/understand`'), false);
+  assert.equal(
+    UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND.includes('`/understand-dashboard` and `/understand-figma` are refused too'),
+    true,
+  );
+
+  assert.equal(understandAnythingDenial('Skill', { command: 'understand' }, [DIR], true), null, 'the licensed pass');
+  assert.match(understandAnythingDenial('Skill', { command: 'understand' }, [DIR], false), /token cost/);
+  for (const stillDenied of ['understand-dashboard', 'understand-figma']) {
+    assert.match(understandAnythingDenial('Skill', { command: stillDenied }, [DIR], true), /understand-anything:/, stillDenied);
+  }
+
+  const { options } = buildOptions({ COLONIZER_PLUGIN_DIRS: DIR, COLONIZER_UA_FULL_PASS: '1' });
+  assert.ok(options.systemPrompt.append.includes(UNDERSTAND_ANYTHING_FULL_PASS_PROMPT_APPEND));
+  assert.equal(options.systemPrompt.append.includes(UNDERSTAND_ANYTHING_PROMPT_APPEND), false);
+  const hook = options.hooks.PreToolUse.find((entry) => entry.matcher === 'Skill').hooks[0];
+  assert.deepEqual(await hook(SKILL('understand-anything:understand')), { continue: true });
+  assert.equal((await hook(SKILL('understand-anything:understand-figma'))).hookSpecificOutput.permissionDecision, 'deny');
 });

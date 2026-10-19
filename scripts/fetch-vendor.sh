@@ -311,6 +311,62 @@ while read -r name version plat kind sha url; do
       done
       rm -rf "$tmp"
       ;;
+    mattpocock-skills)
+      # Staged at dist/plugins/mattpocock-skills as a thirteen-skill plugin. Upstream nests its skills
+      # one category deep (skills/engineering/<name>, skills/productivity/<name>, ...), so they are
+      # staged one directory at a time from an explicit curated list, flattened to skills/<name>/ —
+      # an allowlist, never a wholesale copy, for the same reason as ponytail's: the excluded skills
+      # are interactive (they work by interviewing the user, which a colony never does) or the setup
+      # skill, whose per-repo config the claude-code runner pre-seeds in the system prompt instead.
+      # Each staged skill keeps the sibling files it reads by relative path (tdd/tests.md, triage's
+      # AGENT-BRIEF.md, ...) and drops its agents/ Codex stub. Neither upstream manifest is staged:
+      # it lists the nested category paths and names excluded skills, so both are generated here in
+      # Colonizer's shape, as for ponytail. A new upstream skill fails the loop below until a human
+      # adds it to $skills_staged and to the vendor.lock comment, or writes down there why it is not.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/skills-*)
+      dest="$root/dist/plugins/mattpocock-skills"
+      skills_expected="code-review codebase-design diagnosing-bugs domain-modeling handoff improve-codebase-architecture implement-spec pr tdd to-spec to-tickets triage writing-for-agents"
+      skills_staged="engineering/tdd engineering/diagnosing-bugs engineering/code-review engineering/to-spec engineering/implement-spec engineering/to-tickets engineering/triage engineering/improve-codebase-architecture engineering/codebase-design engineering/domain-modeling engineering/pr productivity/handoff productivity/writing-for-agents"
+      [ -d "$src/skills" ] || { echo "mattpocock-skills $version has no skills/" >&2; exit 1; }
+      rm -rf "$dest"
+      mkdir -p "$dest/.claude-plugin" "$dest/skills"
+      for rel in $skills_staged; do
+        [ -f "$src/skills/$rel/SKILL.md" ] || { echo "mattpocock-skills $version has no skills/$rel/SKILL.md" >&2; exit 1; }
+        skill=${rel#*/}
+        cp -R "$src/skills/$rel" "$dest/skills/$skill"
+        # The per-skill agents/ holds only a Codex stub; pruned by name so its removal upstream fails
+        # here instead of the prune going quiet.
+        [ -d "$dest/skills/$skill/agents" ] || { echo "mattpocock-skills $version has no agents/ to drop in skills/$skill" >&2; exit 1; }
+        rm -rf "$dest/skills/$skill/agents"
+        grep -q "^name: $skill$" "$dest/skills/$skill/SKILL.md" || { echo "mattpocock-skills $version: skills/$skill/SKILL.md is not the $skill skill" >&2; exit 1; }
+      done
+      [ -f "$src/LICENSE" ] || { echo "mattpocock-skills $version has no LICENSE" >&2; exit 1; }
+      cp "$src/LICENSE" "$dest/LICENSE"
+      # Exactly the thirteen curated skills, and none of the excluded ones (the interactive set and
+      # setup-matt-pocock-skills above all): the staged skill list is compared to the allowlist, so an
+      # upstream addition cannot slip through and an excluded skill cannot leak in.
+      skills_found=$(ls "$dest/skills" | LC_ALL=C sort)
+      skills_want=$(printf '%s\n' $skills_expected | LC_ALL=C sort)
+      [ "$skills_found" = "$skills_want" ] || { echo "mattpocock-skills $version staging does not match its allowlist; expected:" "$skills_expected" "got:" $skills_found >&2; rm -rf "$tmp"; exit 1; }
+      printf '{\n  "name": "mattpocock-skills",\n  "version": "%s",\n  "description": "Engineering skills by Matt Pocock, curated to a non-interactive thirteen (github.com/mattpocock/skills): TDD, bug diagnosis, spec and ticket flows, review, triage, domain modelling",\n  "license": "MIT"\n}\n' "$version" > "$dest/.claude-plugin/plugin.json"
+      printf '{\n  "name": "mattpocock-skills",\n  "version": "%s",\n  "description": "Engineering skills by Matt Pocock, curated to a non-interactive thirteen (github.com/mattpocock/skills): TDD, bug diagnosis, spec and ticket flows, review, triage, domain modelling",\n  "skills": ["code-review", "codebase-design", "diagnosing-bugs", "domain-modeling", "handoff", "improve-codebase-architecture", "implement-spec", "pr", "tdd", "to-spec", "to-tickets", "triage", "writing-for-agents"]\n}\n' "$version" > "$dest/plugin.json"
+      if [ -n "$(find "$dest" \( -name hooks -o -name hooks.json -o -name .mcp.json -o -name mcp.json -o -name agents \) -print -quit)" ]; then
+        echo "mattpocock-skills staging leaked a hook, an MCP server configuration or an agents directory" >&2; exit 1
+      fi
+      # The grep above only catches hooks, MCP and agents by name. This is what makes "nothing else is
+      # staged" true for upstream's docs/, scripts/, .agents/ and .changeset/ too: the staged pack is
+      # an allowlist, and any top-level entry the staging did not plan for fails here.
+      for entry in $(ls -A "$dest"); do
+        case " .claude-plugin LICENSE plugin.json skills " in
+          *" $entry "*) ;;
+          *) echo "mattpocock-skills staging holds an unexpected top-level entry: $entry" >&2; exit 1 ;;
+        esac
+      done
+      [ "$(find "$dest/skills" -name SKILL.md | wc -l)" -eq 13 ] || { echo "mattpocock-skills staging has not exactly the thirteen skills" >&2; exit 1; }
+      rm -rf "$tmp"
+      ;;
     google-skills)
       # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
       # of google/skills would put ~17k tokens of skill descriptions into every
