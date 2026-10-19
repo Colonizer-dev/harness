@@ -944,10 +944,10 @@ mod tests {
             "1.1.1.1",
             "8.8.8.8",
             "93.184.216.34",
-            "100.0.0.1",     // below 100.64.0.0/10
-            "100.128.0.1",   // above it
-            "172.15.0.1",    // below 172.16.0.0/12
-            "172.32.0.1",    // above it
+            "100.0.0.1",   // below 100.64.0.0/10
+            "100.128.0.1", // above it
+            "172.15.0.1",  // below 172.16.0.0/12
+            "172.32.0.1",  // above it
             "2606:4700:4700::1111",
             "2001:4860:4860::8888",
         ] {
@@ -1004,7 +1004,10 @@ mod tests {
         assert!(!follow_public_hop(&url("http://10.0.0.1/")));
         assert!(!follow_public_hop(&url("http://localhost/")));
         assert!(!follow_public_hop(&url("http://printer.local/")));
-        assert!(!follow_public_hop(&url("ftp://example.com/x")), "the scheme must stay http(s)");
+        assert!(
+            !follow_public_hop(&url("ftp://example.com/x")),
+            "the scheme must stay http(s)"
+        );
         assert!(!follow_public_hop(&url("file:///etc/passwd")));
     }
 
@@ -1023,7 +1026,10 @@ mod tests {
         assert!(resolves_to_public("public.example").await);
         assert!(!resolves_to_public("roundrobin.example").await);
         assert!(!resolves_to_public("intranet.example").await);
-        assert!(!resolves_to_public("nx.example").await, "a name that does not resolve is refused");
+        assert!(
+            !resolves_to_public("nx.example").await,
+            "a name that does not resolve is refused"
+        );
     }
 
     #[tokio::test]
@@ -1038,7 +1044,10 @@ mod tests {
         use std::io::{Read, Write};
         let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let (hop1, hop2) = (first.local_addr().unwrap().to_string(), second.local_addr().unwrap().to_string());
+        let (hop1, hop2) = (
+            first.local_addr().unwrap().to_string(),
+            second.local_addr().unwrap().to_string(),
+        );
         std::thread::spawn(move || {
             if let Ok((mut conn, _)) = first.accept() {
                 let mut buf = [0u8; 1024];
