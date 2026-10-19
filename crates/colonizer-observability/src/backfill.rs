@@ -49,12 +49,8 @@ mod progress;
 // grammar, the send pacing, the progress file. Their items live under their engine paths.
 use flags::DEFAULT_RATE;
 pub use flags::Options;
-<<<<<<< HEAD
 use pace::Bucket;
-=======
-use pace::{BACKOFF_START, Bucket, next_backoff};
 pub(crate) use progress::Window;
->>>>>>> origin/main
 pub use progress::progress_path;
 use progress::{CursorEntry, Progress};
 
@@ -789,6 +785,7 @@ impl Backfill {
             mut requests,
             cursors,
             traces,
+            fleet,
         } = outbox;
         let mut counters = std::mem::take(&mut self.counters);
         let outcome = deliver(&self.transport, &mut requests, |ack| {
@@ -804,6 +801,7 @@ impl Backfill {
                     requests,
                     cursors,
                     traces,
+                    fleet,
                 })
             }
             Err(held) => Err(held),

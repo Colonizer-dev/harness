@@ -246,7 +246,6 @@ async fn observability_ranges_are_checked_at_save_time() {
     std::fs::remove_dir_all(root).ok();
 }
 
-<<<<<<< HEAD
 /// #861: `relay_fleet_history` defaults off, saves like any switch, reaches the add-on's contract
 /// settings, and the contract carries the relay list (empty until members report their own
 /// exporters, #860).
@@ -292,7 +291,7 @@ async fn relay_fleet_history_defaults_off_saves_and_reaches_the_contract() {
     }
     std::fs::remove_dir_all(root).ok();
 }
-=======
+
 /// Regenerates the committed archive-bundle fixture the observability add-on's tests read
 /// (#859): a real tar+zstd bundle and its sidecar, written by the mothership's own archiver over
 /// the v0.1.9 fixture's richer colony (`a1b2c3d4`: events, a finding, an `out/` file and the
@@ -353,4 +352,3 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
         }
     }
 }
->>>>>>> origin/main
