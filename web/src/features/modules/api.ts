@@ -1,7 +1,15 @@
 // Modules API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request } from "../../http";
-import type { AutonomyStatus, ModuleInfo, ObservabilityStatus, ObservabilityTest, WebhookDeliveries } from "./types";
+import type {
+  AutonomyStatus,
+  ModuleInfo,
+  ObservabilityAddonInstall,
+  ObservabilityAddonRemove,
+  ObservabilityStatus,
+  ObservabilityTest,
+  WebhookDeliveries,
+} from "./types";
 
 export interface SaveModuleRequest {
   provider: string;
@@ -26,6 +34,10 @@ export interface ModulesApi {
   observabilityStatus(): Promise<ObservabilityStatus>;
   /** POST /api/observability/test: one test log record and metric point to the saved backend. */
   observabilityTest(): Promise<ObservabilityTest>;
+  /** PUT /api/observability/addon (issue #1060): installs the exporter add-on and tries to enable it. */
+  observabilityInstall(): Promise<ObservabilityAddonInstall>;
+  /** DELETE /api/observability/addon (issue #1060): removes the add-on; `purge` also drops its files. */
+  observabilityRemove(purge: boolean): Promise<ObservabilityAddonRemove>;
   /** GET /api/notify/deliveries (issue #898): webhook retries waiting, the dead letter and the last success. */
   webhookDeliveries(): Promise<WebhookDeliveries>;
   /** POST /api/notify/dead-letters/{key}/replay: one attempt now; `delivered` false with the receiver's error when it still fails. */
@@ -40,6 +52,8 @@ export const modulesHttp: ModulesApi = {
   autonomyStatus: () => request("/api/autonomy/status"),
   observabilityStatus: () => request("/api/observability/status"),
   observabilityTest: () => post("/api/observability/test"),
+  observabilityInstall: () => put("/api/observability/addon", {}),
+  observabilityRemove: (purge) => del(`/api/observability/addon${purge ? "?purge=1" : ""}`),
   webhookDeliveries: () => request("/api/notify/deliveries"),
   replayDeadLetter: (key) => post(`/api/notify/dead-letters/${enc(key)}/replay`),
   discardDeadLetter: (key) => del(`/api/notify/dead-letters/${enc(key)}`),

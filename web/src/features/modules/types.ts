@@ -100,6 +100,8 @@ export interface ObservabilityStatus {
   restarts?: number;
   headers?: { source: "env" | "secret" | "none"; names: string[] };
   exporter?: ObservabilityExporterStatus | null;
+  /** The installed exporter add-on (issue #1060); absent when there is none. */
+  addon?: { path: string; version: string };
 }
 
 /** The exporter add-on's status.json, passed through by GET /api/observability/status. */
@@ -135,4 +137,23 @@ export interface ObservabilityTest {
   ok: boolean;
   error?: string;
   signals?: Record<string, { ok: boolean; status?: number; error?: string; rejected?: number; message?: string; auth_failed?: boolean }>;
+}
+
+/** PUT /api/observability/addon (issue #1060): the add-on was installed; `enable_error` says why it
+ *  could not also be enabled, present only when `enabled` is false. */
+export interface ObservabilityAddonInstall {
+  installed: boolean;
+  version: string;
+  path: string;
+  enabled: boolean;
+  enable_error?: string;
+}
+
+/** DELETE /api/observability/addon (issue #1060): the add-on was removed; `offsets_kept` says the
+ *  exporter's ledger offsets survived, and `note` carries anything worth telling the operator. */
+export interface ObservabilityAddonRemove {
+  removed: boolean;
+  purge: boolean;
+  offsets_kept: boolean;
+  note?: string;
 }
