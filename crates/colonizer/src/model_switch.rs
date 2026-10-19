@@ -205,6 +205,12 @@ async fn listed_orgs(app: &Shared, saved: &BTreeMap<String, OrgSettings>) -> Vec
     orgs.into_iter().filter(|o| orgs::valid_org(o)).collect()
 }
 
+/// `GET /api/model-hosts`: the cheapest-host view of the fleet (issue #1039) — every canonical two
+/// or more configured providers serve, its hosts ranked by blended price.
+pub async fn hosts(State(app): State<Shared>) -> Json<Value> {
+    Json(json!(crate::model_hosts::rankings(&app)))
+}
+
 /// `GET /api/models/assignments`: the effective model per role for the install and for each org,
 /// with where each comes from; the agent modules with their roles and whether they can launch; and
 /// the models on offer with their health and quota.
@@ -769,6 +775,7 @@ fn or_default(model: &str) -> &str {
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
     use axum::routing;
     axum::Router::new()
+        .route("/api/model-hosts", routing::get(hosts))
         .route("/api/models/assignments", routing::get(assignments))
         .route("/api/models/switch", routing::post(switch))
         .route("/api/models/plans", routing::get(plans::plans))

@@ -32,6 +32,12 @@ describe("providerStatus", () => {
     expect(providerStatus({ ...base, health: { ...base.health!, degraded: true, failure_pct: 40 } }).label).toBe("Failing");
     expect(providerStatus({ ...base, health: { ...base.health!, degraded: true }, quota_exhausted: { reset_at: null, reset_unix: null } }).label).toBe("Quota out");
   });
+
+  it("ranks an outage colonies are parked on over degraded", () => {
+    expect(providerStatus({ ...base, outage_since: "2026-10-07T09:14:00Z" }).label).toBe("Outage");
+    expect(providerStatus({ ...base, outage_since: "2026-10-07T09:14:00Z", health: { ...base.health!, degraded: true, failure_pct: 40 } }).tone).toBe("err");
+    expect(providerStatus({ ...base, outage_since: null }).label).toBe("Healthy");
+  });
 });
 
 describe("gaugeOf", () => {
