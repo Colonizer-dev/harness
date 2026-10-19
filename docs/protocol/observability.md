@@ -77,16 +77,19 @@ the repository's compatibility rules. Bucket bounds, the `other` fold and the se
 outcomes are the current implementation; a change to any of them is a changelog entry. See
 [Metrics (`GET /metrics`)"](../observability/metrics.md) for the full table and the reasoning.
 
-## The backfill routes
+## The backfill and export routes
 
-The module's `/api` surface, beside the scrape route above: the history backfill (issue #858),
-served by the mothership and done by the add-on it supervises
-([Backfill](../observability/backfill.md)). Both are owner-only — the install's own API token.
+The module's `/api` surface, beside the scrape route above: the history backfill (issue #858) and
+the offline export (issue #859), served by the mothership and done by the add-on it supervises
+([Backfill](../observability/backfill.md),
+[Archived colonies and offline export](../observability/archive-export.md)). All three are
+owner-only — the install's own API token.
 
 | Route | Does |
 | :--- | :--- |
-| `POST /api/observability/backfill` | `{since?, until?, repo?, rate?, dry_run?}` → with `dry_run`, the counts summary (`{per_signal, per_org, records_sent, bytes_sent, …}`); otherwise `{started: true, progress: "GET /api/observability/status"}` and the replay runs beside the exporter. 409 when export is off or a backfill is already running; 503 when the add-on is missing or its version does not match. |
+| `POST /api/observability/backfill` | `{since?, until?, repo?, rate?, dry_run?, include_archive?}` → with `dry_run`, the counts summary (`{per_signal, per_org, records_sent, bytes_sent, …}`); otherwise `{started: true, progress: "GET /api/observability/status"}` and the replay runs beside the exporter. 409 when export is off or a backfill is already running; 503 when the add-on is missing or its version does not match. |
 | `DELETE /api/observability/backfill` | Cancels the running backfill: the child finishes its tick, writes `state: "cancelled"` and exits; → `{cancelled: true}`. 409 when none is running. |
+| `POST /api/observability/export` | `{out, since?, until?, signals?, include_archive?, content?}` — an offline export, run to completion inside the request: → the add-on's summary `{files, requests, logs, spans, colonies, archived}`. `out` must be an absolute path (the add-on writes beside the mothership) and `signals` only `logs` and `traces`, comma-separated; anything else is a 400 before the add-on is sought. 409 when export is off; 503 when the add-on is missing or mismatched; 502 with the add-on's message when the export fails. |
 
 `GET /api/observability/status` carries the backfill's progress as `backfill` while one runs:
 `{state: "running"|"complete"|"cancelled"|"failed", window, records_sent, bytes_sent, cursors,

@@ -40,6 +40,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 # HMAC-SHA256 for `repo_names = hashed` and the key's randomness; the mothership's own version.
 ring = "0.17.14"
+# The archive bundles (#859): tar holds the session's files, zstd decompresses the stream — the
+# mothership's own versions, read entry by entry and never extracted to disk.
+tar = "0.4.44"
+zstd = "0.14.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "io-std", "io-util", "sync"] }

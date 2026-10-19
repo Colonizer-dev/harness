@@ -28,6 +28,9 @@ colonizer.dev. Observability goes only to the endpoint you name.
   redacted, filtered, and dropped when the disk is behind.
 - [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
   provisioning they assume, and the lint that keeps their queries honest.
+- [Archived colonies and offline export](observability/archive-export.md): reaching colonies that
+  live only in the local archive (`--include-archive`), and writing an export to a file instead of
+  a backend.
 - [Observability across a fleet](fleet.md#observability-across-a-fleet): the same backend on every
   member, the resource attributes that join them into one dataset, and the hash key a `hashed`
   fleet must share.

@@ -1,8 +1,8 @@
 //! The mothership's half of the exporter (#850, #854): it writes the contract
 //! (`<data>/observability/exporter.json`), spawns the `colonizer-observability` add-on with the
 //! headers on its stdin, restarts it with backoff, stops it when export is switched off, and serves
-//! `GET /api/observability/status`, `POST /api/observability/test`, and the history backfill's
-//! start/cancel routes (#858).
+//! `GET /api/observability/status`, `POST /api/observability/test`, the history backfill's
+//! start/cancel routes (#858) and the offline export route (#859).
 //!
 //! Off by default: with no saved+enabled module and no `COLONIZER_OBSERVABILITY=on`, nothing is
 //! written and nothing is spawned. The add-on is a separate binary (docs/design/observability.md):
@@ -605,6 +605,10 @@ struct BackfillRequest {
     rate: Option<u64>,
     #[serde(default)]
     dry_run: bool,
+    /// Also replay colonies that live only in the local archive
+    /// (docs/observability/archive-export.md).
+    #[serde(default)]
+    include_archive: bool,
 }
 
 /// `backfill --contract …` with the request's flags, each only when it was given.
@@ -625,6 +629,9 @@ fn backfill_command(binary: &Path, contract: &Path, body: &BackfillRequest) -> t
     }
     if body.dry_run {
         cmd.arg("--dry-run");
+    }
+    if body.include_archive {
+        cmd.arg("--include-archive");
     }
     cmd
 }
@@ -784,6 +791,148 @@ async fn backfill_cancel(State(app): State<Shared>) -> ApiResult<Value> {
     Ok(Json(json!({"cancelled": true})))
 }
 
+/// The `POST /api/observability/export` body: where the add-on writes, the window and the
+/// pass-through flags. `signals` and a relative `out` are refused here because either would start a
+/// child that cannot do what the caller meant — the add-on runs beside the mothership, so a
+/// relative path would land there, not beside whoever called the API. The dates stay the add-on's
+/// to parse, as the backfill's are.
+#[derive(Deserialize)]
+struct ExportRequest {
+    /// The file to write, or an existing directory that gets `logs.jsonl` and `traces.jsonl` inside.
+    out: PathBuf,
+    /// Only records written at or after this: RFC3339, `YYYY-MM-DDTHH:MM:SS` or `YYYY-MM-DD`.
+    since: Option<String>,
+    /// Only records written before this, the same forms (a bare date means its end).
+    until: Option<String>,
+    /// Comma-separated `logs` and `traces`; absent or blank means both.
+    signals: Option<String>,
+    /// Also read colonies that live only in the archive (docs/observability/archive-export.md).
+    #[serde(default)]
+    include_archive: bool,
+    /// Include conversation content, not just structure. The caller confirmed it on a terminal;
+    /// the add-on's content gate (org opt-in, sensitivity) still applies.
+    #[serde(default)]
+    content: bool,
+}
+
+/// Splits and checks `signals`: only `logs` and `traces`, no empty item, duplicates folded. An
+/// absent or blank value means both and answers an empty list — the argv then names no
+/// `--signals`, which is the add-on's own default.
+fn export_signals(signals: Option<&str>) -> Result<Vec<&str>, String> {
+    let Some(text) = signals.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for one in text.split(',') {
+        let one = one.trim();
+        if one != "logs" && one != "traces" {
+            return Err(format!("signals accepts only logs and traces, not {one:?}"));
+        }
+        if !out.contains(&one) {
+            out.push(one);
+        }
+    }
+    Ok(out)
+}
+
+/// `export --contract … --out …` with the request's flags, each only when it was given.
+fn export_command(binary: &Path, contract: &Path, body: &ExportRequest, signals: &[&str]) -> tokio::process::Command {
+    let mut cmd = command(binary);
+    cmd.arg("export").arg("--contract").arg(contract).arg("--out").arg(&body.out);
+    if let Some(v) = &body.since {
+        cmd.arg("--since").arg(v);
+    }
+    if let Some(v) = &body.until {
+        cmd.arg("--until").arg(v);
+    }
+    if !signals.is_empty() {
+        cmd.arg("--signals").arg(signals.join(","));
+    }
+    if body.include_archive {
+        cmd.arg("--include-archive");
+    }
+    if body.content {
+        cmd.arg("--content");
+    }
+    cmd
+}
+
+/// The export, synchronously like [`run_backfill`]'s dry run: the headers line on stdin, the
+/// add-on's one-line summary from stdout — and, when it failed, its stderr as the error, redacted
+/// again here as every line of the add-on's is. The child writes files and touches no network.
+async fn run_export(
+    binary: &Path,
+    contract: &Path,
+    headers: &str,
+    body: &ExportRequest,
+    signals: &[&str],
+    timeout: Duration,
+) -> Result<Value, String> {
+    let mut child = export_command(binary, contract, body, signals)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", binary.display()))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let line = format!("{}\n", json!({"headers": headers}));
+        let _ = stdin.write_all(line.as_bytes()).await;
+    }
+    let out = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| "the export timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        // The add-on's failure message is its stderr, redacted on its side and redacted again here.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let why = util::truncate(&crate::redact::redact_text(&stderr), 500);
+        return Err(if why.is_empty() {
+            format!("the add-on exited with {}", out.status)
+        } else {
+            why
+        });
+    }
+    serde_json::from_slice(&out.stdout).map_err(|_| "the add-on gave no result".to_string())
+}
+
+/// `POST /api/observability/export` (#859): an offline export — the OTLP/JSON request lines the
+/// add-on would have sent, written to a local file or directory, no network. The child runs to
+/// completion inside the request like the backfill's dry run (nothing continues once it answers,
+/// so it registers no job and holds no slot), and its one-line summary —
+/// `{files, requests, logs, spans, colonies, archived}` — is the response.
+async fn export_start(State(app): State<Shared>, Json(body): Json<ExportRequest>) -> ApiResult<Value> {
+    let signals = export_signals(body.signals.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    if !body.out.is_absolute() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "out must be an absolute path: the add-on runs beside the mothership, not beside the caller",
+        ));
+    }
+    let effective = match resolve(&app).await {
+        Resolved::On(e) => e,
+        Resolved::Off(why) | Resolved::Invalid(why) => return Err(client_error(StatusCode::CONFLICT, &why)),
+    };
+    let data_dir = app.cfg.data_dir.clone();
+    let Some(binary) = locate(&data_dir) else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "the {BINARY} add-on is not installed; build it and put it beside the colonizer binary, or name it with {BINARY_ENV}"
+            ),
+        ));
+    };
+    check_version(&binary)
+        .await
+        .map_err(|e| client_error(StatusCode::SERVICE_UNAVAILABLE, &e))?;
+    let path = contract_path(&data_dir);
+    write_contract(&path, &contract(&app, &effective.settings).await).await?;
+    let answer = run_export(&binary, &path, &effective.headers, &body, &signals, Duration::from_secs(600))
+        .await
+        .map_err(|e| client_error(StatusCode::BAD_GATEWAY, &e))?;
+    Ok(Json(answer))
+}
+
 pub(crate) fn routes() -> axum::Router<Shared> {
     use axum::routing;
     axum::Router::new()
@@ -793,6 +942,7 @@ pub(crate) fn routes() -> axum::Router<Shared> {
             "/api/observability/backfill",
             routing::post(backfill_start).delete(backfill_cancel),
         )
+        .route("/api/observability/export", routing::post(export_start))
 }
 
 #[cfg(test)]
@@ -892,6 +1042,7 @@ mod tests {
                 repo: None,
                 rate: None,
                 dry_run: true,
+                include_archive: false,
             }),
         )
         .await
@@ -904,5 +1055,134 @@ mod tests {
             backfills().lock().unwrap().get(&app.cfg.data_dir).is_none(),
             "no job was registered"
         );
+    }
+
+    /// The add-on argv a request maps to: `--include-archive` on backfill only when asked, and the
+    /// export's flags each only when given — `--signals` joined back as one comma-separated word.
+    #[test]
+    fn backfill_and_export_map_their_requests_onto_the_add_on_argv() {
+        let binary = Path::new("/bin/colonizer-observability");
+        let contract = Path::new("/data/observability/exporter.json");
+        let argv = |cmd: tokio::process::Command| {
+            cmd.as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<String>>()
+        };
+        // A bare backfill names only its contract; every flag arrives in a fixed order.
+        let bare = BackfillRequest {
+            since: None,
+            until: None,
+            repo: None,
+            rate: None,
+            dry_run: false,
+            include_archive: false,
+        };
+        assert_eq!(
+            argv(backfill_command(binary, contract, &bare)),
+            ["backfill", "--contract", "/data/observability/exporter.json"],
+            "no flag the request did not carry"
+        );
+        let full = BackfillRequest {
+            since: Some("2026-01-01".into()),
+            until: Some("2026-06-30".into()),
+            repo: Some("acme/widgets".into()),
+            rate: Some(250),
+            dry_run: true,
+            include_archive: true,
+        };
+        assert_eq!(
+            argv(backfill_command(binary, contract, &full)),
+            [
+                "backfill",
+                "--contract",
+                "/data/observability/exporter.json",
+                "--since",
+                "2026-01-01",
+                "--until",
+                "2026-06-30",
+                "--repo",
+                "acme/widgets",
+                "--rate",
+                "250",
+                "--dry-run",
+                "--include-archive",
+            ]
+        );
+
+        // An export names its contract and its out, then only the flags it was given.
+        let bare = serde_json::from_value::<ExportRequest>(json!({"out": "/tmp/export.jsonl"})).unwrap();
+        assert_eq!(
+            argv(export_command(binary, contract, &bare, &[])),
+            [
+                "export",
+                "--contract",
+                "/data/observability/exporter.json",
+                "--out",
+                "/tmp/export.jsonl"
+            ]
+        );
+        assert!(!bare.include_archive && !bare.content, "the serde defaults are off");
+        let full = serde_json::from_value::<ExportRequest>(json!({
+            "out": "/tmp/dir",
+            "since": "2026-01-01",
+            "until": "2026-06-30",
+            "signals": "traces, logs,traces",
+            "include_archive": true,
+            "content": true,
+        }))
+        .unwrap();
+        // Whitespace is trimmed and a duplicate folded before the one word travels.
+        assert_eq!(export_signals(full.signals.as_deref()).unwrap(), ["traces", "logs"]);
+        assert_eq!(
+            argv(export_command(
+                binary,
+                contract,
+                &full,
+                &export_signals(full.signals.as_deref()).unwrap()
+            )),
+            [
+                "export",
+                "--contract",
+                "/data/observability/exporter.json",
+                "--out",
+                "/tmp/dir",
+                "--since",
+                "2026-01-01",
+                "--until",
+                "2026-06-30",
+                "--signals",
+                "traces,logs",
+                "--include-archive",
+                "--content",
+            ]
+        );
+    }
+
+    /// The export route refuses what cannot run — a signal the add-on does not know, a relative
+    /// `out` — with a 400 before the add-on is even looked for, and answers the same off-409 the
+    /// module's other routes give.
+    #[tokio::test]
+    async fn export_refuses_a_bad_body_before_it_looks_for_the_add_on() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        for bad in [
+            json!({"out": "/tmp/e.jsonl", "signals": "logs,metrics"}),
+            json!({"out": "/tmp/e.jsonl", "signals": ","}),
+            json!({"out": "relative.jsonl"}),
+        ] {
+            let err = export_start(State(app.clone()), Json(serde_json::from_value(bad.clone()).unwrap()))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
+        // A body the add-on could take still gets no further while export is off.
+        let err = export_start(
+            State(app.clone()),
+            Json(serde_json::from_value(json!({"out": "/tmp/e.jsonl", "signals": "logs"})).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT, "nothing to export while export is off");
     }
 }

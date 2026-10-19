@@ -9,6 +9,10 @@
 //!   `observability/backfill.json`, written in the same atomic write as the cursors it commits.
 //! - **The same pipeline** as the live exporter: policy, mapper, trace builder, batcher,
 //!   transport. Record ids are deterministic, so a backend that dedupes absorbs any replay.
+//! - **The archive half** (`--include-archive`, #859) replays the tar+zstd bundles of colonies the
+//!   disk no longer holds, through the same window, mapper and trace builder under the bundles'
+//!   own host ids. It keeps no progress file: a resumed run replays the bundles from the top, and
+//!   the ids being deterministic, the backend absorbs that like any replay.
 //! - **Metrics are skipped on purpose**: the live exporter's metric series are cumulative folds of
 //!   their ledgers, and replaying the same inputs would double-count every point. A backfill of
 //!   logs and traces is the whole feature.
@@ -16,24 +20,27 @@
 //!   `--until` bound the window instead, and the send rate is held to `--rate` records a second
 //!   (`--dry-run` counts and estimates without sending anything).
 
+use crate::archive_source::{self, ArchivedColony, Message};
 use crate::batch::{BatchConfig, Batcher, ExportResource, Item};
 use crate::contract::{self, ColonyPolicy, Contract};
 use crate::cursor::{Cursor, GapReason, Limits, read_batch};
 use crate::encode::Request;
 use crate::exporter::{self, now_nanos, policy_for, resource_for};
 use crate::map::{Mapper, ts_nanos};
-use crate::policy::Policy;
+use crate::policy::{Policy, Source};
 use crate::sources::{self, SourceFile};
 use crate::state::{CursorKey, Signal, State};
 use crate::tailer;
 use crate::traces::{Builder, Traces};
 use crate::transport::{Outcome, Transport};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver as ArchiveReceiver, TryRecvError};
+
 use std::time::Duration;
 
-mod flags;
+pub(crate) mod flags;
 mod pace;
 mod progress;
 
@@ -42,15 +49,16 @@ mod progress;
 use flags::DEFAULT_RATE;
 pub use flags::Options;
 use pace::{BACKOFF_START, Bucket, next_backoff};
+pub(crate) use progress::Window;
 pub use progress::progress_path;
-use progress::{CursorEntry, Progress, Window};
+use progress::{CursorEntry, Progress};
 
 /// The pause between ticks: a full rate bucket refills in one second.
 const TICK: Duration = Duration::from_secs(1);
 /// The bucket colonies with no org of their own are grouped under in `per_org`.
 const INSTALL_ORG: &str = "(install)";
-/// The longest line read as a line: the live tailer's own cap.
-const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// The longest line read as a line: the live tailer's own cap, and the archive reader's too.
+pub(crate) const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// The smallest byte share one file gets in a pass, so a pass over many files still reads lines.
 const MIN_SHARE: u64 = 16 * 1024;
 /// The key the live exporter records its settled destinations under in `state.json`'s `extra`. The
@@ -143,6 +151,9 @@ struct Outbox {
     requests: Vec<Request>,
     cursors: Vec<(CursorKey, Cursor)>,
     traces: Traces,
+    /// The trace state of the fleet hosts the archive supplied, keyed by host id. Never persisted:
+    /// the archive half replays from the top, so these live and die with the run.
+    fleet: BTreeMap<String, Traces>,
 }
 
 /// How a delivery pass ended: `Ok` when every request was acknowledged, else why the rest is held.
@@ -167,10 +178,21 @@ pub struct Backfill {
     destination: String,
     rate: u64,
     dry_run: bool,
+    include_archive: bool,
     window: Window,
     repo: Option<String>,
     /// Sorted by `relative` for a deterministic rotation; metrics never appear.
     files: Vec<Plan>,
+    /// The colonies the archive supplies under `--include-archive`, in id order.
+    archive: Vec<ArchivedColony>,
+    /// The archive reader's chunks, when there are bundles to read.
+    archive_rx: Option<ArchiveReceiver<Message>>,
+    /// A chunk this tick's budget could not finish; the next tick's starts here.
+    archive_pending: Option<Message>,
+    /// The reader has signed off (`Done` seen, or the channel gone quiet without it).
+    archive_done: bool,
+    /// The trace state of every fleet host but this one, keyed by host id. Never persisted.
+    fleet_traces: BTreeMap<String, Traces>,
     /// The backfill's own cursors, committed only after the backend's ack.
     cursors: BTreeMap<CursorKey, Cursor>,
     traces: Traces,
@@ -248,11 +270,44 @@ impl Backfill {
             .collect();
         files.sort_by(|a, b| a.file.relative.cmp(&b.file.relative));
 
+        // The archive half (#859): the colonies the disk no longer holds, discovered from the
+        // bundles' sidecars. Disk wins — a colony with a live session directory is never read out
+        // of a bundle — and an archived colony exports structure only: its synthesized policy
+        // fails the content gate whatever the contract says (P3).
+        let mut archive = Vec::new();
+        let mut archive_rx = None;
+        if opts.include_archive {
+            let on_disk: BTreeSet<String> = colonies
+                .iter()
+                .filter(|id| data_dir.join("sessions").join(id).is_dir())
+                .cloned()
+                .collect();
+            archive = archive_source::discover(&data_dir, opts.repo.as_deref(), &on_disk)
+                .values()
+                .cloned()
+                .collect();
+            if !archive.is_empty() {
+                // The reader owns the whole decoder on its own thread and blocks on a full
+                // channel, so it never runs ahead of this run's rate budget. There is no progress
+                // file for it: a resumed run replays the bundles from the top, and the ids being
+                // deterministic, the backend absorbs that like any replay.
+                let (tx, rx) = archive_source::channel();
+                let bundles = archive.clone();
+                std::thread::Builder::new()
+                    .name("observability-archive".into())
+                    .spawn(move || archive_source::stream(&bundles, tx))
+                    .map_err(|e| format!("cannot start the archive reader: {e}"))?;
+                archive_rx = Some(rx);
+            }
+        }
+
         let window = Window {
             since: opts.since,
             until: opts.until,
         };
         let until_offsets: BTreeMap<String, u64> = files.iter().map(|p| (p.file.relative.clone(), p.until)).collect();
+        // Whether the archive half is over before it began: no bundles, or none asked for.
+        let archive_done = archive_rx.is_none();
         let mut backfill = Backfill {
             contract,
             data_dir,
@@ -262,9 +317,15 @@ impl Backfill {
             destination,
             rate: if opts.rate == 0 { DEFAULT_RATE } else { opts.rate },
             dry_run: opts.dry_run,
+            include_archive: opts.include_archive,
             window,
             repo: opts.repo.clone(),
             files,
+            archive,
+            archive_rx,
+            archive_pending: None,
+            archive_done,
+            fleet_traces: BTreeMap::new(),
             cursors: BTreeMap::new(),
             traces: Traces::default(),
             outbox: None,
@@ -334,6 +395,7 @@ impl Backfill {
                 // ends the moment every one of them reaches its bound.
                 self.cursors.extend(outbox.cursors);
                 self.traces = outbox.traces;
+                self.fleet_traces = outbox.fleet;
                 if self.all_done() {
                     self.finish(RunState::Complete);
                     return Duration::ZERO;
@@ -352,6 +414,7 @@ impl Backfill {
                 // The open spans land in the same write as the cursors that read them, so a
                 // crash replays at most the batch in flight.
                 self.traces = outbox.traces;
+                self.fleet_traces = outbox.fleet;
                 self.write_progress(true);
                 if self.all_done() {
                     let end = if self.cancelled {
@@ -415,20 +478,30 @@ impl Backfill {
             active.push(at);
         }
 
+        // The colonies the archive supplies ride along under their synthesized, fail-closed
+        // policies, so the mapper, the builders and the org tallies see one colony list; the ones
+        // another host archived are keyed by colony id for the redirect below.
+        let mut colonies_map = self.contract.policy.clone();
+        for archived in &self.archive {
+            colonies_map.insert(archived.colony.clone(), archived.policy.clone());
+        }
+        let archive_hosts: BTreeMap<&str, &str> = self.archive.iter().map(|a| (a.colony.as_str(), a.host.as_str())).collect();
+
         let mapper = Mapper {
             policy: &self.policy,
             host_id: &self.contract.host_id,
-            colonies: &self.contract.policy,
+            colonies: &colonies_map,
             now_unix_nanos: now,
         };
         let builder = Builder {
             policy: &self.policy,
             host_id: &self.contract.host_id,
-            colonies: &self.contract.policy,
+            colonies: &colonies_map,
             sample_ratio: self.contract.settings.trace_sample_ratio,
             max_trace_bytes: self.contract.settings.max_trace_bytes,
         };
         let mut traces = self.traces.clone();
+        let mut fleet = self.fleet_traces.clone();
         let mut items: Vec<Item> = Vec::new();
         let mut cursors = Vec::new();
 
@@ -463,7 +536,7 @@ impl Backfill {
                 // bounded region can no longer be read linearly: the live stream owns the
                 // discrepancy and this file's replay is done, not restarted.
                 let gapped = batch.gaps.iter().any(|g| !matches!(g.reason, GapReason::StateReset));
-                let org = org_of(&self.contract.policy, plan.file.colony.as_deref());
+                let org = org_of(&colonies_map, plan.file.colony.as_deref());
 
                 let mut line_end = cursor.offset;
                 for ((line, digest), size) in batch.lines.iter().zip(&batch.digests).zip(&batch.sizes) {
@@ -496,14 +569,47 @@ impl Backfill {
                             }
                         }
                         Signal::Traces => {
-                            builder.feed(
-                                &mut traces,
-                                plan.file.source,
-                                plan.file.colony.as_deref(),
-                                line,
-                                digest,
-                                &mut items,
-                            );
+                            // An activity outcome for a colony another host archived closes that
+                            // host's root span: its ids are keyed by the bundle's mothership host,
+                            // and its trace state is the fleet map's, never the persisted one.
+                            let other_host: Option<&str> = if plan.file.source == Source::Activity {
+                                line.get("colony")
+                                    .and_then(Value::as_str)
+                                    .and_then(|c| archive_hosts.get(c).copied())
+                                    .filter(|host| *host != self.contract.host_id.as_str())
+                            } else {
+                                None
+                            };
+                            match other_host {
+                                Some(host) => {
+                                    let fleet_builder = Builder {
+                                        policy: &self.policy,
+                                        host_id: host,
+                                        colonies: &colonies_map,
+                                        sample_ratio: self.contract.settings.trace_sample_ratio,
+                                        max_trace_bytes: self.contract.settings.max_trace_bytes,
+                                    };
+                                    let state = fleet.entry(host.to_string()).or_default();
+                                    fleet_builder.feed(
+                                        state,
+                                        plan.file.source,
+                                        plan.file.colony.as_deref(),
+                                        line,
+                                        digest,
+                                        &mut items,
+                                    );
+                                }
+                                None => {
+                                    builder.feed(
+                                        &mut traces,
+                                        plan.file.source,
+                                        plan.file.colony.as_deref(),
+                                        line,
+                                        digest,
+                                        &mut items,
+                                    );
+                                }
+                            }
                             counters.kept("traces", &org, *size);
                         }
                         // Metrics are filtered out of the plan before any of this.
@@ -525,6 +631,100 @@ impl Backfill {
             active = again;
         }
 
+        // The archive half: the chunks the reader thread has ready, within whatever budget the
+        // disk files left. An empty channel is not the end — the reader may still be working — so
+        // the tick simply comes back for the rest.
+        while records > 0 && bytes > 0 {
+            let message = match self.archive_pending.take() {
+                Some(message) => message,
+                None => match self.archive_rx.as_ref().map(|rx| rx.try_recv()) {
+                    Some(Ok(message)) => message,
+                    Some(Err(TryRecvError::Empty)) => break,
+                    // The producer signs off with `Done`; a channel gone quiet without it died,
+                    // and a replay must not hang on a dead reader.
+                    Some(Err(TryRecvError::Disconnected)) => {
+                        self.archive_done = true;
+                        break;
+                    }
+                    None => break,
+                },
+            };
+            match message {
+                Message::Lines { colony, host, lines } => {
+                    let org = org_of(&colonies_map, Some(&colony));
+                    let archive_mapper = Mapper {
+                        policy: &self.policy,
+                        host_id: &host,
+                        colonies: &colonies_map,
+                        now_unix_nanos: now,
+                    };
+                    let archive_builder = Builder {
+                        policy: &self.policy,
+                        host_id: &host,
+                        colonies: &colonies_map,
+                        sample_ratio: self.contract.settings.trace_sample_ratio,
+                        max_trace_bytes: self.contract.settings.max_trace_bytes,
+                    };
+                    // A colony this very host archived shares its trace state with the disk half;
+                    // another host's is the fleet map's, under that host's ids.
+                    let state = if host == self.contract.host_id {
+                        &mut traces
+                    } else {
+                        fleet.entry(host.clone()).or_default()
+                    };
+                    let settings = &self.contract.settings;
+                    let mut held = false;
+                    let mut lines = lines.into_iter();
+                    for line in lines.by_ref() {
+                        if records == 0 || bytes == 0 {
+                            // The rest of the chunk waits for the next tick's budget.
+                            held = true;
+                            break;
+                        }
+                        records -= 1;
+                        bytes = bytes.saturating_sub(line.size);
+                        records_bucket.spend(1);
+                        bytes_bucket.spend(line.size);
+                        if self.window.bounded() {
+                            match ts_nanos(&line.line) {
+                                Some(ts) if self.window.keeps(ts) => {}
+                                None => {
+                                    counters.untimestamped += 1;
+                                    continue;
+                                }
+                                Some(_) => {
+                                    counters.out_of_window += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        if sources::logs_enabled(settings, line.source)
+                            && let Some(item) = archive_mapper.log(line.source, Some(&colony), &line.line, &line.digest)
+                        {
+                            counters.kept("logs", &org, line.size);
+                            items.push(item);
+                        }
+                        if matches!(line.source, Source::Events | Source::Gateway) && settings.stream_traces {
+                            archive_builder.feed(state, line.source, Some(&colony), &line.line, &line.digest, &mut items);
+                            counters.kept("traces", &org, line.size);
+                        }
+                    }
+                    if held {
+                        self.archive_pending = Some(Message::Lines {
+                            colony,
+                            host,
+                            lines: lines.collect(),
+                        });
+                        break;
+                    }
+                }
+                Message::Done { malformed } => {
+                    counters.malformed += malformed;
+                    self.archive_done = true;
+                }
+            }
+        }
+
         // A root goes out once its colony's events are replayed to their bound, so no span of it
         // is closed as incomplete while its real end is still on disk.
         let working_ref = &working;
@@ -537,6 +737,20 @@ impl Backfill {
                 .is_none_or(|at| working_ref.get(&at).is_none_or(|c| c.offset >= files[at].until))
         };
         builder.settle(&mut traces, &caught_up, &[], now, &mut items);
+        // The fleet hosts' roots go out once their bundles are drained — their caught-up is the
+        // stream's own end, since a bundle is only ever read whole.
+        if self.archive_done && self.archive_pending.is_none() {
+            for (host, state) in fleet.iter_mut() {
+                let fleet_builder = Builder {
+                    policy: &self.policy,
+                    host_id: host,
+                    colonies: &colonies_map,
+                    sample_ratio: self.contract.settings.trace_sample_ratio,
+                    max_trace_bytes: self.contract.settings.max_trace_bytes,
+                };
+                fleet_builder.settle(state, &|_| true, &[], now, &mut items);
+            }
+        }
 
         let mut batcher = Batcher::new(
             &self.resource,
@@ -570,6 +784,7 @@ impl Backfill {
             requests: batch.requests,
             cursors,
             traces,
+            fleet,
         }
     }
 
@@ -609,7 +824,10 @@ impl Backfill {
     }
 
     fn all_done(&self) -> bool {
+        // The archive half is done when its reader has signed off and the last held chunk is
+        // consumed; an empty channel may still be filling.
         self.files.iter().all(|plan| self.reached(plan))
+            && (self.archive_rx.is_none() || (self.archive_done && self.archive_pending.is_none()))
     }
 
     fn sources_done(&self) -> usize {
@@ -728,6 +946,8 @@ impl Backfill {
             "dry_run": self.dry_run,
             "window": {"since": self.window.since, "until": self.window.until},
             "repo": self.repo,
+            "include_archive": self.include_archive,
+            "archived_colonies": self.archive.len(),
             "sources_total": self.files.len(),
             "sources_done": self.sources_done(),
             "records_sent": self.counters.records_sent,
