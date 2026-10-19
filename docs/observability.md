@@ -26,6 +26,9 @@ colonizer.dev. Observability goes only to the endpoint you name.
   redacted, filtered, and dropped when the disk is behind.
 - [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
   provisioning they assume, and the lint that keeps their queries honest.
+- [Archived colonies and offline export](observability/archive-export.md): reaching colonies that
+  live only in the local archive (`--include-archive`), and writing an export to a file instead of
+  a backend.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 
