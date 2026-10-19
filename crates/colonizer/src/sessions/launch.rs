@@ -625,11 +625,18 @@ pub async fn create(
     // the supply-chain hold (issue #673), and the claim a second mothership left on GitHub. The
     // authoritative local re-check runs in the admission lock (`try_claim_session`).
     let work = crate::duplicates::Work::requested(&repo, &req);
-    if let Err(refusal) =
-        crate::duplicates::check_launch(&app, &work, req.allow_duplicate, req.queue_behind_holder, &unreachable_ids).await
+    let check_result = match crate::duplicates::check_launch(
+        &app,
+        &work,
+        req.allow_duplicate,
+        req.queue_behind_holder,
+        &unreachable_ids,
+    )
+    .await
     {
-        return Err(refusal.into_error());
-    }
+        Ok(result) => result,
+        Err(refusal) => return Err(refusal.into_error()),
+    };
     // Placement (issue #688): a pure policy whose verdict is recorded on the colony. Nothing here
     // executes remotely (issue #1252), so an unpinned choice of a peer is recorded and the colony runs
     // here, a pin to a peer is refused rather than silently moved, and an unknown pin is a bad request.
@@ -957,6 +964,19 @@ pub async fn create(
     app.mark_org_known(owner, pending_avatar.as_deref()).await;
     // A one-line summary of the task, written by a cheap model off the launch path (summaries.rs).
     tokio::spawn(crate::summaries::summarize_colony(app.clone(), session.id.clone()));
+    // Log if a stale remote claim was detected and will be cleared in the background.
+    if check_result.stale_claim_detected {
+        let app = app.clone();
+        let id = session.id.clone();
+        tokio::spawn(async move {
+            app.session_log(
+                &id,
+                "info",
+                "Detected stale remote claim (no branch or pull request for 24h); cleared it to proceed with launch".to_string(),
+            )
+            .await;
+        });
+    }
     Ok(Json(session))
 }
 

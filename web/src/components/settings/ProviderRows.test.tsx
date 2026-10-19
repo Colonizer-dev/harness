@@ -53,7 +53,7 @@ describe("a collapsed provider row", () => {
 
   it("says the balance is unknown rather than drawing a gauge", () => {
     const out = row(provider());
-    expect(out).toContain("balance unknown");
+    expect(out).toContain("no balance API");
     expect(out).not.toContain('aria-valuenow');
   });
 
@@ -65,7 +65,7 @@ describe("a collapsed provider row", () => {
 
   it("opens to credits, usage, models, wiring and connection, with the one-line help", () => {
     const out = row(provider({ used_by: ["model"] }), true);
-    for (const part of ["Credits", "Usage", "Models", "Used by", "Connection", "2 enabled · +1 available", "Orchestrator model", "Balance unknown: add a plan balance reader"]) {
+    for (const part of ["Credits", "Usage", "Models", "Used by", "Connection", "2 enabled · +1 available", "Orchestrator model", "No balance API available"]) {
       expect(out).toContain(part);
     }
     expect(out).toContain('aria-expanded="true"');

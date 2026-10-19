@@ -196,6 +196,8 @@ fn a_remote_claim_names_the_host_colony_and_pull_request() {
         host: Some("archlinux (f88)".into()),
         colony: Some("33577107".into()),
         merged: false,
+        updated: None,
+        author: None,
     };
     let r = remote_refusal(&info, 7, true);
     assert_eq!(r.holder.kind, HoldKind::RemoteClaim);
@@ -241,4 +243,73 @@ fn issue_held_by_matches_repo_case_insensitively() {
     holder2.issue = Some(7);
     let result3 = issue_held_by(&[holder2.clone(), holder.clone()], "acme/app", 7);
     assert_eq!(result3.map(|s| s.id), Some("second".to_string()), "first non-waiter wins");
+}
+
+#[test]
+fn remote_holder_includes_claimed_by_and_claimed_at() {
+    use chrono::Utc;
+    let now = Utc::now();
+    let info = RemoteClaimInfo {
+        kind: ClaimKind::PullRequest,
+        detail: "https://github.com/acme/repo/pull/4".into(),
+        host: Some("archlinux (f88)".into()),
+        colony: Some("abc123".into()),
+        merged: false,
+        updated: Some(now),
+        author: Some("someone".into()),
+    };
+    let holder = remote_holder(&info, 7);
+    assert_eq!(holder.claimed_by.as_deref(), Some("someone"));
+    assert_eq!(holder.claimed_at.as_ref(), Some(&now.to_rfc3339()));
+    assert!(!holder.stale_hint, "PR claim is not stale");
+}
+
+#[test]
+fn remote_holder_stale_hint_for_any_label_only_claim() {
+    use chrono::{Duration, Utc};
+    let now = Utc::now();
+    let old_time = now - Duration::hours(25);
+    let fresh_time = now - Duration::hours(12);
+
+    // Label-only claim (old) has stale hint.
+    let mut info = RemoteClaimInfo {
+        kind: ClaimKind::Label,
+        detail: crate::claims::CLAIM_LABEL.to_string(),
+        host: None,
+        colony: Some("abc123".into()),
+        merged: false,
+        updated: Some(old_time),
+        author: Some("someone".into()),
+    };
+    let holder = remote_holder(&info, 7);
+    assert!(holder.stale_hint, "label-only claim (any age) has stale hint");
+
+    // Label-only claim (fresh) also has stale hint.
+    info.updated = Some(fresh_time);
+    let holder = remote_holder(&info, 7);
+    assert!(holder.stale_hint, "label-only claim (fresh) has stale hint");
+
+    // Non-label-only claims never have stale hint.
+    info.kind = ClaimKind::Branch;
+    info.detail = "colonizer/issue-7-abc123".to_string();
+    let holder = remote_holder(&info, 7);
+    assert!(!holder.stale_hint, "branch claim is not stale");
+}
+
+#[test]
+fn remote_holder_omits_stale_hint_and_dates_when_json_serialized_if_not_set() {
+    let info = RemoteClaimInfo {
+        kind: ClaimKind::PullRequest,
+        detail: "https://github.com/acme/repo/pull/4".into(),
+        host: Some("archlinux (f88)".into()),
+        colony: Some("abc123".into()),
+        merged: false,
+        updated: None,
+        author: None,
+    };
+    let holder = remote_holder(&info, 7);
+    let json = serde_json::to_value(&holder).unwrap();
+    assert!(!json.get("claimed_by").is_some(), "claimed_by should be omitted when None");
+    assert!(!json.get("claimed_at").is_some(), "claimed_at should be omitted when None");
+    assert_eq!(json.get("stale_hint"), None, "stale_hint=false should be omitted");
 }

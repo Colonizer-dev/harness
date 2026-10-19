@@ -86,6 +86,18 @@ pub struct ModuleAllow {
     pub allow: Vec<String>,
 }
 
+/// A skill pack that fed the allow list in allowlist mode, and the MCP hosts it contributed:
+/// which pack, and the hosts declared in its `mcp.json` that were not already allowed. The
+/// provenance is recorded as `pack:<name>` per entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PackAllow {
+    /// The pack name, as listed in the Skillsets setting.
+    pub pack: String,
+    /// The hosts this pack's mcp.json declared that were not already in the allow list.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
 /// The resolved policy plus where it came from — what [`resolve`] hands a boot.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolved {
@@ -93,6 +105,8 @@ pub struct Resolved {
     pub sources: Sources,
     /// The running module's contribution, when one widened the allow list.
     pub module: Option<ModuleAllow>,
+    /// The enabled packs' contributions in allowlist mode, each named for the record.
+    pub packs: Vec<PackAllow>,
     /// What the fleet floor (#690) refused to let this colony loosen, each named for the record.
     /// Empty everywhere but a member whose local policy tried to widen past its owner's floor.
     pub fleet_refused: Vec<String>,
@@ -376,8 +390,14 @@ pub(crate) fn compile(policy: &EgressPolicy, infra: &[String]) -> Compiled {
 /// module's; the allow and block lists are the union of both levels, because an org can add to a
 /// fence but never subtract from one. Entries saved by neither level's validation (hand-edited
 /// files) are dropped here; what is left compiles into the boot's rules. The running agent module
-/// joins in `allowlist` mode (#601): see [`ModuleAllow`].
-pub fn resolve(modules: &ModulesConfig, org: &OrgSettings, agent: Option<&AgentModule>) -> Resolved {
+/// joins in `allowlist` mode (#601): see [`ModuleAllow`]. Enabled skill packs' declared MCP hosts
+/// join in `allowlist` mode too: see [`PackAllow`].
+pub fn resolve(
+    modules: &ModulesConfig,
+    org: &OrgSettings,
+    agent: Option<&AgentModule>,
+    packs: &[(&str, Vec<String>)],
+) -> Resolved {
     let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
     let global = |key: &str| setting_str(&modules.sandbox, &schema, key);
     let global_mode = EgressMode::parse(&global("egress")).unwrap_or_default();
@@ -454,6 +474,39 @@ pub fn resolve(modules: &ModulesConfig, org: &OrgSettings, agent: Option<&AgentM
     if module.is_some() {
         sources.allow.push("module".to_string());
     }
+    // In `allowlist` mode the enabled packs' declared MCP hosts join the operator's, so the agent
+    // reaches the tool servers the packs' skills call without the operator restating them. `open`
+    // mode is untouched: the `public` profile covers them. A host is lowercased and validated
+    // through the same parser an operator entry goes through; one that does not parse is dropped.
+    // A host `egress_allow` already carries or the module already listed is neither repeated nor
+    // counted as the pack's.
+    let mut packs_allow = Vec::new();
+    if mode == EgressMode::Allowlist {
+        for (pack_name, declared_hosts) in packs {
+            let mut allow = Vec::new();
+            for host in declared_hosts {
+                let host = host.to_ascii_lowercase();
+                if parse_entry(&host).is_err()
+                    || policy.allow.contains(&host)
+                    || allow.contains(&host)
+                    || packs_allow.iter().any(|p: &PackAllow| p.allow.contains(&host))
+                {
+                    continue;
+                }
+                allow.push(host);
+            }
+            if !allow.is_empty() {
+                policy.allow.extend(allow.iter().cloned());
+                packs_allow.push(PackAllow {
+                    pack: pack_name.to_string(),
+                    allow,
+                });
+            }
+        }
+        if !packs_allow.is_empty() {
+            sources.allow.push("packs".to_string());
+        }
+    }
     // The toolbox baseline ([`TOOLBOX_ALLOW`]). Appended after the configured entries so an entry
     // the operator already listed keeps its place and the union never repeats one; `contains`
     // guards that. Only `allowlist` needs it: `open`'s `public` profile reaches these already.
@@ -468,6 +521,7 @@ pub fn resolve(modules: &ModulesConfig, org: &OrgSettings, agent: Option<&AgentM
         policy,
         sources,
         module,
+        packs: packs_allow,
         fleet_refused: Vec::new(),
     }
 }
@@ -497,6 +551,10 @@ pub struct Record {
     /// `open` mode and for a module that declared no host of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<ModuleAllow>,
+    /// Skill packs' contributions to the allow list in allowlist mode, each named as `pack:<name>`;
+    /// omitted in `open` mode and when no pack declared a host of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packs: Vec<PackAllow>,
     /// What the fleet floor (#690) refused to let this colony loosen, each named. Omitted when the
     /// colony is not a member under a floor, or its local policy loosened nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -517,6 +575,7 @@ pub(crate) fn record(resolved: &Resolved, compiled: &Compiled, applied_at: u64) 
         block: resolved.policy.block.clone(),
         sources: resolved.sources.clone(),
         module: resolved.module.clone(),
+        packs: resolved.packs.clone(),
         fleet_refused: resolved.fleet_refused.clone(),
         always_blocked: ALWAYS_BLOCKED.iter().map(|t| format!("deny@{t}")).collect(),
         rules: compiled.rules.clone(),
@@ -754,7 +813,7 @@ mod tests {
             .sandbox
             .settings
             .insert("egress_block".into(), serde_json::json!("10.0.0.0/8"));
-        let resolved = resolve(&global_only, &OrgSettings::default(), None);
+        let resolved = resolve(&global_only, &OrgSettings::default(), None, &[]);
         assert_eq!(resolved.policy.mode, EgressMode::Open);
         assert_eq!(resolved.policy.block, vec!["10.0.0.0/8"]);
         assert_eq!(resolved.sources.mode, "global");
@@ -781,6 +840,7 @@ mod tests {
                 Some(vec!["240.0.0.0/4"]),
             ),
             None,
+            &[],
         );
         assert_eq!(resolved.policy.mode, EgressMode::Allowlist);
         // The operator's entries keep their place; the toolbox baseline ([`TOOLBOX_ALLOW`]) follows.
@@ -793,11 +853,16 @@ mod tests {
         assert_eq!(resolved.sources.allow, vec!["global", "org"]);
         assert_eq!(resolved.sources.block, vec!["global", "org"]);
         // An org cannot drop a global block: the union stands, whatever the org omits.
-        let resolved = resolve(&org_side, &org(Some("allowlist"), Some(vec!["deb.debian.org"]), None), None);
+        let resolved = resolve(
+            &org_side,
+            &org(Some("allowlist"), Some(vec!["deb.debian.org"]), None),
+            None,
+            &[],
+        );
         assert_eq!(resolved.policy.block, vec!["10.0.0.0/8"]);
         assert_eq!(resolved.sources.block, vec!["global"]);
         // A blank org mode is inherit, like an unset one.
-        let resolved = resolve(&org_side, &org(Some("  "), None, None), None);
+        let resolved = resolve(&org_side, &org(Some("  "), None, None), None, &[]);
         assert_eq!(resolved.policy.mode, EgressMode::Open);
         assert_eq!(resolved.sources.mode, "global");
         // A hand-edited module file carrying an unparseable entry loses the entry, not the boot.
@@ -807,7 +872,7 @@ mod tests {
             .settings
             .insert("egress_allow".into(), serde_json::json!("not a host"));
         assert_eq!(
-            resolve(&hand_edited, &OrgSettings::default(), None).policy.allow,
+            resolve(&hand_edited, &OrgSettings::default(), None, &[]).policy.allow,
             Vec::<String>::new()
         );
     }
@@ -852,7 +917,7 @@ mod tests {
         };
         let org = OrgSettings::default();
 
-        let booted = resolve(&modules, &org, Some(&claude));
+        let booted = resolve(&modules, &org, Some(&claude), &[]);
         assert_eq!(
             booted.policy.allow,
             expected_allow(&[
@@ -886,7 +951,7 @@ mod tests {
             booted.policy.allow
         );
 
-        let booted = resolve(&modules, &org, Some(&opencode));
+        let booted = resolve(&modules, &org, Some(&opencode), &[]);
         assert_eq!(
             booted.policy.allow,
             expected_allow(&["deb.debian.org", "registry.npmjs.org:443", "registry.npmjs.org", "models.dev"])
@@ -913,7 +978,7 @@ mod tests {
         // merge happens and the record names no module.
         let mut open = modules.clone();
         open.sandbox.settings.insert("egress".into(), serde_json::json!("open"));
-        let booted = resolve(&open, &org, Some(&claude));
+        let booted = resolve(&open, &org, Some(&claude), &[]);
         assert_eq!(booted.policy.allow, vec!["deb.debian.org", "registry.npmjs.org:443"]);
         assert_eq!(booted.sources.allow, vec!["global"]);
         assert_eq!(booted.module, None);
@@ -923,11 +988,11 @@ mod tests {
 
         // A module that declares nothing fixed (pi) adds nothing: no `module` source, no record
         // entry, no empty-list noise.
-        let booted = resolve(&modules, &org, Some(&module("pi", &[], &[], &["*.sentry.io"], &[])));
+        let booted = resolve(&modules, &org, Some(&module("pi", &[], &[], &["*.sentry.io"], &[])), &[]);
         assert_eq!(booted.module, None);
         assert_eq!(booted.sources.allow, vec!["global"]);
         // A module whose every host the operator already listed adds nothing of its own.
-        let booted = resolve(&modules, &org, Some(&module("acp", &["deb.debian.org"], &[], &[], &[])));
+        let booted = resolve(&modules, &org, Some(&module("acp", &["deb.debian.org"], &[], &[], &[])), &[]);
         assert_eq!(booted.module, None);
         assert_eq!(
             booted.policy.allow,
@@ -935,8 +1000,156 @@ mod tests {
         );
         // No module at all (a boot before one was picked) leaves the operator's word alone.
         assert_eq!(
-            resolve(&modules, &org, None).policy.allow,
+            resolve(&modules, &org, None, &[]).policy.allow,
             expected_allow(&["deb.debian.org", "registry.npmjs.org:443"])
+        );
+    }
+
+    /// #1165: skill packs' declared MCP hosts feed the allowlist, just as module hosts do.
+    /// A pack's hosts join the operator's and the module's in allowlist mode, the record names
+    /// each pack and its contribution, and `open` mode is untouched.
+    #[test]
+    fn packs_declare_hosts_the_allowlist_colony_reaches() {
+        let mut sandbox = ModulesConfig::default().sandbox;
+        sandbox.settings.insert("egress".into(), serde_json::json!("allowlist"));
+        sandbox
+            .settings
+            .insert("egress_allow".into(), serde_json::json!("operator.example.com"));
+        let modules = ModulesConfig {
+            sandbox,
+            ..ModulesConfig::default()
+        };
+        let org = OrgSettings::default();
+        let agent = AgentModule::test("claude-code");
+
+        // A single pack with two declared hosts.
+        let packs = vec![("archify", vec!["tool.example.com".to_string(), "api.example.io".to_string()])];
+        let booted = resolve(&modules, &org, Some(&agent), &packs);
+        assert_eq!(
+            booted.policy.allow,
+            expected_allow(&["operator.example.com", "tool.example.com", "api.example.io"])
+        );
+        assert_eq!(booted.sources.allow, vec!["global", "packs"]);
+        assert_eq!(booted.packs.len(), 1);
+        assert_eq!(
+            booted.packs[0],
+            PackAllow {
+                pack: "archify".into(),
+                allow: vec!["tool.example.com".into(), "api.example.io".into()],
+            }
+        );
+
+        // Multiple packs, each with some hosts; dedup across packs.
+        let packs = vec![
+            ("archify", vec!["tool.example.com".to_string()]),
+            ("graft", vec!["tool.example.com".to_string(), "graph.example.net".to_string()]),
+        ];
+        let booted = resolve(&modules, &org, Some(&agent), &packs);
+        assert_eq!(
+            booted.policy.allow,
+            expected_allow(&["operator.example.com", "tool.example.com", "graph.example.net"])
+        );
+        assert_eq!(booted.sources.allow, vec!["global", "packs"]);
+        assert_eq!(booted.packs.len(), 2);
+        // Each pack records only its unique entries, not shared ones the first pack added.
+        assert_eq!(booted.packs[0].pack, "archify");
+        assert_eq!(booted.packs[0].allow, vec!["tool.example.com".to_string()]);
+        assert_eq!(booted.packs[1].pack, "graft");
+        assert_eq!(booted.packs[1].allow, vec!["graph.example.net".to_string()]);
+
+        // A host the operator already listed is not counted as the pack's.
+        let packs = vec![("archify", vec!["operator.example.com".to_string()])];
+        let booted = resolve(&modules, &org, Some(&agent), &packs);
+        assert_eq!(booted.policy.allow, expected_allow(&["operator.example.com"]));
+        assert_eq!(booted.packs.len(), 0, "pack added nothing new, no record entry");
+
+        // `open` mode is untouched: the `public` profile already covers declared hosts.
+        let mut open = modules.clone();
+        open.sandbox.settings.insert("egress".into(), serde_json::json!("open"));
+        let packs = vec![("archify", vec!["tool.example.com".to_string()])];
+        let booted = resolve(&open, &org, Some(&agent), &packs);
+        assert_eq!(booted.policy.allow, vec!["operator.example.com"]);
+        assert_eq!(booted.sources.allow, vec!["global"]);
+        assert_eq!(booted.packs.len(), 0, "open mode ignores pack hosts");
+
+        // The record carries the pack contribution.
+        let packs = vec![("archify", vec!["tool.example.com".to_string()])];
+        let booted = resolve(&modules, &org, Some(&agent), &packs);
+        let compiled = compile(&booted.policy, &[]);
+        let recorded = serde_json::to_value(record(&booted, &compiled, 0)).unwrap();
+        assert_eq!(recorded["packs"][0]["pack"], "archify");
+        assert_eq!(recorded["packs"][0]["allow"], serde_json::json!(["tool.example.com"]));
+    }
+
+    /// When a fleet floor refuses a pack host, the fleet clamping removes it from the policy,
+    /// but the pack provenance stays listed (same as module provenance): the record shows what
+    /// the source declared, and `fleet_refused` names what the floor disallowed.
+    #[test]
+    fn pack_hosts_refused_by_the_fleet_floor_are_clamped_but_stay_in_provenance() {
+        let mut sandbox = ModulesConfig::default().sandbox;
+        sandbox.settings.insert("egress".into(), serde_json::json!("allowlist"));
+        let modules = ModulesConfig {
+            sandbox,
+            ..ModulesConfig::default()
+        };
+        let org = OrgSettings::default();
+        let agent = AgentModule::test("claude-code");
+
+        // A pack declaring two hosts, one allowed and one that will be refused by the floor.
+        let packs = vec![(
+            "archify",
+            vec!["allowed.example.com".to_string(), "refused.example.com".to_string()],
+        )];
+        let resolved = resolve(&modules, &org, Some(&agent), &packs);
+        // Before clamping: both hosts are in the policy.
+        assert_eq!(
+            resolved
+                .policy
+                .allow
+                .iter()
+                .filter(|h| h.contains("example.com"))
+                .collect::<Vec<_>>(),
+            vec!["allowed.example.com", "refused.example.com"]
+        );
+        assert_eq!(resolved.packs.len(), 1);
+        assert_eq!(resolved.packs[0].allow.len(), 2);
+
+        // The fleet floor allows only the first host, refuses the second.
+        let floor = EgressPolicy {
+            mode: EgressMode::Allowlist,
+            allow: vec!["allowed.example.com".to_string()],
+            block: Vec::new(),
+        };
+        let (clamped, refused) = crate::fleet_policy::enforce(&floor, resolved.policy.clone());
+        assert_eq!(clamped.allow, vec!["allowed.example.com".to_string()]);
+        assert!(refused.iter().any(|r| r.contains("refused.example.com")), "{refused:?}");
+
+        // The record still shows the pack declared both hosts (provenance unchanged), but
+        // `fleet_refused` names the one the floor disallowed.
+        let compiled = compile(&clamped, &[]);
+        let mut final_resolved = resolved.clone();
+        final_resolved.policy = clamped;
+        final_resolved.fleet_refused = refused.clone();
+        let recorded = serde_json::to_value(record(&final_resolved, &compiled, 0)).unwrap();
+        assert_eq!(recorded["packs"][0]["pack"], "archify");
+        assert_eq!(
+            recorded["packs"][0]["allow"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>(),
+            vec!["allowed.example.com", "refused.example.com"],
+            "pack provenance stays unchanged"
+        );
+        assert!(
+            recorded["fleet_refused"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r.as_str().is_some_and(|s| s.contains("refused.example.com"))),
+            "refused host named in fleet_refused: {:?}",
+            recorded["fleet_refused"]
         );
     }
 
@@ -984,14 +1197,14 @@ mod tests {
                 ..ModulesConfig::default()
             }
         };
-        let resolved = resolve(&configured("allowlist", None), &OrgSettings::default(), None);
+        let resolved = resolve(&configured("allowlist", None), &OrgSettings::default(), None, &[]);
         assert_eq!(resolved.policy.allow, expected_allow(&[]), "every mirror, exactly once");
         // An operator entry is not repeated: the union keeps one copy, the operator's first.
-        let resolved = resolve(&configured("allowlist", Some("pypi.org")), &OrgSettings::default(), None);
+        let resolved = resolve(&configured("allowlist", Some("pypi.org")), &OrgSettings::default(), None, &[]);
         assert_eq!(resolved.policy.allow, expected_allow(&["pypi.org"]));
         assert_eq!(resolved.policy.allow.first().map(String::as_str), Some("pypi.org"));
         // `open` keeps the `public` profile and takes no baseline.
-        let resolved = resolve(&configured("open", None), &OrgSettings::default(), None);
+        let resolved = resolve(&configured("open", None), &OrgSettings::default(), None, &[]);
         assert!(resolved.policy.allow.is_empty(), "{:?}", resolved.policy.allow);
     }
 }

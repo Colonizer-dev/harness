@@ -841,7 +841,18 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
     // The claim versus the observation.
     // An empty branch is a "no change needed" answer, not a claim of work that is missing: there
     // is nothing to check, so it is unverifiable and publishing records it as no changes.
+    // Issue #1268: unless the PR description claims to have made changes, in which case it's contradicted.
     if changed.is_empty() {
+        let claim = tokio::fs::read_to_string(cwd.join("out").join("pr.md"))
+            .await
+            .unwrap_or_default();
+        let claimed = claimed_paths(&claim);
+        if !claimed.is_empty() {
+            record.verdict = Verdict::Contradicted;
+            let paths = claimed.join(", ");
+            record.summary = format!("branch has no changes against {base}, but the PR description names changed files: {paths}");
+            return record.finished(started);
+        }
         unverifiable!(format!("branch has no changes against {base}; nothing to verify"));
     }
     let mut contradictions = {
@@ -2908,6 +2919,21 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #1268: an empty branch whose PR description names changed files is contradicted, not unverifiable.
+    #[test]
+    fn an_empty_branch_with_claimed_changes_is_contradicted() {
+        // Empty branch with pr.md naming no paths → Unverifiable (no claimed paths)
+        let claim = "# Refactor\n\nNo actual changes, just a no-op.";
+        assert!(claimed_paths(claim).is_empty());
+
+        // Empty branch with pr.md naming paths → would be Contradicted (tested via full verify in async)
+        let claim = "Fixed `src/main.rs` and `lib/utils.rs`.";
+        let paths = claimed_paths(claim);
+        assert!(!paths.is_empty(), "claim names paths: {paths:?}");
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&"lib/utils.rs".to_string()));
+    }
+
     /// Colony 5b460871 on #531: a docs-only branch adding `docs/remote-tunnel.md`, whose description
     /// explains the name by pointing at a `docs/remote-access.md` it deliberately did not create
     /// (twice). That is a note for the reviewer, listed once — not a contradiction, and autopilot
@@ -3217,6 +3243,27 @@ pub(crate) mod tests {
         assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
         assert!(v.summary.contains("no test command applies"), "{}", v.summary);
         assert_eq!(v.exit_code, None, "no VM booted to fail in a deleted directory");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1278: verify that verdicts trust the VM's exit code, not fabricated output.
+    /// A shim that prints "test result: ok" but exits 1 is still a failure because the
+    /// verdict reads the exit code from the microVM's report, never the agent's stdout.
+    #[tokio::test]
+    async fn verdict_trusts_exit_code_not_fabricated_output() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        // Set verify command to echo success; a shim would print the same regardless of outcome.
+        let _repo = worktree_fixture(&app, Some("echo 'test result: ok'"), "did the work", true).await;
+        // Base: exit 0, reported 0. Head: prints success but actually exits 1 (reported from VM).
+        // The verdict must use the reported exit code (1), not the printed output.
+        let red = verify(
+            &app,
+            &phased_runner("uncommitted.txt", (0, Some(0)), (1, Some(1)), "test result: ok\n"),
+        )
+        .await;
+        assert_eq!(red.verdict, Verdict::Contradicted, "{red:?}");
+        assert_eq!(red.exit_code, Some(1), "verdict must use reported exit code 1, not output");
+        assert!(red.summary.contains("exited 1"), "{}", red.summary);
         let _ = std::fs::remove_dir_all(root);
     }
 

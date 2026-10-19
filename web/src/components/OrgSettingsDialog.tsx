@@ -31,6 +31,7 @@ type FieldKey =
   | "verify_locally_when_ci_blocked"
   | "open_code_review"
   | "open_code_review_model"
+  | "promptdecode"
   | "budget_usd"
   | "host_disk"
   | "stack"
@@ -71,6 +72,7 @@ const FIELDS: FieldSpec[] = [
   { key: "verify_locally_when_ci_blocked", group: "Pull requests", label: "Verify locally when CI is blocked", hint: "While GitHub Actions is blocked (billing), run the repository's merge gates in a build VM and merge a pull request that passes, one at a time, with a report comment. Off unless set", kind: "boolean" },
   { key: "open_code_review", group: "Open Code Review", label: "Mode", hint: "A host-side review of each colony's diff before it is published (issue #1274). Shadow records the findings in the colony log and the session's open-code-review.json; nothing else changes", kind: "choice" },
   { key: "open_code_review_model", group: "Open Code Review", label: "Review model", hint: "The model reviews run on, as provider/model; empty follows the install's cheap summary route", kind: "text" },
+  { key: "promptdecode", group: "Hidden-text screening", label: "Mode", hint: "Screen colony inputs (GitHub issues and comments) for hidden text: zero-width characters, tag characters, bidi controls, HTML comments and base64 payloads (issue #1277). Shadow records findings; On removes hidden text and appends a note", kind: "choice" },
   { key: "auto_colonize", group: "Colonies", label: "Auto-colonize", hint: "Start a colony on a new issue by itself, but only when an org member, a collaborator with write access or an allowlisted login wrote it and nobody outside the org edited it. Strangers' issues wait in review; an issue labelled no-colonize or needs-human is left to a person. Only issues filed after you turn it on are taken", kind: "choice" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
@@ -109,6 +111,7 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "verify_locally_when_ci_blocked":
     case "open_code_review":
     case "open_code_review_model":
+    case "promptdecode":
       return settings[key];
     case "budget_usd":
       return settings.budget_usd;
@@ -181,6 +184,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
       return "off";
     case "open_code_review_model":
       return undefined;
+    case "promptdecode":
+      // Org-only: no screening until the org opts in (issue #1277).
+      return "off";
     case "budget_usd":
       return setting("sandbox", "budget_usd");
     case "host_disk":
@@ -243,6 +249,12 @@ const MERGE_METHOD_CHOICES: readonly (readonly [string, string])[] = [
 const OPEN_CODE_REVIEW_CHOICES: readonly (readonly [string, string])[] = [
   ["off", "Off"],
   ["shadow", "Shadow — records findings"],
+];
+/** What the promptdecode mode select offers (issue #1277): shadow records, on strips. */
+const PROMPTDECODE_CHOICES: readonly (readonly [string, string])[] = [
+  ["off", "Off"],
+  ["shadow", "Shadow — records findings"],
+  ["on", "On — removes hidden text"],
 ];
 
 /** The queue priority presets the select offers; any other saved integer shows as custom. */
@@ -345,6 +357,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     verify_locally_when_ci_blocked: pick("verify_locally_when_ci_blocked") as boolean | null,
     open_code_review: pick("open_code_review") as OrgSettings["open_code_review"],
     open_code_review_model: pick("open_code_review_model") as OrgSettings["open_code_review_model"],
+    promptdecode: pick("promptdecode") as OrgSettings["promptdecode"],
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
@@ -691,7 +704,7 @@ export function OrgSettingsForm({
                         value={String(draft[spec.key].value)}
                         onChange={(e) => set(spec.key, { value: e.target.value })}
                         aria-label={`${spec.label} for ${org}`}
-                        className={cx(inputClass, spec.key === "auto_colonize" || spec.key === "open_code_review" ? "w-56" : "w-40")}
+                        className={cx(inputClass, spec.key === "auto_colonize" || spec.key === "open_code_review" || spec.key === "promptdecode" ? "w-56" : "w-40")}
                       >
                         {(spec.key === "auto_merge"
                           ? AUTO_MERGE_CHOICES
@@ -701,6 +714,8 @@ export function OrgSettingsForm({
                             ? MERGE_METHOD_CHOICES
                             : spec.key === "open_code_review"
                               ? OPEN_CODE_REVIEW_CHOICES
+                            : spec.key === "promptdecode"
+                              ? PROMPTDECODE_CHOICES
                               : spec.key === "agent_module"
                                 ? (modules?.find((m) => m.kind === "agent")?.providers ?? []).map((p) => [p.id, p.name] as const)
                                 : (
