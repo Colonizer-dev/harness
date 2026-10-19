@@ -31,8 +31,8 @@ const SETTING_LABEL: Record<ModelSetting, string> = {
   model_high: "Model for large tasks",
 };
 
-/** A thin meter of what is left in a plan; dashed when the balance is unknown. */
-function GaugeBar({ pct, tone, label }: { pct: number | null; tone: StatusTone; label: string }) {
+/** A thin meter of what is left in a plan; dashed when the balance is unknown or no API. */
+function GaugeBar({ pct, tone, label, gaugeText }: { pct: number | null; tone: StatusTone; label: string; gaugeText?: string }) {
   return (
     <div
       role="meter"
@@ -40,7 +40,7 @@ function GaugeBar({ pct, tone, label }: { pct: number | null; tone: StatusTone; 
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={pct ?? undefined}
-      aria-valuetext={pct == null ? "balance unknown" : `${Math.round(pct)}% left`}
+      aria-valuetext={pct == null ? (gaugeText || "balance unknown") : `${Math.round(pct)}% left`}
       className={cx("h-1.5 w-full overflow-hidden rounded-full", pct == null ? "border border-dashed border-border-strong" : "bg-panel-3")}
     >
       {pct != null && <div className={cx("h-full rounded-full transition-[width] duration-500", FILL[tone])} style={{ width: `${Math.max(pct, 2)}%` }} />}
@@ -94,7 +94,7 @@ function Shell({
           <span className="mt-1.5 flex items-start gap-2.5 sm:hidden">
             {gauge.pct != null && (
               <span className="mt-[7px] w-12 shrink-0">
-                <GaugeBar pct={gauge.pct} tone={gauge.tone} label={`${name} plan left`} />
+                <GaugeBar pct={gauge.pct} tone={gauge.tone} label={`${name} plan left`} gaugeText={gauge.text} />
               </span>
             )}
             <span className={cx("min-w-0 text-small leading-5 tabular-nums", TEXT[gauge.tone])}>{[gauge.text, reset].filter(Boolean).join(" · ")}</span>
@@ -104,7 +104,7 @@ function Shell({
         <span className="hidden w-[132px] shrink-0 items-center gap-2.5 sm:flex">
           {gauge.pct != null && (
             <span className="w-16 shrink-0">
-              <GaugeBar pct={gauge.pct} tone={gauge.tone} label={`${name} plan left`} />
+              <GaugeBar pct={gauge.pct} tone={gauge.tone} label={`${name} plan left`} gaugeText={gauge.text} />
             </span>
           )}
           <span className={cx("truncate text-small tabular-nums", gauge.pct == null ? "text-faint" : TEXT[gauge.tone])}>{gauge.text}</span>
@@ -243,7 +243,7 @@ function CreditsBlock({ provider, report, failed, onEdit, nowMs }: { provider: M
               ? "Credits history isn't available from this Mothership."
               : hasReader
                 ? "No reading yet. The balance is read when you press Check, and every half hour after."
-                : "Balance unknown: add a plan balance reader to see what is left."}
+                : "No balance API available. Add a plan balance reader to see what is left."}
           </p>
           {!hasReader && (
             <Button size="sm" onClick={onEdit}>
