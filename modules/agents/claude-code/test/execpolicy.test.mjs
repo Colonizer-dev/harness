@@ -882,10 +882,13 @@ test('colon-separated git refs and equals-separated flag values properly expose 
   // These should be denied because the splitting exposes the secret path
   const denied = [
     'git show HEAD:.env',
-    'git cat-file -p HEAD:credentials.json',
+    'git cat-file -p HEAD:.env',
+    'git show main:.env',
+    'git cat-file -p HEAD:config/.env.local',
     'git cat-file blob HEAD:.npmrc',
     'git show main:.git-credentials',
-    'echo --pattern=.env',
+    'grep --file=.env foo',
+    'cat --some-flag=.env',
     'cmd --some-flag=.env.local',
     'tool --config=~/.ssh/id_rsa',
     '--flag=.env',
@@ -902,6 +905,8 @@ test('colon-separated git refs and equals-separated flag values properly expose 
     '--flag=normal-value',
   ];
   for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
+  // #1279: echo prints its own literal words, so an echoed name is not a read and stays allowed.
+  assert.equal(decide(policy, 'echo --pattern=.env', '/repo'), null);
 });
 
 // #1279: the harness seeds empty placeholder dotfiles (.env, .envrc, .npmrc, .netrc,

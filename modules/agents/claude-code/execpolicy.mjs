@@ -491,8 +491,8 @@ function withoutExcludes(segment) {
 function words(text) {
   return String(text ?? '')
     .replace(/\$\{HOME\}/g, '$HOME') // before the split: the braces would break the word apart
-    .split(/[\s;|&<>():"'`\[\]{}=]+/)
-    .map((w) => w.replace(/^[@+]+/, '').replace(/[,;]+$/, ''))
+    .split(/[\s;|&<>()"'`\[\]{}]+/)
+    .map((w) => w.replace(/^[@:=+]+/, '').replace(/[,;:]+$/, ''))
     // One-char words are noise (`echo x`), except the filesystem root, which a `rm -rf /` writes.
     .filter((w) => w.length > 1 || w === '/');
 }
@@ -510,6 +510,17 @@ function gitObjectPaths(segment) {
     .filter((w) => w.indexOf(':') > 0)
     .map((w) => w.slice(w.indexOf(':') + 1))
     .filter((path) => path.length > 1);
+}
+
+/**
+ * The values of `--flag=value` words (#1174): `tool --config=~/.ssh/id_rsa` and `cmd --some-flag=.env.local`
+ * name the file in the value, and `words` keeps the whole `--flag=value` word together. Each value is
+ * split like any other word, so a value that is itself `a:b` or `a,b` yields each part.
+ */
+function flagValues(segment) {
+  return segment.trim().split(/\s+/)
+    .filter((w) => w.indexOf('=') > 0)
+    .flatMap((w) => words(w.slice(w.indexOf('=') + 1)));
 }
 
 /** A segment's words past its env assignments and a leading sudo/env/command/exec. */
@@ -844,7 +855,7 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
   }
   const tokens = new Set();
   const spelled = new Map(); // token -> the word as the command spelled it (`~/.ssh`, not /root/.ssh)
-  for (const word of [...nameOnlyFiltered(command, segments, cwd).map(withoutExcludes).flatMap((s) => [...words(s), ...gitObjectPaths(s)]), ...scripts.flatMap((s) => words(s.text))]) {
+  for (const word of [...nameOnlyFiltered(command, segments, cwd).map(withoutExcludes).flatMap((s) => [...words(s), ...gitObjectPaths(s), ...flagValues(s)]), ...scripts.flatMap((s) => words(s.text))]) {
     const token = expandTilde(word);
     tokens.add(token);
     if (!spelled.has(token)) spelled.set(token, word);
