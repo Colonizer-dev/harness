@@ -58,6 +58,7 @@ export const FIXED_PAGES: readonly PageInfo[] = [
   { id: "living-brain", group: "connections", slug: "living-brain", label: "Living Brain", hint: "Send colony sessions to your team brain, and let colonies read it" },
 
   { id: "runtime", group: "runtime", slug: "runtime", label: "Runtime", hint: "What this machine has to run colonies" },
+  { id: "modules", group: "runtime", slug: "modules", label: "Modules", hint: "Cratefield modules and how to use them" },
 
   { id: "remote", group: "devices", slug: "remote-access", label: "Remote access", hint: "Open this cockpit from anywhere" },
   { id: "phone", group: "devices", slug: "phone", label: "Add your phone", hint: "Pair a phone with a one-use code" },
