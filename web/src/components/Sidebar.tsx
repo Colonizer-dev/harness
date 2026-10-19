@@ -836,7 +836,7 @@ export function NewSession({
                 <Button size="sm" variant="ghost" disabled={launching} onClick={() => setSelected(new Set())}>
                   Clear
                 </Button>
-                <Button size="sm" variant="primary" disabled={launching || launchCount === 0} onClick={launchSelected}>
+                <Button size="sm" variant="primary" disabled={launching || launchCount === 0} onClick={() => launchSelected()}>
                   {launching ? <Spinner /> : <IconPlus size={14} />} Launch {launchCount}
                 </Button>
               </div>
@@ -982,7 +982,7 @@ function OpenSessionRow({
         className={cx(inputClass, "resize-y text-body-sm")}
       />
       <AutopilotSwitch checked={autopilot ?? autopilotDefault} onChange={setAutopilot} />
-      <Button variant="primary" className="w-full" disabled={starting} onClick={start}>
+      <Button variant="primary" className="w-full" disabled={starting} onClick={() => start()}>
         {starting ? <Spinner /> : <IconPlus size={15} />} Launch colony
       </Button>
     </div>
@@ -1225,7 +1225,7 @@ function IssueRow({
             className={cx(inputClass, "resize-y text-body-sm")}
           />
           <AutopilotSwitch checked={autopilot ?? autopilotDefault} onChange={setAutopilot} />
-          <Button variant="primary" className="w-full" disabled={starting} onClick={start}>
+          <Button variant="primary" className="w-full" disabled={starting} onClick={() => start()}>
             {starting ? <Spinner /> : <IconPlus size={15} />} Launch colony
           </Button>
         </div>
