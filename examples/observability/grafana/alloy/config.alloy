@@ -1,0 +1,82 @@
+// Alloy for the Colonizer observability example stack: one OTLP receiver in, three exporters
+// out — logs to Loki, traces to Tempo, metrics to Prometheus. The stack's docker-compose.yml
+// runs this file; the mothership points its OTLP endpoint at http://localhost:4318.
+//
+// Which attributes become Loki labels is decided by loki/loki.yaml, not here: Alloy forwards
+// every resource and log attribute untouched and Loki's otlp_config promotes only service.name,
+// colonizer.stream and the severity to index labels (the ADR's cardinality rule,
+// docs/design/observability.md), keeping the rest as structured metadata.
+
+// The mothership (or anything else speaking OTLP) pushes here: gRPC on 4317, HTTP on 4318.
+
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		logs    = [otelcol.processor.batch.default.input]
+		metrics = [otelcol.processor.batch.default.input]
+		traces  = [otelcol.processor.batch.default.input]
+	}
+}
+
+// One batch for every signal: the exporters talk to three neighbors on the compose network, and
+// batching is what keeps a chatty install from hammering them with one-request-per-record.
+
+otelcol.processor.batch "default" {
+	output {
+		logs    = [otelcol.exporter.otlphttp.loki.input]
+		metrics = [otelcol.exporter.prometheus.default.input]
+		traces  = [otelcol.exporter.otlp.tempo.input]
+	}
+}
+
+// Loki 3 ingests OTLP natively; /otlp is the base path it serves both signals under.
+
+otelcol.exporter.otlphttp "loki" {
+	client {
+		endpoint = "http://loki:3100/otlp"
+	}
+}
+
+// Tempo speaks OTLP/gRPC. tls.insecure because the local stack serves plaintext, not a
+// certificate anyone would trust.
+
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = "tempo:4317"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+// Metrics take one hop through Alloy's Prometheus translation: OTLP metrics become Prometheus
+// series in-pipeline and are handed straight to the remote-write below.
+otelcol.exporter.prometheus "default" {
+	forward_to = [prometheus.remote_write.colonizer.receiver]
+}
+
+prometheus.remote_write "colonizer" {
+	endpoint {
+		url = "http://prometheus:9090/api/v1/write"
+	}
+}
+
+// Fan out to a hosted backend as well (Grafana Cloud and friends) by uncommenting a second
+// exporter and adding `otelcol.exporter.otlphttp.hosted.input` to the batch output above. The
+// endpoint here is a placeholder on purpose; a real one authenticates with a header from an
+// environment variable, never with credentials written in this file.
+//
+//   otelcol.exporter.otlphttp "hosted" {
+//   	client {
+//   		endpoint = "https://otlp.example.invalid/otlp"
+//   		headers = { "authorization" = "Basic ${env("OTLP_HOSTED_AUTH")}" }
+//   	}
+//   }

@@ -1,0 +1,25 @@
+# Prometheus for the Colonizer observability example stack. It receives, more than it scrapes:
+# Tempo's metrics-generator remote-writes span metrics and Alloy remote-writes the OTLP metrics
+# catalogue to /api/v1/write (enabled by --web.enable-remote-write-receiver in docker-compose.yml),
+# so both arrive whatever this file does.
+global:
+  scrape_interval: 30s
+scrape_configs:
+  # The mothership's pull catalogue (docs/observability/metrics.md) — the same families the push
+  # delivers, plus the pull-only ones. Redundancy, deliberately optional: skip this job and the
+  # dashboards still fill in.
+  - job_name: colonizer
+    authorization:
+      # A scoped `read` API token with no org or repo limits (docs/observability/metrics.md),
+      # never the install's own token. The file is yours to create (grafana/README.md); its
+      # directory is gitignored, and Prometheus exits at startup without it.
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/prometheus.token
+    static_configs:
+      # The mothership binds 127.0.0.1:7878 by default, which this container cannot reach.
+      # host.docker.internal (extra_hosts in docker-compose.yml) resolves to the host, so the
+      # mothership must be bound where the docker bridge can see it — or left unscraped.
+      - targets: ["host.docker.internal:7878"]
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -20,6 +20,7 @@
 use crate::{
     merge_loop::local_checks,
     sessions::Session,
+    util::shell_quote,
     verify::{self, BaseFiles, BaseOut, Check, Checked, Compared, Failure, Outcome, Verification, VmRunner},
 };
 use serde::Deserialize;
@@ -94,7 +95,8 @@ pub(crate) fn is_test_command(command: &str) -> bool {
 
 /// The name a check carries in the pull request note: `cargo fmt --all --check` is `fmt`, clippy
 /// is `clippy`, `npm run typecheck` is `typecheck`, `bash scripts/ci/check-exec-bits.sh` is
-/// `check-exec-bits`; anything else reads as itself.
+/// `check-exec-bits`; anything else reads as itself. A quoted script path (the repository's own
+/// scripts are quoted where they are selected) reads the same as a bare one.
 pub(crate) fn short_name(command: &str) -> String {
     let command = command.trim();
     if command.starts_with("cargo fmt") {
@@ -113,7 +115,7 @@ pub(crate) fn short_name(command: &str) -> String {
     }
     for runner in ["bash ", "sh "] {
         if let Some(path) = command.strip_prefix(runner) {
-            let path = path.trim();
+            let path = path.trim().trim_matches('\'');
             return path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sh").to_string();
         }
     }
@@ -192,7 +194,8 @@ pub(crate) fn select(
         })
         .collect();
     scripts.sort_unstable();
-    out.extend(scripts.into_iter().map(|path| format!("bash {path}")));
+    // The path is the repository's own, so it is quoted: a name with a space is one script, not two.
+    out.extend(scripts.into_iter().map(|path| format!("bash {}", shell_quote(path))));
     dedupe(out)
 }
 
@@ -413,6 +416,8 @@ mod tests {
         assert_eq!(short_name("npm ci && npm run typecheck"), "typecheck");
         assert_eq!(short_name("bash scripts/ci/check-exec-bits.sh"), "check-exec-bits");
         assert_eq!(short_name("bash scripts/ci/check-rust-file-size.sh"), "check-rust-file-size");
+        assert_eq!(short_name("bash 'scripts/ci/check-exec-bits.sh'"), "check-exec-bits");
+        assert_eq!(short_name("bash 'scripts/ci/a name with spaces.sh'"), "a name with spaces");
         assert_eq!(short_name("npx tsc --noEmit"), "npx tsc --noEmit");
     }
 
@@ -516,9 +521,9 @@ mod tests {
                 "cargo fmt --all --check".to_string(),
                 "cargo clippy --workspace --all-targets -- -D warnings".to_string(),
                 "npx tsc --noEmit".to_string(),
-                "bash scripts/ci/check-exec-bits.sh".to_string(),
+                "bash 'scripts/ci/check-exec-bits.sh'".to_string(),
             ],
-            "only the check script a workflow names runs, deduplicated, sorted"
+            "only the check script a workflow names runs, deduplicated, sorted, its path quoted"
         );
         // No workflows read: no script runs, whatever the base carries.
         assert_eq!(
@@ -536,7 +541,7 @@ mod tests {
         let commands = vec![
             "cargo fmt --all --check".to_string(),
             "npm ci && npm run lint".to_string(),
-            "bash scripts/ci/check-exec-bits.sh".to_string(),
+            "bash 'scripts/ci/check-exec-bits.sh'".to_string(),
         ];
         let checks = as_checks(&commands, &npm);
         assert_eq!(checks.len(), 3);

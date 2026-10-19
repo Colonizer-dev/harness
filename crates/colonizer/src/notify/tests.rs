@@ -1670,9 +1670,20 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
     };
     let as_acme = || Some(Extension(acme.clone()));
     let create = |scoped, body| subscriptions::create(State(app.clone()), scoped, Json(body));
+    // The save-time DNS check reads the test resolver, so no test reaches the network:
+    // `hooks.example.com` resolves publicly, `intranet.example.com` privately, nothing else does.
+    fn dns(host: &str) -> Option<Vec<std::net::IpAddr>> {
+        match host {
+            "hooks.example.com" => Some(vec!["93.184.216.34".parse().unwrap()]),
+            "intranet.example.com" => Some(vec!["10.0.0.5".parse().unwrap()]),
+            _ => None,
+        }
+    }
+    let _dns = crate::util::install_test_resolver(dns);
 
-    // Refused to a scoped token: this machine or its network, an event outside every token's
-    // scope, an unknown event, credentials in the address, a bad secret — and no secret at all.
+    // Refused to a scoped token: this machine or its network, a public name that resolves to a
+    // private address, a name that does not resolve at all, an event outside every token's scope,
+    // an unknown event, credentials in the address, a bad secret — and no secret at all.
     for (url, events, secret) in [
         ("http://127.0.0.1:7878/hook", vec![], None),
         ("http://localhost/hook", vec![], None),
@@ -1680,6 +1691,8 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
         ("http://[::1]/hook", vec![], None),
         ("http://100.100.1.1/hook", vec![], None),
         ("http://intranet/hook", vec![], None),
+        ("http://intranet.example.com/hook", vec![], None),
+        ("http://gone.example.com/hook", vec![], None),
         ("ftp://hooks.example.com/hook", vec![], None),
         ("https://hooks.example.com/hook", vec!["provider_degraded"], None),
         ("https://hooks.example.com/hook", vec!["no_such_event"], None),
@@ -1755,6 +1768,44 @@ async fn the_subscription_api_keeps_each_token_to_its_own() {
         .0;
     assert_eq!(deleted["deleted"], theirs["id"]);
     assert_eq!(subscriptions::list(State(app.clone()), None).await.0.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The save-time DNS check, which the literal host check cannot see: a public name that resolves to
+/// a private address is refused to a scoped token, and so is a name that does not resolve at all —
+/// the webhook would be broken anyway. The owner's subscriptions are never resolved: their machine
+/// is theirs to name, however it answers.
+#[tokio::test]
+async fn a_scoped_tokens_webhook_must_resolve_to_public_addresses() {
+    use axum::Extension;
+    let (app, root, _) = outbox_app("subs-dns");
+    let acme = token(&app, "acme ci", "operate", &["acme"]).await;
+    fn dns(host: &str) -> Option<Vec<std::net::IpAddr>> {
+        let ip = |s: &str| s.parse().unwrap();
+        match host {
+            "roundrobin.example.com" => Some(vec![ip("93.184.216.34"), ip("10.0.0.5")]),
+            "intranet.example.com" => Some(vec![ip("10.0.0.5")]),
+            _ => None,
+        }
+    }
+    let _dns = crate::util::install_test_resolver(dns);
+    let new = |url: &str| {
+        serde_json::from_value::<subscriptions::NewSubscription>(json!({
+            "url": url, "events": ["merged"], "secret": "s3cret",
+        }))
+        .unwrap()
+    };
+    let create = |scoped, url| subscriptions::create(State(app.clone()), scoped, Json(new(url)));
+    for url in [
+        "http://intranet.example.com/hook",
+        "http://roundrobin.example.com/hook",
+        "http://gone.example.com/hook",
+    ] {
+        let refused = create(Some(Extension(acme.clone())), url).await;
+        assert!(refused.is_err(), "{url} should be refused to a scoped token");
+    }
+    let owners = create(None, "http://intranet.example.com/hook").await;
+    assert!(owners.is_ok(), "the owner is never DNS-checked: {owners:?}");
     let _ = std::fs::remove_dir_all(root);
 }
 
