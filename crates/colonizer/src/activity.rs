@@ -1158,7 +1158,9 @@ pub async fn list(State(app): State<Shared>, Query(query): Query<ListQuery>) -> 
             )
         })?;
     if page.skipped > 0 {
-        eprintln!(
+        tracing::warn!(
+            skipped = page.skipped,
+            path = %app.cfg.data_dir.join(FILE).display(),
             "activity: skipped {} unreadable {} in {}",
             page.skipped,
             if page.skipped == 1 { "line" } else { "lines" },

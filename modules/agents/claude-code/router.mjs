@@ -30,6 +30,14 @@ const DEFAULT_TIMEOUT_SECS = 300;
 // event) and between two chunks of the body. Node's built-in fetch caps both silences at 300 s.
 const DEFAULT_CONNECT_TIMEOUT_SECS = 30;
 const DEFAULT_IDLE_TIMEOUT_SECS = 600;
+// How long a routed request waits for an unreachable route (normally a restarting mothership) to come
+// back before it falls back, and the pause between its attempts (doubling, at most 5 s).
+const DEFAULT_GATEWAY_GRACE_SECS = 20;
+const GATEWAY_RETRY_FIRST_MS = 500;
+const GATEWAY_RETRY_MAX_MS = 5_000;
+// The failure classes that mean the route never took the request: nothing listening, or the
+// connection dropped before any answer. A timeout already waited; DNS and TLS do not heal in seconds.
+const GRACE_CLASSES = new Set(['connect', 'connection']);
 // How long the mothership's answer about the Claude account is reused, and how long the router waits
 // for it. A slow or dead answer means Claude, exactly as without the feature: the fallback only ever
 // adds a route, it never holds a request back.
@@ -158,11 +166,70 @@ export function stripOauthBetas(value) {
     .join(',');
 }
 
-/** The request body for a Claude fallback: the fallback model, and thinking in a form Claude accepts. */
-export function fallbackBody(parsed, model) {
+// Content blocks that carry one provider's reasoning: Anthropic's signed `thinking` and
+// `redacted_thinking`, and `reasoning` as some OpenAI-compatible providers name it.
+const REASONING_BLOCKS = new Set(['thinking', 'redacted_thinking', 'reasoning']);
+
+/**
+ * `messages` with every reasoning block removed from the assistant turns, and an assistant turn left
+ * with nothing (it only held reasoning) removed as well. A reasoning block is only valid on the provider
+ * that produced it: Anthropic verifies each `thinking` block's `signature` and refuses the whole request
+ * with "Invalid `signature` in `thinking` block" for one minted elsewhere (a GLM, DeepSeek or MiniMax
+ * block), and another provider has no use for Anthropic's. Removing all of them, never some, keeps what
+ * is left consistent: nothing is replayed, so nothing is checked. Text, tool_use and tool_result stay.
+ * Returns the same array when there was nothing to remove.
+ */
+export function stripReasoning(messages) {
+  if (!Array.isArray(messages)) return messages;
+  let changed = false;
+  const out = [];
+  for (const message of messages) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) {
+      out.push(message);
+      continue;
+    }
+    const content = message.content.filter((block) => !REASONING_BLOCKS.has(block?.type));
+    if (content.length === message.content.length) {
+      out.push(message);
+      continue;
+    }
+    changed = true;
+    // An empty assistant turn is refused; the user turns either side of it are joined by the API.
+    if (content.length) out.push({ ...message, content });
+  }
+  return changed ? out : messages;
+}
+
+/**
+ * The request body for a request sent to a different provider than the conversation's own: the new
+ * model, and no reasoning blocks from the old provider (see `stripReasoning`).
+ */
+export function crossProviderBody(parsed, model) {
   const body = { ...parsed, model };
+  if (Array.isArray(parsed.messages)) body.messages = stripReasoning(parsed.messages);
+  return body;
+}
+
+/**
+ * The request body for a Claude fallback: the fallback model, thinking in a form Claude accepts, and
+ * none of the routed provider's reasoning blocks, whose signatures Anthropic would refuse.
+ */
+export function fallbackBody(parsed, model) {
+  const body = crossProviderBody(parsed, model);
   if (body.thinking?.type === 'enabled') body.thinking = { type: 'adaptive' };
   return body;
+}
+
+/**
+ * How long a routed request keeps trying the same route when the route cannot be reached at all,
+ * before it falls back: `COLONIZER_ROUTER_GATEWAY_GRACE_SECS` (default 20, 0 turns it off). A route
+ * normally points at the mothership's gateway, which a mothership restart takes away for a second or
+ * two; without the grace the request in flight at that moment went to the Claude fallback, with the
+ * routed provider's history, instead of waiting for the gateway to come back.
+ */
+export function gatewayGraceMs(env = process.env) {
+  const value = Number(env.COLONIZER_ROUTER_GATEWAY_GRACE_SECS);
+  return (Number.isFinite(value) && value >= 0 ? value : DEFAULT_GATEWAY_GRACE_SECS) * 1000;
 }
 
 /**
@@ -333,6 +400,7 @@ const errorTypeFor = (failure) => (failure.class === 'timeout' ? 'timeout_error'
  * @param {number} [args.connectTimeoutMs]  overrides `upstreamTimeouts(env, routes).connectMs`
  * @param {number} [args.idleTimeoutMs]  overrides `upstreamTimeouts(env, routes).idleMs`
  * @param {{url: string, headers: object}|null} [args.accountRoute]  the mothership's account-fallback question
+ * @param {number} [args.graceMs]  overrides `gatewayGraceMs(env)`
  * @returns {Promise<{url: string, close: () => Promise<void>}>}
  */
 export async function startRouter({
@@ -344,6 +412,7 @@ export async function startRouter({
   connectTimeoutMs,
   idleTimeoutMs,
   accountRoute = parseAccountRoute(env.COLONIZER_ACCOUNT_ROUTE),
+  graceMs = gatewayGraceMs(env),
 } = {}) {
   const timeouts = upstreamTimeouts(env, routes);
   const connectMs = connectTimeoutMs ?? timeouts.connectMs;
@@ -440,7 +509,8 @@ export async function startRouter({
           : undefined;
         if (target) {
           model = decision.model;
-          parsed.model = model;
+          // The conversation so far was Claude's: its signed thinking means nothing to the fallback.
+          parsed = crossProviderBody(parsed, model);
           route = target;
         }
       }
@@ -506,8 +576,31 @@ export async function startRouter({
 
         let reason = null;
         let failure = null;
+        const routedBody = Buffer.from(JSON.stringify(parsed));
+        // A route that cannot be reached at all — the mothership's gateway mid-restart — is tried
+        // again for a short grace before the fallback, so the conversation stays on its own provider.
+        const sendRouted = async () => {
+          const deadline = Date.now() + graceMs;
+          let pause = GATEWAY_RETRY_FIRST_MS;
+          for (;;) {
+            try {
+              return await send(joinUrl(route.base_url, req.url), routed, routedBody);
+            } catch (err) {
+              if (abort.signal.aborted || Date.now() + pause > deadline) throw err;
+              const failure = classifyUpstreamError(err, { target: `provider "${route.provider}"`, connectMs, idleMs });
+              if (!GRACE_CLASSES.has(failure.class)) throw err;
+              say('warn', `provider ${route.provider} unreachable (${failure.detail}); retrying in ${seconds(pause)}`);
+              await new Promise((resolve) => {
+                const timer = setTimeout(resolve, pause);
+                abort.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+              });
+              if (abort.signal.aborted) throw err;
+              pause = Math.min(pause * 2, GATEWAY_RETRY_MAX_MS);
+            }
+          }
+        };
         try {
-          upstream = await send(joinUrl(route.base_url, req.url), routed, Buffer.from(JSON.stringify(parsed)));
+          upstream = await sendRouted();
           if (FALLBACK_STATUSES.has(upstream.status)) reason = upstream.headers.get(FALLBACK_HEADER);
           // Quota exhaustion answers 429/403, never 502/503/504: the gateway names it in the
           // header, and only that marker (never a bare 429/403) earns the Claude retry.

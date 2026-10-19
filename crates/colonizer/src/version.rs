@@ -321,7 +321,7 @@ impl Updates {
         let mut state = self.state.lock().await;
         let same = waiting && state.auto_apply_last.as_ref().is_some_and(|(_, last)| *last == message);
         if !same {
-            eprintln!("update: auto-apply: {message}");
+            tracing::info!("update: auto-apply: {message}");
             state.auto_apply_last = Some((Utc::now(), message));
         }
     }

@@ -118,7 +118,11 @@ async fn running_or_wait(execution: &dyn ExecutionBackend) -> HashSet<String> {
     loop {
         match execution.running().await {
             Ok(running) => return running,
-            Err(e) => eprintln!("recover: `msb ls` failed, asking again in {backoff:?}: {e:#}"),
+            Err(e) => tracing::warn!(
+                backoff = ?backoff,
+                error = %format!("{e:#}"),
+                "recover: `msb ls` failed, asking again in {backoff:?}: {e:#}"
+            ),
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(10));
@@ -1670,7 +1674,12 @@ async fn archive_first(app: &Shared, s: &Session, purge_logs: bool) -> anyhow::R
     match archive::archive_session(app, s).await {
         Ok(rel) => Ok(rel),
         Err(e) if purge_logs => {
-            eprintln!("archive: could not archive {}'s logs before the purge: {e:#}", s.id);
+            tracing::error!(
+                id = %s.id,
+                error = %format!("{e:#}"),
+                "archive: could not archive {}'s logs before the purge: {e:#}",
+                s.id
+            );
             Ok(None)
         }
         Err(e) => Err(e.context("could not archive the colony's logs; the colony is kept")),

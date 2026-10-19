@@ -358,7 +358,7 @@ async fn ask_freeform_with_api_key(key: &str, model: &str, prompt: &str) -> Resu
 /// Logs a summary failure once per run.
 fn log_once(message: String) {
     if !FAILURE_LOGGED.swap(true, Ordering::SeqCst) {
-        eprintln!("summaries: {message}");
+        tracing::warn!("summaries: {message}");
     }
 }
 

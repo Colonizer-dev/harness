@@ -13,7 +13,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { CODEX_HOME, archPlatform, createBridge, defaultCacheDir, mcpArgs, parseRoutes, parseVersion, resolveCodex, resolveModel, turnArgs } from '../runner.mjs';
+import { CODEX_HOME, archPlatform, createBridge, defaultCacheDir, livingBrainArgs, mcpArgs, parseRoutes, parseVersion, resolveCodex, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -819,6 +819,18 @@ test('mcpArgs forwards the loop switches into the colonizer server env; undefine
   // pins the forwarding: without the switches in the table, mcp.mjs never offers the loop tools.
   const off = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: {} }));
   assert.ok(!('COLONIZER_LOOP' in off) && !('COLONIZER_LOOP_SELF_PACED' in off));
+});
+
+test('livingBrainArgs registers the brain over streamable HTTP only when the mothership granted it', () => {
+  assert.deepEqual(livingBrainArgs({}), []);
+  assert.deepEqual(livingBrainArgs({ COLONIZER_LIVINGBRAIN_MCP_URL: 'https://mcp.livingbrain.wiki/v1/pages/mcp' }), []);
+  assert.deepEqual(livingBrainArgs({ COLONIZER_LIVINGBRAIN_MCP_URL: 'http://mcp.example', COLONIZER_LIVINGBRAIN_TOKEN: 'p' }), []);
+  const args = livingBrainArgs({ COLONIZER_LIVINGBRAIN_MCP_URL: 'https://mcp.livingbrain.wiki/v1/pages/mcp', COLONIZER_LIVINGBRAIN_TOKEN: 'placeholder' });
+  assert.deepEqual(args, [
+    '-c', 'mcp_servers.livingbrain.url="https://mcp.livingbrain.wiki/v1/pages/mcp"',
+    '-c', 'mcp_servers.livingbrain.bearer_token_env_var="COLONIZER_LIVINGBRAIN_TOKEN"',
+  ]);
+  assert.ok(!args.join(' ').includes('placeholder'), 'the token itself never rides in argv');
 });
 
 test('the bridge turns /loop_next and /loop_stop into protocol events and refuses malformed ones', async () => {

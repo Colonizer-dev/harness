@@ -115,7 +115,7 @@ impl AnswerCache {
             let mut entry = cache_store::DiskEntry::new(key, value.clone());
             entry.fetched_at = started;
             if let Err(e) = disk.store(&entry) {
-                eprintln!("{key}: could not keep the answer on disk: {e:#}");
+                tracing::warn!( key = %key, error = %format!("{e:#}"), "{key}: could not keep the answer on disk: {e:#}" );
             }
         }
         self.entries.lock().unwrap_or_else(|p| p.into_inner()).insert(
@@ -258,7 +258,7 @@ where
         let started = cache_store::now_ms();
         match compute(app.clone()).await {
             Ok(value) => app.answer_cache.put(&key, started, value),
-            Err(e) if log_errors => eprintln!("{key}: {e:#}"),
+            Err(e) if log_errors => tracing::warn!( key = %key, error = %format!("{e:#}"), "{key}: {e:#}" ),
             Err(_) => {}
         }
         app.answer_cache.end_refresh(&key);

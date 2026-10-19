@@ -40,6 +40,8 @@ export type AttentionReason =
   | "provider_retry"
   /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
   | "looping"
+  /** Parked because the host's GitHub account needs sign-in again (issue #984): the work is kept and the colony resumes when the account works. */
+  | "waiting_for_account"
   /** The operator turn (issue #1192) diagnosed a stall no playbook row matched and needs a person; `detail` carries its diagnosis. */
   | "operator_escalation";
 

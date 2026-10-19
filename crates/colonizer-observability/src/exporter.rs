@@ -30,7 +30,7 @@ use crate::cursor::Cursor;
 use crate::encode::Request;
 use crate::hashing::HashKey;
 pub use crate::health::Status;
-use crate::health::{Caps, PartialSuccess, backlog_bytes};
+use crate::health::{Caps, PartialSuccess, backlog_by_signal};
 use crate::map::Mapper;
 use crate::metrics::Aggregates;
 use crate::policy::{AttrValue, ContentGate, Policy, PolicyConfig, RepoNames};
@@ -170,15 +170,24 @@ pub fn resource_for(policy: &Policy, contract: &Contract) -> ExportResource {
 
 /// The destination a cursor belongs to: a new endpoint starts its own cursors (from the backlog
 /// limit), rather than skipping what the old one never received.
-fn destination_hash(contract: &Contract) -> String {
+pub(crate) fn destination_hash(contract: &Contract) -> String {
     let s = &contract.settings;
-    let key = format!("{}|{}|{}", s.endpoint, s.logs_endpoint.as_deref().unwrap_or(""), s.protocol);
+    // A Loki contract carries an empty `endpoint` (its destination rides in `url`), so keying on
+    // the endpoint alone would hash every Loki destination identically and a URL change would
+    // share cursor state. The effective push URL is the destination instead; the OTLP key below
+    // is untouched, so an existing OTLP install keeps its cursors.
+    let endpoint = if s.provider == "loki" {
+        crate::loki::push_url(&s.url)
+    } else {
+        s.endpoint.clone()
+    };
+    let key = format!("{}|{}|{}", endpoint, s.logs_endpoint.as_deref().unwrap_or(""), s.protocol);
     let digest = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
     crate::map::hex(&digest.as_ref()[..8])
 }
 
 /// Splits a request's records in half, or `None` when it holds one record or fewer.
-fn halves(request: &Request) -> Option<(Request, Request)> {
+pub(crate) fn halves(request: &Request) -> Option<(Request, Request)> {
     match request {
         Request::Logs(r) => {
             let mut a = r.clone();
@@ -547,16 +556,21 @@ impl Exporter {
                     self.status.dropped_records(signal_name(&request), rejected);
                     outbox.requests.remove(0);
                     let now = unix_now();
+                    let signal = signal_name(&request);
+                    // The self-metrics of this ack (wire bytes, when it happened) join the cursors
+                    // it is acknowledged for, in the same atomic write.
+                    *outbox.aggregates.sent_bytes.entry(signal.to_string()).or_default() += bytes;
+                    outbox.aggregates.last_success.insert(signal.to_string(), now);
                     if rejected > 0 || message.is_some() {
                         self.status.last_partial_success = Some(PartialSuccess {
                             at_unix: now,
-                            signal: signal_name(&request),
+                            signal,
                             rejected,
                             message,
                         });
                     }
                     let accepted = (request.len() as u64).saturating_sub(rejected);
-                    self.status.success(signal_name(&request), now, accepted, bytes);
+                    self.status.success(signal, now, accepted, bytes);
                 }
                 Outcome::Refused { status, message } => {
                     outbox.requests.remove(0);
@@ -648,7 +662,10 @@ impl Exporter {
             return;
         }
         self.last_metrics = Some(Instant::now());
-        let points = self.aggregates.points(&self.policy, &self.contract.policy, now_nanos());
+        let now = now_nanos();
+        let backlog = self.backlog_by_signal();
+        let mut points = self.aggregates.points(&self.policy, &self.contract.policy, now);
+        points.extend(self.aggregates.backlog_points(&self.policy, now, &backlog));
         let mut batcher = Batcher::new(
             &self.resource,
             BatchConfig {
@@ -660,6 +677,7 @@ impl Exporter {
         for p in points {
             batcher.push(p);
         }
+        let before = self.aggregates.clone();
         for request in batcher.finish().requests {
             let records = request.len() as u64;
             match self.transport.send(&request).await {
@@ -679,6 +697,10 @@ impl Exporter {
                     }
                     self.status.dropped_records("metrics", rejected);
                     self.status.success("metrics", now, records.saturating_sub(rejected), bytes);
+                    // The push's own accounting joins the aggregates, and is committed below with
+                    // them — exactly as a failure of it lands on `export_failures`.
+                    *self.aggregates.sent_bytes.entry("metrics".to_string()).or_default() += bytes;
+                    self.aggregates.last_success.insert("metrics".to_string(), now);
                 }
                 Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
@@ -698,6 +720,15 @@ impl Exporter {
                 }
             }
         }
+        // A push's own accounting is durable on its own: with the ledgers quiet nothing else
+        // changes for hours, and a restart must not rewind the sums a backend already saw.
+        if self.aggregates != before {
+            self.state.extra.insert(
+                METRICS_KEY.to_string(),
+                serde_json::to_value(&self.aggregates).unwrap_or_default(),
+            );
+            let _ = self.state.commit(&self.data_dir, true);
+        }
     }
 
     /// Writes `status.json`, at most once a second unless `force`.
@@ -707,10 +738,11 @@ impl Exporter {
         }
         self.status.heartbeat_unix = unix_now();
         self.status.exported = self.aggregates.exported;
-        let backlog = self.backlog();
+        let backlog = self.backlog_by_signal();
         self.status.backlog_bytes = backlog.values().sum();
-        for (signal, bytes) in backlog {
-            self.status.signal(signal).backlog_bytes = bytes;
+        // The same split the backlog gauge pushes, so the status page and a push never disagree.
+        for signal in ["logs", "traces", "metrics"] {
+            self.status.signal(signal).backlog_bytes = backlog.get(signal).copied().unwrap_or(0);
         }
         self.status.dropped = self.aggregates.dropped.clone();
         self.status.export_failures = self.aggregates.export_failures;
@@ -724,9 +756,9 @@ impl Exporter {
         self.last_status_write = Some(Instant::now());
     }
 
-    /// The ledger bytes not yet behind a committed cursor, per health signal (their sum is the
-    /// status's global `backlog_bytes`).
-    fn backlog(&self) -> BTreeMap<&'static str, u64> {
+    /// The ledger bytes not yet behind a committed cursor, split by the signal each source feeds
+    /// (`logs`, `traces`, `metrics`); the status page's total is the sum of the split.
+    fn backlog_by_signal(&self) -> BTreeMap<String, u64> {
         let gone = crate::tailer::gone(&self.state);
         let colonies: Vec<String> = self
             .contract
@@ -735,12 +767,8 @@ impl Exporter {
             .filter(|id| !gone.contains(*id))
             .cloned()
             .collect();
-        let mut out: BTreeMap<&'static str, u64> = BTreeMap::new();
-        for file in sources::discover(&self.data_dir, &self.contract.settings, &colonies) {
-            let bytes = backlog_bytes(&file, &self.state.cursor(&crate::tailer::key(&self.destination, &file)));
-            *out.entry(signal_key(file.signal)).or_default() += bytes;
-        }
-        out
+        let files = sources::discover(&self.data_dir, &self.contract.settings, &colonies);
+        backlog_by_signal(&files, &self.state, &self.destination)
     }
 
     /// The last commit, forced, and a final status: called on a clean shutdown.
@@ -790,7 +818,14 @@ pub async fn send_test(contract: &Contract, headers: Vec<(String, String)>) -> s
         .finish();
     let mut results = serde_json::Map::new();
     let mut ok = true;
-    for (name, item) in [("logs", log), ("metrics", metric)] {
+    // The Loki provider takes logs only (#865): its test sends the log line alone, or the metric
+    // point would be refused by the transport and fail an otherwise working configuration.
+    let signals = if contract.settings.provider == "loki" {
+        vec![("logs", log)]
+    } else {
+        vec![("logs", log), ("metrics", metric)]
+    };
+    for (name, item) in signals {
         let mut batcher = Batcher::new(
             &resource,
             BatchConfig {

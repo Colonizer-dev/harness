@@ -25,6 +25,7 @@ import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { COORDINATION_PROMPT_APPEND, COORDINATION_SERVER, createCoordinationServer } from './coordinate.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { createGithubServer, GITHUB_PROMPT_APPEND, GITHUB_SERVER, githubDecision } from './github.mjs';
+import { LIVINGBRAIN_PROMPT_APPEND, LIVINGBRAIN_SERVER, LIVINGBRAIN_TOKEN_ENV, LIVINGBRAIN_URL_ENV, livingBrainServer } from './livingbrain.mjs';
 import { createHistoryServer, HISTORY_PROMPT_APPEND, HISTORY_SERVER } from './history.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
@@ -764,6 +765,12 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (github) appended.push(GITHUB_PROMPT_APPEND);
+  // Living Brain (crates/colonizer/src/living_brain): the remote MCP server, when granted. Its env
+  // never reaches Claude Code's own environment, so no shell tool sees even the placeholder.
+  const brain = livingBrainServer(env);
+  delete claudeEnv[LIVINGBRAIN_TOKEN_ENV];
+  delete claudeEnv[LIVINGBRAIN_URL_ENV];
+  if (brain) appended.push(LIVINGBRAIN_PROMPT_APPEND);
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
@@ -834,6 +841,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (github) mcpServers[GITHUB_SERVER] = githubServer;
+  if (brain) mcpServers[LIVINGBRAIN_SERVER] = brain;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
   const preToolUse = [];
   if (delegate === 'enforce') {
@@ -1359,6 +1367,14 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     const messageId = msg.message?.id ?? msg.uuid ?? null;
     const parent = msg.parent_tool_use_id ?? null;
     const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
+    // The model a subagent's message says it ran on rides on its `agent` from here on, so its
+    // events name the model the Task call actually got (an alias, a forced subagent model, a
+    // route) rather than the one it asked for.
+    const model = typeof msg.message?.model === 'string' ? msg.message.model : '';
+    if (parent && model) {
+      const known = subagents.get(parent) ?? { id: parent, name: 'subagent', description: null };
+      if (known.model !== model) subagents.set(parent, { ...known, model });
+    }
     for (const block of content) {
       const index = blockIndex(messageId, block);
       if (block.type === 'text') {

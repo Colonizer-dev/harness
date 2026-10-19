@@ -12,7 +12,7 @@
 //!
 //! Like the epic guard (epic.rs), the lookups are best effort: a fetch that fails just means "no
 //! signal found here" and lets the launch through. A missing file or label is the ordinary case and
-//! is not logged; only a config file that exists but cannot be read or parsed is, via `eprintln!`.
+//! is not logged; only a config file that exists but cannot be read or parsed is, via `tracing`.
 
 use crate::epic::Fetch;
 use anyhow::Result;
@@ -40,7 +40,7 @@ pub async fn launch_refusal(fetch: &Fetch, repo: &str, issue: Option<u64>) -> Op
         )),
         Ok(false) => None,
         Err(e) => {
-            eprintln!("colonizer-ignore: could not read {repo}'s .colonizer/config.toml ({e:#}); launching anyway");
+            tracing::warn!( repo = %repo, error = %format!("{e:#}"), "colonizer-ignore: could not read {repo}'s .colonizer/config.toml ({e:#}); launching anyway" );
             None
         }
     }

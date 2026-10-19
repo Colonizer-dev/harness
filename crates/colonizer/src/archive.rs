@@ -337,7 +337,12 @@ async fn archive_data(
 pub(crate) fn spawn_on_end(store: std::sync::Arc<dyn SessionStore>, data_dir: PathBuf, session: Session, mothership: String) {
     tokio::spawn(async move {
         if let Err(e) = archive_data(store.as_ref(), &data_dir, &session, &mothership).await {
-            eprintln!("archive: could not archive {}'s logs: {e:#}", session.id);
+            tracing::error!(
+                id = %session.id,
+                error = %format!("{e:#}"),
+                "archive: could not archive {}'s logs: {e:#}",
+                session.id
+            );
         }
     });
 }

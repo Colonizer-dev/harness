@@ -234,7 +234,7 @@ async fn a_one_gib_backlog_drains_within_the_read_cap_in_bounded_memory() {
     let target = if free >= 2_684_354_560 {
         1024 * 1024 * 1024
     } else {
-        eprintln!(
+        println!(
             "only {} MiB free under the temp dir: draining 512 MiB instead of 1 GiB",
             free / 1024 / 1024
         );
@@ -310,7 +310,7 @@ async fn a_one_gib_backlog_drains_within_the_read_cap_in_bounded_memory() {
         growth <= 64.0,
         "the drain's peak RSS grew {growth:.1} MiB past its steady state"
     );
-    eprintln!(
+    println!(
         "drained {} MiB ({bytes} bytes, {lines} lines) in {:.1?} at {effective:.1} MiB/s effective \
          (cap {CAP_MIB} MiB/s), {} requests, peak RSS +{growth:.1} MiB ({} -> {} KiB)",
         bytes / 1024 / 1024,
@@ -390,7 +390,7 @@ async fn event_appends_stay_fast_while_the_exporters_receiver_hangs() {
 
     let (b50, b99) = p50_p99(baseline);
     let (h50, h99) = p50_p99(during);
-    eprintln!(
+    println!(
         "append latency over {EVENTS} events (µs): baseline p50 {b50:.0} p99 {b99:.0}; \
          receiver hanging p50 {h50:.0} p99 {h99:.0} ({} requests held by the receiver)",
         hits.load(Ordering::SeqCst)

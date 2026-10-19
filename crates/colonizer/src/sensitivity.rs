@@ -105,7 +105,7 @@ impl SensitivityConfig {
             return Self::default();
         };
         toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("{}: could not be parsed ({e}); using the defaults", path.display());
+            tracing::warn!( path = %path.display(), error = %e, "{}: could not be parsed ({e}); using the defaults", path.display() );
             Self::default()
         })
     }

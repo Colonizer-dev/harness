@@ -5,6 +5,7 @@
 use super::*;
 use crate::contract::{ColonyPolicy, Settings};
 use crate::proto::collector::logs::v1::ExportLogsServiceRequest;
+use crate::proto::collector::metrics::v1::ExportMetricsServiceRequest;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use prost::Message;
@@ -73,7 +74,8 @@ impl Collector {
         let app = axum::Router::new()
             .route("/v1/logs", axum::routing::post(handler("/v1/logs")))
             .route("/v1/traces", axum::routing::post(handler("/v1/traces")))
-            .route("/v1/metrics", axum::routing::post(handler("/v1/metrics")));
+            .route("/v1/metrics", axum::routing::post(handler("/v1/metrics")))
+            .route("/loki/api/v1/push", axum::routing::post(handler("/loki/api/v1/push")));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -384,6 +386,62 @@ async fn old_lines_past_the_backlog_limit_are_dropped_and_counted() {
     assert_eq!(x.aggregates.dropped.get("backlog"), Some(&1));
 }
 
+/// Every number point of a push as `(metric, colonizer.signal, value)`: the exporter's own
+/// families are per signal, so a test has to see the attribute, not just the metric's name.
+fn pushed_points(req: &ExportMetricsServiceRequest) -> Vec<(&str, String, i64)> {
+    use crate::proto::common::v1::any_value;
+    use crate::proto::metrics::v1::{metric, number_data_point};
+    let mut out = Vec::new();
+    for resource in &req.resource_metrics {
+        for scope in &resource.scope_metrics {
+            for m in &scope.metrics {
+                let points = match m.data.as_ref() {
+                    Some(metric::Data::Sum(s)) => &s.data_points,
+                    Some(metric::Data::Gauge(g)) => &g.data_points,
+                    _ => continue,
+                };
+                for p in points {
+                    let signal = p
+                        .attributes
+                        .iter()
+                        .find(|kv| kv.key == "colonizer.signal")
+                        .and_then(|kv| kv.value.as_ref().and_then(|v| v.value.as_ref()))
+                        .and_then(|v| match v {
+                            any_value::Value::StringValue(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if let Some(number_data_point::Value::AsInt(value)) = p.value.as_ref() {
+                        out.push((m.name.as_str(), signal, *value));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every data point's start time. The series are cumulative, so one push's points all start
+/// together and the push after it starts where the first did — or the backend sees a reset on
+/// every interval.
+fn pushed_start_times(req: &ExportMetricsServiceRequest) -> Vec<u64> {
+    use crate::proto::metrics::v1::metric;
+    let mut out = Vec::new();
+    for resource in &req.resource_metrics {
+        for scope in &resource.scope_metrics {
+            for m in &scope.metrics {
+                match m.data.as_ref() {
+                    Some(metric::Data::Sum(s)) => out.extend(s.data_points.iter().map(|p| p.start_time_unix_nano)),
+                    Some(metric::Data::Gauge(g)) => out.extend(g.data_points.iter().map(|p| p.start_time_unix_nano)),
+                    Some(metric::Data::Histogram(h)) => out.extend(h.data_points.iter().map(|p| p.start_time_unix_nano)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
 #[tokio::test]
 async fn the_health_snapshot_counts_dropped_records_and_gaps_per_signal() {
     let root = root("health-fields");
@@ -425,22 +483,176 @@ async fn metrics_are_pushed_from_the_gateway_ledger() {
     x.tick().await;
     let metrics = collector.seen("/v1/metrics");
     assert_eq!(metrics.len(), 1);
-    let text = format!(
-        "{:?}",
-        crate::proto::collector::metrics::v1::ExportMetricsServiceRequest::decode(metrics[0].body.as_slice()).unwrap()
-    );
+    let first = ExportMetricsServiceRequest::decode(metrics[0].body.as_slice()).unwrap();
+    let text = format!("{first:?}");
     for name in [
         "colonizer.gateway.requests",
         "colonizer.gateway.duration",
         "colonizer.colonies",
         "colonizer.queue.depth",
+        // The exporter's own families: this tick's log export is accounted already, and every
+        // discovered signal has a backlog series, a live zero included.
+        "colonizer.observability.bytes",
+        "colonizer.observability.last_success",
+        "colonizer.observability.backlog",
     ] {
         assert!(text.contains(name), "{name} missing");
     }
+    let points = pushed_points(&first);
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.bytes" && s == "logs" && *v > 0),
+        "{points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.last_success" && s == "logs" && *v > 0),
+        "{points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, _)| *n == "colonizer.observability.backlog" && s == "metrics"),
+        "{points:?}"
+    );
+    // The next interval's push carries the first one's success, and the same start.
+    x.last_metrics = None;
+    x.tick().await;
+    let metrics = collector.seen("/v1/metrics");
+    assert_eq!(metrics.len(), 2);
+    let second = ExportMetricsServiceRequest::decode(metrics[1].body.as_slice()).unwrap();
+    let points = pushed_points(&second);
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.bytes" && s == "metrics" && *v > 0),
+        "{points:?}"
+    );
+    assert!(
+        points
+            .iter()
+            .any(|(n, s, v)| *n == "colonizer.observability.last_success" && s == "metrics" && *v > 0),
+        "{points:?}"
+    );
+    let mut starts = pushed_start_times(&first);
+    starts.extend(pushed_start_times(&second));
+    assert!(!starts.is_empty());
+    assert!(starts.iter().all(|t| *t == starts[0]), "the cumulative stream never restarts");
+
     // Restarted, the series continue from what was committed rather than starting over.
     x.shutdown();
     let y = Exporter::new(&path, Vec::new()).unwrap();
     assert_eq!(y.aggregates.gateway.values().next().unwrap().requests, 1);
+    assert!(
+        y.aggregates.sent_bytes.values().all(|b| *b > 0),
+        "the self-metrics survived the restart: {:?}",
+        y.aggregates.sent_bytes
+    );
+}
+
+#[tokio::test]
+async fn a_failing_metrics_push_does_not_hold_up_logs() {
+    let root = root("metrics-fail");
+    // The first metrics push is refused; everything else, before and after, is accepted.
+    let calls = Arc::new(Mutex::new(0u32));
+    let counter = calls.clone();
+    let collector = Collector::start(Arc::new(move |path, _| {
+        if path == "/v1/metrics" {
+            let mut n = counter.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                return (503, b"no".to_vec());
+            }
+        }
+        (200, Vec::new())
+    }))
+    .await;
+    harness(&root, "hello");
+    let path = contract(&root, &collector.url, |s| s.stream_metrics = true);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+
+    // The refused push holds nothing back: the tick answers TICK and the log line is delivered.
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(collector.accepted(), ["hello"]);
+    assert_eq!(collector.seen("/v1/metrics").len(), 1, "the push was attempted");
+    assert_eq!(x.aggregates.export_failures, 1, "the failure is counted");
+    assert!(
+        x.aggregates.dropped.is_empty(),
+        "nothing was dropped for it: {:?}",
+        x.aggregates.dropped
+    );
+    assert!(
+        *x.aggregates.sent_bytes.get("logs").unwrap() > 0,
+        "the log export is accounted"
+    );
+    assert!(x.aggregates.last_success.contains_key("logs"));
+    assert_eq!(committed_offset(&root), Some(file_size(&root)), "the cursors still commit");
+
+    // The next interval's push succeeds, and its own accounting lands with it.
+    x.last_metrics = None;
+    assert_eq!(x.tick().await, TICK);
+    assert!(
+        *x.aggregates.sent_bytes.get("metrics").unwrap() > 0,
+        "the push is accounted too"
+    );
+    assert!(x.aggregates.last_success.contains_key("metrics"));
+    assert_eq!(x.aggregates.export_failures, 1, "a failed push is superseded, never retried");
+    assert_eq!(collector.seen("/v1/logs").len(), 1, "the log line was never held or resent");
+
+    // A restart resends nothing: the cursors of the acknowledged line are committed.
+    x.shutdown();
+    let mut y = Exporter::new(&path, Vec::new()).unwrap();
+    y.tick().await;
+    assert_eq!(collector.accepted(), ["hello"]);
+
+    // The per-signal backlog reaches the status page: a line written and not yet read is logs'.
+    harness(&root, "written but unread");
+    y.write_status(true);
+    let status: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(status_path(&root.0)).unwrap()).unwrap();
+    assert!(status["signals"]["logs"]["backlog_bytes"].as_u64().unwrap() > 0, "{status}");
+    assert_eq!(
+        status["backlog_bytes"], status["signals"]["logs"]["backlog_bytes"],
+        "{status}"
+    );
+}
+
+/// A restart between flushes must not rewind the sums the backend already saw: with the ledgers
+/// quiet, only the interval's pushes touch the aggregates, so their own accounting has to reach
+/// `state.json` on its own — not wait for a flush that has nothing to commit.
+#[tokio::test]
+async fn the_pushs_own_accounting_survives_a_restart_with_nothing_to_flush() {
+    let root = root("metrics-restart");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "hello");
+    let path = contract(&root, &collector.url, |s| s.stream_metrics = true);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK);
+    // A second interval passes with no new lines: the only change is the push's own accounting.
+    x.last_metrics = None;
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(collector.seen("/v1/metrics").len(), 2, "two pushes went out");
+    let start = x.aggregates.start_unix_nanos;
+    let logs = x.aggregates.sent_bytes.get("logs").copied().unwrap();
+    let metrics = x.aggregates.sent_bytes.get("metrics").copied().unwrap();
+    assert!(logs > 0, "{:?}", x.aggregates.sent_bytes);
+    assert!(metrics > 0, "{:?}", x.aggregates.sent_bytes);
+    x.shutdown();
+    let y = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(y.aggregates.start_unix_nanos, start, "the cumulative stream does not restart");
+    assert_eq!(y.aggregates.sent_bytes.get("logs"), Some(&logs), "the flush's bytes survive");
+    assert_eq!(
+        y.aggregates.sent_bytes.get("metrics"),
+        Some(&metrics),
+        "the pushes' own bytes were committed, not only the flush's: {:?}",
+        y.aggregates.sent_bytes
+    );
+    assert_eq!(
+        y.aggregates.last_success.get("metrics"),
+        x.aggregates.last_success.get("metrics"),
+        "the last push's success survives too"
+    );
 }
 
 #[tokio::test]
@@ -773,6 +985,171 @@ async fn no_canary_reaches_the_wire() {
     }
 }
 
+/// A Loki contract over `url`: logs only, the push path completed from the base URL.
+fn loki(root: &Root, url: &str, edit: impl FnOnce(&mut Settings)) -> PathBuf {
+    contract(root, url, |s| {
+        s.provider = "loki".into();
+        s.url = url.to_string();
+        s.stream_traces = false;
+        s.stream_metrics = false;
+        edit(s);
+    })
+}
+
+#[tokio::test]
+async fn loki_provider_pushes_json_streams() {
+    let root = root("loki");
+    // Loki answers 204 with an empty body; any 2xx commits.
+    let collector = Collector::start(Arc::new(|_, _| (204, Vec::new()))).await;
+    harness(&root, "hello loki");
+    let path = loki(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK);
+
+    let seen = collector.seen("/loki/api/v1/push");
+    assert_eq!(
+        seen.len(),
+        1,
+        "one push, and nothing on the OTLP paths: {:?}",
+        collector.seen.lock().unwrap()
+    );
+    assert_eq!(seen[0].headers.get("content-type").unwrap(), "application/json");
+    // The contract keeps the default compression, so the push rides gzipped — the body the
+    // collector records is the decompressed one.
+    assert_eq!(seen[0].headers.get("content-encoding").unwrap(), "gzip");
+    let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1, "{body}");
+    assert_eq!(
+        streams[0]["stream"],
+        // The line is c0ffee12's, whose policy gives the org — the only way an org label appears.
+        serde_json::json!({"level": "info", "org": "acme", "service_name": "colonizer-mothership", "stream": "operational"}),
+        "{body}"
+    );
+    let values = streams[0]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 1, "{body}");
+    let entry = values[0].as_array().unwrap();
+    assert_eq!(entry[1], serde_json::json!("hello loki"), "{values:?}");
+    assert!(
+        entry[0].as_str().unwrap().chars().all(|c| c.is_ascii_digit()) && !entry[0].as_str().unwrap().is_empty(),
+        "the timestamp is a nanosecond string: {values:?}"
+    );
+    assert_eq!(
+        entry[2]["event_name"],
+        serde_json::json!("colonizer.harness_log"),
+        "{values:?}"
+    );
+    assert_eq!(committed_offset(&root), Some(file_size(&root)), "committed after the 204");
+}
+
+#[tokio::test]
+async fn loki_provider_sends_tenant_and_operator_headers() {
+    let root = root("loki-headers");
+    let collector = Collector::start(ok()).await;
+    harness(&root, "with a tenant");
+    let path = loki(&root, &collector.url, |s| s.tenant_id = "acme-tenant".into());
+    let mut x = Exporter::new(&path, vec![("x-custom".into(), "v".into())]).unwrap();
+    assert_eq!(x.tick().await, TICK);
+    let seen = collector.seen("/loki/api/v1/push");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].headers.get("x-scope-orgid").unwrap(), "acme-tenant");
+    assert_eq!(seen[0].headers.get("x-custom").unwrap(), "v");
+
+    // The operator's own header wins over the setting, whatever its case.
+    harness(&root, "with the operator's header");
+    let mut y = Exporter::new(&path, vec![("X-Scope-OrgID".into(), "operator-tenant".into())]).unwrap();
+    assert_eq!(y.tick().await, TICK);
+    let seen = collector.seen("/loki/api/v1/push");
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].headers.get("x-scope-orgid").unwrap(), "operator-tenant");
+    // Exactly one header of a kind: reqwest would overwrite it, so this also holds if it did not.
+    assert_eq!(seen[1].headers.get_all("x-scope-orgid").iter().count(), 1);
+}
+
+#[tokio::test]
+async fn no_canary_reaches_the_loki_wire() {
+    let root = root("loki-canary");
+    let collector = Collector::start(ok()).await;
+    let canaries = crate::testkit::Canaries::new();
+    for canary in &canaries.all {
+        harness(&root, &canary.text);
+    }
+    harness(&root, &canaries.content);
+    let path = loki(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    let seen = collector.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "one push carries the whole batch: {seen:?}");
+    assert!(seen[0].path == "/loki/api/v1/push");
+    let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
+    let lines: usize = body["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["values"].as_array().map(Vec::len).unwrap_or(0))
+        .sum();
+    assert_eq!(lines, canaries.all.len() + 1, "every line was exported: {body}");
+    for request in &seen {
+        crate::testkit::assert_absent(&request.body, canaries.secrets(), &request.path);
+    }
+}
+
+/// The pane's "Send test event" runs `send-test-event` with the module's contract; a Loki one
+/// must not fail on a metric point the provider has no path for.
+#[tokio::test]
+async fn a_loki_test_event_sends_the_log_line_only() {
+    let root = root("loki-test-event");
+    let collector = Collector::start(ok()).await;
+    let path = loki(&root, &collector.url, |_| {});
+    let result = send_test(&contract::load(&path).unwrap(), Vec::new()).await;
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["signals"]["logs"]["ok"], true, "{result}");
+    assert_eq!(result["signals"].as_object().unwrap().len(), 1, "logs only: {result}");
+    assert_eq!(collector.seen("/loki/api/v1/push").len(), 1);
+    assert_eq!(collector.seen("/v1/metrics").len(), 0, "a metric point has no Loki path");
+}
+
+#[test]
+fn loki_destinations_hash_by_their_push_url_and_otlp_keeps_its_hash() {
+    // A Loki contract's `endpoint` is empty; unless the push URL is the key, every Loki
+    // destination hashes identically and a URL change shares cursor state with the old one.
+    let loki = |url: &str| {
+        destination_hash(&Contract {
+            settings: Settings {
+                provider: "loki".into(),
+                url: url.into(),
+                ..Settings::default()
+            },
+            ..Contract::default()
+        })
+    };
+    assert_ne!(
+        loki("http://loki-a:3100"),
+        loki("http://loki-b:3100"),
+        "two URLs, two destinations"
+    );
+    assert_eq!(
+        loki("http://loki-a:3100"),
+        loki("http://loki-a:3100/"),
+        "a trailing slash is nothing"
+    );
+    assert_eq!(
+        loki("http://loki-a:3100"),
+        loki("http://loki-a:3100/loki/api/v1/push"),
+        "a base and its full push URL are the same destination"
+    );
+    // The OTLP key is untouched, so an existing install keeps its cursors across the upgrade:
+    // sha256("http://127.0.0.1:4318||http/protobuf"), first 8 bytes as hex.
+    let otlp = destination_hash(&Contract {
+        settings: Settings {
+            endpoint: "http://127.0.0.1:4318".into(),
+            ..Settings::default()
+        },
+        ..Contract::default()
+    });
+    assert_eq!(otlp, "f46ac179053b3768");
+}
+
 #[tokio::test]
 async fn a_new_destination_starts_now_and_a_restart_never_skips_again() {
     let root = root("start-now");
@@ -1038,4 +1415,69 @@ async fn a_refused_trace_credential_holds_the_spans_and_their_state() {
     assert_eq!(accepted_spans(&collector).len(), 11, "every span, once the key works");
     let committed = crate::traces::Traces::load(&State::load(&root.0).0.extra, &x.destination);
     assert!(committed.colonies["c0ffee12"].root.emitted);
+}
+
+/// Issue #865's acceptance criterion — a push a real Loki accepts — against a pinned Loki 2.9:
+/// start one (nothing here does it for you), then
+/// `COLONIZER_TEST_LOKI_URL=http://127.0.0.1:13109 cargo test -p colonizer-observability
+/// push_is_accepted_by_a_real_loki -- --ignored --nocapture` and read the marker back with
+/// `curl -sG localhost:13109/loki/api/v1/query_range --data-urlencode 'query={service_name="colonizer"}'`.
+/// Nothing runs without the variable, so CI never needs a Loki.
+#[tokio::test]
+#[ignore]
+async fn push_is_accepted_by_a_real_loki() {
+    let Ok(url) = std::env::var("COLONIZER_TEST_LOKI_URL") else {
+        return;
+    };
+    if url.is_empty() {
+        return;
+    }
+    use crate::proto::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
+    use crate::proto::logs::v1::{LogRecord, ResourceLogs, ScopeLogs, SeverityNumber};
+    use crate::proto::resource::v1::Resource;
+    let kv = |key: &str, value: &str| KeyValue {
+        key: key.into(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(value.into())),
+        }),
+        ..KeyValue::default()
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let record = |offset: u64, body: &str| LogRecord {
+        time_unix_nano: now + offset,
+        observed_time_unix_nano: now + offset,
+        severity_number: SeverityNumber::Info as i32,
+        body: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(body.into())),
+        }),
+        ..LogRecord::default()
+    };
+    let request = Request::Logs(ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: Some(Resource {
+                attributes: vec![kv("service.name", "colonizer")],
+                ..Resource::default()
+            }),
+            scope_logs: vec![ScopeLogs {
+                scope: Some(InstrumentationScope::default()),
+                log_records: vec![
+                    record(0, "loki_conformance_marker #865"),
+                    record(1, "loki_conformance_marker #865 second line"),
+                ],
+                ..ScopeLogs::default()
+            }],
+            ..ResourceLogs::default()
+        }],
+    });
+    let settings = Settings {
+        provider: "loki".into(),
+        url,
+        structured_metadata: true,
+        ..Settings::default()
+    };
+    let transport = Transport::new(&settings, Vec::new()).unwrap();
+    match transport.send(&request).await {
+        Outcome::Sent { rejected, .. } => assert_eq!(rejected, 0, "the push was accepted in full"),
+        other => panic!("the real Loki did not accept the push: {other:?}"),
+    }
 }

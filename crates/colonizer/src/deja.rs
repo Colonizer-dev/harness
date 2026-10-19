@@ -73,7 +73,9 @@ fn binary(app: &App) -> Option<PathBuf> {
         .filter(|path| path.exists())
         .or_else(|| app.cfg.asset(BIN_ASSET).ok());
     if found.is_none() && !app.deja.warned.swap(true, Ordering::Relaxed) {
-        eprintln!("deja: the deja binary is not installed (run scripts/install.sh); transcript recall stays empty until it is");
+        tracing::warn!(
+            "deja: the deja binary is not installed (run scripts/install.sh); transcript recall stays empty until it is"
+        );
     }
     found
 }
@@ -122,7 +124,7 @@ pub(crate) fn spawn_after_stop(app: Shared, s: &crate::sessions::Session) {
     let s = s.clone();
     tokio::spawn(async move {
         if let Err(e) = index_colony(&app, &s).await {
-            eprintln!("deja: colony {}: {e:#}", s.id);
+            tracing::warn!( id = %s.id, error = %format!("{e:#}"), "deja: colony {}: {e:#}", s.id );
         }
     });
 }

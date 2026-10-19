@@ -464,7 +464,7 @@ fn ledger_line(action: &Action, repo: &str, outcome: &str, reason: Option<&str>)
 
 async fn append(app: &App, id: &str, line: &Value) {
     if let Err(e) = app.store().append(id, LEDGER, line.to_string().as_bytes()).await {
-        eprintln!("github: could not append to colony {id}'s {LEDGER}: {e}");
+        tracing::error!(colony = %id, error = %e, "github: could not append to colony {id}'s {LEDGER}: {e}");
     }
 }
 

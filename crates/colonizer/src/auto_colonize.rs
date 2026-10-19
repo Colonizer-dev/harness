@@ -842,7 +842,7 @@ async fn save_state(app: &App, state: &Memory) {
         crate::util::write_atomic(&state_file(app), &serde_json::to_vec_pretty(state)?).await
     };
     if let Err(e) = write.await {
-        eprintln!("auto-colonize: could not save its state: {e:#}");
+        tracing::error!(error = %format!("{e:#}"), "auto-colonize: could not save its state: {e:#}");
     }
 }
 
@@ -1221,7 +1221,7 @@ async fn sweep(app: &Shared) {
         let found = match search(app, scope, armed).await {
             Ok(found) => found,
             Err(e) => {
-                eprintln!("auto-colonize: could not search {scope}: {e}");
+                tracing::warn!(scope = %scope, error = %e, "auto-colonize: could not search {scope}: {e}");
                 continue;
             }
         };
@@ -1317,7 +1317,14 @@ async fn sweep_repo(app: &Shared, state: &mut Memory, repo: &str, group: &[Found
                 changed = true;
             }
             // Anything else (a login gap, a full disk) is tried again on the next sweep.
-            Err(e) => eprintln!("auto-colonize: could not start {repo}#{}: {:#}", found.row.number, e.1),
+            Err(e) => tracing::warn!(
+                repo = %repo,
+                number = found.row.number,
+                error = %format!("{:#}", e.1),
+                "auto-colonize: could not start {repo}#{}: {:#}",
+                found.row.number,
+                e.1
+            ),
         }
     }
     changed

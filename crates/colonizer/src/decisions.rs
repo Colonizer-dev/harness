@@ -1194,7 +1194,12 @@ async fn tick<G: Gh>(app: &Shared, gh: &G, now: DateTime<Utc>) {
         }
         Err(e) if merge_loop::is_throttle(&e) => {
             let until = c.gate.throttled(&org, now);
-            eprintln!("decisions: GitHub pushed back searching {org} ({e}); pausing until {until}");
+            tracing::warn!(
+                org = %org,
+                error = %e,
+                until = %until,
+                "decisions: GitHub pushed back searching {org} ({e}); pausing until {until}"
+            );
             c.errors.insert(
                 org,
                 format!("GitHub pushed back; paused until {until}: {}", truncate(&e, 200)),
@@ -1410,7 +1415,12 @@ async fn answer_on<G: Gh>(app: &Shared, gh: &G, body: AnswerBody) -> Result<Valu
         stored.answered.insert(card.id.clone(), now);
         stored.answered.retain(|_, at| now - *at < Duration::days(ANSWERED_KEEP_DAYS));
         if let Err(e) = save(app, &stored).await {
-            eprintln!("decisions: could not record the answer to {}: {e:#}", card.id);
+            tracing::error!(
+                id = %card.id,
+                error = %format!("{e:#}"),
+                "decisions: could not record the answer to {}: {e:#}",
+                card.id
+            );
         }
     }
     Ok(json!(answered))
@@ -1560,7 +1570,11 @@ async fn redo(app: &Shared, card: &PrCard) -> Result<String, crate::AppError> {
     })
     .await
     {
-        eprintln!("decisions: could not record the redo of {pr_url}: {e:#}");
+        tracing::error!(
+            pr_url = %pr_url,
+            error = %format!("{e:#}"),
+            "decisions: could not record the redo of {pr_url}: {e:#}"
+        );
     }
     app.session_log(
         &old.id,

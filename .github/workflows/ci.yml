@@ -34,7 +34,7 @@ jobs:
 
       # The remote-access end-to-end test (crates/colonizer/src/remote.rs) spawns services/relay's
       # local-relay harness, which needs node:sqlite: Node 24, the pin every other job uses.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -67,6 +67,25 @@ jobs:
             echo "::error::colonizer-harness depends on the crates above; they belong in colonizer-observability only"
             exit 1
           fi
+
+      # The other half of that truth: the add-on is the only crate that could carry tonic, and only
+      # with its otlp-grpc feature (#851) — without the feature even it links none, so a release
+      # binary built at the default features has no gRPC stack anywhere in it.
+      - name: The add-on links no gRPC stack without the feature
+        run: |
+          tree="$(cargo tree -p colonizer-observability -e normal --locked --prefix none)"
+          if printf '%s\n' "$tree" | grep -E '^tonic'; then
+            echo "::error::colonizer-observability links tonic without the otlp-grpc feature"
+            exit 1
+          fi
+
+      # The feature-on build the two steps above never compile: clippy and the tests run with
+      # otlp-grpc, so the transport cannot rot between the times someone builds it. The workspace
+      # lint below covers the feature-off build, as every release does.
+      - name: Test with otlp-grpc
+        run: |
+          cargo clippy -p colonizer-observability --all-targets --locked --features otlp-grpc -- -D warnings
+          node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- cargo test -p colonizer-observability --locked --features otlp-grpc
 
       # Includes colonizer-agentd's integration and smoke tests, which boot the real agentd binary on
       # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
@@ -135,7 +154,7 @@ jobs:
       # The retry wrapper's flake records, uploaded so a run a flake turned green is still visible.
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -180,7 +199,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -236,7 +255,7 @@ jobs:
 
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -257,7 +276,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -268,6 +287,14 @@ jobs:
       # reworded heading fails the pull request that did it instead of a reader's click later.
       - name: Check documentation links
         run: node scripts/check-doc-links.mjs
+
+      # The Grafana dashboards under examples/observability must parse, query only datasource uids
+      # the provisioning declares and metric names the catalogues list, and carry no hard-coded
+      # colony id — a renamed metric or a pasted id fails this pull request instead of showing a
+      # blank panel later. The unit test above covers the checker; this runs it over what a Grafana
+      # provisions.
+      - name: Check dashboards
+        run: node scripts/check-dashboards.mjs
 
       # Pending changelog entries are fragments under changelog.d/, one file per change, so parallel
       # pull requests never collide in CHANGELOG.md. This validates every fragment and, on a pull
@@ -328,7 +355,7 @@ jobs:
 
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -346,7 +373,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -355,7 +382,7 @@ jobs:
 
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -374,7 +401,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -383,7 +410,7 @@ jobs:
 
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -406,7 +433,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -428,7 +455,7 @@ jobs:
 
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -443,7 +470,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -452,7 +479,7 @@ jobs:
 
       - name: Upload the flake report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flakes-${{ github.job }}
           path: ${{ runner.temp }}/flakes.json
@@ -478,7 +505,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -554,7 +581,7 @@ jobs:
       # do not. The driver's own stdout (the full report) is in the step log regardless.
       - name: Upload the run's logs
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: colony-e2e-logs
           path: |

@@ -234,7 +234,9 @@ impl Registry {
             // A missing file is a first use, not a fault.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
                     "api-tokens: could not read {} ({e}); refusing every scoped API token",
                     path.display()
                 );
@@ -243,7 +245,9 @@ impl Registry {
             Ok(bytes) => match serde_json::from_slice::<Vec<Stored>>(&bytes) {
                 Ok(tokens) => tokens,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
                         "api-tokens: {} does not parse ({e}); refusing every scoped API token until the file is repaired or removed",
                         path.display()
                     );
@@ -264,7 +268,12 @@ impl Registry {
             return; // a fixed-shape list cannot fail to serialize
         };
         if let Err(e) = crate::util::write_private(&self.path, &line) {
-            eprintln!("api-tokens: could not save {}: {e}", self.path.display());
+            tracing::error!(
+                path = %self.path.display(),
+                error = %e,
+                "api-tokens: could not save {}: {e}",
+                self.path.display()
+            );
         }
     }
 

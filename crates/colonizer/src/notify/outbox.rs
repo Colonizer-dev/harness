@@ -138,7 +138,9 @@ pub fn load(app: &App) -> Book {
     let path = file(app);
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            eprintln!(
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
                 "notify: {} could not be parsed ({e}); starting an empty outbox",
                 path.display()
             );
@@ -164,7 +166,7 @@ fn save(app: &App, book: &Book) {
         .and_then(|()| std::fs::rename(&tmp, &path).map_err(anyhow::Error::from));
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
-        eprintln!("notify: could not save the webhook outbox ({e:#})");
+        tracing::error!(error = %format!("{e:#}"), "notify: could not save the webhook outbox ({e:#})");
     }
 }
 
@@ -292,7 +294,8 @@ pub async fn retry_due(app: &App, client: &reqwest::Client, now: DateTime<Utc>) 
         let dropped = before - book.pending.len();
         if dropped > 0 {
             save(app, &book);
-            eprintln!(
+            tracing::warn!(
+                count = dropped,
                 "notify: dropped {dropped} queued webhook deliver{}: no signing secret is readable for {} (PUT /api/notify/secret, or COLONIZER_NOTIFY_SECRET; check COLONIZER_MASTER_KEY too)",
                 if dropped == 1 { "y" } else { "ies" },
                 if dropped == 1 { "its target" } else { "their targets" },
@@ -331,7 +334,7 @@ pub async fn retry_due(app: &App, client: &reqwest::Client, now: DateTime<Utc>) 
                     );
                     match colony {
                         Some(id) => app.session_log_as(crate::protocol::Origin::Notify, &id, "warn", line).await,
-                        None => eprintln!("{line}"),
+                        None => tracing::warn!(event = %event, error = %format!("{e:#}"), "{line}"),
                     }
                 }
             }
@@ -348,7 +351,7 @@ pub(crate) async fn run(app: Shared) {
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
         .build()
     else {
-        eprintln!("notify: could not build an HTTP client; webhook retries are off");
+        tracing::warn!("notify: could not build an HTTP client; webhook retries are off");
         return;
     };
     let mut tick = tokio::time::interval(TICK);

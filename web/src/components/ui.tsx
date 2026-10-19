@@ -425,6 +425,12 @@ export function attentionText(attention: Attention): string {
       return attention.detail?.trim() || "The operator needs a person";
     case "provider_retry":
       return attention.summary?.trim() || attention.detail?.trim() || "Retrying a provider error automatically";
+    case "provider_quota_exhausted":
+      return "Provider out of quota — waiting for the plan to refill";
+    case "waiting_for_account":
+      return "Its Claude account needs sign-in again — it resumes when the account works";
+    case "turn_lost_after_subagent":
+      return "Its turn never resumed after a subagent — the watchdog re-drove it";
     default:
       return "Needs attention";
   }

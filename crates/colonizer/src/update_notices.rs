@@ -213,6 +213,12 @@ pub struct Restarts {
     pub failed: BTreeMap<String, String>,
 }
 
+/// The ids with a restart onto the new version already in flight (`POST /api/update/restart`):
+/// what the queues page reads so it does not offer a second one (`restart_targets`' skip).
+pub(crate) async fn restarting(app: &Shared) -> BTreeSet<String> {
+    app.updater.notices.restarts.lock().await.restarting.clone()
+}
+
 /// Held by `update::Updater`, so it lives as long as the process: a probe cache and the restarts.
 #[derive(Default)]
 pub struct NoticeState {

@@ -12,13 +12,20 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [Settings and privacy](observability/settings.md): every setting of the module.
 - [Export policy and OTLP encoding](observability/export-policy.md): how every exported string is
   allowlisted, gated, redacted again, capped and hashed, and how requests are batched and encoded.
+- [OTLP/gRPC](observability/grpc.md): the tonic transport behind the add-on's `otlp-grpc` feature,
+  for collectors that only speak gRPC on 4317.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
+- [Backfill](observability/backfill.md): replaying the history a destination never received — the window, the rate, the dry run, duplicates and backend limits.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
   serve, how to scrape it, and what a series is allowed to name.
+- [Metrics push](observability/metrics-push.md): the metric catalogue the exporter pushes, its
+  interval and failure semantics, and how its names map to the pull catalogue.
 - [Environment configuration](observability/configuration.md): the `OTEL_*` variables, their precedence, and what an upgrade changes.
 - [Mothership log](observability/mothership-log.md): the process's own JSON lines, what is rotated,
   redacted, filtered, and dropped when the disk is behind.
+- [Dashboards](observability/dashboards.md): the four provisioned Grafana dashboards, the
+  provisioning they assume, and the lint that keeps their queries honest.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 
@@ -80,7 +87,9 @@ bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `last_success_unix`, `records_sent`, `bytes_sent`, `backlog_bytes` (this signal's share),
 `records_dropped` (records dropped rather than sent, any reason) and `gaps` (holes in what could be
 read, one per `export_gap`). After a 413 the exporter remembers the smaller request size for that
-signal until it restarts.
+signal until it restarts. While a backfill
+([Backfill](observability/backfill.md)) runs, the same route also carries its progress as
+`backfill`.
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
 `<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
@@ -109,10 +118,10 @@ overrides its one field of the saved module; it never turns export on by itself,
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The base URL; `/v1/logs`, `/v1/traces` and `/v1/metrics` are appended. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | A full URL for one signal, used as is. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | `k=v,k2=v2`, values percent-encoded. Overrides the **Observability headers** secret. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. gRPC is not built. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. gRPC only behind the add-on's `otlp-grpc` feature ([gRPC](observability/grpc.md)). |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` (default) or `none`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | Milliseconds. |
-| `OTEL_SERVICE_NAME` | `service.name`, default `colonizer`. |
+| `OTEL_SERVICE_NAME` | `service.name`, default `colonizer-mothership`. |
 | `OTEL_RESOURCE_ATTRIBUTES` | Extra resource attributes, `k=v,k2=v2`. |
 
 The endpoint rules of a save apply to the effective value too: `http://` only to a loopback or
@@ -170,8 +179,11 @@ it.
 
 ### Metrics
 
-Cumulative, pushed every 30 seconds while **Metrics** is on. The sums survive a restart: they are
-committed with the read offsets that produced them.
+Cumulative, pushed every **Metrics push interval (seconds)** (30 by default) while **Metrics** is on.
+The sums survive a restart: they are committed with the read offsets that produced them. The one
+live gauge is `colonizer.observability.backlog`, a reading taken at each push; the interval, the
+failure semantics and the pull-endpoint name mapping are on
+[the metrics push page](observability/metrics-push.md).
 
 | Metric | Type | Unit | Attributes |
 | :--- | :--- | :--- | :--- |
@@ -187,6 +199,9 @@ committed with the read offsets that produced them.
 | `colonizer.observability.exported` | counter | `{record}` | — |
 | `colonizer.observability.dropped` | counter | `{record}` | `colonizer.drop.reason`: `backlog`, `refused`, `rejected`, `oversized`, `malformed`, `series_limit`, `state_reset`, `gap_*` (`gap_deleted` once per deleted colony or file) |
 | `colonizer.observability.export_failures` | counter | `{request}` | — |
+| `colonizer.observability.bytes` | counter | `{By}` | `colonizer.signal`: `logs`, `traces`, `metrics` |
+| `colonizer.observability.last_success` | gauge | `s` | `colonizer.signal` |
+| `colonizer.observability.backlog` | gauge | `{By}` | `colonizer.signal` |
 
 ### Traces
 

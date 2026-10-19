@@ -191,9 +191,37 @@ describe("Header judge chip (issue #875)", () => {
   });
 });
 
+describe("Header observability badge (issue #855)", () => {
+  const withObs = (alert: string | null) =>
+    renderToStaticMarkup(
+      <Header
+        orgs={[]}
+        selectedOrg={null}
+        onSelectOrg={() => {}}
+        needByOrg={{}}
+        statusError={false}
+        onOpenRemote={() => {}}
+        observabilityAlert={alert}
+        onOpenObservability={() => {}}
+      />,
+    );
+
+  it("is absent while the exporter is healthy or its failure is still young", () => {
+    expect(withObs(null)).not.toContain("Observability degraded");
+    expect(withObs("")).not.toContain("bg-err-soft");
+  });
+
+  it("names the failure in the tooltip and opens the observability pane", () => {
+    const html = withObs("logs have failed for 11 min");
+    expect(html).toContain("Observability degraded");
+    expect(html).toContain('title="logs have failed for 11 min — opens the observability settings"');
+    expect(html).toContain("<button");
+  });
+});
+
 describe("NavRail views", () => {
   it("lists the views in order; Colonize and settings have their own buttons", () => {
-    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "chat", "code", "history", "loops", "memory", "host", "secrets"]);
+    expect(navTabs({ needCount: 0, liveCount: 0, pendingMemory: 0 }).map((t) => t.view)).toEqual(["overview", "home", "chat", "code", "history", "queues", "loops", "memory", "host", "secrets"]);
     const html = rail();
     expect(html).toContain('aria-label="colonize"');
     expect(html).toContain('aria-label="settings"');

@@ -15,6 +15,8 @@ use serde_json::{Map, Value, json};
 pub const OTLP: &str = "otlp";
 /// The provider that writes events to capped local files and sends nothing.
 pub const FILE: &str = "file";
+/// The provider that pushes logs natively to Loki over its push API (#865).
+pub const LOKI: &str = "loki";
 
 fn provider(id: &str, name: &str, description: &str, schema: Value) -> Provider {
     Provider {
@@ -46,6 +48,10 @@ fn shared_properties() -> Map<String, Value> {
     m.insert(
         "stream_metrics".into(),
         json!({"type": "boolean", "title": "Metrics", "description": "Counters and durations: colonies, tokens and requests.", "default": true}),
+    );
+    m.insert(
+        "metrics_interval_secs".into(),
+        json!({"type": "integer", "title": "Metrics push interval (seconds)", "description": "How often the metric catalogue is pushed to the endpoint.", "minimum": 5, "maximum": 86400, "default": 30}),
     );
     m.insert(
         "conversation_content".into(),
@@ -107,7 +113,7 @@ fn schema(own: Vec<(&str, Value)>) -> Value {
     json!({"type": "object", "properties": props})
 }
 
-/// The two providers of this kind, each with the settings both share.
+/// The providers of this kind, each with the settings all of them share.
 pub fn providers() -> Vec<Provider> {
     vec![
         provider(
@@ -156,6 +162,25 @@ pub fn providers() -> Vec<Provider> {
                 ),
             ]),
         ),
+        provider(
+            LOKI,
+            "Loki push API",
+            "Send logs natively to Grafana Loki 2.9+ or Grafana Cloud Logs over the Loki push API; logs only — traces and metrics still need the OTLP endpoint provider or a collector. Authentication (basic or bearer) goes in the observability-headers secret, never the URL",
+            schema(vec![
+                (
+                    "url",
+                    json!({"type": "string", "title": "URL", "description": "http:// or https://. The Loki server's base URL (http://localhost:3100) or a full …/loki/api/v1/push URL. It must carry no credentials (user:pass@) and no query string — those belong in the observability-headers secret, never in the URL. A plain http:// URL is accepted only for loopback and private addresses, like the OTLP endpoint with its switch off.", "default": ""}),
+                ),
+                (
+                    "tenant_id",
+                    json!({"type": "string", "title": "Tenant id", "description": "The optional Loki tenant, sent as the X-Scope-OrgID header (Grafana Cloud: the instance's tenant id).", "default": ""}),
+                ),
+                (
+                    "structured_metadata",
+                    json!({"type": "boolean", "title": "Structured metadata", "description": "Send the record's other attributes as Loki structured metadata (needs Loki ≥ 2.9). Off, each line is written as one JSON object instead, which also works on older Loki.", "default": true}),
+                ),
+            ]),
+        ),
     ]
 }
 
@@ -175,10 +200,18 @@ pub struct ExporterConfig {
     pub allow_insecure: bool,
     pub dir: String,
     pub max_mb: u64,
+    /// The Loki push provider's base URL (#865); empty for the other providers.
+    pub url: String,
+    /// The optional Loki tenant, sent as `X-Scope-OrgID`.
+    pub tenant_id: String,
+    /// Whether a Loki record's other attributes ride as structured metadata (true) or inside one
+    /// JSON line (false).
+    pub structured_metadata: bool,
     pub stream_operational: bool,
     pub stream_activity: bool,
     pub stream_traces: bool,
     pub stream_metrics: bool,
+    pub metrics_interval_secs: u64,
     pub conversation_content: bool,
     pub conversation_thinking: bool,
     pub trace_sample_ratio: f64,
@@ -218,10 +251,14 @@ impl ExporterConfig {
             allow_insecure: bool_at(s, "allow_insecure", false),
             dir: str_at(s, "dir", ""),
             max_mb: u64_at(s, "max_mb", 512),
+            url: str_at(s, "url", ""),
+            tenant_id: str_at(s, "tenant_id", ""),
+            structured_metadata: bool_at(s, "structured_metadata", true),
             stream_operational: bool_at(s, "stream_operational", true),
             stream_activity: bool_at(s, "stream_activity", true),
             stream_traces: bool_at(s, "stream_traces", true),
             stream_metrics: bool_at(s, "stream_metrics", true),
+            metrics_interval_secs: u64_at(s, "metrics_interval_secs", 30),
             conversation_content: bool_at(s, "conversation_content", false),
             conversation_thinking: bool_at(s, "conversation_thinking", false),
             trace_sample_ratio: f64_at(s, "trace_sample_ratio", 1.0),
@@ -258,10 +295,14 @@ impl std::fmt::Debug for ExporterConfig {
             .field("allow_insecure", &self.allow_insecure)
             .field("dir", &self.dir)
             .field("max_mb", &self.max_mb)
+            .field("url", &self.url)
+            .field("tenant_id", &self.tenant_id)
+            .field("structured_metadata", &self.structured_metadata)
             .field("stream_operational", &self.stream_operational)
             .field("stream_activity", &self.stream_activity)
             .field("stream_traces", &self.stream_traces)
             .field("stream_metrics", &self.stream_metrics)
+            .field("metrics_interval_secs", &self.metrics_interval_secs)
             .field("conversation_content", &self.conversation_content)
             .field("conversation_thinking", &self.conversation_thinking)
             .field("trace_sample_ratio", &self.trace_sample_ratio)
@@ -305,6 +346,30 @@ pub fn validate(
         }
     }
     let settings = effective;
+    if provider == LOKI {
+        let url = str_at(settings, "url", "");
+        if url.is_empty() {
+            // The same refusal as an enabled OTLP module with no endpoint: an enabled exporter
+            // with nowhere to send is a silent no-op, but a disabled module may keep an empty URL.
+            if enabled {
+                return Err("an enabled Loki module needs a URL; set the URL or switch the module off".into());
+            }
+        } else {
+            check_endpoint(&url, false)?;
+        }
+        // Logs only, checked when the module is on: a disabled module may hold any stream switches,
+        // the same quarter it may keep an empty URL, but enabling one is refused until they are off.
+        if enabled && (bool_at(settings, "stream_traces", true) || bool_at(settings, "stream_metrics", true)) {
+            return Err(
+                "the Loki provider takes logs only; turn Traces and Metrics off or pick the OTLP endpoint provider".into(),
+            );
+        }
+        let tenant_id = str_at(settings, "tenant_id", "");
+        if tenant_id.chars().any(|c| c < ' ' || c == '\u{7f}') {
+            return Err("tenant_id must carry no control characters; it is sent as the X-Scope-OrgID header".into());
+        }
+        return Ok(());
+    }
     if provider != OTLP {
         return Ok(());
     }
@@ -421,9 +486,9 @@ mod tests {
     }
 
     #[test]
-    fn both_providers_declare_the_shared_settings_with_their_defaults() {
+    fn every_provider_declares_the_shared_settings_with_their_defaults() {
         let ids: Vec<_> = providers().into_iter().map(|p| p.id).collect();
-        assert_eq!(ids, vec!["otlp".to_string(), "file".to_string()]);
+        assert_eq!(ids, vec!["otlp".to_string(), "file".to_string(), "loki".to_string()]);
         for provider in providers() {
             let props = &provider.schema["properties"];
             for (key, default) in [
@@ -431,6 +496,7 @@ mod tests {
                 ("stream_activity", json!(true)),
                 ("stream_traces", json!(true)),
                 ("stream_metrics", json!(true)),
+                ("metrics_interval_secs", json!(30)),
                 ("conversation_content", json!(false)),
                 ("conversation_thinking", json!(false)),
                 ("trace_sample_ratio", json!(1)),
@@ -452,6 +518,10 @@ mod tests {
         assert_eq!(otlp["allow_insecure"]["default"], json!(false));
         let file = &providers().remove(1).schema["properties"];
         assert_eq!(file["max_mb"]["default"], json!(512));
+        let loki = &providers().remove(2).schema["properties"];
+        assert_eq!(loki["url"]["default"], json!(""));
+        assert_eq!(loki["tenant_id"]["default"], json!(""));
+        assert_eq!(loki["structured_metadata"]["default"], json!(true));
     }
 
     #[test]
@@ -521,6 +591,64 @@ mod tests {
     }
 
     #[test]
+    fn a_loki_module_needs_a_url_and_takes_logs_only() {
+        let stored = Map::new();
+        let err = validate(LOKI, &stored, &Map::new(), true, false).unwrap_err();
+        assert!(err.contains("URL"), "{err}");
+        // Disabled with no URL is fine, the same quarter an enabled module is refused in.
+        assert!(validate(LOKI, &stored, &Map::new(), false, false).is_ok());
+        // Traces and metrics have no Loki path: their streams staying on is a configuration
+        // error, not a silent half-export.
+        let loki = |extra: &[(&str, Value)]| {
+            let mut s = settings(&[("stream_traces", json!(false)), ("stream_metrics", json!(false))]);
+            for (key, value) in extra {
+                s.insert((*key).into(), value.clone());
+            }
+            s
+        };
+        for key in ["stream_traces", "stream_metrics"] {
+            let mut s = loki(&[("url", json!("http://127.0.0.1:3100"))]);
+            s.insert(key.into(), json!(true));
+            let err = validate(LOKI, &stored, &s, true, false).unwrap_err();
+            assert!(err.contains("logs only"), "{key}: {err}");
+        }
+        assert!(validate(LOKI, &stored, &loki(&[("url", json!("http://127.0.0.1:3100"))]), true, false).is_ok());
+        // The URL is held to the endpoint rules, credentials and query strings included.
+        for url in [
+            "ftp://127.0.0.1:3100",
+            "https://user:pass@loki",
+            "https://loki?x=1",
+            "http://loki.example.com",
+        ] {
+            assert!(
+                validate(LOKI, &stored, &loki(&[("url", json!(url))]), true, false).is_err(),
+                "{url}"
+            );
+        }
+        assert!(validate(LOKI, &stored, &loki(&[("url", json!("http://10.0.0.5:3100"))]), true, false).is_ok());
+        // A tenant rides in a header, so a control character in it is refused.
+        let err = validate(
+            LOKI,
+            &stored,
+            &loki(&[("url", json!("http://127.0.0.1:3100")), ("tenant_id", json!("a\u{1}b"))]),
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("control characters"), "{err}");
+        assert!(
+            validate(
+                LOKI,
+                &stored,
+                &loki(&[("url", json!("http://127.0.0.1:3100")), ("tenant_id", json!("acme"))]),
+                true,
+                false
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn content_needs_a_confirmation_only_for_the_save_that_turns_it_on() {
         let endpoint = ("endpoint", json!("https://otlp.example.com"));
         let off = settings(std::slice::from_ref(&endpoint));
@@ -572,6 +700,28 @@ mod tests {
         assert!(cfg.stream_operational && !cfg.conversation_content);
         assert_eq!(cfg.max_content_bytes, 32768);
         assert!(cfg.headers.is_empty(), "this build reads no secret");
+    }
+
+    #[test]
+    fn from_module_parses_the_loki_fields_and_metadata_defaults_on() {
+        let choice = ModuleChoice {
+            provider: LOKI.into(),
+            enabled: true,
+            settings: settings(&[("url", json!("http://loki:3100")), ("tenant_id", json!("acme"))]),
+        };
+        let cfg = ExporterConfig::from_module(&choice).unwrap();
+        assert_eq!(cfg.provider, LOKI);
+        assert_eq!(cfg.url, "http://loki:3100");
+        assert_eq!(cfg.tenant_id, "acme");
+        assert!(cfg.structured_metadata, "absent keys take their default, which is on");
+        assert_eq!(cfg.endpoint, "", "the OTLP fields stay empty for a Loki module");
+
+        let off_metadata = ModuleChoice {
+            provider: LOKI.into(),
+            enabled: true,
+            settings: settings(&[("url", json!("http://loki:3100")), ("structured_metadata", json!(false))]),
+        };
+        assert!(!ExporterConfig::from_module(&off_metadata).unwrap().structured_metadata);
     }
 
     #[test]

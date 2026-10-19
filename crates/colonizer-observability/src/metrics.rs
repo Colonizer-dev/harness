@@ -17,6 +17,9 @@
 //! | `colonizer.observability.exported` | counter | `{record}` | — |
 //! | `colonizer.observability.dropped` | counter | `{record}` | `colonizer.drop.reason` |
 //! | `colonizer.observability.export_failures` | counter | `{request}` | — |
+//! | `colonizer.observability.bytes` | counter | `{By}` | `colonizer.signal` |
+//! | `colonizer.observability.last_success` | gauge | `s` | `colonizer.signal` |
+//! | `colonizer.observability.backlog` | gauge | `{By}` | `colonizer.signal` |
 
 use crate::batch::Item;
 use crate::contract::ColonyPolicy;
@@ -87,6 +90,10 @@ pub struct Aggregates {
     pub exported: u64,
     pub dropped: BTreeMap<String, u64>,
     pub export_failures: u64,
+    /// Wire bytes (after gzip) sent per signal since `start_unix_nanos`.
+    pub sent_bytes: BTreeMap<String, u64>,
+    /// The last successful export per signal, unix seconds.
+    pub last_success: BTreeMap<String, u64>,
 }
 
 fn str_at<'a>(line: &'a Value, key: &str) -> &'a str {
@@ -276,6 +283,41 @@ impl Aggregates {
                 .int(self.export_failures as i64)
                 .finish(),
         );
+        for (signal, bytes) in &self.sent_bytes {
+            out.push(
+                own("colonizer.observability.bytes", "{By}")
+                    .int(*bytes as i64)
+                    .attr("colonizer.signal", signal.as_str(), Tier::Structure)
+                    .finish(),
+            );
+        }
+        for (signal, at) in &self.last_success {
+            out.push(
+                policy
+                    .metric(Source::Mothership, "colonizer.observability.last_success", "s")
+                    .times(start, now)
+                    .int(*at as i64)
+                    .attr("colonizer.signal", signal.as_str(), Tier::Structure)
+                    .finish(),
+            );
+        }
         out
+    }
+
+    /// The backlog gauge's points: one series per signal, of the live ledger bytes behind the
+    /// committed cursors. Live rather than cumulative, so it is built per push and never folded into
+    /// [`Aggregates`]; here rather than in the exporter because the point builder is the policy's.
+    pub fn backlog_points(&self, policy: &Policy, now: u64, backlog: &BTreeMap<String, u64>) -> Vec<Item> {
+        backlog
+            .iter()
+            .map(|(signal, bytes)| {
+                policy
+                    .metric(Source::Mothership, "colonizer.observability.backlog", "{By}")
+                    .times(self.start_unix_nanos, now)
+                    .int(*bytes as i64)
+                    .attr("colonizer.signal", signal.as_str(), Tier::Structure)
+                    .finish()
+            })
+            .collect()
     }
 }

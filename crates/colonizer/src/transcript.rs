@@ -177,7 +177,7 @@ pub(crate) fn refused(error: TranscriptError) -> Response {
 /// The generic **500** for a store that would not load or stage: the detail is
 /// logged, never returned, so no host path leaks.
 pub(crate) fn unreadable(error: &dyn std::fmt::Display) -> Response {
-    eprintln!("transcript: {error}");
+    tracing::warn!( error = %error, "transcript: {error}" );
     client_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "could not read the colony's session transcript",

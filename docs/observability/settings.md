@@ -1,17 +1,20 @@
 # Observability: settings and privacy
 
 The `observability` module sends the harness's logs, traces and metrics to a backend you choose,
-over OpenTelemetry's OTLP protocol, or writes them to capped files under the data directory. It is
-**off until you configure it**. The standard `OTEL_*` variables override its fields, but never turn
-it on by themselves; see [Observability](../observability.md#configuration).
+over OpenTelemetry's OTLP protocol, pushes the logs natively to Grafana Loki, or writes everything
+to capped files under the data directory. It is **off until you configure it**. The standard
+`OTEL_*` variables override its fields, but never turn it on by themselves; see
+[Observability](../observability.md#configuration).
 
 ## Turning it on
 
 1. In **Settings → Modules → Observability**, pick a provider:
    - **OTLP endpoint** sends to Grafana Cloud, a local collector, Datadog, Honeycomb, Elastic,
      SigNoz, New Relic or any OpenTelemetry backend.
+   - **Loki push API** sends the logs natively to Grafana Loki 2.9+ or Grafana Cloud Logs — logs
+     only; traces and metrics still need the OTLP endpoint provider or a collector.
    - **Local file** writes the same events under the data directory and sends nothing anywhere.
-2. Fill in the endpoint (or the directory) and the shared settings below.
+2. Fill in the endpoint or URL (or the directory) and the shared settings below.
 3. If the backend wants a header, save it under **Settings → Secrets** as **Observability headers**,
    a standard `k=v,k2=v2` list — the same form `OTEL_EXPORTER_OTLP_HEADERS` takes. The value lives
    only in that secret; it is never written into the module settings, a log line or the URL.
@@ -21,28 +24,40 @@ The module appears in `GET /api/modules` only after the first save, and a save i
 
 ## Settings
 
-Both providers share the second table.
+Each provider has its own table; all of them share the last one.
 
 | OTLP endpoint | Default | What it is |
 | :--- | :--- | :--- |
 | Endpoint URL | *(empty)* | `http://` or `https://`. Required while the module is on (an enabled OTLP module with no endpoint is refused; leave it empty only while the module is off). It must carry no credentials (`user:pass@`) and no query string — those go in the **Observability headers** secret. |
-| Protocol | `http/protobuf` | `http/protobuf`, `http/json`, or `grpc`. `grpc` is refused in this build; a later issue adds it. |
+| Protocol | `http/protobuf` | `http/protobuf`, `http/json`, or `grpc`. The mothership refuses `grpc` at save (it links no gRPC stack); an add-on built with `--features otlp-grpc` speaks it ([OTLP/gRPC](grpc.md)). |
 | Backend | `custom` | Names the header the backend expects: Honeycomb `x-honeycomb-team`, Datadog `dd-api-key`, New Relic `api-key`, Grafana Cloud `Authorization` (Basic), Elastic `Authorization` (ApiKey); SigNoz and a local collector usually want none. The value is in the secret. |
 | Compression | `gzip` | `gzip` or `none`. |
 | Request timeout (seconds) | `10` | 1 to 120. |
 | Allow plain http to a public host | off | Off, a plain `http://` endpoint is accepted only for loopback and private addresses. On, it is sent anyway, unencrypted. |
+
+| Loki push API | Default | What it is |
+| :--- | :--- | :--- |
+| URL | *(empty)* | `http://` or `https://`. The Loki server's base URL (`http://localhost:3100`), or a full `…/loki/api/v1/push` URL, which is used as it is. Required while the module is on. It must carry no credentials (`user:pass@`) and no query string — authentication (basic or bearer) goes in the **Observability headers** secret, never the URL. A plain `http://` URL is accepted only for loopback and private addresses, like the OTLP endpoint with its switch off. |
+| Tenant id | *(empty)* | The optional Loki tenant, sent as the `X-Scope-OrgID` header (Grafana Cloud: the instance's tenant id). An `X-Scope-OrgID` saved in the secret wins over this setting. |
+| Structured metadata | on | Each record's other attributes ride as Loki structured metadata (needs Loki ≥ 2.9). Off, every line is one JSON object instead, which also works on older Loki. |
+
+The Loki provider takes logs only: a save with **Traces** or **Metrics** on is refused — turn them
+off or pick the OTLP endpoint provider. Only fixed low-cardinality labels are sent
+(`service_name`, `stream`, `level`, and `org` for a colony whose org opted in); everything else
+rides as structured metadata or inside the line, never as a label.
 
 | Local file | Default | What it is |
 | :--- | :--- | :--- |
 | Directory | *(empty)* | Relative to the data directory; empty means `<data>/observability/otlp`. |
 | Total size cap (MB) | `512` | Across all the files; the oldest is trimmed first. |
 
-| Both providers | Default | What it is |
+| All providers | Default | What it is |
 | :--- | :--- | :--- |
 | Operational logs | on | Boots, parks, quota pauses, watchdog nudges. |
 | Colony activity | on | Stages, tool use and status changes. |
 | Traces | on | One trace per colony: its turns, tool calls and subagents as spans ([Traces](traces.md)). |
 | Metrics | on | Counters and durations. |
+| Metrics push interval (seconds) | `30` | 5 to 86400; how often the metric catalogue is pushed ([Metrics push](metrics-push.md)). |
 | Conversation content | off | The words you and the agent exchanged. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Agent thinking | off | The agent's reasoning. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Trace sample ratio | `1` | 0 to 1; the share of colonies traced, chosen per colony so a trace is always whole. Logs and metrics are never sampled. |

@@ -1,0 +1,305 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "How agents behave, fleet-wide, from the trace spans: tool error rates, denials, verification verdicts, subagent fan-out, and who answers questions. All panels are TraceQL metrics queries over the exported spans; there is deliberately no per-colony dimension here.",
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=~\"execute_tool .*\"} | rate() by (span.gen_ai.tool.name)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool calls/s by tool",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=~\"execute_tool .*\" && status=error} | rate() by (span.gen_ai.tool.name)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool errors/s by tool",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "description": "colonizer.denial.class is set when the sandbox refused a tool call.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && span.colonizer.denial.class!=\"\"} | rate() by (span.colonizer.denial.class)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Denials/s by class",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "description": "colonizer.verdict on host_step spans, e.g. pass, contradicted.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=~\"host_step .*\" && span.colonizer.verdict!=\"\"} | count_over_time() by (span.colonizer.verdict)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Verification verdicts per window",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "description": "Fan-out: Task and Agent tool calls opening subagent spans.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=~\"subagent .*\"} | rate() by (span.gen_ai.agent.name)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Subagent starts/s by type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=\"question\" && span.colonizer.answered_by!=\"\"} | rate() by (span.colonizer.answered_by)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Answers: person vs autonomy-judge",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=\"question\" && span.colonizer.unanswered=true} | count_over_time()",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Unanswered questions per window",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "colonizer-tempo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ns"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "id": 8,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "colonizer-tempo"
+          },
+          "limit": 50,
+          "query": "{resource.service.name=\"colonizer-mothership\" && name=~\"turn [0-9]+\"} | quantile_over_time(duration, 0.5, 0.95)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Turn durations (p50/p95, fleet)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "colonizer"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Colonizer — Agent behaviour",
+  "uid": "colonizer-agents",
+  "version": 1,
+  "weekStart": ""
+}

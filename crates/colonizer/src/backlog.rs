@@ -96,7 +96,10 @@ pub(crate) async fn status_json(app: &Shared) -> Value {
                     state.refreshed = Some(Instant::now());
                 }
                 Err(e) => {
-                    eprintln!("backlog: could not count open issues, retrying in a minute: {e:#}");
+                    tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "backlog: could not count open issues, retrying in a minute: {e:#}"
+                    );
                     state.failed = Some(Instant::now());
                 }
             }

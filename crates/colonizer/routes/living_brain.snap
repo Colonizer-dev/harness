@@ -1,0 +1,9 @@
+/api/living-brain                                    GET    unauth=401    token=owner            activity=-
+/api/living-brain                                    PUT    unauth=401    token=owner            activity=settings.save
+/api/living-brain/backfill                           POST   unauth=401    token=owner            activity=settings.save
+/api/living-brain/colonies/{id}                      GET    unauth=401    token=owner            activity=-
+/api/living-brain/connect                            DELETE unauth=401    token=owner            activity=-
+/api/living-brain/connect                            POST   unauth=401    token=owner            activity=settings.save
+/api/living-brain/connection                         DELETE unauth=401    token=owner            activity=settings.save
+/api/living-brain/queue/retry                        POST   unauth=401    token=owner            activity=-
+/api/living-brain/token                              PUT    unauth=401    token=owner            activity=settings.save

@@ -6,6 +6,7 @@
 import { isActive } from "../redTeam";
 import { CodeView } from "./CodeView";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { advanceFailureClock, observabilityDegraded } from "../components/settings/ObservabilityRows";
 
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
@@ -21,7 +22,7 @@ import { currentLocation, navigate as pushUrl, routerBase, subscribe } from "../
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { settlersOf, useSessionStream } from "../sessionStream";
-import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
+import type { AutonomyStatus, FleetHost, HarnessStatus, ObservabilityStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { AskProvider } from "./spotlight/Ask";
@@ -35,6 +36,7 @@ import { NavRail, type CockpitView } from "./NavRail";
 import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
+import { QueuesView } from "./QueuesView";
 import { focusTurn } from "./turnFocus";
 import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
 import { SecretsView } from "./SecretsView";
@@ -208,6 +210,31 @@ export function Cockpit({
       window.clearInterval(id);
     };
   }, [api]);
+  // The observability exporter's health (issue #855): the same slow poll, feeding the header's
+  // degraded badge. The clock remembers when failing started, from this cockpit's own point of
+  // view, so the badge waits out short outages. Errors are swallowed the same way.
+  const [observability, setObservability] = useState<ObservabilityStatus | null>(null);
+  const [obsFailingSince, setObsFailingSince] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      void api
+        .observabilityStatus()
+        .then((status) => {
+          if (!live) return;
+          const nowSecs = Math.floor(Date.now() / 1000);
+          setObservability(status);
+          setObsFailingSince((prev) => advanceFailureClock(prev, status, nowSecs));
+        })
+        .catch(() => {});
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+    };
+  }, [api]);
+  const observabilityAlert = observabilityDegraded(observability, Math.floor(Date.now() / 1000), obsFailingSince);
   // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
   // The address names the view (issue #1180): `/nest`, `/settings/models/providers`, `/colonies/<id>`.
   // The bare root is the Overview, but a returning visitor's remembered view still wins there, so a
@@ -710,6 +737,8 @@ export function Cockpit({
         );
       case "loops":
         return <LoopsView org={selectedOrg} orgs={orgs} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
+      case "queues":
+        return <QueuesView sessions={sessions} />;
       case "secrets":
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "chat":
@@ -892,6 +921,8 @@ export function Cockpit({
         connection={liveConnection}
         remoteOn={remoteOn}
         judge={judge}
+        observabilityAlert={observabilityAlert}
+        onOpenObservability={() => onOpenSettings("module:observability")}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
         models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}

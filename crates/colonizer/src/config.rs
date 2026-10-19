@@ -283,7 +283,7 @@ impl ModulesConfig {
             path.display(),
             saved.display()
         );
-        eprintln!("modules: {message}");
+        tracing::error!("modules: {message}");
         Ok((
             Self::default(),
             Some(crate::StorageAlert {
@@ -514,7 +514,7 @@ impl FileConfig {
             return Self::default();
         };
         toml::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("colonizer.toml: {}", corrupt_message(&path, &e));
+            tracing::warn!("colonizer.toml: {}", corrupt_message(&path, &e));
             Self::default()
         })
     }

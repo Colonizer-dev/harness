@@ -71,7 +71,7 @@ From top to bottom, the sidebar has:
 
 - the workspace switcher ([Workspaces](#workspaces-and-the-switcher)),
 - the **Colonize** button ([Colonize](#colonize)),
-- Overview, Nest, Chat, Code, History, Loops, Memory, Host and Secrets,
+- Overview, Nest, Chat, Code, History, Queues, Loops, Memory, Host and Secrets,
 - an **Update** row when a newer version is out (it opens Settings, Updates),
 - Settings, and a light/dark theme toggle.
 
@@ -427,6 +427,29 @@ row.
 Limit: outcomes from before the activity log existed come from the colony list and are marked as
 approximate.
 
+## Queues
+
+**Sidebar: Queues.**
+
+Queues is the waiting list: every colony that wants to start, why it is waiting, and what you can do
+about it. Each row names its colony, its status, its branch and age, and the wait in plain words —
+parked on a quota or on the repository's daily pull-request cap (with the time it resumes), waiting
+for your answer, held because a merge superseded it, or held by a policy, which nothing starts until
+the hold is lifted. A raised queue priority is shown on the row.
+
+- A strip at the top shows each host: how many of its slots are in use against its ceiling, how much
+  is queued and parked on it, and how deep its queue is. A host over its ceiling is highlighted, and
+  one that cannot be reached says so.
+- Search, and filter by host, reason, repository and agent. Group the rows flat, by host, by reason
+  or by repository.
+- The filters live in the address next to the workspace (`?host=…&q=…`), so a filtered view can be
+  bookmarked and shared.
+- Select rows for the bulk actions: **Resume selected**, **Stop selected** and **Restart on new
+  version**. Whatever the mothership refuses comes back with its reason, row by row.
+
+While an update or restart is draining the queue, the page says so at the top, like every other
+view.
+
 ## Inbox and the bell
 
 The bell at the top right counts the colonies waiting on a person, across all workspaces. Click it
@@ -769,6 +792,41 @@ never sent. **Send history to the owner** is the consent the history push waits 
 ([fleet.md](fleet.md#history-push)); **Stop sending history** withdraws it. Leaving and re-joining
 turns it off again.
 
+### Observability
+
+**Settings → Modules → Observability.** Sends the mothership's logs, traces and metrics to any
+OpenTelemetry backend; what exactly is carried is in [observability.md](observability.md).
+
+Turn it on with the endpoint and the protocol (`http/protobuf` suits almost every backend). The
+pane lists the common backends with their endpoint patterns and the header each wants — Grafana
+Cloud (`https://otlp-gateway-<zone>.grafana.net/otlp`, header `Authorization` carrying
+`Basic <base64 of instance-id:token>`), Honeycomb (`https://api.honeycomb.io`, header
+`x-honeycomb-team`), Datadog's local Agent (`http://127.0.0.1:4318`, header `DD-API-KEY`), a local
+collector (`http://127.0.0.1:4318`, usually no header). Header values never go in the settings:
+type them into the pane's **Headers** field, which stores the `k=v,k2=v2` list as the
+observability-headers secret and only ever names it back.
+
+Under the status line, the health card shows one row per signal — logs, traces, metrics — labelled
+**Sending** (with the age of the last record), **Backing off** (with the retry countdown and the
+last error), **Unauthorized** (the backend rejected the credentials — check the header in
+**Settings → Secrets**), or **Off**, with a summary of the backlog, records sent and the last
+success, and a line saying where each setting came from: the module settings, an environment
+variable, or the built-in default.
+
+**Send test** sends one log record and one metric point through the saved settings, and each
+failing signal comes back with a hint: compare the header name and value with what this backend
+expects, check the endpoint path and protocol when it answered an HTTP error, or check the host
+and port when it could not be reached.
+
+The **Conversation content** and **Conversation thinking** switches are the one save this pane
+asks about. The dialog says what would be sent (what you and the agent actually said, and the
+model's thinking), that each workspace must also opt in before any of it is sent, that restricted
+colonies — and colonies whose sensitivity was never recorded — never send content, and that it
+meaningfully increases data volume and backend cost.
+
+When a signal has been failing for ten minutes, a red **Observability degraded** badge appears in
+the top bar; clicking it opens this pane.
+
 ### Notifications and Web Push
 
 **Settings → Notifications.** These switches are kept in the browser, per browser:
@@ -894,8 +952,8 @@ This page is also where you switch a workspace off, or back on.
 
 Under 640px wide, the sidebar is replaced by a tab bar at the bottom of the screen with five tabs:
 **Nest**, **Inbox**, **Chat**, **Code** and **More**. More opens a sheet with Overview, Launch,
-History, Loops, Memory, Host, Secrets and Settings. An open colony counts as Nest. The bar sits
-above the phone's home indicator.
+History, Queues, Loops, Memory, Host, Secrets and Settings. An open colony counts as Nest. The bar
+sits above the phone's home indicator.
 
 ⌘K and ⌘B are keyboard shortcuts and do nothing on a phone without a keyboard. Use the Colonize
 button on Overview instead. The Colonize pane opens full width over the tab bar.

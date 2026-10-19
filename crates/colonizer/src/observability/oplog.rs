@@ -125,6 +125,7 @@ pub(crate) fn install(data_dir: &Path) {
                 .event_format(JsonEvent);
             // A writer that never started loses every line silently, so the refusal is said out
             // loud — on stderr, once, before the subscriber below is installed to replace it.
+            #[allow(clippy::disallowed_macros)] // pre-subscriber: the tracing log it would go through does not exist yet
             if let Err(error) = spawn_writer(channel.rx, data_dir.join(LOG_DIR), ROTATE_BYTES) {
                 eprintln!(
                     "colonizer: the {LOG_DIR} writer thread could not start ({error}); \
@@ -368,14 +369,21 @@ impl ChannelGuard {
             }
             Err(TrySendError::Disconnected(_)) => {
                 if !WRITER_GONE.swap(true, Ordering::Relaxed) {
-                    eprintln!(
-                        "colonizer: the {LOG_DIR} writer thread is gone; \
-                         {FILE} is no longer being written and its lines are being dropped"
-                    );
+                    report_writer_gone();
                 }
             }
         }
     }
+}
+
+/// The one diagnostic the file layer prints, see [`ChannelGuard::send`]. The allow sits on this
+/// function, not on the macro call: an attribute on a macro invocation is ignored by the lint.
+#[allow(clippy::disallowed_macros)] // the file layer's writer is gone; tracing would log through the layer that stopped working
+fn report_writer_gone() {
+    eprintln!(
+        "colonizer: the {LOG_DIR} writer thread is gone; \
+         {FILE} is no longer being written and its lines are being dropped"
+    );
 }
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ChannelWriter {
