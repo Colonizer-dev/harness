@@ -285,6 +285,9 @@ enum Command {
     Stop { id: String },
     /// Start a stopped colony again, picking up its worktree where it was left
     Resume { id: String },
+    /// Start a *failed* colony again from scratch, with the same settings (issue #1073); a colony
+    /// `resume` can bring back should use `resume` instead
+    Retry { id: String },
     /// Print a colony's pull request URL and state, or --wait for its checks to settle
     Pr {
         id: String,
@@ -2011,6 +2014,24 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                         )
                     }
                     None => println!("colony {id} resumed"),
+                }
+                Ok(EXIT_OK)
+            })
+            .await
+        }
+        Command::Retry { id } => {
+            let json = cli.json;
+            client_command(cli, move |machine| async move {
+                match machine.post(&format!("/api/sessions/{id}/retry"), None).await? {
+                    Some(session) if json => println!("{}", pretty(&session)?),
+                    Some(session) => {
+                        println!(
+                            "colony {id} failed; colony {} is a retry of it ({})",
+                            session["id"].as_str().unwrap_or(&id),
+                            session["status"].as_str().unwrap_or("queued")
+                        )
+                    }
+                    None => println!("colony {id}: retried"),
                 }
                 Ok(EXIT_OK)
             })
