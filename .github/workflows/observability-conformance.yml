@@ -60,8 +60,8 @@ jobs:
             cargo-obs-conformance-${{ runner.os }}-
             cargo-${{ runner.os }}-
 
-      # Before the mount, so the runner user owns it: the test appends the golden files into it and
-      # the in-container collector (root) must read them, while the test must read what it wrote.
+      # Before the mount, so the runner user owns it: the test appends the golden files into it, and
+      # the collector writes its output files into it as the runner's own uid (see `--user` below).
       - name: Scratch dir
         run: mkdir -p /tmp/otel-conformance
 
@@ -70,7 +70,11 @@ jobs:
 
       - name: Start the collector
         run: |
+          # The upstream image runs as a non-root user (10001), which cannot create files in this
+          # runner-owned mount and failed the file exporters' open at startup. Run it as the runner's
+          # uid so it can write its output here and the test can read and clean up what it stored.
           docker run -d --name otel-collector \
+            --user "$(id -u):$(id -g)" \
             -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 -p 127.0.0.1:13133:13133 \
             -v /tmp/otel-conformance:/tmp/otel-conformance \
             otel-conformance/collector
