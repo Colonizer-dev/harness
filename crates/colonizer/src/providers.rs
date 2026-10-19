@@ -1206,6 +1206,9 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "quota": provider.quota,
         // The last plan-balance reading, so the list can draw a gauge without probing (#1204).
         "balance": app.gateway.history.latest_balance(&provider.id),
+        // When an outage began and no probe has answered since (#1068): a provider colonies are
+        // parked on, not merely one whose failure rate reads high.
+        "outage_since": app.gateway.history.outage_since(&provider.id),
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
         "queued": queued,
