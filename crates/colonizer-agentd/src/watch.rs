@@ -835,6 +835,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Child half of `a_path_max_deep_tree_does_not_overflow_the_watcher_stack`: gated by env, it
+    /// builds the deepest directory tree a 4096-byte path allows (single-character names, chdir as
+    /// it goes — `scan`'s recursion is uncapped, only PATH_MAX bounds it) and runs the watcher's
+    /// `scan` over it on a default-stack thread, the way `start` does.
+    #[cfg(target_os = "linux")]
+    const SCAN_PROBE: &str = "scan_deep_tree_probe";
+    #[cfg(target_os = "linux")]
+    const SCAN_PROBE_ENV: &str = "COLONIZER_AGENTD_SCAN_PROBE";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scan_deep_tree_probe() {
+        if std::env::var_os(SCAN_PROBE_ENV).is_none() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("agentd-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::env::set_current_dir(&ws).unwrap();
+        let mut made = 0usize;
+        while made < 4000 {
+            if std::fs::create_dir("a").is_err() || std::env::set_current_dir("a").is_err() {
+                break;
+            }
+            made += 1;
+        }
+        eprintln!("tree depth built: {made}");
+        let watcher = Watcher {
+            workspace: ws.clone(),
+            workspace_fd: std::fs::File::open(&ws).unwrap(),
+            patterns: patterns("mask-file .env\n"),
+            store: Arc::new(crate::store::EventStore::open(&root.join("state")).unwrap()),
+            roots: HashSet::new(),
+            quiet: HashSet::new(),
+            misses: (0, None),
+            fd: -1, // no inotify in the child: watch() records misses, scan still recurses
+            watched: std::collections::HashMap::new(),
+            watches: std::collections::HashMap::new(),
+        };
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        let scan_root = ws.clone();
+        // The production thread: Builder with no stack_size, like watch::start — 2 MiB.
+        let handle = std::thread::Builder::new()
+            .name("path-policy".into())
+            .spawn(move || {
+                let mut watcher = watcher;
+                let mut mounts = HashSet::new();
+                watcher.scan(&scan_root, &mut mounts);
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .unwrap();
+        handle.join().unwrap();
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "scan returned without finishing the tree"
+        );
+        // The tree is deeper than remove_dir_all's own recursion likes; delete inside-out.
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("cd {:?} && rm -rf a", ws.display()))
+            .status();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Watcher::scan` recurses per directory with no depth cap of its own (the off-Linux `walk`
+    /// caps at `POLL_DEPTH`); the bound is PATH_MAX — `read_dir` answers ENAMETOOLONG past ~2047
+    /// single-character levels. This pins that a maximal tree cannot overflow the watcher thread's
+    /// default 2 MiB stack (a stack overflow aborts the whole daemon, not just the thread). If this
+    /// ever starts failing with SIGSEGV/SIGABRT, the recursion needs a depth cap or an explicit
+    /// stack size.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_path_max_deep_tree_does_not_overflow_the_watcher_stack() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([SCAN_PROBE, "--nocapture"]).env(SCAN_PROBE_ENV, "1");
+        let output = command.output().expect("spawn the probe child");
+        let say = format!(
+            "--- stdout\n{}--- stderr\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("{say}");
+        assert_eq!(output.status.code(), Some(0), "the deep-tree scan crashed the daemon: {say}");
+    }
+
     /// An event is policed at the deepest checkout root above it, and nowhere when there is none —
     /// the workspace root itself is the boot's business.
     #[cfg(target_os = "linux")]

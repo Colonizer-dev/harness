@@ -28,6 +28,9 @@ colonizer.dev. Observability goes only to the endpoint you name.
   provisioning they assume, and the lint that keeps their queries honest.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
+- [Conformance](observability/conformance.md): the run against a real OpenTelemetry Collector that
+  CI starts, how to run it locally, and what it asserts (issue
+  [#864](https://github.com/Colonizer-dev/harness/issues/864)).
 
 ## How it runs
 

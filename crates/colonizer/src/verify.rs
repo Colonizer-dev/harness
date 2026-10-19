@@ -1621,13 +1621,17 @@ fn without_duration(text: &str) -> &str {
 async fn tail_lines(path: &Path, lines: usize) -> Option<String> {
     let mut file = tokio::fs::File::open(path).await.ok()?;
     let len = file.metadata().await.ok()?.len();
+    let from_start = len <= 1 << 20; // a shorter window seeks to 0, where no line is cut in half
     file.seek(std::io::SeekFrom::Start(len.saturating_sub(1 << 20))).await.ok()?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await.ok()?;
     let text = String::from_utf8_lossy(&buf);
     let mut all: Vec<&str> = text.lines().collect();
-    if len > 1 << 20 {
-        all.remove(0); // the seek may have landed mid-line
+    // The seek landed mid-line, so the first line is partial — but drop it only when a line follows
+    // it: a window that is one line (with or without the file's trailing `\n`) has nothing else to
+    // show, and that cut line is the only evidence there is.
+    if !from_start && all.len() > 1 {
+        all.remove(0);
     }
     let start = all.len().saturating_sub(lines);
     Some(all[start..].join("\n"))
@@ -1971,6 +1975,31 @@ pub(crate) mod tests {
 
     fn failing_verification(inconclusive: bool) -> Verification {
         failing_verification_with(inconclusive, !inconclusive)
+    }
+
+    /// A log over the 1 MiB seek window whose whole window is one line (no newline anywhere in
+    /// it, a minified dump say): that line is whole, so the failure's evidence tail must show it
+    /// — a blanket "the seek landed mid-line" drop would empty the tail of its only line.
+    #[tokio::test]
+    async fn tail_lines_of_a_single_huge_line_still_shows_the_line() {
+        let dir = std::env::temp_dir().join(format!("colonizer-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        std::fs::write(&path, "x".repeat((1 << 20) + 64)).unwrap();
+        let tail = tail_lines(&path, 10).await.expect("the file reads");
+        assert!(!tail.is_empty(), "the window holds exactly one line, and it is the evidence");
+        // The usual shape of that output ends in a newline: still one line, still the evidence.
+        std::fs::write(&path, "x".repeat((1 << 20) + 64) + "\n").unwrap();
+        let tail = tail_lines(&path, 10).await.expect("the file reads");
+        assert!(!tail.is_empty(), "a trailing newline does not make the only line droppable");
+        // With a line after it, the seek's partial first line is the one dropped.
+        std::fs::write(&path, "x".repeat((1 << 20) + 64) + "\nerror: boom\n").unwrap();
+        let tail = tail_lines(&path, 10).await.expect("the file reads");
+        assert_eq!(
+            tail, "error: boom",
+            "the cut-off head is dropped, the whole line after it kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Issue #1186: a contradicted verify sends the agent a fix message with the test name and a
