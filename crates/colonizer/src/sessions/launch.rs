@@ -811,6 +811,7 @@ pub async fn create(
         boot_cpus: None,
         boot_memory: None,
         boot_image: None,
+        boot_root_disk: None,
         app_slot: None,
         boot_attempt_started_at: None,
         failure_class: None,

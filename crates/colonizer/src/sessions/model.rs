@@ -851,6 +851,9 @@ pub struct Session {
     /// existed, which fall back to the configured image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_image: Option<String>,
+    /// The root disk this colony's microVM booted with, for verification runs (issue #1301).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_root_disk: Option<String>,
     /// The app directory this colony's mounts came from. An update keeps that
     /// directory until no live colony still names it (`update::sweep_slots`).
     pub app_slot: Option<String>,
@@ -980,6 +983,7 @@ impl Default for Session {
             boot_cpus: None,
             boot_memory: None,
             boot_image: None,
+            boot_root_disk: None,
             app_slot: None,
             boot_attempt_started_at: None,
             failure_class: None,

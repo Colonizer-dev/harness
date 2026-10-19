@@ -1027,6 +1027,7 @@ mod tests {
             boot_cpus: None,
             boot_memory: None,
             boot_image: None,
+            boot_root_disk: None,
             failure_class: None,
             boot_retries: 0,
             retry_at: None,
