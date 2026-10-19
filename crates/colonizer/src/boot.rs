@@ -1157,7 +1157,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             agent_choice.settings.insert((*key).into(), Value::String((*value).into()));
         }
     }
+    // A graph colony runs the one pass every other colony is refused (ua_graph.rs, issue #1015):
+    // mount the understand-anything skillset whatever its org has switched on, the way a mapping
+    // colony gets archify.
+    let graph_colony = s.origin.as_deref() == Some(crate::ua_graph::ORIGIN);
+    if graph_colony {
+        let plugins = agent_choice
+            .settings
+            .get("plugins")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let with = crate::plugins::with_skillset(plugins, crate::understand_anything::NAME);
+        agent_choice.settings.insert("plugins".into(), Value::String(with));
+    }
     let mut runner_env = agent_env(&agent, &agent_choice);
+    // The graph colony's licence for the full `/understand` pass: the runner's cost guard
+    // (issue #1014) stands down for exactly this colony, which reads the variable.
+    if graph_colony {
+        runner_env.insert("COLONIZER_UA_FULL_PASS".into(), Value::String("1".into()));
+    }
     // The exec policy is the operator's rule about commands, not a model setting: it follows the
     // colony to this module pick, or the boot refuses when the pick cannot apply it.
     // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
@@ -1246,6 +1264,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &task_signals,
     )
     .await;
+    // The cheapest-host hint (issue #1039): the agent module opts this colony's open-weight models
+    // into starting on the cheapest healthy host serving them. The flag is read here; the rewrite
+    // runs after every model substitution below is final.
+    let prefer_cheapest_host = flag("prefer_cheapest_host").unwrap_or(false);
     let route_settings = crate::routing::RoutingSettings {
         enabled: flag("route_per_task").unwrap_or(true),
         chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
@@ -1386,6 +1408,53 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
     runner_env.remove("COLONIZER_MODEL_LOW");
     runner_env.remove("COLONIZER_MODEL_HIGH");
+    // The cheapest-host rewrite (issue #1039), the last hand on the model vars: every substitution
+    // above is final, and only the host prefix of a `provider/model` ever changes. Open-weight
+    // models only — a closed model, or one any operator marked host-sensitive, keeps its named
+    // host, as does a model nobody prices or a host that is degraded, out of quota or has its
+    // tools disabled. The tier vars are stripped just above, so of MODEL_VARS only the vars still
+    // in the env move; the summary model is not on that list and never does. A model the operator
+    // named at launch (`--model` / the MCP `start`) is their statement of intent and is never
+    // rewritten — provenance.rs says so, and the playbook's own switch writes the same override,
+    // so boot leaving it alone is consistent. The candidate filter shares the sensitivity inputs
+    // `resolve_sensitivity_model`/`model_fix` resolved against, so the policy cannot move a colony
+    // onto a host the gateway would then 403.
+    let operator_named = [
+        s.model_override.as_deref().map(|_| "COLONIZER_MODEL"),
+        s.subagent_model_override.as_deref().map(|_| "COLONIZER_SUBAGENT_MODEL"),
+    ]
+    .into_iter()
+    .flatten();
+    let mut cheapest_host: Vec<(String, String)> = Vec::new();
+    if prefer_cheapest_host {
+        let feed = app.price_feed.entries();
+        let state = |p: &providers::Provider| crate::model_hosts::host_state(app, p);
+        let eligible = |p: &providers::Provider| providers::provider_eligible(sensitivity, overrides, p);
+        for var in providers::MODEL_VARS {
+            if operator_named.clone().any(|named| named == var) {
+                continue;
+            }
+            let Some(current) = runner_env.get(var).and_then(Value::as_str).map(str::to_string) else {
+                continue;
+            };
+            let Some(rerouted) = crate::model_hosts::reroute_model(&configured, Some(&feed), &current, &state, &eligible) else {
+                continue;
+            };
+            runner_env.insert(var.into(), Value::String(rerouted.clone()));
+            if var == "COLONIZER_MODEL" {
+                effective_model = rerouted.clone();
+            }
+            cheapest_host.push((current, rerouted));
+        }
+        if !cheapest_host.is_empty() {
+            let said = cheapest_host
+                .iter()
+                .map(|(from, to)| format!("{from} → {to}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log.info(format!("cheapest host: {said}")).await;
+        }
+    }
     let model_changed = !effective_model.is_empty() && effective_model != module_model;
     let mut message = format!("model routing: {}", tier_decision.reason);
     if model_changed {
@@ -1418,7 +1487,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
-    let record = json!({
+    let mut record = json!({
         // Which decision this is and how Jev took part (issue #583), so a report can compare
         // Jev-acted decisions against rule ones by outcome without re-deriving either.
         "point": crate::routing::DECISION_POINT,
@@ -1440,6 +1509,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "cost": cost_record,
         "sensitivity": sensitivity.as_str(),
     });
+    // What the cheapest-host policy moved (issue #1039), so a boot can be checked against the
+    // ranking `GET /api/model-hosts` shows. Absent when the policy is off or moved nothing.
+    if !cheapest_host.is_empty() {
+        record["cheapest_host"] = json!(
+            cheapest_host
+                .iter()
+                .map(|(from, to)| json!({ "from": from, "to": to }))
+                .collect::<Vec<_>>()
+        );
+    }
     app.update_session(id, |x| {
         x.model_routing = Some(record.clone());
         x.sensitivity = Some(sensitivity.as_str().to_string());
@@ -1765,6 +1844,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         target: crate::services::GUEST_DIR.into(),
         read_only: false,
     });
+    // The repository's shared knowledge graph (issue #1015): on a repo the org opted into, every
+    // colony gets the newest stored graph under .ua/ — bound read-only when its base is the
+    // graph's commit, else seeded writable to refresh — and a note pointing at it. The graph
+    // colony itself gets only the seed (ua_graph.rs).
+    let ua_opted_in = orgs::builds_ua_graph(&org_settings, &s.repo);
+    if let Some(placed) = crate::ua_graph::placement(app, &s, &bare, &base, ua_opted_in).await {
+        crate::ua_graph::place(&wt, &placed, &mut mounts)?;
+        if let Some(note) = &placed.note {
+            prompt.push_str(note);
+        }
+    }
     // Skill packs (docs/skill-packs.md), mounted read-only from the mothership. A module that
     // loads packs reads its own runner env first — how a claude-code colony's `plugins` setting
     // arrives — and, when it declares `skill_packs` but carries no list of its own, draws from the
@@ -1783,6 +1873,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // force-append every claude-code map already gets through its own settings, extended to
         // any module that loads packs.
         enabled = crate::plugins::parse_list(&crate::maps::with_archify(&enabled.join(",")));
+    }
+    if graph_colony {
+        // The graph colony loads the understand-anything skillset whatever its org switched on
+        // (ua_graph.rs) — the force-append above, for the pass the cost guard refuses elsewhere.
+        enabled = crate::plugins::parse_list(&crate::plugins::with_skillset(
+            &enabled.join(","),
+            crate::understand_anything::NAME,
+        ));
     }
     let mut plugin_names = crate::plugins::parse_list(
         runner_env
@@ -2251,18 +2349,34 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     )?;
     // Hidden from the guest's `git status` (issue #1169): left untracked and unignored they read as
     // credential files about to be committed, and the agent goes to ignore or inspect them. The
-    // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise.
+    // understand-anything skillset's generated knowledge graph (#1014) is the same kind of noise —
+    // and on a repo opted into the shared graph (#1015) every colony carries `.ua/`, whether or
+    // not it loads the skillset. Also when the worktree already holds a `.ua/`: a colony resumed
+    // after the org opted out keeps its seeded graph, which must stay just as excluded.
     let placeholders = crate::path_policy::exclude_lines(&planned);
+    let ua_carried = ua_opted_in || wt.join(".ua").is_dir();
+    let mut ua_names = plugin_names.clone();
+    if ua_carried && !ua_names.iter().any(|name| name == crate::understand_anything::NAME) {
+        ua_names.push(crate::understand_anything::NAME.to_string());
+    }
     let mut excludes = placeholders.clone();
-    excludes.extend(crate::path_policy::ua_exclude_lines(&plugin_names));
+    excludes.extend(crate::path_policy::ua_exclude_lines(&ua_names));
     crate::path_policy::write_list(&vm_dir.join(crate::path_policy::EXCLUDE_FILE), &excludes)?;
     // The placeholders into the repository's shared `info/exclude` (#1279): a git that strips the
     // environment — the host's own calls, an agent's startup snapshot — never sees the
     // `core.excludesFile` above, and for a linked worktree it reads `info/exclude` from the common
-    // dir, which is the bare repo. Only the placeholders: the understand-anything lines are a
-    // per-colony view (see `ua_exclude_lines`), so they stay guest-side. Best effort: the env arm
-    // still covers the guest's own shells.
-    if let Err(e) = crate::path_policy::write_repo_exclude(&bare, &placeholders.join("\n")) {
+    // dir, which is the bare repo. The placeholders, and on an opted-in repository (or one whose
+    // worktree carries a `.ua/`) the `.ua/` lines too: the host's own staging git reads only this
+    // file, and a seeded knowledge graph must not be swept into a pull request. The skillset's
+    // lines for every other colony stay guest-side (see `ua_exclude_lines`). Best effort: the env
+    // arm still covers the guest's own shells.
+    let mut repo_excludes = placeholders;
+    if ua_carried {
+        repo_excludes.extend(crate::path_policy::ua_exclude_lines(&[
+            crate::understand_anything::NAME.to_string()
+        ]));
+    }
+    if let Err(e) = crate::path_policy::write_repo_exclude(&bare, &repo_excludes.join("\n")) {
         log.warn(format!("path policy: could not update the repository's info/exclude: {e}"))
             .await;
     }

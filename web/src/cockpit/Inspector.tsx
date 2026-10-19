@@ -9,7 +9,7 @@ import { AntAvatar } from "../components/AntAvatar";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../components/AskUserCard";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
-import { SESSION_STATUS, type Tone, cx, isLive, ordinal, restorePlace, statusLabel, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, cx, isLive, isUrl, ordinal, restorePlace, statusLabel, timeAgo } from "../components/ui";
 import { claimWaitPosition } from "../api";
 import { useBehind } from "../behind";
 import { useApi } from "../context";
@@ -191,8 +191,6 @@ function trail(chain: FindingChain): FindingStage[] {
   }
   return stages;
 }
-
-const isUrl = (value: string) => /^https?:\/\//.test(value);
 
 /** The one line under the trail that explains a terminal: why it was rejected or its merge blocked, the error, or the finding it duplicated. */
 function noteFor(chain: FindingChain): { text: string; tone: Tone; href: string | null } | null {

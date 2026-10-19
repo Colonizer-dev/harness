@@ -201,6 +201,12 @@ pub struct OrgSettings {
     /// request, so merges stay off until the operator lists a repository here.
     #[serde(default)]
     pub merge_prs: Vec<String>,
+    /// The repositories of this org (full `owner/name`) the mothership builds an
+    /// Understand-Anything knowledge graph for (issue #1015): one dedicated colony per commit of
+    /// main, the newest graph handed to every colony of the repository. Empty — the default —
+    /// builds none.
+    #[serde(default)]
+    pub ua_graph: Vec<String>,
     /// The merge steward (issue #1172): whether Colonizer merges this org's colonies' own pull
     /// requests when they are green, and rebases them when they fall behind. `None` — the default —
     /// is `off`; the steward never calls GitHub for an org that has not opted in.
@@ -580,6 +586,17 @@ pub fn idle_park(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.watchdog, &schema, "idle_park_minutes").clamp(1, 1440) as i64)
 }
 
+/// How long a colony parked on an unreachable provider waits before the cockpit also flags it
+/// (issue #1068), from the watchdog module's `provider_outage_alert_minutes`. Clamped where read,
+/// for the reason [`idle_park`] is: modules.json is not re-validated on load and
+/// `chrono::Duration::minutes` panics out of bounds. A module config written before the setting
+/// existed reads the schema default of two hours — long enough to ride out an outage, short enough
+/// that a provider gone for a day is not something to sit out quietly.
+pub fn provider_outage_alert(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.watchdog, &schema, "provider_outage_alert_minutes").clamp(1, 10080) as i64)
+}
+
 /// How many times autopilot retries automatically after a turn dies on a *transient* provider error
 /// before it holds the colony for a person (issue #980), from the watchdog module. Zero turns the
 /// automatic retry off: the first transient error holds at once, the pre-#980 behaviour. Clamped
@@ -636,6 +653,18 @@ pub(crate) fn provider_retry_delay(schedule: &[i64], attempt: u32) -> chrono::Du
 pub fn suspend_waiting(modules: &ModulesConfig) -> bool {
     let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
     setting(&modules.sandbox, &schema, "suspend_waiting")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Whether the Claude account's own exhausted quota holds the whole colony queue, from the sandbox
+/// module. On by default: every queued colony waits for the account's reset, whatever it would have
+/// run on. Off, only the queued colonies that spend the Claude account wait — a colony on another
+/// agent module, or whose model roles are routed to configured providers, keeps starting (#1129).
+/// A module config written before the setting existed reads the schema default.
+pub fn claude_quota_pauses_queue(modules: &ModulesConfig) -> bool {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    setting(&modules.sandbox, &schema, "claude_quota_pauses_queue")
         .and_then(Value::as_bool)
         .unwrap_or(true)
 }
@@ -704,6 +733,13 @@ pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
 /// per repository, and until then a merge request is refused before `gh` is reached.
 pub fn merges_prs(org: &OrgSettings, repo: &str) -> bool {
     in_list(org, &org.merge_prs, repo)
+}
+
+/// Whether the mothership builds an Understand-Anything knowledge graph for `repo` (issue #1015):
+/// the repository is in the org's `ua_graph` list, read like `merge_prs` above. Off until the
+/// operator opts in per repository.
+pub fn builds_ua_graph(org: &OrgSettings, repo: &str) -> bool {
+    in_list(org, &org.ua_graph, repo)
 }
 
 /// Whether a repository-list setting of `org` names `repo`: `owner/name`, the org as `owner`, or
@@ -1006,6 +1042,11 @@ pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
             "merge_prs entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
         ));
     }
+    if let Some(bad) = settings.ua_graph.iter().find(|repo| !crate::repo_scope::valid_entry(repo)) {
+        return Err(format!(
+            "ua_graph entries are repositories like acme/api, an org like acme or *, and {bad:?} is not one"
+        ));
+    }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
         return Err("budget must be 0 or more dollars (0 means no budget)".into());
     }
@@ -1213,6 +1254,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("merge_prs") {
         incoming.merge_prs = saved.merge_prs.clone();
+    }
+    if !named("ua_graph") {
+        incoming.ua_graph = saved.ua_graph.clone();
     }
     if !named("auto_merge") {
         incoming.auto_merge = saved.auto_merge;
@@ -1896,6 +1940,35 @@ mod tests {
         assert_eq!(idle_park(&configured), chrono::Duration::minutes(1440));
     }
 
+    /// Issue #1068: the outage alert waits two hours by default, takes the operator's word over it,
+    /// and never reads a hand-edited number outside the schema's range — `Duration::minutes` panics
+    /// out of bounds and modules.json is not re-validated on load.
+    #[test]
+    fn the_provider_outage_alert_reads_the_watchdog_setting_with_a_two_hour_default() {
+        let modules = ModulesConfig::default();
+        assert_eq!(
+            provider_outage_alert(&modules),
+            chrono::Duration::hours(2),
+            "the schema default"
+        );
+        let mut configured = ModulesConfig::default();
+        configured
+            .watchdog
+            .settings
+            .insert("provider_outage_alert_minutes".into(), json!(30));
+        assert_eq!(provider_outage_alert(&configured), chrono::Duration::minutes(30));
+        configured
+            .watchdog
+            .settings
+            .insert("provider_outage_alert_minutes".into(), json!(0));
+        assert_eq!(provider_outage_alert(&configured), chrono::Duration::minutes(1));
+        configured
+            .watchdog
+            .settings
+            .insert("provider_outage_alert_minutes".into(), json!(u64::MAX));
+        assert_eq!(provider_outage_alert(&configured), chrono::Duration::minutes(10080));
+    }
+
     /// Issue #980/#1093: the automatic-retry budget reads the watchdog setting, defaults to three,
     /// and a hand-edited value never exceeds the schema's range.
     #[test]
@@ -1984,6 +2057,25 @@ mod tests {
             !discard_vm(&bogus),
             "the saved false survives a provider this build does not know"
         );
+    }
+
+    /// The Claude account's exhausted quota holds the whole queue unless the operator switched that
+    /// off (#1129): today's behaviour is the default, so an install that never saved the setting is
+    /// unchanged.
+    #[test]
+    fn claude_quota_pauses_queue_defaults_on_and_reads_what_was_saved() {
+        assert!(claude_quota_pauses_queue(&ModulesConfig::default()), "the schema default");
+        let mut configured = ModulesConfig::default();
+        configured
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(false));
+        assert!(!claude_quota_pauses_queue(&configured), "the operator's word wins");
+        configured
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(true));
+        assert!(claude_quota_pauses_queue(&configured));
     }
 
     /// A hand-edited or restored modules.json is read as-is — `validate_settings` only guards the

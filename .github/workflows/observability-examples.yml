@@ -1,0 +1,106 @@
+# The Grafana observability example stack (#862): lint its configs without running it — the
+# compose file must parse, the Alloy files must be formatted and valid, the Prometheus, Loki and
+# Tempo configs must pass their own binaries' checkers, and nothing under the examples (or the
+# two backend docs) may have committed a credential or pointed at a host that is not this stack.
+#
+# Path-filtered like CI's per-piece jobs: it runs when the examples, or this workflow, change.
+name: Observability examples
+
+on:
+  pull_request:
+    paths:
+      - examples/observability/**
+      - .github/workflows/observability-examples.yml
+  push:
+    branches: [main]
+    paths:
+      - examples/observability/**
+      - .github/workflows/observability-examples.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Nothing here publishes, so a superseded run's result is worthless: only the newest commit on a ref
+# matters, and an older one still running is just queued minutes.
+concurrency:
+  group: observability-examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  configs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The same digest-pinned images docker-compose.yml runs, so the checkers are the versions
+      # the stack will actually use.
+      - name: compose file parses
+        run: docker compose -f examples/observability/grafana/docker-compose.yml config --quiet
+
+      # alloy fmt --test exits non-zero when it would change anything; validate parses the
+      # components. file.alloy uses a public-preview component, hence the stability flag.
+      - name: alloy configs are formatted and valid
+        run: |
+          for f in config.alloy file.alloy; do
+            docker run --rm -v "$PWD/examples/observability/grafana/alloy:/work:ro" \
+              grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f \
+              fmt --test "/work/$f"
+            docker run --rm -v "$PWD/examples/observability/grafana/alloy:/work:ro" \
+              grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f \
+              validate --stability.level=public-preview "/work/$f"
+          done
+
+      # promtool resolves authorization credentials_file at check time, so a stub token rides
+      # along at the path the real config expects. Only prometheus.yml is bind-mounted: a read-only
+      # directory mount would stop Docker creating the nested secrets/ mountpoint.
+      - name: prometheus config checks
+        run: |
+          printf ci-stub > /tmp/prometheus.token
+          docker run --rm \
+            -v "$PWD/examples/observability/grafana/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v /tmp/prometheus.token:/etc/prometheus/secrets/prometheus.token:ro \
+            --entrypoint promtool \
+            prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: loki config checks
+        run: |
+          docker run --rm -v "$PWD/examples/observability/grafana/loki:/work:ro" \
+            --entrypoint /usr/bin/loki \
+            grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193 \
+            -config.file=/work/loki.yaml -verify-config
+
+      - name: tempo config checks
+        run: |
+          docker run --rm -v "$PWD/examples/observability/grafana/tempo:/work:ro" \
+            --entrypoint /tempo \
+            grafana/tempo:3.1.0@sha256:3076b8dcdfb32fd6bc5ccef85e7b7313e6199b9cb84366257fc17ecb696db5fd \
+            -config.verify -config.file /work/tempo.yaml
+
+      # A committed token is the one mistake this example could teach: the token file is
+      # gitignored on purpose. Grep the examples and the backend docs (those two for credentials
+      # only, and only if they exist yet) for the shapes real credentials take; placeholders and
+      # variable references ($OWNER_TOKEN, col_PASTE_HERE) deliberately do not match.
+      - name: no credentials committed
+        run: |
+          files="examples/observability"
+          for f in docs/observability/backends.md docs/observability/limits-and-cost.md; do
+            [ -f "$f" ] && files="$files $f"
+          done
+          if grep -rEn --color=never \
+            'Basic [A-Za-z0-9+/=]{20,}|Bearer [A-Za-z0-9._~+/=-]{20,}|glc_[A-Za-z0-9]{10,}|NRAK-[A-Za-z0-9]{10,}|api[_-]?key.{0,3}[:=][[:space:]]*[^[:space:]]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY' \
+            $files; then
+            echo 'credential-looking string(s) above'; exit 1
+          fi
+
+      # Every host an example URL names must be this stack: loopback, a compose service, the
+      # host gateway, a documentation placeholder, or a doc link.
+      - name: example URLs point at the stack
+        run: |
+          bad=$(grep -rhoE 'https?://[A-Za-z0-9._:-]+' examples/observability \
+            | sed -E 's#^https?://##; s/[.:]+$//; s/:[0-9]+$//' | sort -u \
+            | grep -Ev '^(localhost|127\.0\.0\.1|alloy|loki|tempo|prometheus|grafana|host\.docker\.internal)$|\.example\.(invalid|com)$|^(www\.)?(grafana\.com|github\.com)$' \
+            || true)
+          if [ -n "$bad" ]; then echo "unexpected host(s):"; echo "$bad"; exit 1; fi

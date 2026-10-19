@@ -840,7 +840,11 @@ async fn hold_answer(
             // The pause is the tick's own hold on the restore pass (`start_queued` skips it while
             // either pause stands), so the note never promises a resume the tick cannot make.
             let modules = app.modules.read().await.clone();
-            let paused = crate::reclaim::admission_paused(app).await || crate::providers::quota_status(app).await.paused;
+            let quota = crate::providers::quota_status(app).await;
+            // The Claude account's hold scoped to its own colonies (#1129) leaves the queue running,
+            // so this colony is the one that asks whether it spends the account.
+            let claude_held = quota.pauses_claude_only() && crate::providers::ClaudeRoutes::snapshot(app).await.holds(&x);
+            let paused = crate::reclaim::admission_paused(app).await || quota.paused || claude_held;
             // Resolved before the admission read: `org_settings` reads the orgs file with blocking IO.
             let org_settings = app.org_settings(&x.org);
             // Resolved before the sessions lock: auto mode reads the sessions itself.
@@ -1414,6 +1418,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
         .route("/api/sessions/{id}/prewarm", routing::post(prewarm))
+        .route("/api/sessions/{id}/retry", routing::post(retry))
         .route("/api/sessions/{id}/seen", routing::post(seen))
         .route("/api/sessions/{id}/messages", routing::post(message))
         .route("/api/sessions/{id}/events", routing::get(events_ws))

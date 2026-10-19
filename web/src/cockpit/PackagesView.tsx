@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 
 import { FilterSelect, Pagination, SearchBox, optionsBy } from "./ListControls";
 import { matchesQuery, usePagedFilter } from "./paging";
 import { errorMessage, useApi, useToast } from "../context";
-import { cx, timeAgo } from "../components/ui";
+import { cx, isUrl, timeAgo } from "../components/ui";
 import { describeHolder } from "../components/DuplicateNotice";
 import { duplicateHolder } from "../api";
 import type {
@@ -458,11 +458,17 @@ function DependencyList({ data }: { data: PackagesDependencies }): ReactElement 
                       <span className="font-mono text-text">{v.version}</span>
                       {" in "}
                       {v.users.map((u) => `${u.repo.split("/")[1]}/${u.path}`).join(", ")}
-                      {v.vulns.map((x) => (
-                        <a key={x.id} href={x.url} target="_blank" rel="noreferrer" className="ml-2 text-err hover:underline">
-                          {x.id} ({x.severity}){x.fixed ? ` · fixed in ${x.fixed}` : ""}
-                        </a>
-                      ))}
+                      {v.vulns.map((x) =>
+                        isUrl(x.url) ? (
+                          <a key={x.id} href={x.url} target="_blank" rel="noreferrer" className="ml-2 text-err hover:underline">
+                            {x.id} ({x.severity}){x.fixed ? ` · fixed in ${x.fixed}` : ""}
+                          </a>
+                        ) : (
+                          <span key={x.id} className="ml-2 text-err">
+                            {x.id} ({x.severity}){x.fixed ? ` · fixed in ${x.fixed}` : ""}
+                          </span>
+                        ),
+                      )}
                     </div>
                   ))}
                 </div>
@@ -649,7 +655,7 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
                 <EcoIcon eco={r.ecosystem} size={16} />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-baseline gap-x-2">
-                    {r.url ? (
+                    {isUrl(r.url) ? (
                       <a href={r.url} target="_blank" rel="noreferrer" className="font-mono text-text hover:underline">
                         {r.name}
                         {r.version ? `@${r.version}` : ""}

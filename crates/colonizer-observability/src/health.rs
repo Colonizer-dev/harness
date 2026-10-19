@@ -52,6 +52,11 @@ pub struct SignalStatus {
     pub consecutive_failures: u64,
     pub last_success_unix: Option<u64>,
     pub last_error: Option<String>,
+    /// Why the signal is held, when a machine can act on it: `disk`, while the mothership's disk
+    /// guard has the file provider paused (#850). Absent otherwise, so a status.json from before
+    /// the field existed reads exactly as it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     pub records_sent: u64,
     pub bytes_sent: u64,
     /// Ledger bytes of this signal not yet behind a committed cursor (its share of the status's
@@ -124,18 +129,21 @@ impl Status {
         s.consecutive_failures = 0;
         s.last_success_unix = Some(now_unix);
         s.last_error = None;
+        s.reason = None;
         s.records_sent += records;
         s.bytes_sent += bytes;
     }
 
-    /// A failed request; `state` is the signal's new state (`backing_off` or `auth_failed`).
-    pub fn failure(&mut self, signal: &'static str, state: &'static str, message: String) {
+    /// A failed request; `state` is the signal's new state (`backing_off` or `auth_failed`), and
+    /// `reason` the machine-readable hold, when there is one (`disk`, #850).
+    pub fn failure(&mut self, signal: &'static str, state: &'static str, message: String, reason: Option<&'static str>) {
         self.consecutive_failures += 1;
         self.last_error = Some(message.clone());
         let s = self.signal(signal);
         s.state = state;
         s.consecutive_failures += 1;
         s.last_error = Some(message);
+        s.reason = reason;
     }
 
     /// Counts `n` records of `signal` dropped rather than sent: the same counts the `dropped` map

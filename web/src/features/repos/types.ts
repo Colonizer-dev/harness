@@ -163,6 +163,17 @@ export interface RepoGitSummary {
   latest_tag: string | null;
 }
 
+/** GET /api/understand-anything/graphs/{o}/{r}: the repo's knowledge graph — the opt-in, the commit
+ *  it was built at, whether a build is running, and what its jobs have cost. */
+export interface RepoGraph {
+  enabled: boolean;
+  commit: string | null;
+  built_at: string | null;
+  building: boolean;
+  jobs: number;
+  cost_usd: number;
+}
+
 export interface RepoBranch {
   name: string;
   sha: string;

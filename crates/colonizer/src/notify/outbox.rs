@@ -15,7 +15,7 @@
 use super::{post, secret};
 use crate::{
     ApiResult, App, Shared, client_error,
-    util::{short_id, write_private},
+    util::{public_redirect_policy, short_id, write_private},
 };
 use axum::{
     Json,
@@ -349,6 +349,9 @@ pub(crate) async fn run(app: Shared) {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        // A redirect only to another public http(s) host, like every delivery client (the first
+        // URL was checked where the subscription or the webhook was saved).
+        .redirect(public_redirect_policy())
         .build()
     else {
         tracing::warn!("notify: could not build an HTTP client; webhook retries are off");
@@ -415,6 +418,8 @@ fn client() -> Result<reqwest::Client, crate::AppError> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        // A redirect only to another public http(s) host, like the retry worker's client.
+        .redirect(public_redirect_policy())
         .build()
         .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("no HTTP client: {e}")))
 }

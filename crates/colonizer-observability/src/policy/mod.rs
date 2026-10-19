@@ -43,21 +43,23 @@ pub enum Tier {
     Content,
 }
 
-/// Whether content-tier values may leave the machine (P3/P4). Until the gate's conditions (install
-/// switch, org opt-in, known sensitivity) are wired in, it is always closed.
+/// Whether content-tier values may leave the machine (P3/P4). The gate's conditions — install
+/// switch, org opt-in, known sensitivity — are resolved by the caller: the live exporter and the
+/// backfill always hold a closed one, and only the offline export (`--content`) ever opens it,
+/// per colony.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ContentGate {
     open: bool,
 }
 
 impl ContentGate {
-    /// No content: the only gate outside tests.
+    /// No content: the live exporter's and the backfill's only gate.
     pub const fn closed() -> ContentGate {
         ContentGate { open: false }
     }
 
-    /// Content allowed, for tests of what the rest of the policy does to it.
-    #[cfg(test)]
+    /// Content allowed: the offline export's half of P3's install switch, held only once the
+    /// per-colony conditions there (org opt-in, known sensitivity) have passed.
     pub(crate) const fn open() -> ContentGate {
         ContentGate { open: true }
     }
@@ -246,6 +248,14 @@ impl Policy {
 /// whatever it looks like, and an identifier or digest key (`tool_call_id`, `*.sha`) skips only the
 /// high-entropy layer, so a long provider id stays joinable while a known token shape is still caught.
 pub(crate) fn scrub_text(s: &str, key: Option<&str>, cap: usize) -> (String, bool) {
+    // The conformance run's `OTEL_CONFORMANCE_DEMO=leak-canary` toggle (#864): skips the
+    // export-time redaction pass so a seeded canary secret reaches the wire, which the
+    // conformance sweep must catch. Never set outside that test.
+    #[cfg(test)]
+    if SKIP_REDACTION_FOR_CONFORMANCE.load(std::sync::atomic::Ordering::SeqCst) {
+        let cut = s.len() > cap;
+        return (truncate(s, cap).into_owned(), cut);
+    }
     let unblobbed = scrub::blobs(s);
     let redacted = match key {
         None => redact_text(&unblobbed).into_owned(),
@@ -254,6 +264,10 @@ pub(crate) fn scrub_text(s: &str, key: Option<&str>, cap: usize) -> (String, boo
     let cut = redacted.len() > cap;
     (truncate(&redacted, cap).into_owned(), cut)
 }
+
+/// See the hook in [`scrub_text`].
+#[cfg(test)]
+pub(crate) static SKIP_REDACTION_FOR_CONFORMANCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `value` redacted as the field `key` of a JSON object: colonizer-redact's key-aware path.
 fn redact_under(key: &str, value: String) -> String {

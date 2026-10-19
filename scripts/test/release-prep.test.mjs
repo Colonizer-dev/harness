@@ -3,7 +3,8 @@
 // so the bump, the crate-ahead case, the no-op and the tag gate are all exercised without cargo
 // (`--no-lock`) or a network.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
@@ -11,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 
 import {
   RELEASE_CRATES,
+  decideTags,
+  laterFragments,
   latestRelease,
   main,
   nextPatch,
@@ -19,6 +22,7 @@ import {
   planCrates,
   prep,
   releaseNotesStub,
+  releaseVersion,
   setPackageVersion,
   setPathDependencyVersions,
   verify,
@@ -227,6 +231,136 @@ test('the command line: plan, prep, verify and their exit codes', () => {
     console.log = log;
     console.error = err;
   }
+});
+
+// --- The tag gate against git history (#1396): fixtures that are repositories, with release commits
+// squashed onto main the way a merged release pull request lands.
+
+function git(root, ...args) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function commit(root, message) {
+  git(root, 'add', '-A');
+  git(root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', message);
+  return git(root, 'rev-parse', 'HEAD').trim();
+}
+
+/** Lands a pull request that adds one fragment. */
+function land(root, file) {
+  writeFileSync(join(root, 'changelog.d', file), `**${file} landed.** Something a user notices. ([#1300])\n`);
+  return commit(root, `add ${file}`);
+}
+
+/** A repository at v0.2.10 (tagged), with no fragment pending. */
+function repo() {
+  const root = fixture();
+  git(root, 'init', '-q', '-b', 'main');
+  commit(root, 'base');
+  git(root, 'tag', 'v0.2.10');
+  return root;
+}
+
+/**
+ * The squashed release commit: `prep` run on main as it was, except that `notYet` fragments are hidden
+ * from it, as if they landed while the release pull request was open.
+ */
+function release(root, notYet = [], subject) {
+  const aside = mkdtempSync(join(scratch, 'aside-'));
+  for (const f of notYet) renameSync(join(root, 'changelog.d', f), join(aside, f));
+  const r = prep(root, { lock: false, date: '2026-10-19' });
+  for (const f of notYet) renameSync(join(aside, f), join(root, 'changelog.d', f));
+  return commit(root, subject ?? `release: ${r.version} (#1388)`);
+}
+
+/** Runs the command line, returning its exit code and what it printed to stdout. */
+function run(argv) {
+  const lines = [];
+  const log = console.log;
+  const err = console.error;
+  console.log = (...a) => lines.push(a.join(' '));
+  console.error = () => {};
+  try {
+    return { code: main(argv), lines };
+  } finally {
+    console.log = log;
+    console.error = err;
+  }
+}
+
+test('releaseVersion reads a squashed release subject and nothing else', () => {
+  assert.equal(releaseVersion('release: v0.2.16 (#1388)'), 'v0.2.16');
+  assert.equal(releaseVersion('release: v0.2.16'), 'v0.2.16');
+  assert.equal(releaseVersion('release: v0.2.16 and more'), null);
+  assert.equal(releaseVersion('fix: release: v0.2.16'), null);
+});
+
+test('verify: a fragment that landed during the freeze does not block the release that left it', () => {
+  const root = repo();
+  land(root, '1300.fixed.md');
+  land(root, '1301.added.md');
+  land(root, '1302.fixed.md'); // merged while the release pull request was open
+  const sha = release(root, ['1302.fixed.md']);
+  assert.deepEqual([...laterFragments(root, sha).later], ['1302.fixed.md']);
+  const notes = [];
+  assert.deepEqual(verify(root, 'v0.2.11', { notes }), []);
+  assert.match(notes.join('\n'), /1 fragment\(s\) .* belong to the next release: 1302\.fixed\.md/);
+  // Away from the release commit there is no history to go by, and the gate is strict again.
+  land(root, '1303.fixed.md');
+  assert.ok(verify(root, 'v0.2.11').some((e) => /2 fragment\(s\) left/.test(e)));
+});
+
+test('verify: a fragment that was there when the release was cut still blocks it', () => {
+  const root = repo();
+  land(root, '1300.fixed.md');
+  land(root, '1301.added.md');
+  const sha = release(root, ['1300.fixed.md']); // predates 1301, which the release folded
+  assert.deepEqual([...laterFragments(root, sha).later], []);
+  const problems = verify(root, 'v0.2.11');
+  assert.ok(problems.some((e) => /1 fragment\(s\) left in changelog\.d\/ at v0\.2\.11 \(1300\.fixed\.md\)/.test(e)), problems.join('\n'));
+});
+
+test('decideTags: an older release that fails the gate is skipped when a newer one supersedes it', () => {
+  const list = [
+    { sha: 'a', version: 'v0.2.15' },
+    { sha: 'b', version: 'v0.2.16' },
+  ];
+  const bad = new Set(['v0.2.15']);
+  const gate = (r) => (bad.has(r.version) ? ['2 fragment(s) left'] : []);
+  assert.deepEqual(
+    decideTags(list, gate).map((d) => [d.version, d.action, d.supersededBy]),
+    [['v0.2.15', 'skip', 'v0.2.16'], ['v0.2.16', 'tag', undefined]],
+  );
+  bad.add('v0.2.16');
+  assert.deepEqual(decideTags(list, gate).map((d) => d.action), ['skip', 'fail'], 'the newest one still fails');
+  bad.clear();
+  assert.deepEqual(decideTags(list, gate).map((d) => d.action), ['tag', 'tag']);
+  assert.deepEqual(decideTags(list, gate, (v) => v === 'v0.2.15').map((d) => d.action), ['tagged', 'tag']);
+});
+
+test('tags: skips the untaggable older release with a notice and tags the newer one', () => {
+  const root = repo();
+  land(root, '1300.fixed.md');
+  land(root, '1301.added.md');
+  const older = release(root, ['1300.fixed.md'], 'release: v0.2.11 (#1375)'); // left one it should have folded
+  land(root, '1302.fixed.md');
+  land(root, '1303.fixed.md');
+  const newer = release(root, ['1303.fixed.md'], 'release: v0.2.12 (#1388)'); // folds 1300 and 1302; 1303 is later
+  land(root, 'unrelated.changed.md');
+  const r = run(['tags', '--ref', 'main', '--root', root]);
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.lines, [`skip v0.2.11 ${older}`, `tag v0.2.12 ${newer}`]);
+  assert.equal(git(root, 'worktree', 'list').trim().split('\n').length, 1, 'no worktree is left behind');
+  assert.equal(git(root, 'tag', '--list', 'v0.2.1[12]'), '', 'the command tags nothing itself');
+});
+
+test('tags: the newest release failing the gate fails the run; nothing pending is a quiet success', () => {
+  const root = repo();
+  assert.deepEqual(run(['tags', '--ref', 'main', '--root', root]), { code: 0, lines: [] });
+  land(root, '1300.fixed.md');
+  land(root, '1301.added.md');
+  const sha = release(root, ['1300.fixed.md'], 'release: v0.2.11 (#1375)');
+  assert.deepEqual(run(['tags', '--ref', 'main', '--root', root]), { code: 1, lines: [`fail v0.2.11 ${sha}`] });
 });
 
 test('the real repository: the workspace is at a state prep can read', () => {

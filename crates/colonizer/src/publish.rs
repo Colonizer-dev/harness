@@ -211,9 +211,11 @@ async fn publish_session_with(app: Shared, id: String, grant: Option<crate::auth
             }
         }
     }
-    // A mapping colony's product is its architecture map, not a pull request (maps.rs).
+    // A mapping colony's product is its architecture map, not a pull request (maps.rs); a graph
+    // colony's is its knowledge graph (ua_graph.rs).
     if let Some(ended) = app.session(&id).await {
         crate::maps::on_colony_end(&app, &ended).await;
+        crate::ua_graph::on_colony_end(&app, &ended).await;
         // deja (issue #495): a published colony is a finished colony, however it ended here — its
         // transcripts are final, so index them for the org's recall. Fire-and-forget.
         crate::deja::spawn_after_stop(app.clone(), &ended);

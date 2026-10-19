@@ -67,6 +67,13 @@ pub(crate) const PUBLISH_BLOCKED_REASON: &str = "publish_blocked";
 /// back once the attempt's delay has passed.
 pub(crate) const PROVIDER_RETRY_REASON: &str = "provider_retry";
 
+/// The park reason a colony gets when the retry ladder has run out and the provider is still
+/// unreachable (issue #1068). The hold the give-up used to take was fatal for what is usually a
+/// blip: a fifteen-minute provider outage ended the colony. Instead it waits here, releases its
+/// slot, and [`resume_provider_outage_parked`] probes the provider and brings it back by itself —
+/// after [`orgs::provider_outage_alert`] of waiting, the cockpit also flags it for a person.
+pub(crate) const PROVIDER_OUTAGE_REASON: &str = "provider_outage";
+
 /// The attention reason stamped on a hold-parked colony whose question is above the judge's ceiling
 /// (issue #876): the backoff never resumes it, so the queue raises this once for `notify` to read as
 /// "a person has to answer this". Distinct from [`HOLD_TIMEOUT_REASON`] so [`hold_park_action`] still
@@ -588,6 +595,10 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Colonies parked by the automatic provider-error retry (issue #980) whose backoff step is due
     // resume on this same tick, after the parks above.
     resume_provider_retry_parked(app).await;
+    // Colonies whose retry ladder ran out while the provider was still unreachable (issue #1068)
+    // park waiting for it and resume by themselves once a probe says it answers, rather than being
+    // held and stopped. On the same tick, after the retries above.
+    resume_provider_outage_parked(app).await;
     // Colonies parked waiting on an unusable Claude account (issue #984) resume on this same tick
     // once the account works again — first the re-sign-in sweep, then the resumes it unblocks.
     resume_waiting_for_account(app).await;
@@ -596,9 +607,18 @@ pub(crate) async fn start_queued(app: &Shared) {
     suspend_waiting_colonies(app, &modules).await;
     // Every routable provider's plan out: the queue holds, and `/api/status` says why. Checked per
     // tick rather than per colony, so a recovered provider unpauses the whole queue at once.
-    if providers::quota_status(app).await.paused {
+    let quota = providers::quota_status(app).await;
+    if quota.paused {
         return;
     }
+    // The Claude account is out but its hold is scoped to its own colonies (#1129), so they wait and
+    // every other colony starts; the ids come off the poll above, and the snapshot behind them
+    // answers the suspended and prewarming colonies this tick never queued.
+    let claude = if quota.pauses_claude_only() {
+        Some(providers::ClaudeRoutes::snapshot(app).await)
+    } else {
+        None
+    };
     // Below the free-space floor: queued colonies that would start hold until the reclaim tick
     // frees room. The hold rides in `room`, not an early return: retiring a colony that can never
     // start takes no slot, and leaving it Queued would stall the queue head (and all the disk the
@@ -640,7 +660,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // of them — answering it is what the user has been waiting for (issue #562). The floor above
     // holds this back with every other start.
     if !held {
-        restore_suspended(app, &modules).await;
+        restore_suspended(app, &modules, claude.as_ref()).await;
     }
     // A colony routed to an account in trouble (issue #984) does not boot only to fail its first
     // turn: it holds its place in the queue until the account works again, exactly as the account's
@@ -665,6 +685,7 @@ pub(crate) async fn start_queued(app: &Shared) {
             |s| {
                 let (org_limit, repo_limit) = limits(&s.org);
                 !held
+                    && !quota.held_ids.contains(&s.id)
                     && !troubled_accounts.contains(&crate::account_health::account_of(s))
                     && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
             },
@@ -804,7 +825,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // launches above — has had its say: a pre-warm request (issue #701) boots a suspended colony's
     // question with whatever slots are left, never ahead of a colony that already holds an answer.
     if !held {
-        prewarm_requested(app, &modules).await;
+        prewarm_requested(app, &modules, claude.as_ref()).await;
     }
 }
 
@@ -1097,6 +1118,169 @@ pub(crate) fn waiting_for_account(s: &Session) -> bool {
             .is_some_and(|p| p.reason == crate::account_health::WAITING_FOR_ACCOUNT_REASON)
 }
 
+/// Whether this colony is parked on an unreachable provider (issue #1068), the park shape
+/// [`resume_provider_outage_parked`] owns: distinct from the retry park, which is still counting
+/// down its ladder, and from a quota park, which waits for a reset time rather than for the
+/// provider to answer. Pure, so the filter is testable apart from the tick.
+pub(crate) fn provider_outage_parked(s: &Session) -> bool {
+    s.status == SessionStatus::Parked && s.parked.as_ref().is_some_and(|p| p.reason == PROVIDER_OUTAGE_REASON)
+}
+
+/// Whether a provider-outage park is due for its probe: it has been waiting at least as long as
+/// the retry backoff it was parked on would have waited ([`orgs::provider_retry_delay`], the same
+/// call [`provider_retry_due`] makes), so an outage costs one step of the ladder rather than none.
+/// Pure, so the wait is testable apart from the probe that acts on it.
+pub(crate) fn provider_outage_due(s: &Session, now: DateTime<Utc>, schedule: &[i64]) -> bool {
+    if !provider_outage_parked(s) {
+        return false;
+    }
+    let park = s.parked.as_ref().expect("provider_outage_parked checked the record");
+    now >= park.at + orgs::provider_retry_delay(schedule, s.provider_retries.max(1))
+}
+
+/// The provider whose outage parked `s`, by routing rather than by text (issue #1068): the
+/// gateway's record of the colony's last routed request, else its single `allowed_providers` entry,
+/// else the one provider prefix its models share — the same attribution a quota error that names no
+/// provider gets ([`provider_quota::routed_provider`]). `None` when the colony's traffic names no
+/// provider on file, which is not a reason to strand it.
+pub(crate) fn outage_provider(app: &Shared, s: &Session) -> Option<String> {
+    let provider_ids: Vec<String> = app.providers().into_iter().map(|p| p.id).collect();
+    let last_route = app.gateway.last_route(&s.id);
+    provider_quota::routed_provider(
+        last_route.as_deref(),
+        s.allowed_providers.as_deref(),
+        s.model_usage.as_ref(),
+        &provider_ids,
+    )
+}
+
+/// Resumes every colony parked on an unreachable provider (issue #1068), on the same tick as
+/// [`resume_provider_retry_parked`]: once the backoff step has passed, the provider is probed
+/// ([`crate::gateway::probe::probe_cached`], its 60 s read-through cache) and the colony is brought
+/// back through `lifecycle::resume` when it answers. The slot was released when the park was taken,
+/// so a colony waiting out an outage costs the queue nothing.
+///
+/// A provider that cannot be resolved, or is no longer on file, resumes anyway: the park exists to
+/// stop an outage costing the colony its work, and nothing here may turn it back into that.
+pub(crate) async fn resume_provider_outage_parked(app: &Shared) {
+    alert_provider_outages(app).await;
+    let now = Utc::now();
+    let schedule = orgs::provider_retry_schedule(&app.modules.read().await.clone());
+    // Read once per tick: the provider list is a file read and every colony's id comes out of it.
+    let providers = app.providers();
+    let provider_ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
+    let parked: Vec<String> = {
+        let sessions = app.sessions.read().await;
+        sessions
+            .iter()
+            // Issue #673: a merge covered this colony's work — it stays parked until it is kept.
+            .filter(|s| !crate::supersede::blocks_start(s))
+            .filter(|s| provider_outage_due(s, now, &schedule))
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    for id in parked {
+        let Some(s) = app.session(&id).await else { continue };
+        let last_route = app.gateway.last_route(&s.id);
+        let provider = provider_quota::routed_provider(
+            last_route.as_deref(),
+            s.allowed_providers.as_deref(),
+            s.model_usage.as_ref(),
+            &provider_ids,
+        );
+        let on_file = provider.as_deref().and_then(|id| providers.iter().find(|p| p.id == id));
+        if let Some(provider) = on_file {
+            let health = crate::gateway::probe_cached(app, provider).await;
+            if health["reachable"].as_bool() != Some(true) {
+                continue;
+            }
+            // The outage window the cockpit's provider health reads closes here.
+            app.gateway.history.record_event(&provider.id, "recovered", Utc::now());
+        }
+        // Re-checked in the claim under the colony's lifecycle lock, as the other sweeps do: a
+        // colony no longer parked for this reason, or an operator who just stopped it, is left be.
+        if crate::lifecycle::resume_if(app, &id, provider_outage_parked).await.is_ok() {
+            app.session_log(
+                &id,
+                "info",
+                format!(
+                    "resuming automatically: {} answers again",
+                    provider.as_deref().unwrap_or("the provider")
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+/// Raises the attention an outage park grows once it has waited past the watchdog's alert window
+/// (issue #1068), so a provider gone for hours is not something the operator has to notice in a
+/// list. Before the loop above, and once per park: the attention's own `alerted` mark is the guard,
+/// so a colony waiting days raises this once, not once a tick.
+pub(crate) async fn alert_provider_outages(app: &Shared) {
+    let now = Utc::now();
+    let parked: Vec<String> = {
+        let sessions = app.sessions.read().await;
+        sessions
+            .iter()
+            .filter(|s| provider_outage_parked(s))
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    for id in parked {
+        let Some(s) = app.session(&id).await else { continue };
+        let Some(attention) = s.attention.as_ref() else { continue };
+        if !outage_alert_due(attention, now) {
+            continue;
+        }
+        // How long it has actually waited, not the window it was promised: a park taken while the
+        // operator was away is already past the deadline on the next tick.
+        let waited = s
+            .parked
+            .as_ref()
+            .map(|p| (now - p.at).num_minutes())
+            .unwrap_or_default()
+            .max(0);
+        let provider = attention["provider"].as_str();
+        let detail = match provider {
+            Some(p) => format!(
+                "{p} has been unreachable for {waited} minutes; the colony is parked waiting for it and resumes on its own as soon as it answers"
+            ),
+            None => format!(
+                "The provider has been unreachable for {waited} minutes; the colony is parked waiting for it and resumes on its own as soon as it answers"
+            ),
+        };
+        app.session_log(&id, "warn", format!("autopilot: provider outage — {detail}"))
+            .await;
+        app.update_session(&id, |x| {
+            if provider_outage_parked(x)
+                && let Some(attention) = x.attention.as_mut()
+                && outage_alert_due(attention, now)
+            {
+                attention["alerted"] = json!(true);
+                attention["detail"] = Value::String(detail);
+            }
+        })
+        .await;
+    }
+}
+
+/// Whether an outage park's attention is past the deadline the park stamped into it, and has not
+/// said so yet (issue #1068). Pure, so the escalation is testable apart from the sweep that acts on
+/// it; the `alerted` mark is what makes it fire once per park rather than once a tick.
+pub(crate) fn outage_alert_due(attention: &Value, now: DateTime<Utc>) -> bool {
+    if attention.get("reason").and_then(Value::as_str) != Some(PROVIDER_OUTAGE_REASON)
+        || attention.get("alerted").and_then(Value::as_bool) == Some(true)
+    {
+        return false;
+    }
+    attention
+        .get("alert_at")
+        .and_then(Value::as_str)
+        .and_then(|at| at.parse::<DateTime<Utc>>().ok())
+        .is_some_and(|alert_at| now >= alert_at)
+}
+
 // ---------------------------------------------------------------------------
 // Suspend and restore (issue #562)
 // ---------------------------------------------------------------------------
@@ -1349,7 +1533,11 @@ async fn retire_and_rotate(app: &Shared, id: &str, revert: impl FnOnce(&mut Sess
 /// failed boot leaves it on the record. The link drop and the event-log rotation are the resume
 /// handler's, for the same reason: the fresh microVM's agentd numbers events from 1, and a stale
 /// log would swallow them.
-pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::ModulesConfig) {
+pub(crate) async fn restore_suspended(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    claude: Option<&providers::ClaudeRoutes>,
+) {
     let mut candidates: Vec<(DateTime<Utc>, String)> = {
         app.sessions
             .read()
@@ -1358,6 +1546,9 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
             // Issue #673: a merge covered this colony's work — the answer can wait until it is kept.
             .filter(|s| !crate::supersede::blocks_start(s))
+            // Issue #1129: a colony the scoped Claude hold covers waits for the reset, as it would
+            // have behind the whole-queue pause this tick no longer returns on.
+            .filter(|s| claude.is_none_or(|c| !c.holds(s)))
             .map(|s| (restore_key(s), s.id.clone()))
             .collect()
     };
@@ -1443,7 +1634,11 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
 /// question until an answer lands ([`deliver_prewarmed`]) or the timeout gives up
 /// ([`prewarm_expire`]). The link drop and the event-log rotation are this pass's, like the
 /// restore's: the fresh microVM's agentd numbers events from 1, and a stale log would swallow them.
-pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::ModulesConfig) {
+pub(crate) async fn prewarm_requested(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    claude: Option<&providers::ClaudeRoutes>,
+) {
     let timeout = orgs::prewarm_timeout(modules);
     let now = Utc::now();
     let mut candidates: Vec<(DateTime<Utc>, String)> = {
@@ -1459,6 +1654,8 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
                     // Issue #673: a merge covered this colony's work — like the restore pass, no
                     // warm-up until it is kept.
                     && !crate::supersede::blocks_start(s)
+                    // Issue #1129: a warm-up boots the colony, so the scoped Claude hold covers it too.
+                    && claude.is_none_or(|c| !c.holds(s))
             })
             .map(|s| (s.prewarm.as_ref().map(|p| p.requested_at).unwrap_or(now), s.id.clone()))
             .collect()
@@ -2755,6 +2952,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The Claude account's own cap holds the whole queue by default; switched off, only the queued
+    /// colonies that spend the account wait and every other one starts (#1129).
+    #[tokio::test]
+    async fn a_scoped_claude_quota_holds_only_the_colonies_that_spend_the_account() {
+        let root = std::env::temp_dir().join(format!("colonizer-claude-scope-{}", crate::util::short_id()));
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![
+                crate::modules::AgentModule::test("claude-code").needs_claude(true),
+                crate::modules::AgentModule::test("opencode").needs_claude(false),
+            ],
+            |_| {},
+        );
+        // The reclaim floor would otherwise pause admission on a host with less than the default 5G
+        // free, keeping every colony queued for a reason this test is not about.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("min_free_disk".into(), json!("0"));
+        let mut on_claude = colony("acme", SessionStatus::Queued);
+        on_claude.id = "on-claude".into();
+        on_claude.agent = "claude-code".into();
+        let mut on_opencode = colony("acme", SessionStatus::Queued);
+        on_opencode.id = "on-opencode".into();
+        on_opencode.agent = "opencode".into();
+        *app.sessions.write().await = vec![on_claude, on_opencode];
+        app.gateway
+            .mark_account_quota_exhausted(Some("10-05 19:51:58".into()), Some(Utc::now().timestamp() + 3600));
+
+        // The default: the account's cap pauses the queue, so both colonies keep their place.
+        start_queued(&app).await;
+        for id in ["on-claude", "on-opencode"] {
+            assert_eq!(
+                app.session(id).await.unwrap().status,
+                SessionStatus::Queued,
+                "{id} waits on the whole queue"
+            );
+        }
+
+        // Scoped: the opencode colony never mounts the Claude login, so it leaves the queue while
+        // the claude-code colony keeps its place.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(false));
+        start_queued(&app).await;
+        assert_eq!(
+            app.session("on-claude").await.unwrap().status,
+            SessionStatus::Queued,
+            "the colony that spends the Claude account still waits for the reset"
+        );
+        assert_ne!(
+            app.session("on-opencode").await.unwrap().status,
+            SessionStatus::Queued,
+            "a colony on another agent module keeps starting while the account is out"
+        );
+
+        // The same hold covers a boot that is not a fresh admission: an answered suspension comes
+        // back ahead of the queue, and it would land on the exhausted account.
+        let mut answered = waiting_colony("answered", "claude-code", Some("s1"));
+        answered.suspended = Some(Suspension {
+            at: Utc::now() - chrono::Duration::minutes(5),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        answered.pending_answer = Some(PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
+        });
+        app.sessions.write().await.push(answered);
+        std::fs::create_dir_all(app.session_dir("answered")).unwrap();
+        start_queued(&app).await;
+        let answered = app.session("answered").await.unwrap();
+        assert_eq!(
+            answered.status,
+            SessionStatus::WaitingForAnswer,
+            "the scoped hold keeps a Claude colony suspended as well as queued"
+        );
+        assert!(answered.suspended.is_some(), "it did not boot to deliver the answer");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn a_provider_pause_names_the_provider_by_its_display_name_never_claude() {
         let root = std::env::temp_dir().join(format!("colonizer-quota-name-{}", crate::util::short_id()));
@@ -3530,6 +3815,151 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A colony parked on an unreachable provider (issue #1068): parked with the outage reason, a
+    /// kept worktree, and an attention naming the provider and the alert deadline.
+    fn provider_outage_colony(id: &str, at: chrono::DateTime<chrono::Utc>, alert_at: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = colony("acme", SessionStatus::Parked);
+        s.id = id.into();
+        s.git_admin_dir = Some("git".into());
+        s.attention = Some(json!({
+            "reason": PROVIDER_OUTAGE_REASON,
+            "nudges": 0,
+            "cause": "gateway_error",
+            "provider": "anthropic",
+            "alert_at": alert_at,
+        }));
+        s.parked = Some(crate::sessions::Park {
+            at,
+            reason: PROVIDER_OUTAGE_REASON.into(),
+            resets_at: None,
+            vm_kept: false,
+            question_risk: None,
+        });
+        s
+    }
+
+    /// Issue #1068: the outage park is its own shape — it is not the retry park still counting down
+    /// a ladder, nor a running colony, and a retry park is not an outage park.
+    #[test]
+    fn only_the_outage_reason_is_an_outage_park() {
+        let now = Utc::now();
+        assert!(provider_outage_parked(&provider_outage_colony("o", now, now)));
+        assert!(!provider_outage_parked(&provider_retry_parked_colony("r", 1, now)));
+        let mut running = provider_outage_colony("x", now, now);
+        running.status = SessionStatus::Running;
+        assert!(!provider_outage_parked(&running), "an unparked colony is no park at all");
+    }
+
+    /// Issue #1068: the outage park waits the retry backoff before probing, so an outage costs a step
+    /// of the ladder rather than nothing — and a colony just parked is not due yet.
+    #[test]
+    fn an_outage_park_is_probed_after_a_retry_backoff_step() {
+        let schedule = [1i64, 5, 15];
+        let now = Utc::now();
+        let waited = now - chrono::Duration::minutes(6);
+        assert!(
+            provider_outage_due(&provider_outage_colony("waited", waited, now), now, &schedule),
+            "five minutes is due for the default schedule"
+        );
+        assert!(
+            !provider_outage_due(&provider_outage_colony("just", now, now), now, &schedule),
+            "a colony only just parked waits the first minute"
+        );
+        assert!(
+            !provider_outage_due(&provider_retry_parked_colony("retry", 1, waited), now, &schedule),
+            "the retry sweep owns that one"
+        );
+    }
+
+    /// Issue #1068: the outage park's attention escalates once the deadline passes — and once only,
+    /// because the sweep stamps `alerted` back onto the attention it already raised. A card that is
+    /// not an outage park, or has no deadline to pass, never escalates.
+    #[test]
+    fn an_outage_park_raises_its_attention_once_the_deadline_passes() {
+        let now = Utc::now();
+        let attention = json!({"reason": PROVIDER_OUTAGE_REASON, "alert_at": (now - chrono::Duration::minutes(1))});
+        assert!(outage_alert_due(&attention, now), "the deadline has passed");
+        assert!(
+            outage_alert_due(&attention, now + chrono::Duration::minutes(1)),
+            "and stays due — the mark, not the clock, is what fires it once"
+        );
+        let mut raised = attention.clone();
+        raised["alerted"] = json!(true);
+        assert!(!outage_alert_due(&raised, now), "once per park, not once a tick");
+        assert!(
+            !outage_alert_due(
+                &json!({"reason": PROVIDER_OUTAGE_REASON, "alert_at": (now + chrono::Duration::hours(1))}),
+                now
+            ),
+            "a deadline still ahead is not due"
+        );
+        assert!(
+            !outage_alert_due(
+                &json!({"reason": "autopilot_held", "alert_at": (now - chrono::Duration::hours(1))}),
+                now
+            ),
+            "another reason's card is not ours to raise"
+        );
+        assert!(
+            !outage_alert_due(&json!({"reason": PROVIDER_OUTAGE_REASON}), now),
+            "no deadline, no alert"
+        );
+    }
+
+    /// Issue #1068: the sweep itself, not just the predicates — a colony whose provider answers
+    /// resumes by itself (queuing behind the fillers), one whose provider is still unreachable stays
+    /// parked, and one whose provider cannot be resolved resumes anyway rather than being stranded.
+    #[tokio::test]
+    async fn an_outage_park_resumes_only_when_its_provider_answers() {
+        let root = std::env::temp_dir().join(format!("colonizer-provider-outage-{}", crate::util::short_id()));
+        // The endpoint is a closed port: the probe says unreachable, so this one stays parked.
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        let now = Utc::now();
+        let long_ago = now - chrono::Duration::minutes(30);
+        let mut routable = provider_outage_colony("routable", long_ago, now + chrono::Duration::hours(2));
+        routable.allowed_providers = Some(vec!["bailian".into()]);
+        // No provider on file this colony's traffic can be attributed to: nothing to probe, so the
+        // park must not strand it.
+        let mut unresolvable = provider_outage_colony("unresolvable", long_ago, now + chrono::Duration::hours(2));
+        unresolvable.model_usage = Some(json!({"somewhere-else/Model-X": {"requests": 1}}));
+        let sessions = vec![
+            routable,
+            unresolvable,
+            provider_outage_colony("fresh", now, now + chrono::Duration::hours(2)),
+        ];
+        let mut sessions = sessions;
+        for i in 0..3 {
+            let mut f = colony("acme", SessionStatus::Running);
+            f.id = format!("filler-{i}");
+            sessions.push(f);
+        }
+        *app.sessions.write().await = sessions;
+        for id in ["routable", "unresolvable", "fresh"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        resume_provider_outage_parked(&app).await;
+        let still = app.session("routable").await.unwrap();
+        assert_eq!(
+            still.status,
+            SessionStatus::Parked,
+            "the provider is still unreachable, so the colony waits"
+        );
+        let stranded = app.session("unresolvable").await.unwrap();
+        assert_eq!(
+            stranded.status,
+            SessionStatus::Queued,
+            "no provider to probe is no reason to strand a colony: it resumes (queues behind the fillers)"
+        );
+        let fresh = app.session("fresh").await.unwrap();
+        assert_eq!(
+            fresh.status,
+            SessionStatus::Parked,
+            "a colony only just parked waits its backoff"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn the_queue_holds_a_waiting_child_and_re_bases_one_whose_parent_is_gone() {
         let root = std::env::temp_dir().join(format!("colonizer-queue-{}", crate::util::short_id()));
@@ -3990,7 +4420,7 @@ mod tests {
         std::fs::create_dir_all(app.session_dir("answered")).unwrap();
         std::fs::create_dir_all(app.session_dir("second")).unwrap();
 
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let sessions = app.sessions.read().await;
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         let restored = by_id("answered");
@@ -4074,7 +4504,7 @@ mod tests {
         rt.activity.lock().await.question_since = Some(Utc::now());
         drop(rt);
 
-        prewarm_requested(&app, &modules).await;
+        prewarm_requested(&app, &modules, None).await;
         {
             let sessions = app.sessions.read().await;
             let s = sessions.iter().find(|s| s.id == "warming").unwrap();
@@ -4105,7 +4535,7 @@ mod tests {
 
         // No second boot: the restore pass leaves an answered warm-up alone — its own boot is the
         // one the answer rides.
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let s = app.session("delivered").await.unwrap();
         assert_eq!(
             s.status,
@@ -4199,7 +4629,7 @@ mod tests {
             answered_at: Some(Utc::now()),
         };
         app.update_session("warming", |x| x.pending_answer = Some(held)).await;
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let s = app.session("warming").await.unwrap();
         assert_eq!(s.status, SessionStatus::Starting, "the held answer got its boot back");
         assert!(
@@ -4216,7 +4646,7 @@ mod tests {
         let modules = app.modules.read().await.clone();
         *app.sessions.write().await = vec![warming_colony("stale", Utc::now() - chrono::Duration::minutes(10), None)];
         std::fs::create_dir_all(app.session_dir("stale")).unwrap();
-        prewarm_requested(&app, &modules).await;
+        prewarm_requested(&app, &modules, None).await;
         let s = app.session("stale").await.unwrap();
         assert!(
             s.status == SessionStatus::WaitingForAnswer && s.suspended.is_some(),
@@ -4261,8 +4691,8 @@ mod tests {
             std::fs::create_dir_all(app.session_dir(id)).unwrap();
         }
 
-        restore_suspended(&app, &modules).await;
-        prewarm_requested(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
+        prewarm_requested(&app, &modules, None).await;
         let sessions = app.sessions.read().await;
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(by_id("answered").status, SessionStatus::Starting, "the answers went first");
@@ -4332,7 +4762,7 @@ mod tests {
         std::fs::create_dir_all(app.session_dir("suspended-first")).unwrap();
         std::fs::create_dir_all(app.session_dir("answered-first")).unwrap();
 
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         let sessions = app.sessions.read().await;
         let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(
@@ -4408,7 +4838,7 @@ mod tests {
         *app.sessions.write().await = snapshot;
         std::fs::create_dir_all(app.session_dir("held")).unwrap();
         std::fs::create_dir_all(app.session_dir("later")).unwrap();
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         {
             let sessions = app.sessions.read().await;
             let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
@@ -4430,7 +4860,7 @@ mod tests {
             x.superseded.as_mut().is_some_and(crate::supersede::Supersession::mark_kept)
         })
         .await;
-        restore_suspended(&app, &modules).await;
+        restore_suspended(&app, &modules, None).await;
         assert_eq!(
             app.session("held").await.unwrap().status,
             SessionStatus::Starting,

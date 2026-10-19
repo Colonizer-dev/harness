@@ -19,9 +19,9 @@ A release is a pull request titled `release: vX.Y.Z`, a lightweight tag on its m
 3. The release pull request merges. CI is the ordinary CI; the `scripts` job lets this one pull request
    change `CHANGELOG.md` because it adds the section for the bumped crate version.
 4. The tag `vX.Y.Z` goes on the merge commit, once `node scripts/release-prep.mjs verify vX.Y.Z` is
-   clean: `changelog.mjs check --release` finds the section and no fragment left, and every release
-   crate (`colonizer`, `colonizer-agentd`, `colonizer-observability`, `colonizer-redact`) is at that
-   version.
+   clean on it: `changelog.mjs check --release` finds the section and no fragment left that the
+   release should have folded (see [the freeze](#the-freeze)), and every release crate (`colonizer`,
+   `colonizer-agentd`, `colonizer-observability`, `colonizer-redact`) is at that version.
 5. `Release` builds and publishes it; `release-health` checks it; hosts with `updates.auto_apply` pick
    it up.
 
@@ -41,9 +41,12 @@ on every push to `main` that changes `CHANGELOG.md`, and by hand (Actions → Re
 workflow, with a dry-run switch and the number of green runs to require).
 
 **Tag.** It first looks for merged `release: vX.Y.Z` commits since the latest tag that have no tag
-yet, runs the `verify` gate on each (on that commit), and pushes the lightweight tag. A release that
-fails the gate is not tagged and the run fails with the reason; fix it on `main` and run the workflow
-again.
+yet, oldest first, runs the `verify` gate on each (on that commit), and pushes the lightweight tag
+(`node scripts/release-prep.mjs tags` prints the decisions without tagging anything). A release that
+fails the gate is not tagged. When a newer release commit exists it supersedes the failing one: the
+run says so in a notice and goes on to the newer release, which folded whatever the older one left
+behind. Only the newest release failing the gate fails the run; fix it on `main` (usually with
+another release) and run the workflow again.
 
 **Propose.** Then, if all of these hold, it opens `release: vX.Y.Z` with auto-merge on:
 
@@ -79,8 +82,19 @@ pull request is merged by hand.
 
 ## The freeze
 
-Fragments that land after the release assembled its own would fail the release check (`changelog.mjs
-check --release` wants none left). While a `release: vX.Y.Z` pull request is open in a repository, the
+A release pull request folds the fragments that were on `main` when `prep` ran. Fragments that land
+on `main` while it is open are not in it: they are still in `changelog.d/` at the release commit, and
+they belong to the next release. The gate tells the two apart from git history, since the squashed
+release commit no longer records its branch's base. The release commit deleted the fragments it
+folded, and `prep` folds every fragment present, so the newest commit on `main` that added one of the
+folded fragments is at or before the branch's base. A fragment left at the release commit that was
+added after that commit landed during the freeze and does not hold the tag (`verify` lists it in a
+notice); one added at or before it should have been folded, and does. This works only on the
+`release: vX.Y.Z` commit itself, in a git checkout. Run `verify` anywhere else and it wants no fragment
+at all.
+
+Even so, the release is cleaner without them. While a `release: vX.Y.Z` pull request is open in a
+repository, the
 [merge steward](colonies.md#the-merge-steward-getting-a-colonys-pull-request-merged) holds each colony
 pull request that adds a `changelog.d/` fragment and merges it after the release does. It looks only
 at the first 100 files of a pull request, asks GitHub for an open release pull request only when a
@@ -88,6 +102,9 @@ candidate adds a fragment, and treats a failed lookup as "open". A pull request 
 not held, and **Merge now** is still the person's call. Pull requests the steward does not own are held
 the usual way, with the `hold` label.
 
-A fragment that slips through anyway (a person merged one) is caught by the gate: the tag is not
-pushed, the run fails with `1 fragment(s) left in changelog.d/`, and the fix is a follow-up release
-pull request from `prep`, which folds it into the next patch.
+A fragment that slips through anyway (a person merged one during the freeze) waits for the next
+release, which folds it. What the gate still refuses is a release that left behind a fragment that
+was already on `main` when it was cut (a release pull request made by hand without `prep`, say): the
+run fails with `1 fragment(s) left in changelog.d/ … (<file>)`, and the fix is a follow-up release
+pull request from `prep`, which folds it into the next patch. Once that one merges, the train skips
+the older release with a notice and tags the newer one.

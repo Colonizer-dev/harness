@@ -13,14 +13,23 @@
 //       makes a major or minor bump.
 //   node scripts/release-prep.mjs verify vX.Y.Z
 //       the gate before a tag: `changelog.mjs check --release` is clean (the section exists, no
-//       fragment is left) and every release crate is at that version.
+//       fragment is left) and every release crate is at that version. When the checkout is a git
+//       repository whose HEAD is the `release: vX.Y.Z` commit, a fragment that landed on main after
+//       the release pull request assembled its own is not "left": it belongs to the next release
+//       (see `laterFragments`).
+//   node scripts/release-prep.mjs tags [--ref origin/main]
+//       what the release train's tag job does with each merged `release: vX.Y.Z` commit since the
+//       latest tag, oldest first: `tag` it when `verify` passes on it, `skip` it when it does not but
+//       a newer release commit exists (that one carries its leftovers, so it supersedes it), `fail`
+//       otherwise. Prints `<action> <version> <sha>` lines and exits 1 on a `fail`. Tags nothing.
 //
 // A crate may be one version ahead of the rest (colonizer-redact is, when a feature pull request bumped
 // it to publish something new): prep leaves a crate already at the target alone, and only moves the
 // ones still at the latest release. A crate anywhere else is an error, never a guess.
 // Any command takes `--root <dir>` (default: the repository this script is in).
-import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -189,12 +198,90 @@ export function prep(root, { version, date, lock = true, dryRun = false } = {}) 
   return { changed: true, version, pending: p.pending, crates };
 }
 
+// ---------------------------------------------------------------------------------------------- git
+
+function git(root, args) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/** A release commit's subject, `release: vX.Y.Z` with an optional ` (#123)`: the version, or null. */
+export function releaseVersion(subject) {
+  return /^release: (v\d+\.\d+\.\d+)( \(#\d+\))?$/.exec(subject)?.[1] ?? null;
+}
+
+/**
+ * Which of the fragments still in `changelog.d/` at a release commit landed after the release pull
+ * request assembled its own, from git history alone (the pull request was squashed, so its base is
+ * gone from main). The release commit deleted the fragments it folded; `prep` folds every fragment
+ * present, so the newest commit on main (first parent) that added one of those is at or before the
+ * release branch's base, and any fragment-adding commit between it and the base would have been
+ * folded too. A fragment left over that was added after that commit therefore landed during the
+ * freeze and belongs to the next release; one added at or before it should have been folded.
+ *
+ * Returns `{ later: Set<file>, cutoff: sha | null }`. With nothing folded (a release that deleted no
+ * fragment) nothing counts as later. `rev` is the release commit (default HEAD of `root`).
+ */
+export function laterFragments(root, rev = 'HEAD') {
+  const dir = `${FRAGMENT_DIR}/`;
+  const folded = git(root, ['diff', '--name-only', '--no-renames', '--diff-filter=D', `${rev}^`, rev, '--', dir])
+    .split('\n')
+    .filter(Boolean);
+  const left = git(root, ['ls-tree', '--name-only', rev, dir])
+    .split('\n')
+    .filter(Boolean);
+  // Newest first: the first time a path shows up is the latest commit that added it.
+  const order = new Map();
+  const addedAt = new Map();
+  let at = -1;
+  let sha = null;
+  for (const line of git(root, ['log', '--first-parent', '--diff-filter=A', '--no-renames', '--name-only', '--format=%x00%H', `${rev}^`, '--', dir]).split('\n')) {
+    if (line.startsWith('\0')) {
+      sha = line.slice(1);
+      order.set(sha, ++at);
+    } else if (line && !addedAt.has(line)) addedAt.set(line, sha);
+  }
+  // A lower index is newer. The cutoff is the newest commit that added a fragment the release folded.
+  let cutoff = null;
+  for (const path of folded) {
+    const c = addedAt.get(path);
+    if (c && (cutoff === null || order.get(c) < order.get(cutoff))) cutoff = c;
+  }
+  const later = new Set();
+  if (cutoff === null) return { later, cutoff };
+  for (const path of left) {
+    const c = addedAt.get(path);
+    if (c && order.get(c) < order.get(cutoff)) later.add(path.slice(dir.length));
+  }
+  return { later, cutoff };
+}
+
+/** HEAD of `root` when it is the `release: <version>` commit of a git repository, else null. */
+function releaseHead(root, version) {
+  try {
+    const [sha, subject] = git(root, ['log', '-1', '--format=%H%x09%s', 'HEAD']).trim().split('\t');
+    return releaseVersion(subject) === version ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Why `version` may not be tagged at `root`, as a list; empty means go. */
-export function verify(root, version) {
+export function verify(root, version, { notes = [] } = {}) {
   if (!parse(version)) return [`"${version}" is not a vX.Y.Z version`];
   const problems = [];
+  let later = new Set();
+  const head = releaseHead(root, version);
+  if (head) {
+    try {
+      later = laterFragments(root, head).later;
+    } catch (e) {
+      problems.push(`could not read the release's git history: ${e.message}`);
+    }
+  }
   try {
-    problems.push(...check(root, { release: version }).errors);
+    const result = check(root, { release: version, later });
+    problems.push(...result.errors);
+    notes.push(...result.warnings);
   } catch (e) {
     problems.push(`changelog check failed: ${e.message}`);
   }
@@ -204,6 +291,55 @@ export function verify(root, version) {
     if (at !== version) problems.push(`crates/${name}/Cargo.toml is at ${at ?? 'no version'}, not ${version}`);
   }
   return problems;
+}
+
+/** The merged `release: vX.Y.Z` commits after the latest `vX.Y.Z` tag on `ref`, oldest first, as `{ sha, version }`. */
+export function untaggedReleases(root, ref = 'origin/main') {
+  const last = git(root, ['tag', '--list', 'v[0-9]*.[0-9]*.[0-9]*', '--sort=-v:refname'])
+    .split('\n')
+    .find(Boolean);
+  const range = last ? `${last}..${ref}` : ref;
+  return git(root, ['log', '--first-parent', '--reverse', '--format=%H%x09%s', range])
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [sha, subject] = line.split('\t');
+      return { sha, version: releaseVersion(subject) };
+    })
+    .filter((r) => r.version);
+}
+
+/**
+ * What the tag job does with each untagged release, oldest first: `{ sha, version, action, problems }`
+ * where action is `tagged` (already), `tag`, `skip` (fails the gate, but a newer release commit
+ * supersedes it) or `fail` (fails the gate and nothing newer exists). `check(release)` returns the
+ * gate's problems; `isTagged(version)` says whether the tag exists.
+ */
+export function decideTags(list, check, isTagged = () => false) {
+  return list.map((r, i) => {
+    if (isTagged(r.version)) return { ...r, action: 'tagged', problems: [] };
+    const problems = check(r);
+    if (!problems.length) return { ...r, action: 'tag', problems };
+    const newer = list.slice(i + 1).find((n) => !isTagged(n.version));
+    return { ...r, action: newer ? 'skip' : 'fail', problems, supersededBy: newer?.version };
+  });
+}
+
+/** `verify` on the release commit `sha`, checked out in a throwaway worktree of `root`. */
+export function verifyAt(root, sha, version, { notes = [] } = {}) {
+  const at = join(mkdtempSync(join(tmpdir(), 'release-gate-')), 'at');
+  git(root, ['worktree', 'add', '--detach', at, sha]);
+  try {
+    return verify(at, version, { notes });
+  } finally {
+    git(root, ['worktree', 'remove', '--force', at]);
+    rmSync(dirname(at), { recursive: true, force: true });
+  }
+}
+
+function annotate(kind, message) {
+  if (process.env.GITHUB_ACTIONS) console.error(`::${kind}::${message}`);
+  else console.error(`${kind}: ${message}`);
 }
 
 function emit(pairs) {
@@ -217,6 +353,7 @@ const USAGE = `usage:
   release-prep.mjs plan [--message <commit message>]
   release-prep.mjs prep [vX.Y.Z] [--date <YYYY-MM-DD>] [--no-lock] [--dry-run]
   release-prep.mjs verify vX.Y.Z
+  release-prep.mjs tags [--ref <rev>]
   (any command: [--root <dir>])`;
 
 function fail(message) {
@@ -230,7 +367,7 @@ export function main(argv = process.argv.slice(2)) {
   const positional = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (['--message', '--date', '--root'].includes(a)) {
+    if (['--message', '--date', '--root', '--ref'].includes(a)) {
       if (rest[i + 1] === undefined) return fail(`${a} needs a value\n${USAGE}`);
       flags[a.slice(2)] = rest[++i];
     } else if (['--no-lock', '--dry-run'].includes(a)) flags[a.slice(2)] = true;
@@ -264,11 +401,44 @@ export function main(argv = process.argv.slice(2)) {
     }
     if (command === 'verify') {
       if (!positional[0]) return fail(USAGE);
-      const problems = verify(root, positional[0]);
+      const notes = [];
+      const problems = verify(root, positional[0], { notes });
+      for (const n of notes) console.error(`notice: ${n}`);
       for (const p of problems) console.error(`error: ${p}`);
       if (problems.length) return 1;
       console.log(`${positional[0]} is ready to tag`);
       return 0;
+    }
+    if (command === 'tags') {
+      const list = untaggedReleases(root, flags.ref ?? 'origin/main');
+      const tagged = (v) => {
+        try {
+          git(root, ['rev-parse', '-q', '--verify', `refs/tags/${v}`]);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const decisions = decideTags(
+        list,
+        (r) => {
+          const notes = [];
+          const problems = verifyAt(root, r.sha, r.version, { notes });
+          for (const n of notes) annotate('notice', `${r.version}: ${n}`);
+          return problems;
+        },
+        tagged,
+      );
+      for (const d of decisions) {
+        for (const p of d.problems) annotate(d.action === 'fail' ? 'error' : 'notice', `${d.version}: ${p}`);
+        if (d.action === 'skip') {
+          annotate('notice', `${d.version} at ${d.sha} is not tagged: it fails the gate and ${d.supersededBy} supersedes it`);
+        } else if (d.action === 'fail') {
+          annotate('error', `${d.version} at ${d.sha} is not ready to tag; see above. Fix it on main, then run the train again`);
+        }
+        console.log(`${d.action} ${d.version} ${d.sha}`);
+      }
+      return decisions.some((d) => d.action === 'fail') ? 1 : 0;
     }
   } catch (e) {
     console.error(e.message);

@@ -89,7 +89,7 @@ pub(crate) const OUTCOMES: [&str; 9] = [
 /// are public, and anything outside the set is reported as [`OTHER`]. A reason nobody has written
 /// today would still have a series waiting for it, which is the cheaper mistake: an under-used
 /// `other` costs one aggregate, a leaked sentence costs the install its log.
-pub(crate) const ATTENTION_REASONS: [&str; 13] = [
+pub(crate) const ATTENTION_REASONS: [&str; 14] = [
     // Written as these constants today.
     crate::autonomy::ALERT_REASON,
     crate::queue::AUTOPILOT_HELD_REASON,
@@ -101,6 +101,7 @@ pub(crate) const ATTENTION_REASONS: [&str; 13] = [
     crate::gateway::MODEL_ERROR_REASON,
     crate::account_health::WAITING_FOR_ACCOUNT_REASON,
     crate::provider_quota::QUOTA_EXHAUSTED_REASON,
+    crate::watchdog::TURN_LOST_REASON,
     // Written as literals at the few sites that predate the constants.
     "stalled",
     "nudges_exhausted",
@@ -161,6 +162,13 @@ fn hash_key() -> Option<Vec<u8>> {
 /// permanent verdict: the next scrape loads again.
 fn set_hash_key(key: Option<Vec<u8>>) {
     *HASH_KEY.lock().unwrap_or_else(|p| p.into_inner()) = key;
+}
+
+/// Drops the parked key: a reset that deletes `hash.key` (issue #850) calls this so the next
+/// scrape loads the new key the add-on also starts from, instead of hashing with the deleted one
+/// until the next restart.
+pub(super) fn forget_hash_key() {
+    set_hash_key(None);
 }
 
 /// Counts one recorded activity line towards the two colony counters (#852).
@@ -637,14 +645,14 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new().route(PATH, axum::routing::get(scrape))
 }
 
-/// What a scoped token needs for `/metrics`: read scope, nothing else. `host_guard` runs before the
-/// router matches, so the path's segments are what the rule sees, exactly as `api_tokens::classify`
-/// sees them.
+/// What a scoped token needs for this feature's read routes: read scope, nothing else — the
+/// install-wide refusal (fleet scope, org or repo limits) is [`super::access`]'s, inside the
+/// handlers. `host_guard` runs before the router matches, so the path's segments are what the rule
+/// sees, exactly as `api_tokens::classify` sees them.
 fn token_scope<'a>(method: &axum::http::Method, segs: &[&'a str]) -> Option<crate::api_tokens::Need<'a>> {
-    match segs {
-        [segment] if *segment == PATH.trim_start_matches('/') && *method == axum::http::Method::GET => {
-            Some(crate::api_tokens::Need::Bare(Scope::Read))
-        }
+    match (segs, *method == axum::http::Method::GET) {
+        ([segment], true) if *segment == PATH.trim_start_matches('/') => Some(crate::api_tokens::Need::Bare(Scope::Read)),
+        (["api", "observability", "status"], true) => Some(crate::api_tokens::Need::Bare(Scope::Read)),
         _ => None,
     }
 }
@@ -654,10 +662,11 @@ fn token_scope<'a>(method: &axum::http::Method, segs: &[&'a str]) -> Option<crat
 /// 404 when there is no observability module, it is switched off, or `prometheus` is off — an
 /// endpoint an operator never configured should not exist to be found. 403 for a paired phone,
 /// and for a token limited to some orgs or repos or holding fleet scope, all of which reach a
-/// bare-read route `host_guard` has already let past: the catalogue is the whole install, and a
-/// filtered page would hide the very series that are out of reach. 503 when `repo_names = hashed`
-/// is on and the hash key cannot be loaded, because the alternative is a scrape of `org="unknown"`
-/// for every org — a real number that says nothing, and one a dashboard would cache.
+/// bare-read route `host_guard` has already let past ([`super::access`]): the catalogue is the
+/// whole install, and a filtered page would hide the very series that are out of reach. 503 when
+/// `repo_names = hashed` is on and the hash key cannot be loaded, because the alternative is a
+/// scrape of `org="unknown"` for every org — a real number that says nothing, and one a dashboard
+/// would cache.
 pub async fn scrape(
     State(app): State<Shared>,
     token: Option<Extension<ScopedToken>>,
@@ -670,25 +679,10 @@ pub async fn scrape(
     let Some(config) = config.filter(|c| c.prometheus) else {
         return crate::client_error(StatusCode::NOT_FOUND, "metrics are not enabled on this install").into_response();
     };
-    // A paired phone authenticates as the owner in `host_guard` and may make any GET
-    // (`phone::phone_may`). The cockpit is a phone's whole surface, though: the install's own
-    // numbers are the owner's, and a phone is a revocable credential that lives on a device.
-    if phone.is_some() {
-        return crate::client_error(
-            StatusCode::FORBIDDEN,
-            "/metrics is the install's own state, and a phone is not the owner; scrape it from the computer",
-        )
-        .into_response();
-    }
-    if let Some(token) = &token
-        && (token.scope == Scope::Fleet || !token.orgs.is_empty() || !token.repos.is_empty())
+    if let Some(denied) =
+        super::access::install_wide_denial(token.as_deref(), phone.is_some(), PATH, "scrape it from the computer")
     {
-        return crate::client_error(
-            StatusCode::FORBIDDEN,
-            "this API token is limited to some organisations or repositories, and /metrics is install-wide; \
-             use a token with no limits",
-        )
-        .into_response();
+        return denied.into_response();
     }
     let hashed = config.repo_names == "hashed";
     // The key is loaded once at start, but a start that raced the data dir, or a key file that was

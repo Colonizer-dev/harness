@@ -1,1 +1,0 @@
-**The Packages scan reads a lockfile that starts with a byte-order mark, and no longer panics on an odd one.** A UTF-8 BOM at the top of a lockfile is skipped instead of hiding its first entry, and a package spec that is empty or starts with a non-ASCII character is read (or skipped) instead of crashing the scan.

@@ -21,7 +21,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 /// The protocol an endpoint speaks. An `anthropic` endpoint is proxied byte-for-byte; an `openai` one
 /// has to be translated in both directions, so the wire is recorded per provider rather than guessed
@@ -216,6 +219,10 @@ pub struct Provider {
     /// Claude Code tools stripped from every request through this connection (#295).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_tools: Vec<String>,
+    /// Canonical models the operator flags as host-sensitive: quantisation or context limits differ
+    /// per host, so the cheapest-host policy must leave them alone (issue #1039).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_sensitive_models: Vec<String>,
 }
 
 impl Provider {
@@ -581,12 +588,14 @@ pub(crate) fn resolved_preset<'a>(preset: &'a str, base_url: &str) -> &'a str {
 /// The model env vars a colony can be pointed at, matched against the configured providers. The
 /// first four reach the runner as is (OpenCode's small model among them, which registers its own
 /// gateway route); the two tier models are the mothership's per-task routing and are stripped from
-/// the runner env before launch, so only `used_by` reads them — counting the tier settings in the
-/// module's configured env, while a colony booted onto a tier meets the tier's provider through the
-/// substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent on purpose: the mothership
+/// the runner env before launch, so only `used_by` reads them (the cheapest-host pass in `boot`
+/// walks this list too, after the strip, so it moves only the vars still in the env) — counting
+/// the tier settings in the module's configured env, while a colony booted onto a tier meets the
+/// tier's provider through the substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent
+/// on purpose: the mothership
 /// serves summaries itself, straight to Anthropic, never through the gateway. Order matches the
 /// settings array in [`used_by`].
-const MODEL_VARS: [&str; 6] = [
+pub(crate) const MODEL_VARS: [&str; 6] = [
     "COLONIZER_MODEL",
     "COLONIZER_SUBAGENT_MODEL",
     "COLONIZER_BACKGROUND_MODEL",
@@ -957,7 +966,7 @@ pub fn unreachable_route(backend: &str, provider: &Provider, health: &Value, run
 /// The `<provider>` half of a `<provider>/<model>` setting, when the value shapes up as one: a leading
 /// `[A-Za-z0-9]`, then `[A-Za-z0-9._-]*`, then `/`. Mirrors the runner's PROVIDER_PREFIX
 /// (modules/agents/claude-code/router.mjs) so the two stay in step.
-fn provider_prefix(model: &str) -> Option<&str> {
+pub(crate) fn provider_prefix(model: &str) -> Option<&str> {
     let (prefix, _) = model.split_once('/')?;
     let mut rest = prefix.chars();
     match rest.next() {
@@ -995,9 +1004,16 @@ pub(crate) fn model_eligible(
     providers: &[Provider],
     model: &str,
 ) -> bool {
-    let Some(provider) = gated_provider(providers, model) else {
-        return true;
-    };
+    match gated_provider(providers, model) {
+        Some(provider) => provider_eligible(sensitivity, overrides, provider),
+        None => true,
+    }
+}
+
+/// Whether the gateway would carry work sent to `provider` for a task of this class — the
+/// per-provider half of [`model_eligible`], for callers that hold a provider rather than a
+/// `<provider>/<model>` setting (the cheapest-host reroute's candidate filter, issue #1039).
+pub(crate) fn provider_eligible(sensitivity: Sensitivity, overrides: Option<&SensitivityOverrides>, provider: &Provider) -> bool {
     let mark = ProviderMark::of(provider.trusted, provider.vetted);
     sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides)
 }
@@ -1190,6 +1206,9 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "quota": provider.quota,
         // The last plan-balance reading, so the list can draw a gauge without probing (#1204).
         "balance": app.gateway.history.latest_balance(&provider.id),
+        // When an outage began and no probe has answered since (#1068): a provider colonies are
+        // parked on, not merely one whose failure rate reads high.
+        "outage_since": app.gateway.history.outage_since(&provider.id),
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
         "queued": queued,
@@ -1252,6 +1271,17 @@ pub(crate) struct QuotaStatus {
     /// providers (`"provider"`). `None` when the queue is not paused. The cockpit honors it when
     /// present and otherwise derives the scope from `providers`, so older web builds keep working.
     pub kind: Option<String>,
+    /// Which queue the pause reaches: `"queue"` holds every queued colony, while `"claude"` holds
+    /// only the ones that spend the Claude account, and the rest start (#1129). `None` when nothing
+    /// is paused. The cockpit honours it when present and otherwise assumes the whole queue, so older
+    /// web builds keep working.
+    pub scope: Option<String>,
+    /// Queued colonies held only because they route through the Claude account, under a
+    /// `"claude"`-scoped pause; 0 for a queue-wide one and for no pause at all. The banner counts them.
+    pub held: usize,
+    /// The same colonies by id, so the queue tick reuses what this poll already resolved instead of
+    /// walking the sessions and orgs again. Internal: never serialized.
+    pub(crate) held_ids: BTreeSet<String>,
     /// Each exhausted provider's display name and the model roles that route to it, so the banner
     /// says "BytePlus plan limit reached, used by subagents" rather than an id. An account pause
     /// carries one entry for the Claude account itself, with the roles that run on Claude models.
@@ -1271,6 +1301,15 @@ pub(crate) struct QuotaProviderDetail {
     pub name: String,
     /// Plain-word labels of the roles that route here (`orchestrator`, `subagents`, …).
     pub used_by: Vec<&'static str>,
+}
+
+impl QuotaStatus {
+    /// Whether the Claude account is out but the queue runs anyway, holding only the colonies that
+    /// spend it (issue #1129): the queue and the restore line ask each colony
+    /// [`routes_through_claude_account`] instead of returning on a pause.
+    pub(crate) fn pauses_claude_only(&self) -> bool {
+        !self.paused && self.scope.as_deref() == Some("claude")
+    }
 }
 
 impl QuotaProviderDetail {
@@ -1314,6 +1353,88 @@ pub(crate) fn claude_used_by(providers: &[Provider], envs: &[Map<String, Value>]
     used
 }
 
+/// Whether a colony booted on `agent` with `choice`'s settings spends the Claude account (issue
+/// #1129) — the colony-level half of the scoped hold, so the queue and the restore line ask one
+/// question per colony instead of holding the whole queue. An agent module nobody knows is treated
+/// An agent module this build does not know is Claude-routed, so it waits rather than starts on a
+/// model it cannot run; one that never mounts the Claude login (only claude-code does) cannot spend
+/// the account at all. Otherwise the model roles decide, as [`claude_used_by`] reads them for the
+/// banner, with the colony's own launch overrides on top as boot applies them.
+pub(crate) fn routes_through_claude_account(
+    agent: Option<&AgentModule>,
+    choice: &crate::config::ModuleChoice,
+    providers: &[Provider],
+    model_override: Option<&str>,
+    subagent_override: Option<&str>,
+) -> bool {
+    let Some(agent) = agent else {
+        return true;
+    };
+    if !agent.needs_claude {
+        return false;
+    }
+    let mut env = agent_env(agent, choice);
+    for (var, over) in [(MODEL_VARS[0], model_override), (MODEL_VARS[1], subagent_override)] {
+        if let Some(model) = over.filter(|m| !m.trim().is_empty()) {
+            env.insert(var.to_string(), Value::String(model.to_string()));
+        }
+    }
+    !claude_used_by(providers, &[env]).is_empty()
+}
+
+/// The queued colonies that route through the Claude account (issue #1129) — the ones a
+/// `"claude"`-scoped hold keeps waiting while the rest of the queue runs.
+pub(crate) async fn queued_on_claude(app: &Shared) -> BTreeSet<String> {
+    let routes = ClaudeRoutes::snapshot(app).await;
+    app.sessions
+        .read()
+        .await
+        .iter()
+        .filter(|s| s.status == crate::sessions::SessionStatus::Queued)
+        .filter(|s| routes.holds(s))
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// The inputs [`routes_through_claude_account`] reads, snapshotted once so a queue tick can ask
+/// about every colony without re-reading modules.json and orgs.json per colony (#1129).
+pub(crate) struct ClaudeRoutes {
+    agents: Vec<AgentModule>,
+    modules: crate::config::ModulesConfig,
+    orgs: BTreeMap<String, crate::orgs::OrgSettings>,
+    providers: Vec<Provider>,
+}
+
+impl ClaudeRoutes {
+    pub(crate) async fn snapshot(app: &Shared) -> Self {
+        Self {
+            agents: app.agents.clone(),
+            modules: app.modules.read().await.clone(),
+            orgs: app.all_org_settings(),
+            providers: app.providers(),
+        }
+    }
+
+    /// Whether colony `s` spends the Claude account, resolved the way boot resolves it: the agent
+    /// module the colony names (the install's own when it names none), that org's overrides on top,
+    /// then the colony's own launch overrides.
+    pub(crate) fn holds(&self, s: &crate::sessions::Session) -> bool {
+        let id = if s.agent.is_empty() {
+            self.modules.agent.provider.clone()
+        } else {
+            s.agent.clone()
+        };
+        let org = self.orgs.get(&s.org).cloned().unwrap_or_default();
+        routes_through_claude_account(
+            self.agents.iter().find(|a| a.id == id),
+            &crate::orgs::effective_agent_for(&self.modules, &org, &id),
+            &self.providers,
+            s.model_override.as_deref(),
+            s.subagent_model_override.as_deref(),
+        )
+    }
+}
+
 pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
     let waiting = app
         .sessions
@@ -1338,6 +1459,9 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
                 reset_unix: record.as_ref().and_then(|q| q.reset_unix),
                 providers: Vec::new(),
                 kind: Some("account".to_string()),
+                scope: None,
+                held: 0,
+                held_ids: BTreeSet::new(),
                 details: vec![QuotaProviderDetail {
                     id: "anthropic".to_string(),
                     name: "Claude".to_string(),
@@ -1349,6 +1473,37 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
                     "reset_at": record.as_ref().and_then(|q| q.reset_at.clone()),
                     "reset_unix": record.as_ref().and_then(|q| q.reset_unix),
                 })),
+            };
+        }
+        // With the account's hold scoped to its own colonies (#1129), the queue runs and each colony
+        // asks whether it spends the account; the ones that do are what `held` counts.
+        let modules = app.modules.read().await.clone();
+        if !crate::orgs::claude_quota_pauses_queue(&modules) {
+            let held_ids = queued_on_claude(app).await;
+            let pause = provider_quota::claude_hold_pause(
+                record.as_ref().and_then(|q| q.reset_at.clone()),
+                record.as_ref().and_then(|q| q.reset_unix),
+                waiting,
+                held_ids.len(),
+            );
+            let envs = runner_envs(app).await;
+            let details = vec![QuotaProviderDetail {
+                id: "anthropic".to_string(),
+                name: "Claude".to_string(),
+                used_by: claude_used_by(&app.providers(), &envs),
+            }];
+            return QuotaStatus {
+                paused: false,
+                reason: Some(pause.reason),
+                reset_at: pause.reset_at,
+                reset_unix: pause.reset_unix,
+                providers: pause.providers,
+                kind: Some("account".to_string()),
+                scope: Some("claude".to_string()),
+                held: held_ids.len(),
+                held_ids,
+                details,
+                fallback: None,
             };
         }
         let pause = provider_quota::account_pause(
@@ -1369,6 +1524,9 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             reset_unix: pause.reset_unix,
             providers: pause.providers,
             kind: Some("account".to_string()),
+            scope: Some("queue".to_string()),
+            held: 0,
+            held_ids: BTreeSet::new(),
             details,
             fallback: None,
         };
@@ -1414,6 +1572,9 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
                 reset_unix: pause.reset_unix,
                 providers: pause.providers,
                 kind: Some("provider".to_string()),
+                scope: Some("queue".to_string()),
+                held: 0,
+                held_ids: BTreeSet::new(),
                 details,
                 fallback: None,
             }
@@ -1425,6 +1586,9 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             reset_unix: None,
             providers: Vec::new(),
             kind: None,
+            scope: None,
+            held: 0,
+            held_ids: BTreeSet::new(),
             details: Vec::new(),
             fallback: None,
         },
@@ -1877,6 +2041,13 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             }
             None => providers.iter().find(|p| p.id == id).and_then(|p| p.vendor.clone()),
         },
+        // Not a Settings field (yet): a hand-edited providers.json row is preserved as is, like a
+        // field this PUT's request shape does not carry.
+        host_sensitive_models: providers
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.host_sensitive_models.clone())
+            .unwrap_or_default(),
     };
     match providers.iter_mut().find(|p| p.id == id) {
         Some(existing) => *existing = provider.clone(),
@@ -1979,6 +2150,7 @@ mod tests {
             price_feed_id: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
+            host_sensitive_models: Vec::new(),
             quota: None,
             normalize_cache_ttl: false,
             trusted: false,
@@ -2704,6 +2876,124 @@ mod tests {
         assert_eq!(claude_used_by(&providers, &[routed]), vec!["orchestrator"]);
         assert_eq!(role_label("subagent_model"), "subagents");
         assert_eq!(role_label("model_high"), "large tasks");
+    }
+
+    /// Which colonies spend the Claude account, for the scoped hold (#1129): only an agent module
+    /// that mounts the Claude login can, and then only through a role left on a Claude model.
+    #[test]
+    fn routes_through_claude_account_follows_the_agent_module_and_its_models() {
+        let providers = vec![provider("byteplus"), provider("minimax")];
+        let choice = crate::config::ModuleChoice {
+            provider: "claude-code".into(),
+            enabled: true,
+            settings: Default::default(),
+        };
+        let claude_code = AgentModule::test("claude-code").needs_claude(true);
+        // opencode never mounts the Claude login, so its model settings cannot spend the account.
+        let opencode = AgentModule::test("opencode").needs_claude(false);
+        assert!(!routes_through_claude_account(
+            Some(&opencode),
+            &choice,
+            &providers,
+            None,
+            None
+        ));
+        assert!(routes_through_claude_account(
+            Some(&claude_code),
+            &choice,
+            &providers,
+            None,
+            None
+        ));
+        // Both roles on configured providers: nothing of this colony's spends the account.
+        assert!(
+            !routes_through_claude_account(
+                Some(&claude_code),
+                &choice,
+                &providers,
+                Some("byteplus/seed-2.0-code"),
+                Some("minimax/MiniMax-M3.1")
+            ),
+            "every role this colony can set is on a configured provider"
+        );
+        // The orchestrator alone on one: an unset subagent model follows it, so nothing else does.
+        assert!(
+            !routes_through_claude_account(Some(&claude_code), &choice, &providers, Some("byteplus/seed-2.0-code"), None),
+            "an unset subagent model follows the orchestrator, so it is not a second Claude role"
+        );
+        // The subagent role left on a bare Claude alias spends it however the orchestrator is routed.
+        assert!(routes_through_claude_account(
+            Some(&claude_code),
+            &choice,
+            &providers,
+            Some("byteplus/seed-2.0-code"),
+            Some("opus")
+        ));
+        // An agent module nobody knows waits rather than starting on a model it cannot run.
+        assert!(routes_through_claude_account(
+            None,
+            &choice,
+            &providers,
+            Some("byteplus/seed-2.0-code"),
+            None
+        ));
+    }
+
+    /// The account's hold scoped to its own colonies: the queue runs, `held` counts the colonies
+    /// that wait, and the default keeps holding the whole queue (#1129).
+    #[tokio::test]
+    async fn the_account_quota_holds_only_its_own_colonies_when_the_setting_is_off() {
+        let root = std::env::temp_dir().join(format!("colonizer-claude-scope-{}", crate::util::short_id()));
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![
+                AgentModule::test("claude-code").needs_claude(true),
+                AgentModule::test("opencode").needs_claude(false),
+            ],
+            |_| {},
+        );
+        let mut claude_colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Queued);
+        claude_colony.id = "on-claude".into();
+        claude_colony.agent = "claude-code".into();
+        let mut other = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Queued);
+        other.id = "on-opencode".into();
+        other.agent = "opencode".into();
+        *app.sessions.write().await = vec![claude_colony, other];
+        app.gateway
+            .mark_account_quota_exhausted(Some("10-05 19:51:58".into()), Some(chrono::Utc::now().timestamp() + 3600));
+
+        // The default: the account's cap holds every queued colony, whatever it would have run on.
+        let held = quota_status(&app).await;
+        assert!(held.paused);
+        assert_eq!(held.kind.as_deref(), Some("account"));
+        assert_eq!(held.scope.as_deref(), Some("queue"));
+        assert_eq!(held.held, 0, "a queue-wide pause names no held subset");
+        assert!(!held.pauses_claude_only());
+
+        // Scoped: the queue runs, and the one colony that spends the account is what is held.
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("claude_quota_pauses_queue".into(), json!(false));
+        let scoped = quota_status(&app).await;
+        assert!(!scoped.paused, "the queue keeps admitting");
+        assert_eq!(scoped.kind.as_deref(), Some("account"));
+        assert_eq!(scoped.scope.as_deref(), Some("claude"));
+        assert!(scoped.pauses_claude_only());
+        assert_eq!(scoped.held, 1, "only the claude-code colony spends the account");
+        assert_eq!(
+            scoped.held_ids.iter().cloned().collect::<Vec<_>>(),
+            vec!["on-claude".to_string()],
+            "the queue tick reuses these ids rather than walking the sessions again"
+        );
+        let reason = scoped.reason.unwrap_or_default();
+        assert!(reason.contains("1 queued colony on Claude waits"), "{reason}");
+        assert!(reason.contains("1 more keeps starting"), "{reason}");
+        assert!(!reason.starts_with("queue paused"), "the queue itself runs: {reason}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

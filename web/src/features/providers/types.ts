@@ -32,6 +32,17 @@ export interface StatusQuota {
    */
   kind?: "account" | "provider" | null;
   /**
+   * Which queue the pause reaches: `"queue"` holds every queued colony, while `"claude"` holds only
+   * the ones that spend the Claude account and lets the rest start (issue #1129). Null when nothing
+   * is paused; absent from older mothership builds, which read as `"queue"`.
+   */
+  scope?: "queue" | "claude" | null;
+  /**
+   * Queued colonies held only because they route through the Claude account, under a
+   * `"claude"`-scoped hold; 0 for a queue-wide pause. Absent from older mothership builds.
+   */
+  held?: number;
+  /**
    * Each exhausted plan's display name and the roles routed to it, e.g.
    * `{ id: "byteplus", name: "BytePlus", used_by: ["subagents", "background"] }`; an account pause
    * carries one `anthropic` entry named "Claude". Absent from older mothership builds, which the
@@ -231,6 +242,11 @@ export interface ModelProvider extends ProviderLimits {
   quota_exhausted?: ProviderQuotaState | null;
   /** The last plan-balance reading the Mothership kept (issue #1204); null or absent until a reader has run. */
   balance?: ProviderBalance | null;
+  /**
+   * When a provider outage began and no probe has answered since (issue #1068): RFC3339, or
+   * null/absent when the provider is answering. Colonies park on an outage rather than being held.
+   */
+  outage_since?: string | null;
   /**
    * Models the endpoint itself lists (issue #1167), separate from the enabled `models`. Absent until
    * the Mothership discovers them; the page then says "N enabled · +M available".
