@@ -601,6 +601,8 @@ pub(crate) async fn serve() -> Result<()> {
     };
     let app = Arc::new(App::new(cfg, boot)?);
     app.migrate_custom_presets().await;
+    // Issue #1284: migrate session casings to canonical forms (non-fatal).
+    let _ = app.migrate_session_casings().await;
 
     let router = router(&app);
 
