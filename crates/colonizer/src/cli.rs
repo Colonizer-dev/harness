@@ -470,6 +470,17 @@ enum ObservabilityCommand {
         #[arg(long)]
         content: bool,
     },
+    /// Forget where the export got to, so it starts over; --hash-key also drops its pseudonyms
+    /// (docs/observability/reset.md)
+    Reset {
+        /// Do not ask first; delete at once
+        #[arg(long)]
+        yes: bool,
+        /// Also delete the hash key, so records re-sent after the reset are pseudonymised afresh
+        /// and cannot be tied to the ones sent before it
+        #[arg(long)]
+        hash_key: bool,
+    },
 }
 
 /// The `redteam` subcommands.
@@ -2125,6 +2136,9 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                 },
         } => observability_backfill_command(cli, since, until, repo, rate, dry_run, include_archive).await,
         Command::Observability {
+            command: ObservabilityCommand::Reset { yes, hash_key },
+        } => observability_reset_command(cli, yes, hash_key).await,
+        Command::Observability {
             command:
                 ObservabilityCommand::Export {
                     out,
@@ -2357,6 +2371,85 @@ fn print_backfill_preview(answer: &Value) {
     }
 }
 
+/// `observability reset` (issue #850): forget where the export got to — the mothership stops the
+/// supervised child, deletes `state.json` (and with `--hash-key` the pseudonymising key) and lets
+/// the loop restart the child from nothing. A dry run goes first, always, so what will be deleted
+/// is listed from the mothership's own answer rather than guessed at on this side of the wire;
+/// then, unless `--yes`, a y/N prompt — and no prompt at all when there is nobody to answer one:
+/// a non-terminal stdin, or `--json`, whose output must stay a single JSON document to be worth
+/// parsing. Either way the command refuses with exit code 2 and deletes nothing (docs/cli.md).
+async fn observability_reset_command(cli: &Cli, yes: bool, hash_key: bool) -> i32 {
+    use std::io::IsTerminal as _;
+
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        let dry = machine
+            .post(
+                "/api/observability/reset",
+                Some(&json!({"dry_run": true, "hash_key": hash_key})),
+            )
+            .await?
+            .unwrap_or(Value::Null);
+        // A pipe, a script or `--json` has nobody to answer a prompt: refusing beats deleting what
+        // nobody confirmed, and it beats mixing a human question into a machine-readable answer.
+        // `--yes` says it out loud instead.
+        let nobody_answers = json || !std::io::stdin().is_terminal();
+        if nobody_answers && !yes {
+            const REFUSAL: &str = "observability reset deletes the exporter's saved positions; \
+                rerun it with --yes to delete them without asking";
+            if json {
+                println!(
+                    "{}",
+                    pretty(&json!({
+                        "reset": false,
+                        "delete": dry["delete"].clone(),
+                        "error": REFUSAL,
+                    }))?
+                );
+            } else {
+                print_reset_listing("would delete", &dry);
+                eprintln!("colonizer: {REFUSAL}");
+            }
+            return Ok(EXIT_USAGE);
+        }
+        if json {
+            println!("{}", pretty(&dry)?);
+        } else {
+            print_reset_listing("would delete", &dry);
+        }
+        if !yes {
+            print!("delete the above? [y/N] ");
+            let _ = std::io::stdout().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).map_err(anyhow::Error::from)?;
+            if !answer.trim().eq_ignore_ascii_case("y") && !answer.trim().eq_ignore_ascii_case("yes") {
+                println!("aborted; nothing was deleted");
+                return Ok(EXIT_OK);
+            }
+        }
+        let done = machine
+            .post("/api/observability/reset", Some(&json!({"hash_key": hash_key})))
+            .await?
+            .unwrap_or(Value::Null);
+        if json {
+            println!("{}", pretty(&done)?);
+        } else {
+            print_reset_listing("deleted", &done);
+            println!(
+                "the exporter restarts from scratch when the supervisor picks it up again (within \
+                 a tick){}",
+                if hash_key {
+                    "; new records are pseudonymised with a fresh key"
+                } else {
+                    ""
+                }
+            );
+        }
+        Ok(EXIT_OK)
+    })
+    .await
+}
+
 /// `observability export` (issue #859): an offline export — the OTLP/JSON requests the exporter
 /// would have sent, written to a local file or directory by the same add-on, no network
 /// (docs/observability/archive-export.md). A client of the running mothership like
@@ -2405,6 +2498,21 @@ async fn observability_export_command(
         Ok(EXIT_OK)
     })
     .await
+}
+
+/// One line per file a reset answer names — the dry run's `delete` or the deed's `deleted` —
+/// `print_backfill_preview`'s shape: the path and its size, as the mothership measured both.
+fn print_reset_listing(what: &str, answer: &Value) {
+    let key = if answer["delete"].is_array() { "delete" } else { "deleted" };
+    if let Some(entries) = answer[key].as_array() {
+        for entry in entries {
+            println!(
+                "{what} {} ({} bytes)",
+                entry["path"].as_str().unwrap_or("?"),
+                entry["bytes"].as_u64().unwrap_or(0),
+            );
+        }
+    }
 }
 
 /// The `--content` confirmation: conversation text is the most sensitive thing an export can

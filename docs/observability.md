@@ -16,6 +16,10 @@ colonizer.dev. Observability goes only to the endpoint you name.
   for collectors that only speak gRPC on 4317.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
 - [Backfill](observability/backfill.md): replaying the history a destination never received — the window, the rate, the dry run, duplicates and backend limits.
+- [Turning it off, resetting, uninstalling](observability/reset.md): the three switches, what a
+  reset deletes (`--hash-key` and the pseudonyms), and what removing the export leaves behind.
+- [File output](observability/file-output.md): the local `file` provider's OTLP/JSON sink — where
+  it writes, how it rotates, and the disk guard that caps it.
 - [Fleet relay](observability/fleet-relay.md): relaying what fleet members push to the owner's own backend — the switch, the consent members see, identity and the double-send guard.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
@@ -275,4 +279,6 @@ To send without an Agent, take the per-signal intake URLs Datadog documents for 
 ## Turning it off
 
 Switch the module off in the cockpit, or set `OTEL_SDK_DISABLED=true`. The mothership closes the
-add-on's stdin; it commits its offsets and exits. Nothing more is sent.
+add-on's stdin; it commits its offsets and exits — within one tick. Nothing more is sent, and the
+cursors are kept, so turning it back on resumes where it stopped. The three switches, resetting
+and uninstalling each have [their own page](observability/reset.md).

@@ -20,6 +20,8 @@
 //! - [`map`] turns ledger lines into log records and [`metrics`] folds them into metric series;
 //!   `traces` rebuilds each colony's trace from its events (#846).
 //! - [`transport`] is OTLP/HTTP, and [`exporter`] is the loop: read, map, send, commit on ack.
+//! - [`file_sink`] is the `file` provider (#850): the same OTLP/JSON requests as lines in capped
+//!   local files, with a disk guard, instead of anything leaving the machine.
 //! - [`backfill`] replays the ledgers' on-disk history to a destination in one shot (#858).
 //! - `archive_source` reads the tar+zstd bundles of colonies the disk no longer holds (#859), and
 //!   [`export`] writes an offline OTLP/JSON file instead of sending anything.
@@ -36,6 +38,8 @@ pub(crate) mod delivery;
 pub mod encode;
 pub mod export;
 pub mod exporter;
+/// The `file` provider's OTLP/JSON file sink (#850).
+pub mod file_sink;
 /// The OTLP/gRPC transport (#851), behind the `otlp-grpc` cargo feature.
 #[cfg(feature = "otlp-grpc")]
 pub mod grpc;

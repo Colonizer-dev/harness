@@ -369,9 +369,6 @@ pub fn resolve(
         Some(_) => return Resolved::Off("the observability module is switched off".into()),
         None => return Resolved::Off("the observability module is not configured".into()),
     };
-    if choice.provider == FILE {
-        return Resolved::Invalid("the local file provider is not built yet (#850); pick OTLP endpoint".into());
-    }
     let Some(cfg) = ExporterConfig::from_module(&choice) else {
         return Resolved::Off("the observability module is switched off".into());
     };
@@ -450,6 +447,55 @@ pub fn resolve(
             headers,
             parsed_headers,
             headers_source,
+        }));
+    }
+
+    // The local file provider (#850): the same records as OTLP/JSON lines under the data dir,
+    // nothing leaving the machine. Its `dir` and `max_mb` take no `OTEL_*` override — those
+    // variables speak OTLP to a backend — so they arrive as the module saved them. And there is
+    // no request to put a header on, so none is resolved: no secret is read, no env parsed.
+    if choice.provider == FILE {
+        let mut s = Map::new();
+        for (key, value) in [
+            ("dir", json!(cfg.dir)),
+            ("max_mb", json!(cfg.max_mb)),
+            ("service_name", json!(DEFAULT_SERVICE_NAME)),
+            (
+                "resource_attributes",
+                json!(resource_attributes(DEFAULT_SERVICE_NAME, id, &BTreeMap::new())),
+            ),
+            ("stream_operational", json!(cfg.stream_operational)),
+            ("stream_activity", json!(cfg.stream_activity)),
+            ("stream_traces", json!(cfg.stream_traces)),
+            ("stream_metrics", json!(cfg.stream_metrics)),
+            ("metrics_interval_secs", json!(cfg.metrics_interval_secs)),
+            ("max_attribute_bytes", json!(cfg.max_attribute_bytes)),
+            ("max_content_bytes", json!(cfg.max_content_bytes)),
+            ("trace_sample_ratio", json!(cfg.trace_sample_ratio)),
+            ("max_trace_bytes", json!(cfg.max_trace_bytes)),
+            ("repo_names", json!(cfg.repo_names)),
+            ("max_backlog_days", json!(cfg.max_backlog_days)),
+            ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
+            ("start_from", json!(cfg.start_from)),
+        ] {
+            provenance.insert(key.to_string(), origin(key));
+            s.insert(key.into(), value);
+        }
+        s.insert("provider".into(), json!(FILE));
+
+        // The same rules a save is held to, now over the effective values.
+        let path = std::path::Path::new(&cfg.dir);
+        if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+            return Resolved::Invalid(
+                "the file provider's dir must be relative to the data dir, with no `..`; leave it empty for the default".into(),
+            );
+        }
+        return Resolved::On(Box::new(Effective {
+            settings: s,
+            provenance,
+            headers: String::new(),
+            parsed_headers: Vec::new(),
+            headers_source: "none",
         }));
     }
     let mut field = |key: &str, saved: Value, var_name: Option<&str>, settings: &mut Map<String, Value>| {
@@ -822,15 +868,39 @@ mod tests {
                 "{var}={value}"
             );
         }
-        let file = ModuleChoice {
-            provider: FILE.into(),
-            enabled: true,
-            settings: Map::new(),
-        };
-        assert!(matches!(
-            resolve(Some(&file), &env_of(&[]), None, &alone()),
-            Resolved::Invalid(_)
-        ));
+    }
+
+    #[test]
+    fn a_file_module_resolves_on_with_its_own_two_fields_and_no_headers() {
+        let file = module_as(FILE, true, json!({"dir": "otlp/here", "max_mb": 16}));
+        let e = on(resolve(Some(&file), &env_of(&[]), None, &alone()));
+        assert_eq!(e.str("provider"), "file");
+        assert_eq!(e.str("dir"), "otlp/here");
+        assert_eq!(
+            e.settings["max_mb"],
+            json!(16),
+            "the cap arrives as saved, like the dir; neither has an OTEL_* override"
+        );
+        assert!(e.headers.is_empty());
+        assert!(e.parsed_headers.is_empty());
+        assert_eq!(e.headers_source, "none", "no request exists to put a header on");
+        // The streams still resolve, so the operator can hold Metrics back on disk too.
+        assert_eq!(e.settings["stream_operational"], json!(true));
+        assert_eq!(e.settings["start_from"], json!("now"));
+
+        // Left empty, the dir is the add-on's default under the data dir.
+        let default = module_as(FILE, true, json!({}));
+        let e = on(resolve(Some(&default), &env_of(&[]), None, &alone()));
+        assert_eq!(e.str("dir"), "");
+
+        // A dir that escapes the data dir is refused, exactly as a save is.
+        for dir in ["/etc/observability", "../elsewhere", "a/../../b"] {
+            let escaping = module_as(FILE, true, json!({"dir": dir}));
+            assert!(
+                matches!(resolve(Some(&escaping), &env_of(&[]), None, &alone()), Resolved::Invalid(_)),
+                "dir {dir} must not resolve"
+            );
+        }
     }
 
     #[test]

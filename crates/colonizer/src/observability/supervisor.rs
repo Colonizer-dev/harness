@@ -2,7 +2,8 @@
 //! (`<data>/observability/exporter.json`), spawns the `colonizer-observability` add-on with the
 //! headers on its stdin, restarts it with backoff, stops it when export is switched off, and serves
 //! `GET /api/observability/status`, `POST /api/observability/test`, the history backfill's
-//! start/cancel routes (#858) and the offline export route (#859).
+//! start/cancel routes (#858), `POST /api/observability/reset` (#850, in [`super::reset`]) and the
+//! offline export route (#859).
 //!
 //! Off by default: with no saved+enabled module and no `COLONIZER_OBSERVABILITY=on`, nothing is
 //! written and nothing is spawned. The add-on is a separate binary (docs/design/observability.md):
@@ -11,7 +12,11 @@
 
 use super::env::{self, Resolved};
 use crate::{ApiResult, App, Shared, client_error, util};
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Extension, State},
+    http::StatusCode,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{
@@ -84,12 +89,17 @@ pub(crate) fn contract_path(data_dir: &Path) -> PathBuf {
     data_dir.join("observability").join("exporter.json")
 }
 
+/// `<data>/observability/status.json`, the add-on's own health (health.rs): read by the status
+/// route and by the compact `/api/status` field.
 pub(super) fn status_path(data_dir: &Path) -> PathBuf {
     data_dir.join("observability").join("status.json")
 }
 
-/// The supervisor's current state word for this data dir, "" before it has ever ticked — all the
-/// fleet health block (#860) needs of the runtime, so the `Runtime` itself stays private.
+/// The supervisor's last word for this data dir, `""` before it has said one (or with no
+/// supervision loop running at all): `running`, `starting`, `restarting`, `refused`, `no_addon`,
+/// `failed`, `resetting`, `off` or `invalid`. Read by the compact `/api/status` field and by the
+/// reset route, which waits for the child to be gone before it deletes anything.
+/// Also what the fleet health block (#860) reads, so the `Runtime` itself stays private.
 pub(super) fn runtime_state(data_dir: &Path) -> &'static str {
     runtimes()
         .lock()
@@ -243,9 +253,31 @@ fn backfills() -> &'static Mutex<BTreeMap<PathBuf, Option<Child>>> {
     B.get_or_init(Mutex::default)
 }
 
+/// Whether a backfill is afoot for this data dir — running, or still stopping — so the reset
+/// route can refuse: a backfill reads `state.json` to know where history ends, and deleting it
+/// under one would move that line mid-run.
+pub(super) fn backfill_running(data_dir: &Path) -> bool {
+    backfills().lock().is_ok_and(|jobs| jobs.contains_key(data_dir))
+}
+
 fn set_runtime(data_dir: &Path, f: impl FnOnce(&mut Runtime)) {
     if let Ok(mut map) = runtimes().lock() {
         f(map.entry(data_dir.to_path_buf()).or_default());
+    }
+}
+
+/// Records the runtime state from outside the supervision loop (the tests).
+#[cfg(test)]
+pub(super) fn test_set_runtime(data_dir: &Path, state: &'static str) {
+    set_runtime(data_dir, |r| r.state = state);
+}
+
+/// Occupies the install's backfill slot the way `backfill_start` does, without a child (the
+/// tests): enough for `backfill_running` to answer, which is all the reset route asks.
+#[cfg(test)]
+pub(super) fn test_register_backfill(data_dir: &Path) {
+    if let Ok(mut jobs) = backfills().lock() {
+        jobs.entry(data_dir.to_path_buf()).or_insert(None);
     }
 }
 
@@ -292,6 +324,12 @@ fn fingerprint(e: &env::Effective) -> String {
 impl Supervisor {
     async fn reconcile(&mut self, app: &App) {
         let data_dir = app.cfg.data_dir.clone();
+        // A reset in flight (reset.rs, issue #850): stop the child — it holds its cursors in
+        // memory and would rewrite `state.json` over the deletion — and start nothing until the
+        // route has deleted what it named and let go.
+        if super::reset::pending(&data_dir) {
+            return self.stop(&data_dir, "resetting", None).await;
+        }
         // A child that exited: note it, and back off before the next start.
         if let Some(child) = self.child.as_mut()
             && let Ok(Some(status)) = child.child.try_wait()
@@ -395,6 +433,13 @@ impl Supervisor {
             return;
         }
         self.policy = Some(contract["policy"].clone());
+        // Everything above awaited — the modules lock, the contract, the add-on's `--version`, the
+        // write — and a reset may have registered in any of them. Its child would rewrite
+        // `state.json` over the deletion, so a pending entry this late ends the tick instead of
+        // the start; the next tick, with nothing pending, starts it from the file the reset left.
+        if super::reset::pending(&data_dir) {
+            return self.stop(&data_dir, "resetting", None).await;
+        }
         match spawn(&binary, &data_dir, &effective.headers).await {
             Ok(child) => {
                 self.child = Some(child);
@@ -471,6 +516,7 @@ pub(crate) fn start_tasks(app: &Shared) {
     tokio::spawn(async move {
         let mut supervisor = Supervisor::default();
         loop {
+            super::disk_guard::sync(&app).await;
             supervisor.reconcile(&app).await;
             tokio::time::sleep(RECONCILE).await;
         }
@@ -492,7 +538,24 @@ pub(super) fn loki_push_url(base: &str) -> String {
 
 /// `GET /api/observability/status`: whether export is on, why not, where each setting came from,
 /// the header *names*, the add-on's own health, and any backfill's progress. Never a header value.
-async fn status(State(app): State<Shared>) -> ApiResult<Value> {
+///
+/// The owner's, or an unlimited read token's (issue #850): the page is install-wide, so a token
+/// with any org/repo limit and a paired phone are refused by [`super::access`]'s shared rule — the
+/// same one `GET /metrics` answers with — after `host_guard`'s allowlist has let the token's scope
+/// past.
+async fn status(
+    State(app): State<Shared>,
+    token: Option<Extension<crate::api_tokens::ScopedToken>>,
+    phone: Option<Extension<crate::phone::PhoneDevice>>,
+) -> ApiResult<Value> {
+    if let Some(denied) = super::access::install_wide_denial(
+        token.as_deref(),
+        phone.is_some(),
+        "/api/observability/status",
+        "read it in the cockpit on your computer",
+    ) {
+        return Err(denied);
+    }
     let data_dir = app.cfg.data_dir.clone();
     let runtime = runtimes()
         .lock()
@@ -942,6 +1005,7 @@ pub(crate) fn routes() -> axum::Router<Shared> {
     axum::Router::new()
         .route("/api/observability/status", routing::get(status))
         .route("/api/observability/test", routing::post(test))
+        .route("/api/observability/reset", routing::post(super::reset::reset))
         .route(
             "/api/observability/backfill",
             routing::post(backfill_start).delete(backfill_cancel),
@@ -970,7 +1034,7 @@ mod tests {
             "nothing at all under observability/"
         );
         assert_eq!(runtime_state(&app.cfg.data_dir), "off");
-        let Json(status) = status(State(app.clone())).await.unwrap();
+        let Json(status) = status(State(app.clone()), None, None).await.unwrap();
         assert_eq!(status["configured"], json!(false));
         let err = test(State(app.clone())).await.unwrap_err();
         assert_eq!(err.status(), StatusCode::CONFLICT, "nothing to test while off");
@@ -998,7 +1062,7 @@ mod tests {
         if locate(&app.cfg.data_dir).is_none() {
             assert_eq!(runtime_state(&app.cfg.data_dir), "no_addon");
         }
-        let Json(status) = status(State(app.clone())).await.unwrap();
+        let Json(status) = status(State(app.clone()), None, None).await.unwrap();
         assert_eq!(status["configured"], json!(true));
         assert_eq!(status["headers"]["names"], json!(["x-honeycomb-team"]));
         assert!(!status.to_string().contains(&secret), "{status}");
@@ -1019,14 +1083,14 @@ mod tests {
             settings: serde_json::from_value(json!({"url": url, "stream_traces": false, "stream_metrics": false})).unwrap(),
         };
         app.modules.write().await.observability = Some(module("http://127.0.0.1:3100"));
-        let Json(shown) = status(State(app.clone())).await.unwrap();
+        let Json(shown) = status(State(app.clone()), None, None).await.unwrap();
         assert_eq!(shown["configured"], json!(true));
         assert_eq!(shown["endpoint"], json!("http://127.0.0.1:3100/loki/api/v1/push"));
         assert_eq!(shown["protocol"], json!("loki"));
 
         // Grafana Cloud hands out full push URLs; one is shown as it is.
         app.modules.write().await.observability = Some(module("https://logs.example.com/loki/api/v1/push"));
-        let Json(full) = status(State(app.clone())).await.unwrap();
+        let Json(full) = status(State(app.clone()), None, None).await.unwrap();
         assert_eq!(full["endpoint"], json!("https://logs.example.com/loki/api/v1/push"));
     }
 
@@ -1035,7 +1099,7 @@ mod tests {
         let root = crate::tests::temp_root();
         let app = crate::tests::test_app(&root);
         // No backfill has ever run: the status slot is there, and null.
-        let Json(status) = status(State(app.clone())).await.unwrap();
+        let Json(status) = status(State(app.clone()), None, None).await.unwrap();
         assert_eq!(status["backfill"], json!(null), "{status}");
         // Export off: a dry run is refused like the test event, and nothing is registered.
         let err = backfill_start(
@@ -1059,6 +1123,104 @@ mod tests {
             backfills().lock().unwrap().get(&app.cfg.data_dir).is_none(),
             "no job was registered"
         );
+    }
+
+    /// `GET /api/observability/status` through the real router and guard (#850): the owner and an
+    /// unbounded `read` token read it; a token with any org or repo limit does not; a paired
+    /// phone does not; and neither the body nor the headers ever carry a header *value*.
+    #[tokio::test]
+    async fn the_status_route_serves_the_owner_and_unbounded_tokens_only() {
+        use tower::ServiceExt as _;
+
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        let secret = format!("canary-{}", util::short_id());
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        util::write_private(
+            &app.cfg.config_dir.join("observability-headers"),
+            format!("x-honeycomb-team={secret}").as_bytes(),
+        )
+        .unwrap();
+        app.modules.write().await.observability = Some(crate::config::ModuleChoice {
+            provider: "otlp".into(),
+            enabled: true,
+            settings: serde_json::from_value(json!({"endpoint": "http://127.0.0.1:4318"})).unwrap(),
+        });
+
+        async fn mint(app: &Shared, name: &str, orgs: Vec<&str>) -> String {
+            app.api_tokens
+                .create(crate::api_tokens::NewToken {
+                    name: name.to_string(),
+                    scope: "read".into(),
+                    orgs: orgs.into_iter().map(String::from).collect(),
+                    repos: Vec::new(),
+                    max_concurrent: None,
+                    budget_usd_per_day: None,
+                })
+                .await
+                .unwrap()
+                .token
+        }
+        let unbounded = mint(&app, "watcher", Vec::new()).await;
+        let limited = mint(&app, "one-org", vec!["acme"]).await;
+
+        let router = crate::server::router(&app);
+        let get = |token: String| {
+            router.clone().oneshot(
+                axum::extract::Request::builder()
+                    .uri("/api/observability/status")
+                    .header("host", "127.0.0.1:7878")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+        };
+        for token in [app.api_token.clone(), unbounded] {
+            let res = get(token).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "the owner and an unlimited read token read it");
+            let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+            let body = String::from_utf8_lossy(&bytes);
+            assert!(!body.contains(&secret), "never a header value: {body}");
+            assert!(body.contains("x-honeycomb-team"), "the name is there: {body}");
+        }
+        let res = get(limited).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "an org-limited token is refused");
+        assert!(
+            !String::from_utf8_lossy(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).contains(&secret),
+            "the refusal carries nothing either"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The same rule, said in the handler's own words for the callers the router cannot reach it
+    /// with: a `fleet`-scope token (`Registry::create` refuses to mint one, so the route tests
+    /// cannot drive it) and a paired phone.
+    #[tokio::test]
+    async fn the_status_handler_refuses_fleet_tokens_and_phones() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        let fleet = crate::api_tokens::ScopedToken {
+            id: "test".into(),
+            name: "fleet".into(),
+            scope: crate::api_tokens::Scope::Fleet,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        };
+        let err = status(State(app.clone()), Some(axum::Extension(fleet)), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(err.message().contains("install-wide"), "{}", err.message());
+
+        let phone = crate::phone::PhoneDevice { id: "phone-1".into() };
+        let err = status(State(app.clone()), None, Some(axum::Extension(phone)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(err.message().contains("not the owner"), "{}", err.message());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The add-on argv a request maps to: `--include-archive` on backfill only when asked, and the
