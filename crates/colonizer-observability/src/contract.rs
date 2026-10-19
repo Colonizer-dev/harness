@@ -35,6 +35,23 @@ pub struct Contract {
     pub settings: Settings,
     /// Every colony the mothership knows, by id. A colony missing here is structure-only.
     pub policy: BTreeMap<String, ColonyPolicy>,
+    /// What each fleet member reports about its own exporter (#861): whether it streams to this
+    /// owner's backend itself, so the relay can leave its rows alone. Filled by the mothership
+    /// from the members' fleet poll answers; `[]` until then.
+    #[serde(default)]
+    pub relay_members: Vec<RelayMember>,
+}
+
+/// One member's answer about its own exporting, as the mothership relays it (#861).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelayMember {
+    /// The member's host id: the `origin_host` its ingested rows carry.
+    pub host_id: String,
+    /// Whether the member runs its own exporter against this owner's destination.
+    pub enabled: bool,
+    /// The destination hash that exporter writes to; the relay compares it with its own.
+    pub destination_hash: String,
 }
 
 /// The effective exporter settings, every override already applied by the mothership.
@@ -80,6 +97,10 @@ pub struct Settings {
     pub start_from: String,
     /// How often metrics are pushed.
     pub metrics_interval_secs: u64,
+    /// Relay the history members pushed to `<data>/fleet-ingest/` to this backend (#861). Off by
+    /// default: nothing of the members' is read or sent without it.
+    #[serde(default)]
+    pub relay_fleet_history: bool,
 }
 
 impl Default for Settings {
@@ -111,6 +132,7 @@ impl Default for Settings {
             max_read_mib_per_sec: 8,
             start_from: START_NOW.into(),
             metrics_interval_secs: 30,
+            relay_fleet_history: false,
         }
     }
 }
@@ -336,6 +358,11 @@ mod tests {
         assert_eq!(
             c.settings.service_name, "colonizer-mothership",
             "absent fields take their defaults"
+        );
+        assert!(!c.settings.relay_fleet_history, "the fleet relay is off unless asked for");
+        assert!(
+            c.relay_members.is_empty(),
+            "no member reports until the mothership fills it in"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

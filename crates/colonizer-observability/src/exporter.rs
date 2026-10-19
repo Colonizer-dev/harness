@@ -46,7 +46,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The pause between ticks with nothing to retry.
 pub const TICK: Duration = Duration::from_secs(1);
-const BACKOFF_START: Duration = Duration::from_secs(1);
+pub(crate) const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_CAP: Duration = Duration::from_secs(60);
 /// The key the metric series are committed under in `state.json`'s `extra`.
 const METRICS_KEY: &str = "metrics";
@@ -236,7 +236,7 @@ fn signal_name(request: &Request) -> &'static str {
 }
 
 /// A jittered next delay: the current one doubled, capped, ±20 %.
-fn next_backoff(current: Option<Duration>) -> Duration {
+pub(crate) fn next_backoff(current: Option<Duration>) -> Duration {
     let base = match current {
         None => BACKOFF_START,
         Some(d) => (d * 2).min(BACKOFF_CAP),

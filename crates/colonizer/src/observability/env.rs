@@ -413,6 +413,7 @@ pub fn resolve(
             ("max_backlog_days", json!(cfg.max_backlog_days)),
             ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
             ("start_from", json!(cfg.start_from)),
+            ("relay_fleet_history", json!(cfg.relay_fleet_history)),
         ] {
             provenance.insert(key.to_string(), origin(key));
             s.insert(key.into(), value);
@@ -516,6 +517,7 @@ pub fn resolve(
         ("max_backlog_days", json!(cfg.max_backlog_days)),
         ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
         ("start_from", json!(cfg.start_from)),
+        ("relay_fleet_history", json!(cfg.relay_fleet_history)),
     ] {
         provenance.insert(key.into(), origin(key));
         s.insert(key.into(), value);

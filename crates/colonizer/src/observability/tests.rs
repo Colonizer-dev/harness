@@ -246,6 +246,52 @@ async fn observability_ranges_are_checked_at_save_time() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// #861: `relay_fleet_history` defaults off, saves like any switch, reaches the add-on's contract
+/// settings, and the contract carries the relay list (empty until members report their own
+/// exporters, #860).
+#[tokio::test]
+async fn relay_fleet_history_defaults_off_saves_and_reaches_the_contract() {
+    let root = crate::tests::temp_root();
+    let app = crate::tests::test_app(&root);
+    let saved = save_observability(
+        &app,
+        "otlp",
+        obs_settings(&[("endpoint", json!("https://otlp.example.com"))]),
+        false,
+    )
+    .await
+    .unwrap();
+    // The save echoes what was sent: an unasked switch is simply absent, never on.
+    assert_ne!(
+        saved["settings"]["relay_fleet_history"],
+        json!(true),
+        "off unless asked: {:?}",
+        saved["settings"]
+    );
+    let saved = save_observability(
+        &app,
+        "otlp",
+        obs_settings(&[
+            ("endpoint", json!("https://otlp.example.com")),
+            ("relay_fleet_history", json!(true)),
+        ]),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["settings"]["relay_fleet_history"], json!(true));
+
+    match crate::observability::supervisor::resolve(&app).await {
+        crate::observability::env::Resolved::On(e) => {
+            let contract = crate::observability::supervisor::contract(&app, &e.settings).await;
+            assert_eq!(contract["settings"]["relay_fleet_history"], json!(true), "{contract}");
+            assert_eq!(contract["relay_members"], json!([]), "{contract}");
+        }
+        _ => panic!("an enabled module with an endpoint resolves on"),
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// Regenerates the committed archive-bundle fixture the observability add-on's tests read
 /// (#859): a real tar+zstd bundle and its sidecar, written by the mothership's own archiver over
 /// the v0.1.9 fixture's richer colony (`a1b2c3d4`: events, a finding, an `out/` file and the

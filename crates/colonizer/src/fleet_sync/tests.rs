@@ -57,6 +57,8 @@ struct Owner {
     refuse_refresh: Option<u16>,
     /// What a refresh hands back instead of [`FRESH`].
     refresh_gives: Option<&'static str>,
+    /// Whether the rows answer says this owner relays (#861).
+    relays: bool,
 }
 
 #[derive(Clone)]
@@ -145,7 +147,7 @@ async fn fake_rows(State(f): State<Fake>, headers: HeaderMap, body: Bytes) -> Re
             o.rows.insert(id.clone(), r.clone());
             accepted.push(id);
         }
-        (o.hang_on_batch != Some(o.batches)).then(|| Json(json!({"accepted": accepted})).into_response())
+        (o.hang_on_batch != Some(o.batches)).then(|| Json(json!({"accepted": accepted, "relays": o.relays})).into_response())
     };
     if let Some(res) = answered {
         return res;
@@ -949,4 +951,89 @@ async fn history_sync_waits_for_consent_and_a_rejoin_resets_it() {
     assert_eq!(app.fleet_members.history_sync().await, Some(false));
     assert_eq!(view(State(app.clone())).await.0["status"], "consent_required");
     assert_eq!(fake.with(|o| o.rows.len()), 3, "nothing more was sent");
+}
+
+/// #861: the preview names the owner's relay only when the owner's latest word says so — a rows
+/// answer's flag is the fresher word an absent pairing flag falls back to, and an owner that
+/// relays nothing shows no line at all.
+#[tokio::test]
+async fn the_preview_names_the_relay_only_when_the_owner_relays() {
+    let fake = Fake::new();
+    fake.with(|o| o.relays = true);
+    let url = serve(&fake).await;
+    let root = TempRoot(std::env::temp_dir().join(format!("colonizer-fleet-relay-{}", util::short_id())));
+    std::fs::create_dir_all(root.0.join("config")).unwrap();
+    let app = crate::tests::test_app(&root.0);
+    write_colonies(&app.cfg.data_dir, 3, &plain);
+    app.fleet_members.set_membership_for_tests(Some(target(&url))).await;
+
+    // No rows answer yet, and this membership carries no pairing flag: no line.
+    let includes = preview(State(app.clone())).await.unwrap().0["includes"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!includes.contains("relays"), "{includes}");
+
+    let _ = consent(State(app.clone()), Json(ConsentBody { enabled: true }))
+        .await
+        .unwrap();
+    assert_eq!(trigger(State(app.clone())).await.unwrap().0.status, SyncStatus::Synced);
+    assert_eq!(DrainState::load(&app.cfg.data_dir).owner_relays, Some(true));
+    let includes = preview(State(app.clone())).await.unwrap().0["includes"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        includes.ends_with(
+            "; the owner relays this history to its own observability backend under this host's identity (structure only, never conversation content)"
+        ),
+        "{includes}"
+    );
+
+    // The owner stops relaying: the next answer's word reaches the preview the same way.
+    fake.with(|o| o.relays = false);
+    write_colonies(&app.cfg.data_dir, 4, &plain);
+    assert_eq!(trigger(State(app.clone())).await.unwrap().0.status, SyncStatus::Synced);
+    assert_eq!(DrainState::load(&app.cfg.data_dir).owner_relays, Some(false));
+    let includes = preview(State(app.clone())).await.unwrap().0["includes"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!includes.contains("relays"), "{includes}");
+}
+
+/// #861: the real owner's rows answer reports `relays` from its observability module — on only
+/// while that module is enabled with `relay_fleet_history`.
+#[tokio::test]
+async fn the_real_owners_rows_answer_reports_the_relay_setting() {
+    let owner_root = TempRoot(std::env::temp_dir().join(format!("colonizer-fleet-relay-owner-{}", util::short_id())));
+    std::fs::create_dir_all(owner_root.0.join("config")).unwrap();
+    let owner = crate::tests::test_app(&owner_root.0);
+    let (_member_id, token) = crate::fleet_members::FleetStore::add_member_for_tests(&owner, "worker").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let served = owner.clone();
+    tokio::spawn(async move { axum::serve(listener, crate::server::router(&served)).await.unwrap() });
+
+    let ask = || {
+        reqwest::Client::new()
+            .post(format!("{url}/api/fleet/peer/rows"))
+            .bearer_auth(&token)
+            .json(&json!({"rows": []}))
+            .send()
+    };
+    let relays = || async { ask().await.unwrap().json::<Value>().await.unwrap()["relays"].clone() };
+    assert_eq!(relays().await, json!(false), "no module saved: no relay");
+    owner.modules.write().await.observability = Some(crate::config::ModuleChoice {
+        provider: "otlp".into(),
+        enabled: true,
+        settings: serde_json::from_value(json!({"endpoint": "http://127.0.0.1:4318", "relay_fleet_history": true})).unwrap(),
+    });
+    assert_eq!(relays().await, json!(true), "the setting is the owner's word");
+    owner.modules.write().await.observability = Some(crate::config::ModuleChoice {
+        provider: "otlp".into(),
+        enabled: false,
+        settings: serde_json::from_value(json!({"relay_fleet_history": true})).unwrap(),
+    });
+    assert_eq!(relays().await, json!(false), "a switched-off module relays nothing");
 }

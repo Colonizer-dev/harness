@@ -24,6 +24,7 @@ use crate::archive_source::{self, ArchivedColony, Message};
 use crate::batch::{BatchConfig, Batcher, ExportResource, Item};
 use crate::contract::{self, ColonyPolicy, Contract};
 use crate::cursor::{Cursor, GapReason, Limits, read_batch};
+use crate::delivery::{Held, deliver, retry_delay};
 use crate::encode::Request;
 use crate::exporter::{self, now_nanos, policy_for, resource_for};
 use crate::map::{Mapper, ts_nanos};
@@ -32,7 +33,7 @@ use crate::sources::{self, SourceFile};
 use crate::state::{CursorKey, Signal, State};
 use crate::tailer;
 use crate::traces::{Builder, Traces};
-use crate::transport::{Outcome, Transport};
+use crate::transport::Transport;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ mod progress;
 // grammar, the send pacing, the progress file. Their items live under their engine paths.
 use flags::DEFAULT_RATE;
 pub use flags::Options;
-use pace::{BACKOFF_START, Bucket, next_backoff};
+use pace::Bucket;
 pub(crate) use progress::Window;
 pub use progress::progress_path;
 use progress::{CursorEntry, Progress};
@@ -158,14 +159,6 @@ struct Outbox {
 
 /// How a delivery pass ended: `Ok` when every request was acknowledged, else why the rest is held.
 type Delivery = Result<Outbox, Held>;
-
-/// A delivery that did not finish.
-enum Held {
-    /// Retry after a backoff, or the server's `Retry-After` when it gave one.
-    Retry(Option<Duration>),
-    /// The credential was refused: nothing is committed and the run fails.
-    Failed(String),
-}
 
 /// The engine. Build one with [`Backfill::new`], drive [`Backfill::tick`] until
 /// [`Backfill::done`], then read [`Backfill::summary`]; [`run`] does all three.
@@ -428,14 +421,11 @@ impl Backfill {
                 TICK
             }
             Delivery::Err(Held::Retry(after)) => {
-                let delay = match after {
-                    Some(after) => after.max(BACKOFF_START),
-                    None => next_backoff(self.backoff.map(|(_, d)| d)),
-                };
+                let delay = retry_delay(after, self.backoff.map(|(_, d)| d));
                 self.backoff = Some((tokio::time::Instant::now(), delay));
                 delay
             }
-            Delivery::Err(Held::Failed(message)) => {
+            Delivery::Err(Held::Unauthorized(message)) => {
                 // Nothing is committed: the next run resumes from the last acknowledged
                 // cursors, once the key works. The unacknowledged batch is dropped with the run.
                 self.error = Some(message);
@@ -788,32 +778,34 @@ impl Backfill {
         }
     }
 
-    /// Sends the outbox's requests in order; on a full acknowledgement returns it for commit. A
-    /// record-level refusal is bisected down to the record at fault (the exporter's own halves);
-    /// a refused credential fails the run with nothing committed.
-    async fn deliver(&mut self, mut outbox: Outbox) -> Delivery {
-        while let Some(request) = outbox.requests.first().cloned() {
-            match self.transport.send(&request).await {
-                Outcome::Sent { rejected, bytes, .. } => {
-                    outbox.requests.remove(0);
-                    self.counters.records_sent += (request.len() as u64).saturating_sub(rejected);
-                    self.counters.bytes_sent += bytes;
-                }
-                Outcome::Refused { .. } => {
-                    outbox.requests.remove(0);
-                    match exporter::halves(&request) {
-                        Some((a, b)) => {
-                            outbox.requests.insert(0, b);
-                            outbox.requests.insert(0, a);
-                        }
-                        None => self.counters.refused += request.len() as u64,
-                    }
-                }
-                Outcome::Unauthorized { message, .. } => return Err(Held::Failed(message)),
-                Outcome::Retry { after, .. } => return Err(Held::Retry(after)),
+    /// Sends the outbox's requests through the shared [`deliver`] loop; on a full acknowledgement
+    /// returns it for commit, counters updated. A refused credential fails the run.
+    async fn deliver(&mut self, outbox: Outbox) -> Delivery {
+        let Outbox {
+            mut requests,
+            cursors,
+            traces,
+            fleet,
+        } = outbox;
+        let mut counters = std::mem::take(&mut self.counters);
+        let outcome = deliver(&self.transport, &mut requests, |ack| {
+            counters.records_sent += ack.records.saturating_sub(ack.rejected);
+            counters.bytes_sent += ack.bytes;
+        })
+        .await;
+        self.counters = counters;
+        match outcome {
+            Ok(refused) => {
+                self.counters.refused += refused;
+                Ok(Outbox {
+                    requests,
+                    cursors,
+                    traces,
+                    fleet,
+                })
             }
+            Err(held) => Err(held),
         }
-        Ok(outbox)
     }
 
     /// Whether a file's committed cursor has reached its bound.

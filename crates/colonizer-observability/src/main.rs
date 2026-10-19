@@ -24,6 +24,7 @@ use colonizer_observability::backfill::{Backfill, Options as BackfillOptions};
 use colonizer_observability::contract::{self, CONTRACT, EXIT_REFUSED};
 use colonizer_observability::export::{self, Options as ExportOptions};
 use colonizer_observability::exporter::{self, Exporter};
+use colonizer_observability::relay::Relay;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use tokio::io::AsyncReadExt;
@@ -99,7 +100,7 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let mut exporter = match Exporter::new(&path, headers) {
+            let mut exporter = match Exporter::new(&path, headers.clone()) {
                 Ok(x) => x,
                 Err(e) if e.starts_with("refused") => {
                     eprintln!("observability: {e}");
@@ -127,6 +128,17 @@ async fn main() -> ExitCode {
                 while matches!(stdin.read(&mut buf).await, Ok(n) if n > 0) {}
                 let _ = stop_tx.send(true);
             });
+            // The fleet relay (#861): `None` unless the contract turns it on. On its own task, so
+            // a slow pass over the fleet never delays the live export; it sleeps between passes
+            // for as long as its tick says — a slow idle cadence once there is nothing to do.
+            if let Some(mut relay) = Relay::new(&path, headers) {
+                tokio::spawn(async move {
+                    loop {
+                        let wait = relay.tick().await;
+                        tokio::time::sleep(wait).await;
+                    }
+                });
+            }
             loop {
                 let wait = exporter.tick().await;
                 tokio::select! {
