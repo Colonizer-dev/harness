@@ -6,6 +6,13 @@ export function cx(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
+/** The only text that may become an href: a value the mothership passed through from an outside
+ *  feed (a GitHub repo's homepage field, an OSV advisory url) is free text, so anything that does
+ *  not start with http(s) — a `javascript:` scheme included — renders as plain text, never a link. */
+export function isUrl(value: string | null | undefined): boolean {
+  return value != null && /^https?:\/\//.test(value);
+}
+
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary" | "ghost" | "danger";
   size?: "sm" | "md";

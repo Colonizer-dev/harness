@@ -17,7 +17,7 @@ use crate::{
     providers::Provider,
     push,
     sessions::{Session, SessionStatus},
-    util::{delete_secret, env_nonempty, read_secret, truncate, write_secret},
+    util::{delete_secret, env_nonempty, public_redirect_policy, read_secret, truncate, write_secret},
 };
 use anyhow::{Result, bail};
 use axum::{Json, extract::State, http::StatusCode};
@@ -907,6 +907,9 @@ pub async fn run(app: Shared) {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        // A redirect is followed only to another public http(s) host, so a receiver's 302 cannot
+        // aim the mothership's POST at itself or its network (the first URL is never checked here).
+        .redirect(public_redirect_policy())
         .build()
         .ok();
     if client.is_none() {
@@ -1340,6 +1343,8 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        // As the loop's client above: a redirect only to another public http(s) host.
+        .redirect(public_redirect_policy())
         .build()
         .ok();
     let candidate = ledger::Candidate {
