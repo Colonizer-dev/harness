@@ -58,10 +58,7 @@ pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: b
         // A failed parent waits: it may recover (issue #1066).
         SessionStatus::NoChanges => match stack::stacked_on(parent_id, Some(parent)) {
             Stacked::Refuse(reason) => Stacked::Refuse(reason),
-            other => panic!(
-                "a changeless parent has no branch to lend: {other:?}",
-                other = other
-            ),
+            other => panic!("a changeless parent has no branch to lend: {other:?}"),
         },
         SessionStatus::Failed => Stacked::Wait,
     }
@@ -269,7 +266,7 @@ mod tests {
         // Issue #1066: a failed parent may recover, so the child waits for it to do so rather than
         // being retired to the queue.
         match queue_decision("parent", Some(&parent(SessionStatus::Failed)), false) {
-            Stacked::Wait => {}, // Expected
+            Stacked::Wait => {} // Expected
             other => panic!("a failed parent may recover: {other:?}"),
         }
     }

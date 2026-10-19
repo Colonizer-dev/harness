@@ -921,7 +921,9 @@ async fn by_default_a_colony_behind_a_closed_parent_is_refused_naming_the_stack_
 }
 
 #[tokio::test]
-async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
+async fn create_stacks_on_a_failed_colony_and_waits_for_it_to_recover() {
+    // Issue #1066: a failed parent may be resumed and publish a branch, so the child is queued
+    // behind it instead of being refused.
     let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
     let app = app_that_can_create(&root);
     let mut dead = colony("acme", SessionStatus::Failed);
@@ -930,20 +932,18 @@ async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
     dead.repo = "acme/app".into();
     app.sessions.write().await.push(dead);
 
-    let err = create(
+    let Json(child) = create(
         State(app.clone()),
         None,
         HeaderMap::new(),
         stack_request("acme/app", Some("dead".into()), true),
     )
     .await
-    .unwrap_err();
-    assert_eq!(err.0, StatusCode::CONFLICT, "a refusal, like the duplicate-issue one");
-    let message = err.1.to_string();
-    assert!(message.contains("dead"), "{message}");
-    assert!(message.contains("failed"), "it says which reason applies: {message}");
+    .expect("a failed parent is waited on, not refused");
+    assert_eq!(child.parent.as_deref(), Some("dead"), "the child names its parent");
+    assert_eq!(child.status, SessionStatus::Queued, "the child waits for the parent");
     let sessions = app.sessions.read().await;
-    assert_eq!(sessions.len(), 1, "nothing was created");
+    assert_eq!(sessions.len(), 2, "the child was created behind the parent");
     drop(sessions);
     let _ = std::fs::remove_dir_all(root);
 }
