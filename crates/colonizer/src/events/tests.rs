@@ -2,15 +2,24 @@ use super::*;
 
 #[test]
 fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
-    // (errored, transient, interrupted, open_question, pr_written)
-    assert_eq!(autopilot_step(false, false, false, false, true), Autopilot::Publish);
+    // (errored, transient, interrupted, open_question, pr_written, subagents_running)
+    assert_eq!(autopilot_step(false, false, false, false, true, false), Autopilot::Publish);
     assert!(matches!(
-        autopilot_step(false, false, false, false, false),
+        autopilot_step(false, false, false, false, false, false),
         Autopilot::Wait(_)
     ));
-    assert!(matches!(autopilot_step(false, false, false, true, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
+    assert!(matches!(
+        autopilot_step(false, false, false, true, true, false),
+        Autopilot::Wait(_)
+    ));
+    assert!(matches!(
+        autopilot_step(true, false, true, false, true, false),
+        Autopilot::Wait(_)
+    ));
+    assert!(matches!(
+        autopilot_step(true, false, false, false, false, false),
+        Autopilot::Hold(_)
+    ));
 }
 
 /// Issue #1176: a turn that errored after writing a fresh pr.md goes on to verify and publish rather
@@ -18,11 +27,23 @@ fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
 /// error still retries.
 #[test]
 fn an_errored_turn_with_a_fresh_pr_description_still_goes_to_verification() {
-    assert_eq!(autopilot_step(true, false, false, false, true), Autopilot::Publish);
-    assert!(matches!(autopilot_step(true, false, false, true, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, true, false, false, true), Autopilot::Retry(_)));
-    assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
+    assert_eq!(autopilot_step(true, false, false, false, true, false), Autopilot::Publish);
+    assert!(matches!(
+        autopilot_step(true, false, false, true, true, false),
+        Autopilot::Wait(_)
+    ));
+    assert!(matches!(
+        autopilot_step(true, false, true, false, true, false),
+        Autopilot::Wait(_)
+    ));
+    assert!(matches!(
+        autopilot_step(true, true, false, false, true, false),
+        Autopilot::Retry(_)
+    ));
+    assert!(matches!(
+        autopilot_step(true, false, false, false, false, false),
+        Autopilot::Hold(_)
+    ));
 }
 
 /// Issue #980: a turn that ended with an error the retry classifier calls transient schedules an
@@ -35,14 +56,44 @@ fn a_transient_provider_error_schedules_a_retry_instead_of_holding() {
         crate::retry::FailureClass::TransientInfra,
         "the fixture is what the classifier calls transient"
     );
-    let holds = autopilot_step(true, false, false, false, false);
+    let holds = autopilot_step(true, false, false, false, false, false);
     assert!(matches!(holds, Autopilot::Hold(_)), "a permanent error still holds");
-    let retries = autopilot_step(true, true, false, false, false);
+    let retries = autopilot_step(true, true, false, false, false, false);
     assert!(
         matches!(retries, Autopilot::Retry(_)),
         "a transient provider error schedules a retry, got {retries:?}"
     );
     assert_ne!(retries, holds, "and it is not the hold");
+}
+
+/// Issue #1268: background subagents block publishing and the PR nudge, but not error handling.
+#[test]
+fn background_subagents_block_publishing_but_not_error_handling() {
+    // Clean turn with subagents → Wait
+    assert!(matches!(
+        autopilot_step(false, false, false, false, true, true),
+        Autopilot::Wait(reason) if reason == "background subagents are still running"
+    ));
+    // Clean turn without pr.md, with subagents → Wait (not the PR_NOT_WRITTEN nudge)
+    assert!(matches!(
+        autopilot_step(false, false, false, false, false, true),
+        Autopilot::Wait(reason) if reason == "background subagents are still running"
+    ));
+    // Errored with pr.md and subagents → Wait (not immediate publish via #1176)
+    assert!(matches!(
+        autopilot_step(true, false, false, false, true, true),
+        Autopilot::Wait(reason) if reason == "background subagents are still running"
+    ));
+    // Errored without pr.md and subagents → Hold (errors are not blocked by subagents)
+    assert!(matches!(
+        autopilot_step(true, false, false, false, false, true),
+        Autopilot::Hold(_)
+    ));
+    // Transient error with subagents → Retry (errors take priority)
+    assert!(matches!(
+        autopilot_step(true, true, false, false, false, true),
+        Autopilot::Retry(_)
+    ));
 }
 
 /// Issue #980: a turn that ends with a transient provider error parks the colony for an automatic
@@ -146,6 +197,81 @@ async fn a_502_turn_end_retries_automatically_and_names_the_error() {
     );
     let text = serde_json::to_string(&rt.logs.lock().await.clone()).unwrap();
     assert!(text.contains("retrying automatically"), "each retry is logged: {text}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1268: a clean turn with subagents running does not nudge the PR rewrite (no "asking the
+/// agent once" log), and does not publish or verify. Once subagents settle, the next turn publishes
+/// if a PR description is present.
+#[tokio::test]
+async fn background_subagents_prevent_nudge_and_publish_until_they_settle() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+
+    // Simulate 2 background subagents in flight
+    rt.open_subagents.lock().await.insert("agent1".into());
+    rt.open_subagents.lock().await.insert("agent2".into());
+
+    // Turn ends cleanly but without pr.md, with subagents running
+    finish_turn(&app, "abc", &rt, false, None, None, None).await;
+
+    // No PR rewrite nudge should have fired (flag stays false)
+    let s = app.session("abc").await.unwrap();
+    assert!(!s.pr_rewrite_nudged, "no nudge while subagents are running");
+
+    // Status should still be Running, no publish/verify
+    assert_eq!(s.status, SessionStatus::Running, "status unchanged, waiting for subagents");
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(
+        log.contains("not publishing yet, background subagents are still running"),
+        "wait reason should mention subagents: {log}"
+    );
+    assert!(
+        !log.contains("asking the agent once to rewrite"),
+        "no nudge while subagents are running: {log}"
+    );
+    assert!(
+        !log.contains("verifying the claim"),
+        "no publish while subagents are running: {log}"
+    );
+
+    // Now write a PR description
+    let out = app.session_dir("abc").join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("pr.md"), "# Fix\n\nBody.\n").unwrap();
+
+    // End another turn with subagents still running
+    finish_turn(&app, "abc", &rt, false, None, None, None).await;
+
+    // Status should still be Running (subagents still block)
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(
+        s.status,
+        SessionStatus::Running,
+        "still waiting for subagents with pr.md present"
+    );
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(
+        log.contains("not publishing yet, background subagents are still running"),
+        "still waiting: {log}"
+    );
+    assert!(
+        !log.contains("verifying the claim"),
+        "no publish/verify while subagents are running: {log}"
+    );
+
+    // Clear subagents and update pr.md (to mark it as changed)
+    rt.open_subagents.lock().await.clear();
+    std::fs::write(out.join("pr.md"), "# Fix\n\nBody updated.\n").unwrap();
+    finish_turn(&app, "abc", &rt, false, None, None, None).await;
+
+    // Now it should publish and verify
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Running, "status may change based on publish result");
+    let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+    assert!(log.contains("verifying the claim"), "now verifying and publishing: {log}");
+
     let _ = std::fs::remove_dir_all(root);
 }
 

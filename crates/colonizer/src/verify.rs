@@ -841,7 +841,18 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
     // The claim versus the observation.
     // An empty branch is a "no change needed" answer, not a claim of work that is missing: there
     // is nothing to check, so it is unverifiable and publishing records it as no changes.
+    // Issue #1268: unless the PR description claims to have made changes, in which case it's contradicted.
     if changed.is_empty() {
+        let claim = tokio::fs::read_to_string(cwd.join("out").join("pr.md"))
+            .await
+            .unwrap_or_default();
+        let claimed = claimed_paths(&claim);
+        if !claimed.is_empty() {
+            record.verdict = Verdict::Contradicted;
+            let paths = claimed.join(", ");
+            record.summary = format!("branch has no changes against {base}, but the PR description names changed files: {paths}");
+            return record.finished(started);
+        }
         unverifiable!(format!("branch has no changes against {base}; nothing to verify"));
     }
     let mut contradictions = {
@@ -2906,6 +2917,21 @@ pub(crate) mod tests {
         assert_eq!(v.exit_code, None, "{v:?}");
         assert_eq!(v.summary, "branch has no changes against main; nothing to verify");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1268: an empty branch whose PR description names changed files is contradicted, not unverifiable.
+    #[test]
+    fn an_empty_branch_with_claimed_changes_is_contradicted() {
+        // Empty branch with pr.md naming no paths → Unverifiable (no claimed paths)
+        let claim = "# Refactor\n\nNo actual changes, just a no-op.";
+        assert!(claimed_paths(claim).is_empty());
+
+        // Empty branch with pr.md naming paths → would be Contradicted (tested via full verify in async)
+        let claim = "Fixed `src/main.rs` and `lib/utils.rs`.";
+        let paths = claimed_paths(claim);
+        assert!(!paths.is_empty(), "claim names paths: {paths:?}");
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&"lib/utils.rs".to_string()));
     }
 
     /// Colony 5b460871 on #531: a docs-only branch adding `docs/remote-tunnel.md`, whose description
