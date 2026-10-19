@@ -1436,3 +1436,41 @@ async fn a_fresh_subagent_settlement_is_not_redriven_early() {
     assert!(commands.try_recv().is_err(), "a disabled watchdog does not re-drive");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A settlement can land while the lead's own turn is still alive — inside a long tool call it
+/// made after the launch — or under someone else's flag. Neither is re-driven: no interrupt, the
+/// flag stands, and the window stays armed for a later tick.
+#[tokio::test]
+async fn a_live_turn_or_a_foreign_flag_holds_the_redrive() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    let mut commands = rt.commands_rx.lock().await.take().expect("the command channel");
+    let armed = at(0);
+    *rt.turn_lost_since.lock().await = Some(armed);
+
+    // The lead is inside a `cargo test` that outlives the grace.
+    rt.open_tool_calls.lock().await.insert("bash-1".into());
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(3)).await;
+    assert!(commands.try_recv().is_err(), "a tool call in flight is not interrupted");
+    assert_eq!(*rt.turn_lost_since.lock().await, Some(armed), "the window stays armed");
+    rt.open_tool_calls.lock().await.clear();
+
+    // A person's control-defeat card is neither talked over nor replaced.
+    app.update_session("abc", |x| x.attention = Some(json!({"reason": CONTROL_DEFEAT_REASON})))
+        .await;
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(3)).await;
+    assert!(commands.try_recv().is_err(), "nothing is sent over a foreign flag");
+    let attention = app.session("abc").await.unwrap().attention.expect("the card stands");
+    assert_eq!(attention["reason"], CONTROL_DEFEAT_REASON);
+    assert_eq!(*rt.turn_lost_since.lock().await, Some(armed));
+
+    // With both gone, the same window is re-driven.
+    app.update_session("abc", |x| x.attention = None).await;
+    let s = app.session("abc").await.unwrap();
+    maybe_redrive_subagent_turn(&app, &s, &rt, &SETTINGS, at(3)).await;
+    assert_eq!(commands.try_recv().expect("the interrupt")["type"], "interrupt");
+    assert!(rt.turn_lost_since.lock().await.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}

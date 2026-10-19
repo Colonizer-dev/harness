@@ -1,0 +1,52 @@
+// Variant of config.alloy that tails the mothership's local `file` provider instead of listening
+// for OTLP pushes. The provider is not built yet (#850 — the settings UI refuses it today); when
+// it lands it is expected to write newline-delimited OTLP/JSON — the same documents as the
+// conformance goldens (crates/colonizer-observability/tests/fixtures/otlp) — into
+// <data>/observability/otlp. Mount that directory at /var/lib/colonizer/observability/otlp and
+// run this file instead of config.alloy (grafana/README.md has the command).
+//
+// Honest about its limits: Alloy 1.20 has no receiver that decodes OTLP files, so this ships
+// each line to Loki as a log record whose body is the raw JSON. Only the static service_name
+// label survives — loki/loki.yaml's label promotion never sees the attributes — so the
+// dashboards' colonizer_stream label and structured-metadata filters will NOT match here, and
+// the provider's traces and metrics files are not handled at all. A collector build with the
+// otlp_json_file receiver reads those properly; .github/ci/otel-collector/conformance.yaml is
+// the working example.
+//
+// otelcol.receiver.filelog is public-preview in Alloy 1.20, so running (or validating) this file
+// needs --stability.level=public-preview — grafana/README.md includes it in the command.
+
+otelcol.receiver.filelog "otlp_files" {
+	include           = ["/var/lib/colonizer/observability/otlp/*"]
+	start_at          = "beginning"
+	include_file_name = false
+
+	output {
+		logs = [otelcol.processor.transform.file.input]
+	}
+}
+
+// The static resource attribute that becomes Loki's service_name index label.
+
+otelcol.processor.transform "file" {
+	log_statements {
+		context    = "resource"
+		statements = ["set(attributes[\"service.name\"], \"colonizer-mothership\")"]
+	}
+
+	output {
+		logs = [otelcol.processor.batch.file.input]
+	}
+}
+
+otelcol.processor.batch "file" {
+	output {
+		logs = [otelcol.exporter.otlphttp.loki.input]
+	}
+}
+
+otelcol.exporter.otlphttp "loki" {
+	client {
+		endpoint = "http://loki:3100/otlp"
+	}
+}

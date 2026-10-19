@@ -354,3 +354,110 @@ async fn compact_status_reads_the_header_secret_only_when_the_rest_is_healthy() 
     assert_eq!(super::compact_status(&app).await, "ok", "a good list leaves it ok");
     std::fs::remove_dir_all(root).ok();
 }
+
+/// #861: `relay_fleet_history` defaults off, saves like any switch, reaches the add-on's contract
+/// settings, and the contract carries the relay list (empty until members report their own
+/// exporters, #860).
+#[tokio::test]
+async fn relay_fleet_history_defaults_off_saves_and_reaches_the_contract() {
+    let root = crate::tests::temp_root();
+    let app = crate::tests::test_app(&root);
+    let saved = save_observability(
+        &app,
+        "otlp",
+        obs_settings(&[("endpoint", json!("https://otlp.example.com"))]),
+        false,
+    )
+    .await
+    .unwrap();
+    // The save echoes what was sent: an unasked switch is simply absent, never on.
+    assert_ne!(
+        saved["settings"]["relay_fleet_history"],
+        json!(true),
+        "off unless asked: {:?}",
+        saved["settings"]
+    );
+    let saved = save_observability(
+        &app,
+        "otlp",
+        obs_settings(&[
+            ("endpoint", json!("https://otlp.example.com")),
+            ("relay_fleet_history", json!(true)),
+        ]),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["settings"]["relay_fleet_history"], json!(true));
+
+    match crate::observability::supervisor::resolve(&app).await {
+        crate::observability::env::Resolved::On(e) => {
+            let contract = crate::observability::supervisor::contract(&app, &e.settings).await;
+            assert_eq!(contract["settings"]["relay_fleet_history"], json!(true), "{contract}");
+            assert_eq!(contract["relay_members"], json!([]), "{contract}");
+        }
+        _ => panic!("an enabled module with an endpoint resolves on"),
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Regenerates the committed archive-bundle fixture the observability add-on's tests read
+/// (#859): a real tar+zstd bundle and its sidecar, written by the mothership's own archiver over
+/// the v0.1.9 fixture's richer colony (`a1b2c3d4`: events, a finding, an `out/` file and the
+/// credential `vm/session.json` the bundle must leave out). Run it on purpose with
+/// `cargo test -p colonizer-harness --locked regenerate_archive_bundle_fixture -- --ignored`; the output
+/// lands in `tests/fixtures/observability/archive/` and is committed, so it needs re-running only
+/// when the bundle layout or the fixture colony moves.
+#[tokio::test]
+#[ignore = "writes the committed fixture; run it on purpose"]
+async fn regenerate_archive_bundle_fixture() {
+    let root = crate::tests::temp_root();
+    // Pinned before the app can read one: the bundle's `mothership` host id keys every record and
+    // trace id the add-on builds from this fixture, so it must never move.
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(root.join("config/host_id"), "host-1").unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/data-v0.1.9");
+    copy_dir(&fixture.join("sessions/a1b2c3d4"), &root.join("data/sessions/a1b2c3d4"));
+    let sessions: Vec<crate::sessions::Session> =
+        serde_json::from_slice(&std::fs::read(fixture.join("sessions.json")).unwrap()).unwrap();
+    let colony = sessions
+        .iter()
+        .find(|s| s.id == "a1b2c3d4")
+        .expect("the fixture holds the colony");
+    let app = crate::tests::test_app(&root);
+    let rel = crate::archive::archive_session(&app, colony)
+        .await
+        .unwrap()
+        .expect("the colony has files to archive");
+    let bundle = root.join("data/archive").join(&rel);
+    let sidecar = crate::archive::sidecar_of(&bundle);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/observability/archive");
+    // Replaced wholesale, so a renamed revision of an older run never lingers beside the new one.
+    std::fs::remove_dir_all(&out).ok();
+    for (from, rel) in [
+        (bundle.clone(), rel.clone()),
+        (
+            sidecar,
+            crate::archive::sidecar_of(std::path::Path::new(&rel))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ] {
+        let to = out.join(&rel);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(from, to).unwrap();
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}

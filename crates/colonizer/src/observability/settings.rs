@@ -97,6 +97,10 @@ fn shared_properties() -> Map<String, Value> {
         "start_from".into(),
         json!({"type": "string", "title": "Start from", "enum": ["now", "backlog"], "default": "now", "description": "Where a new destination starts. now sends only what is written from the moment it is configured; backlog also sends what the ledgers already hold, back to Max backlog (days). Settled once per endpoint: changing it later does not move the read position."}),
     );
+    m.insert(
+        "relay_fleet_history".into(),
+        json!({"type": "boolean", "title": "Relay fleet members' history", "description": "Off by default. Relays what fleet members push to this owner — their finished colonies — to this owner's observability backend, under each member's own identity. Structure only, never conversation content; members see this in their push preview.", "default": false}),
+    );
     m
 }
 
@@ -184,6 +188,23 @@ pub fn providers() -> Vec<Provider> {
     ]
 }
 
+/// Whether this owner's export is on and relays fleet members' synced history to its own backend
+/// (#861): the flag the pairing answer and every rows answer carry, so a member's push preview can
+/// say who else sees what it pushes. Read from the same resolved config ([`env::resolve`]) that
+/// decides whether the add-on runs and what its contract says — a member is never told "the owner
+/// relays" by an owner whose export is actually off (module switched off, `OTEL_SDK_DISABLED`, a
+/// config the resolver refuses).
+pub(crate) async fn relays_fleet_history(app: &crate::App) -> bool {
+    match super::supervisor::resolve(app).await {
+        super::env::Resolved::On(e) => e
+            .settings
+            .get("relay_fleet_history")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 /// The parsed settings of one observability module, with every default applied.
 ///
 /// The exporter (#851, #852) reads this; nothing in this build does yet, so the whole type is
@@ -224,6 +245,8 @@ pub struct ExporterConfig {
     pub max_read_mib_per_sec: u64,
     /// Where a new destination starts: `now` or `backlog`.
     pub start_from: String,
+    /// Whether the owner relays fleet members' synced history to its own backend (#861).
+    pub relay_fleet_history: bool,
     /// The OTLP headers, filled by a later issue from the `observability-headers` secret (#852).
     /// Empty in this build — nothing here reads a secret or an environment variable.
     pub headers: Vec<(String, String)>,
@@ -270,6 +293,7 @@ impl ExporterConfig {
             max_backlog_days: u64_at(s, "max_backlog_days", 7),
             max_read_mib_per_sec: u64_at(s, "max_read_mib_per_sec", 8),
             start_from: str_at(s, "start_from", "now"),
+            relay_fleet_history: bool_at(s, "relay_fleet_history", false),
             headers: Vec::new(),
         })
     }
@@ -314,6 +338,7 @@ impl std::fmt::Debug for ExporterConfig {
             .field("max_backlog_days", &self.max_backlog_days)
             .field("max_read_mib_per_sec", &self.max_read_mib_per_sec)
             .field("start_from", &self.start_from)
+            .field("relay_fleet_history", &self.relay_fleet_history)
             .field("headers", &headers)
             .finish()
     }
@@ -518,6 +543,7 @@ mod tests {
                 ("max_backlog_days", json!(7)),
                 ("max_read_mib_per_sec", json!(8)),
                 ("start_from", json!("now")),
+                ("relay_fleet_history", json!(false)),
             ] {
                 assert_eq!(props[key]["default"], default, "{}: {key}", provider.id);
             }

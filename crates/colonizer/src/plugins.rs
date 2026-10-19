@@ -24,6 +24,17 @@ pub fn parse_list(value: &str) -> Vec<String> {
     names
 }
 
+/// The same setting back, with `name` appended unless it is already there: how a colony that
+/// needs one skillset whatever its org switched on gets it — archify for a mapping colony
+/// (maps.rs), understand-anything for a graph colony (ua_graph.rs).
+pub fn with_skillset(plugins: &str, name: &str) -> String {
+    let mut names = parse_list(plugins);
+    if !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+    names.join(",")
+}
+
 fn local_root(cfg: &Settings) -> PathBuf {
     cfg.data_dir.join("plugins")
 }

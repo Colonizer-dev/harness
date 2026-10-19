@@ -89,7 +89,7 @@ pub(crate) const OUTCOMES: [&str; 9] = [
 /// are public, and anything outside the set is reported as [`OTHER`]. A reason nobody has written
 /// today would still have a series waiting for it, which is the cheaper mistake: an under-used
 /// `other` costs one aggregate, a leaked sentence costs the install its log.
-pub(crate) const ATTENTION_REASONS: [&str; 13] = [
+pub(crate) const ATTENTION_REASONS: [&str; 14] = [
     // Written as these constants today.
     crate::autonomy::ALERT_REASON,
     crate::queue::AUTOPILOT_HELD_REASON,
@@ -101,6 +101,7 @@ pub(crate) const ATTENTION_REASONS: [&str; 13] = [
     crate::gateway::MODEL_ERROR_REASON,
     crate::account_health::WAITING_FOR_ACCOUNT_REASON,
     crate::provider_quota::QUOTA_EXHAUSTED_REASON,
+    crate::watchdog::TURN_LOST_REASON,
     // Written as literals at the few sites that predate the constants.
     "stalled",
     "nudges_exhausted",

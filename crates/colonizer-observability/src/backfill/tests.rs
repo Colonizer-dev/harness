@@ -256,6 +256,7 @@ fn contract(root: &Root, url: &str, colonies: &BTreeMap<String, ColonyPolicy>, e
         data_dir: root.0.clone(),
         settings,
         policy: colonies.clone(),
+        relay_members: Vec::new(),
     };
     let path = contract::path(&root.0);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -624,4 +625,92 @@ fn options_parse_the_flags_and_the_date_grammar() {
         DEFAULT_RATE,
         "no --rate is the default"
     );
+}
+
+/// One string attribute of a record, if it is one.
+fn attr_of(record: &crate::proto::logs::v1::LogRecord, key: &str) -> Option<String> {
+    match record
+        .attributes
+        .iter()
+        .find(|kv| kv.key == key)?
+        .value
+        .as_ref()?
+        .value
+        .as_ref()?
+    {
+        crate::proto::common::v1::any_value::Value::StringValue(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Every accepted log record of `colony` from one of `sources`, as `(record id, record)` with the
+/// two time fields zeroed: the only difference between two runs of the same lines is the `ts` the
+/// mapper stamps on a line that carries none.
+fn records_of(collector: &Collector, colony: &str, sources: &[&str]) -> Vec<(String, crate::proto::logs::v1::LogRecord)> {
+    let mut out = Vec::new();
+    for seen in collector.seen("/v1/logs") {
+        let Ok(request) = ExportLogsServiceRequest::decode(seen.body.as_slice()) else {
+            continue;
+        };
+        for mut record in request
+            .resource_logs
+            .into_iter()
+            .flat_map(|r| r.scope_logs)
+            .flat_map(|s| s.log_records)
+        {
+            let (Some(id), Some(source), Some(of)) = (
+                attr_of(&record, "colonizer.record.id"),
+                attr_of(&record, "colonizer.source"),
+                attr_of(&record, "colonizer.colony.id"),
+            ) else {
+                continue;
+            };
+            if of == colony && sources.contains(&source.as_str()) {
+                record.time_unix_nano = 0;
+                record.observed_time_unix_nano = 0;
+                out.push((id, record));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// The archive half replays exactly what the disk half replays (#859): the committed bundle fixture
+/// — the mothership's own archiver over this very fixture's `a1b2c3d4` colony — read from a data
+/// dir that holds nothing but the archive, against the same colony replayed from disk. Record ids
+/// and whole records — bodies, attributes — are identical.
+#[tokio::test]
+async fn an_archive_only_replay_matches_the_disk_replay() {
+    let (disk_root, colonies) = fixture("archive-vs-disk");
+    let disk = Collector::start(ok()).await;
+    let path = contract(&disk_root, &disk.url, &colonies, |_| {});
+    let mut b = Backfill::new(&path, Vec::new(), &Options::default()).unwrap();
+    run_to_done(&mut b).await;
+    let from_disk = records_of(&disk, "a1b2c3d4", &["events", "findings"]);
+    assert_eq!(from_disk.len(), 3, "two events lines and one finding");
+
+    // A data dir that holds nothing but the archive: the same colony, only bundled.
+    let empty = root("archive-only");
+    let bundles = Path::new(env!("CARGO_MANIFEST_DIR")).join("../colonizer/tests/fixtures/observability/archive");
+    copy_dir(&bundles, &empty.0.join("archive"));
+    let archive = Collector::start(ok()).await;
+    let path = contract(&empty, &archive.url, &colonies, |_| {});
+    let mut b = Backfill::new(
+        &path,
+        Vec::new(),
+        &Options {
+            include_archive: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    run_to_done(&mut b).await;
+    let summary = b.summary();
+    assert_eq!(summary["state"], "complete");
+    assert_eq!(summary["include_archive"], true);
+    assert_eq!(summary["archived_colonies"], serde_json::json!(1));
+    let from_archive = records_of(&archive, "a1b2c3d4", &["events", "findings"]);
+    assert_eq!(from_archive.len(), 3);
+    assert_eq!(from_archive, from_disk, "the same ids and the same records");
 }

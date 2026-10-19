@@ -4,7 +4,9 @@
 // the rest. Nothing here writes to GitHub; the editor's Create PR does, after a confirm.
 import { Suspense, lazy, useEffect, useMemo, useState, type ReactElement } from "react";
 import { useApi } from "../context";
-import type { OrgInfo, Repo, RepoCoverage, RepoGitSummary, RepoLoc, RepoMeta, Session } from "../types";
+import { repoGraphJsonPath } from "../features/repos/api";
+import { formatCost } from "../spend";
+import type { OrgInfo, Repo, RepoCoverage, RepoGitSummary, RepoGraph, RepoLoc, RepoMeta, Session } from "../types";
 import { Avatar } from "../components/Avatar";
 import { Page } from "./Page";
 import { Spinner, cx, sameOrg, store, stored, timeAgo } from "../components/ui";
@@ -26,6 +28,7 @@ interface RepoFacts {
   loc?: RepoLoc | null;
   coverage?: RepoCoverage | null;
   git?: RepoGitSummary | null;
+  graph?: RepoGraph | null;
   error?: string;
 }
 
@@ -40,7 +43,7 @@ function useRepoFacts(repos: readonly string[]): Record<string, RepoFacts> {
     const worker = async () => {
       while (!cancelled && queue.length > 0) {
         const repo = queue.shift()!;
-        const [meta, loc, coverage, git] = await Promise.allSettled([api.repoMeta(repo), api.repoLoc(repo), api.repoCoverage(repo), api.repoGitSummary(repo)]);
+        const [meta, loc, coverage, git, graph] = await Promise.allSettled([api.repoMeta(repo), api.repoLoc(repo), api.repoCoverage(repo), api.repoGitSummary(repo), api.repoGraph(repo)]);
         if (cancelled) return;
         const value = <T,>(r: PromiseSettledResult<T>) => (r.status === "fulfilled" ? r.value : null);
         setFacts((f) => ({
@@ -50,6 +53,7 @@ function useRepoFacts(repos: readonly string[]): Record<string, RepoFacts> {
             loc: value(loc),
             coverage: value(coverage),
             git: value(git),
+            graph: value(graph),
             error: loc.status === "rejected" ? String((loc.reason as Error)?.message ?? loc.reason) : undefined,
           },
         }));
@@ -113,6 +117,24 @@ function CoveragePill({ coverage }: { coverage: RepoCoverage | null | undefined 
   return (
     <span className={cx("font-medium tabular-nums", tone)} title={`${coverage.format} report ${coverage.file} in artifact ${coverage.artifact}`}>
       {coverage.percent}%
+    </span>
+  );
+}
+
+/** The Understand-Anything knowledge-graph line: the raw graph, what commit it was built at and what
+ *  its jobs cost. Nothing before the repo opts in (or an older mothership answers nothing). */
+function GraphLine({ repo, graph }: { repo: string; graph: RepoGraph | null | undefined }): ReactElement | null {
+  if (!graph || (!graph.enabled && !graph.commit)) return null;
+  return (
+    <span className="inline-flex items-center gap-2">
+      {graph.commit && (
+        <a href={repoGraphJsonPath(repo)} target="_blank" rel="noopener" className="text-accent hover:underline">
+          Open knowledge graph
+        </a>
+      )}
+      {graph.commit && <span>built at {graph.commit.slice(0, 7)}</span>}
+      {graph.building && <span>building…</span>}
+      <span>graph jobs: {formatCost(graph.cost_usd)}</span>
     </span>
   );
 }
@@ -236,6 +258,7 @@ function RepoCodeCard({ repo, facts, live, onOpen }: { repo: string; facts: Repo
           ))}
         </span>
         {facts?.meta?.pushed_at && <span>pushed {timeAgo(facts.meta.pushed_at)}</span>}
+        <GraphLine repo={repo} graph={facts?.graph} />
         {live > 0 && <span className="ml-auto text-accent">{live} live {live === 1 ? "colony" : "colonies"}</span>}
       </footer>
     </article>

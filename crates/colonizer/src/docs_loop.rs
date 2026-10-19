@@ -2493,8 +2493,9 @@ async fn clone_for(app: &Shared, repo: &str, mirror: Mirror) -> Result<PathBuf> 
 }
 
 /// The repositories a run covers: the allowlisted repositories, and every repository of each
-/// allowlisted org, at most [`MAX_REPOS`].
-async fn repos_of(app: &Shared, allow: &[String]) -> (Vec<String>, Vec<RepoReport>) {
+/// allowlisted org, at most [`MAX_REPOS`]. The graph tick resolves an org's `ua_graph` list the
+/// same way (ua_graph.rs); its failures are a docs run's to report, so it drops them.
+pub(crate) async fn repos_of(app: &Shared, allow: &[String]) -> (Vec<String>, Vec<RepoReport>) {
     let mut repos: Vec<String> = Vec::new();
     let mut failed = Vec::new();
     // `*` is every visible org, resolved now so a hidden org is left out (issue #1213).

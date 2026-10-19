@@ -51,10 +51,10 @@ the colony's branch afterwards, so an agent cannot write code to satisfy a test 
 ## Do not edit this repository by hand
 
 Everything here is generated. The files come from `scripts/bench/fixture` in
-[Colonizer-dev/harness](https://github.com/Colonizer-dev/harness), and `node scripts/bench.mjs seed`
-writes them here along with the issues. Anything committed straight to this repository is overwritten on
-the next seed, and a change to the code or the wording can move the scores it produces — which is the one
-thing a bench must not do quietly.
+[Colonizer-dev/harness](https://github.com/Colonizer-dev/harness), and `node scripts/bench.mjs seed`,
+run from that repository, writes them here along with the issues. Anything committed straight to this
+repository is overwritten on the next seed, and a change to the code or the wording can move the scores it
+produces — which is the one thing a bench must not do quietly.
 
 Fix things in the harness, under `scripts/bench/`, and re-seed.
 

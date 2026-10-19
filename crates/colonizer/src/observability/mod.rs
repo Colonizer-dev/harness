@@ -15,6 +15,7 @@
 //! add-on: no child process, no push, nothing leaves the machine on its account.
 
 pub mod env;
+pub(crate) mod fleet;
 pub mod metrics;
 pub(crate) mod oplog;
 pub(crate) mod reset;

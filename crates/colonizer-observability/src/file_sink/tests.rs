@@ -67,6 +67,7 @@ fn file_contract(root: &Root, edit: impl FnOnce(&mut Settings)) -> PathBuf {
                 ..ColonyPolicy::default()
             },
         )]),
+        relay_members: Vec::new(),
     };
     let path = contract::path(&root.0);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

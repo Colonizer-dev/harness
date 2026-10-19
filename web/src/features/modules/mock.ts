@@ -22,6 +22,11 @@ let mockDeadLetters: WebhookDelivery[] = [
   },
 ];
 
+// The mock mothership ships with the exporter add-on installed (issue #1060); the pane's install
+// and remove buttons flip this, so both states are demonstrable in mock mode.
+let mockAddonInstalled = true;
+const MOCK_ADDON = { version: "0.0.0-mock", path: "/opt/colonizer/bin/colonizer-observability" };
+
 export function modulesMock(ms: MockState): ModulesApi {
   return {
     modules: () => ms.later(() => ms.modules),
@@ -52,12 +57,20 @@ export function modulesMock(ms: MockState): ModulesApi {
       ms.later((): ObservabilityStatus => {
         const module = ms.modules.find((m) => m.kind === "observability");
         if (!module?.enabled) return { state: "off", configured: false, reason: "the observability module is not configured" };
+        if (!mockAddonInstalled)
+          return {
+            state: "no_addon",
+            configured: true,
+            error:
+              "the colonizer-observability add-on is not installed: build it (`cargo build --release -p colonizer-observability`) and put it beside the colonizer binary, or name it with COLONIZER_OBSERVABILITY_BIN",
+          };
         const endpoint = String(module.settings?.endpoint ?? "");
         const nowSecs = Math.floor(Date.now() / 1000);
         return {
           state: "running",
           configured: true,
           endpoint,
+          addon: { path: MOCK_ADDON.path, version: MOCK_ADDON.version },
           protocol: String(module.settings?.protocol ?? "http/protobuf"),
           service_name: "colonizer-mothership",
           provenance: { endpoint: "module", protocol: "default", service_name: "env:OTEL_EXPORTER_OTLP_SERVICE_NAME" },
@@ -96,6 +109,18 @@ export function modulesMock(ms: MockState): ModulesApi {
           traces: { ok: false, auth_failed: true, status: 401, error: "HTTP 401 Unauthorized" },
         },
       };
+    },
+    // The add-on installer (issue #1060): the mock installs instantly and enables cleanly.
+    observabilityInstall: async () => {
+      await sleep(250);
+      mockAddonInstalled = true;
+      return { installed: true, version: MOCK_ADDON.version, path: MOCK_ADDON.path, enabled: true };
+    },
+    // Removing keeps everything the real one keeps: settings and the exporter's ledger offsets.
+    observabilityRemove: async (purge) => {
+      await sleep(250);
+      mockAddonInstalled = false;
+      return { removed: true, purge, offsets_kept: true };
     },
     // Webhook deliveries (issue #898): one dead letter, so the Settings panel has a row in mock mode.
     webhookDeliveries: () =>

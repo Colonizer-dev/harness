@@ -93,9 +93,11 @@ The table above names each one; the shapes:
   or the one **404** an invalid, expired and already-redeemed code all share, indistinguishably. The
   first redeem consumes the code.
 - `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
-  `{status: "approved", token, member_id, refresh}` exactly once (a second poll reads **404**), or
+  `{status: "approved", token, member_id, refresh, relays}` exactly once (a second poll reads **404**), or
   the rejection. `refresh` is the member's refresh credential (64 hex characters, stored hashed on
-  the owner): what trades a fleet token the owner stopped accepting for a fresh one. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
+  the owner): what trades a fleet token the owner stopped accepting for a fresh one. `relays`
+  (issue #861) says whether the owner relays what this member pushes to its own observability
+  backend — the flag the member's sync preview carries. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
   `GET /api/hosts`, `POST /api/fleet/peer/leave` and the history push's two ingest routes (below),
   never minted by `POST /api/tokens`, and never the member's local cockpit token.
 - `POST /api/fleet/peer/refresh` `{member_id, refresh}` (issue #762) answers `{token}`: a fresh
@@ -131,12 +133,15 @@ owner.
   ([§6.11](fleet-export.md#611-fleet-export-bundle-687)), and `id` is its `<origin_host>:<original_id>`.
   `payloads` lists the colony's logs — `{name, sha256, bytes}` with `name` one of `events.jsonl`,
   `harness.jsonl`, `gateway.jsonl`, or `{name, bytes, omitted: true}` for a log too large to send.
-  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}]}`: accepted rows
-  are upserted by id into `sessions.json` (a re-sent row replaces itself, never duplicates), and a
+  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}], "relays"}`:
+  accepted rows are upserted by id into `sessions.json` (a re-sent row replaces itself, never
+  duplicates), and a
   row whose payloads are not all held is refused by name with the hashes it lacks. A body that
   cannot be read as rows is refused whole (**400**/**422**, or **413** past the limits) — the
   member splits such a batch to find the row that caused it. A refusal may name the row itself
-  with a top-level `"row": id`.
+  with a top-level `"row": id`. `relays` (issue #861) repeats on every answer whether the owner
+  relays members' synced history to its own observability backend — the fresher word the member's
+  sync preview prefers over the pairing answer's flag.
 
 The member reads the other answers as states. A **401** refreshes the token once per drain
 (`POST /api/fleet/peer/refresh`, above), stores the new one in the membership and retries the
@@ -211,7 +216,8 @@ the order below.
 | 7 | `sync_backlog` | the member's drains have ended with rows unsent for ≥ 60 min; reason "Sync behind by N rows" | degraded | check its network, then restart colonizer there | yes |
 | 8 | `sync_rate_limited` | the member's drain is backing off after a 429 or 503 | degraded | it backs off by itself; wait a few minutes | yes |
 | 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
-| 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
+| 10 | `observability_failing` | the member's observability exporter has been failing for more than 10 min; reason "Observability failing for N min". Export off is a choice, never a fault | degraded | check this member's observability settings | yes |
+| 11 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
 
 The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
 A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
@@ -220,12 +226,15 @@ finding, such as a revoked token, still wins), and a member that never answered 
 `disk_total_bytes` (omitted when unknown) for the disk percentage.
 
 The sync and runner signals ride the same poll. A member's reduced `GET /api/status` (the body a
-caller without the API token gets) carries two more keys, both ages, counts and classes only:
+caller without the API token gets) carries three more keys — ages, counts and classes only, plus
+one destination hash:
 
 ```json
 {"runner": {"last_tick_age_s": 3},
  "fleet_sync": {"state": "error", "backlog_rows": 5, "oldest_unsent_age_s": 5400,
-                "last_error_class": "error", "consent": true}}
+                "last_error_class": "error", "consent": true},
+ "observability": {"enabled": true, "state": "failing", "failing_since": 1790000000,
+                   "destination_hash": "1a2b3c4d5e6f7a8b9c0d1e2f"}}
 ```
 
 - `runner.last_tick_age_s` — seconds since the queue loop last came round (`null` before its first
@@ -239,8 +248,16 @@ caller without the API token gets) carries two more keys, both ages, counts and 
   oldest row's wait, `null` with no backlog. `last_error_class` is `unauthorized` (401),
   `forbidden` (403), `rate_limited` (429/503, backing off), `error` (anything else) or `null`.
   `consent` is the operator's answer; with it off, no backlog is claimed.
+- `observability` (issue #860) — always present on this colonizer version, so an owner can tell
+  export switched off (`enabled: false`, `state: "off"`) from an older member that reports no
+  block at all. `state` is `off`, `starting` (on, not yet known either way), `ok`, or `failing` —
+  the exporter's process is down, or its backend is refusing or unreachable. `failing_since` is
+  when the member first saw the current failure, unix seconds, `null` while it is not failing.
+  `destination_hash` is a truncated SHA-256 of the protocol and endpoint, `null` when the config
+  is too broken to resolve one — the only thing that identifies the backend, and only as a hash:
+  no endpoint, header or error text crosses machines.
 
-`GET /api/hosts` rows carry them on as `runner_tick_age_s` and `fleet_sync`, each omitted when the
-peer did not report it. A peer on an older colonizer reports neither, so its sync and runner
-signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog that
-grows from it does.
+`GET /api/hosts` rows carry them on as `runner_tick_age_s`, `fleet_sync` and `observability`, each
+omitted when the peer did not report it. A peer on an older colonizer reports none of them, so
+those signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog
+that grows from it does.
