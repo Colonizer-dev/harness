@@ -117,6 +117,7 @@ mod operator;
 mod orgs;
 mod packages;
 mod path_policy;
+mod path_shims;
 mod phone;
 mod placement;
 mod playbook;
