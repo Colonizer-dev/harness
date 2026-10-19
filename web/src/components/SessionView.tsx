@@ -37,7 +37,7 @@ export interface InterfaceFlags {
   terminal: boolean;
 }
 
-type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up" | "move";
+type Action = "publish" | "resume" | "stop" | "cleanup" | "delete" | "keep" | "catch_up" | "move" | "retry";
 
 export function SessionView({
   sessionId,
@@ -255,6 +255,16 @@ export function SessionView({
                   <Badge tone="warn">Superseded by {superseded.pr != null ? `#${superseded.pr}` : "a merged PR"}</Badge>
                 </a>
               )}
+              {session.retry_of && (
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(session.retry_of!)}
+                  title={`This colony retries ${session.retry_of}`}
+                  className="-mx-1 inline-flex min-w-0 items-center gap-1 rounded-md px-1 text-left hover:bg-panel-2 hover:text-text"
+                >
+                  <Badge tone="accent">Retry of {session.retry_of.slice(-8)}</Badge>
+                </button>
+              )}
               {session.issue == null && <Badge>No issue</Badge>}
               {session.autopilot && <Badge>Autopilot</Badge>}
               {session.origin === "burn_down" && <Badge tone="accent">Burn-down</Badge>}
@@ -390,6 +400,16 @@ export function SessionView({
                 }
               >
                 {busy === "resume" ? <Spinner /> : <IconPower size={15} />} Resume
+              </Button>
+            )}
+            {session.status === "failed" && (
+              <Button
+                variant="primary"
+                disabled={busy !== null}
+                onClick={() => act("retry", (a, id) => a.retrySession(id))}
+                title="Create a new colony with the same settings to retry the failed one"
+              >
+                {busy === "retry" ? <Spinner /> : <IconPower size={15} />} Retry
               </Button>
             )}
             {session.status === "queued" && (

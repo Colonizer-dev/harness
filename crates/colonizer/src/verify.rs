@@ -3246,6 +3246,27 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #1278: verify that verdicts trust the VM's exit code, not fabricated output.
+    /// A shim that prints "test result: ok" but exits 1 is still a failure because the
+    /// verdict reads the exit code from the microVM's report, never the agent's stdout.
+    #[tokio::test]
+    async fn verdict_trusts_exit_code_not_fabricated_output() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        // Set verify command to echo success; a shim would print the same regardless of outcome.
+        let _repo = worktree_fixture(&app, Some("echo 'test result: ok'"), "did the work", true).await;
+        // Base: exit 0, reported 0. Head: prints success but actually exits 1 (reported from VM).
+        // The verdict must use the reported exit code (1), not the printed output.
+        let red = verify(
+            &app,
+            &phased_runner("uncommitted.txt", (0, Some(0)), (1, Some(1)), "test result: ok\n"),
+        )
+        .await;
+        assert_eq!(red.verdict, Verdict::Contradicted, "{red:?}");
+        assert_eq!(red.exit_code, Some(1), "verdict must use reported exit code 1, not output");
+        assert!(red.summary.contains("exited 1"), "{}", red.summary);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Two crates on the base, `a` and `b`; the branch changes one file in `a` and two in `b`, so
     /// the diff's order runs `a` first while focus (#584) picks `b`. `mode` is `verify_focus`.
     async fn two_crate_fixture(app: &crate::Shared, mode: &str) {

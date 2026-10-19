@@ -1,6 +1,6 @@
 # Hosted: the same mothership, somewhere else
 
-The design gate for [#298](https://github.com/Colonizer-dev/harness/issues/298). This page is a
+The design gate for [#1252](https://github.com/Colonizer-dev/harness/issues/1252). This page is a
 contract, not a feature: it fixes what "hosted" means before the thing is built, so that a hosted
 Colonizer inherits the local one's behaviour instead of growing a second API to match it.
 

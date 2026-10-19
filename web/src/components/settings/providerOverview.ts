@@ -14,9 +14,10 @@ export interface ProviderStatus {
   label: string;
 }
 
-/** The row's status dot: quota out first, then the gateway's own health verdict, then whether it was ever used. */
+/** The row's status dot: quota out first, then an outage colonies are parked on (#1068), then the gateway's own health verdict, then whether it was ever used. */
 export function providerStatus(provider: ModelProvider): ProviderStatus {
   if (provider.quota_exhausted) return { tone: "err", label: "Quota out" };
+  if (provider.outage_since) return { tone: "err", label: "Outage" };
   const health = provider.health;
   if (health?.degraded) return health.failure_pct >= 25 ? { tone: "err", label: "Failing" } : { tone: "warn", label: "Degraded" };
   if (!provider.has_key && provider.auth !== "none") return { tone: "warn", label: "No key" };
@@ -30,7 +31,7 @@ export const compactNumber = (n: number): string => compact.format(n);
 export interface Gauge {
   /** 0..100 left in the plan; null when the balance or its total is unknown. */
   pctLeft: number | null;
-  /** "62%", "3.1M left", or "balance unknown". */
+  /** "62%", "3.1M left", "balance unknown", or "no balance API". */
   text: string;
   tone: StatusTone;
 }
@@ -39,7 +40,8 @@ export interface Gauge {
 export function gaugeOf(provider: ModelProvider): Gauge {
   if (provider.quota_exhausted) return { pctLeft: 0, text: "0%", tone: "err" };
   const b = provider.balance;
-  if (!b) return { pctLeft: null, text: "balance unknown", tone: "idle" };
+  const hasQuota = Boolean(provider.quota);
+  if (!b) return { pctLeft: null, text: hasQuota ? "balance unknown" : "no balance API", tone: "idle" };
   if (b.limit != null && b.limit > 0) {
     const pct = Math.max(0, Math.min(100, (b.remaining / b.limit) * 100));
     return { pctLeft: pct, text: `${Math.round(pct)}%`, tone: pct < 10 ? "err" : pct < 25 ? "warn" : "ok" };

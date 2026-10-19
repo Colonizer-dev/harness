@@ -46,8 +46,41 @@ fn no_fallback_set_keeps_todays_behaviour() {
     }
     assert_eq!(
         decide(Some(&account), FALLBACK, &providers, &|id| id == "minimax", None, None),
-        AccountRoute::Claude,
-        "a fallback provider that is out of quota too cannot take it"
+        AccountRoute::Parked {
+            reason: "no provider left: Claude is out until 19:51; MiniMax is out of quota".into()
+        },
+        "issue #1160: a fallback provider out of quota too is not a route, and saying Claude is worse"
+    );
+}
+
+/// Issue #1160: the account is out and so is the one provider the fallback named, so the colony has
+/// nothing to call at all. That is not "keep asking Claude" — it is a park, with the two resets in
+/// the reason so the card says when either plan comes back.
+#[test]
+fn an_account_and_its_fallback_provider_both_out_parks_with_both_resets() {
+    let providers = [provider("minimax", "MiniMax", true)];
+    let account = out_until("19:51", 1_791_229_918);
+    assert_eq!(
+        decide(Some(&account), FALLBACK, &providers, &|id| id == "minimax", None, None),
+        AccountRoute::Parked {
+            reason: "no provider left: Claude is out until 19:51; MiniMax is out of quota".into()
+        }
+    );
+    // The fallback setting names one provider, so another configured provider changes nothing here:
+    // the colony's other routes are `provider_quota::chain_exhausted`'s question, not this one's.
+    // The sensitivity gate is not reached: nothing is left to test eligibility against.
+    assert_eq!(
+        decide(
+            Some(&account),
+            FALLBACK,
+            &providers,
+            &|id| id == "minimax",
+            Some(Sensitivity::Restricted),
+            None
+        ),
+        AccountRoute::Parked {
+            reason: "no provider left: Claude is out until 19:51; MiniMax is out of quota".into()
+        }
     );
 }
 

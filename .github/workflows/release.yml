@@ -2,9 +2,10 @@
 # with the one-command installer (scripts/install-release.sh, published as install.sh). docs/install.md
 # tells people how to use them.
 #
-# - linux-binaries: colonizer-agentd and rtk for each colony architecture, and the harness for Linux, as
-#   static musl binaries built inside rust:1-alpine. That is `docker run` from an ordinary job, because
-#   GitHub's JavaScript actions don't run inside Alpine containers.
+# - linux-binaries: colonizer-agentd and rtk for each colony architecture, and the harness and the
+#   observability add-on for Linux, as static musl binaries built inside rust:1-alpine. That is
+#   `docker run` from an ordinary job, because GitHub's JavaScript actions don't run inside Alpine
+#   containers.
 # - bundle: scripts/install.sh --bundle for each platform, then a smoke test: the app starts from the
 #   unpacked archive, finds its assets there, and serves its API and web UI. The macOS leg wraps its
 #   tarball in Colonizer.app: signed ad hoc, or Developer ID-signed and notarized on a tag push when
@@ -85,12 +86,16 @@ jobs:
               if [ "$ARCH" = x86_64 ]; then
                 cargo build --release --locked -p colonizer-harness
                 install -m 755 target/release/colonizer dist/bin/colonizer
+                # The observability add-on ships in the release too (#1059), as its own tarball
+                # rather than inside the app: same static build, default features (no otlp-grpc).
+                cargo build --release --locked -p colonizer-observability
+                install -m 755 target/release/colonizer-observability dist/bin/colonizer-observability
               fi
               chown -R "$OWNER" dist target
             '
           mkdir -p prebuilt
           cp dist/bin/colonizer-agentd dist/bin/rtk prebuilt/
-          [ "$ARCH" != x86_64 ] || cp dist/bin/colonizer prebuilt/
+          [ "$ARCH" != x86_64 ] || cp dist/bin/colonizer dist/bin/colonizer-observability prebuilt/
           file prebuilt/*
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -232,11 +237,37 @@ jobs:
           tar -C stage -czf "out/colonizer-$PLATFORM.tar.gz" colonizer
           ls -lh out
 
+      # The observability add-on's own tarball (#1059): beside the app's asset, not inside it, so the
+      # app a default install gets does not carry the exporter. The Linux x86_64 binary is the static
+      # musl build the alpine step staged in prebuilt/; the Mac leg builds it natively, the way it
+      # builds the harness. VERSION, LICENSE and NOTICE copied the way the app's Package step does.
+      - name: Package the observability add-on
+        run: |
+          if [ "$PLATFORM" = darwin-arm64 ]; then
+            cargo build --release --locked -p colonizer-observability
+            observability=target/release/colonizer-observability
+          else
+            observability=prebuilt/colonizer-observability
+          fi
+          mkdir -p obs/colonizer-observability/bin
+          install -m 755 "$observability" obs/colonizer-observability/bin/colonizer-observability
+          printf '%s\n' "$VERSION" > obs/colonizer-observability/VERSION
+          cp LICENSE NOTICE obs/colonizer-observability/
+          tar -C obs -czf "out/colonizer-observability-$PLATFORM.tar.gz" colonizer-observability
+          ls -lh out
+
       - name: Smoke test
         run: |
           set -o pipefail
           mkdir -p smoke/home
           tar -xzf "out/colonizer-$PLATFORM.tar.gz" -C smoke
+          # The add-on rides along as its own tarball (#1059): the binary sits at the path the
+          # installer unpacks and the mothership looks for.
+          tar -tzf "out/colonizer-observability-$PLATFORM.tar.gz" > smoke/observability.list
+          grep -q "^colonizer-observability/bin/colonizer-observability$" smoke/observability.list
+          # Runs it too, not just lists it: catches a build that compiles but does not run — notably
+          # on the Mac leg, where nothing else executes the binary.
+          obs/colonizer-observability/bin/colonizer-observability --version
           # A release must know it is one: a build that reads as a development build refuses to update itself.
           smoke/colonizer/bin/colonizer version | tee smoke/version
           if [ "${VERSION#dev-}" = "$VERSION" ]; then
@@ -332,6 +363,7 @@ jobs:
           name: colonizer-${{ matrix.platform }}
           path: |
             out/colonizer-${{ matrix.platform }}.tar.gz
+            out/colonizer-observability-${{ matrix.platform }}.tar.gz
             out/Colonizer-arm64.dmg
           if-no-files-found: error
           retention-days: 7
@@ -378,7 +410,7 @@ jobs:
 
       - name: Check the tag against the crate versions
         run: |
-          for manifest in crates/colonizer/Cargo.toml crates/colonizer-agentd/Cargo.toml crates/colonizer-redact/Cargo.toml; do
+          for manifest in crates/colonizer/Cargo.toml crates/colonizer-agentd/Cargo.toml crates/colonizer-observability/Cargo.toml crates/colonizer-redact/Cargo.toml; do
             crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
             [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match $manifest version $crate" >&2; exit 1; }
           done
@@ -431,6 +463,8 @@ jobs:
             echo '```'
             echo
             echo 'Here <platform> is linux-x86_64 or darwin-arm64.'
+            echo
+            echo "The observability add-on rides along as colonizer-observability-<platform>.tar.gz for the same platforms; the installer puts it beside the colonizer binary, and the checksums and the attestation above cover it too."
             echo
             if [ "$DMG_NOTARIZED" = yes ]; then
               echo "Apple Silicon Macs can also use Colonizer-arm64.dmg: a Developer ID-signed, notarized app, which macOS opens like any other download. The curl installer above is the recommended path."

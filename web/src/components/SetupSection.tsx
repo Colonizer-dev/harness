@@ -253,8 +253,8 @@ export function SetupSection({
     );
   };
 
-  const claudeBody = (row: SetupRow) => {
-    if (row.state === "done" && editing !== "claude")
+  const modelBody = (row: SetupRow) => {
+    if (row.state === "done" && editing !== "model")
       return notes(row).length > 0 ? <div className="space-y-1">{notes(row)}</div> : null;
     return (
       <div className="space-y-2">
@@ -314,8 +314,8 @@ export function SetupSection({
         return stackBody(row);
       case "github":
         return githubBody(row);
-      case "claude":
-        return claudeBody(row);
+      case "model":
+        return modelBody(row);
       case "launch":
         return launchBody(row);
       case "map":
@@ -357,7 +357,7 @@ export function SetupSection({
                         Ask again
                       </Button>
                     )}
-                    {(row.id === "stack" || row.id === "github" || row.id === "claude") && row.state === "done" && (
+                    {(row.id === "stack" || row.id === "github" || row.id === "model") && row.state === "done" && (
                       <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setEditing(editing === row.id ? null : row.id)}>
                         {editing === row.id ? "Close" : "Change"}
                       </Button>
