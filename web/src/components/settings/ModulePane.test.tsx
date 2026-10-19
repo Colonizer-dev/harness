@@ -4,9 +4,12 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { AutonomyStatus } from "../../types";
+import type { Api } from "../../api";
+import { ApiContext } from "../../context";
+import type { AutonomyStatus, ModuleInfo } from "../../types";
+import type { ImagePull } from "../../useImagePull";
 import { AutonomyHealth } from "./AutonomyHealth";
-import { FullAutonomyWarning, riskConfirmation } from "./ModulePane";
+import { FullAutonomyWarning, ModulePane, riskConfirmation } from "./ModulePane";
 
 describe("autonomy above workspace_write asks once", () => {
   it("asks nothing for a ceiling at or below workspace_write, or when autonomy is off", () => {
@@ -50,5 +53,45 @@ describe("AutonomyHealth", () => {
     const out = renderToStaticMarkup(<AutonomyHealth status={status({ problem: "Autonomous mode is on but has no model." })} />);
     expect(out).toContain("has no model");
     expect(out).toContain("bg-warn-soft");
+  });
+});
+
+describe("the agent pane's cheapest-host switch (issue #1039)", () => {
+  // Only the fields under test, on a schema the pane is given: the mothership's own claude-code
+  // module.json declares the rest. The fetch stub never resolves — static markup runs no effects,
+  // so the ranking panel under the switch stays empty, which is the second thing pinned here.
+  const agentModule: ModuleInfo = {
+    kind: "agent",
+    provider: "claude-code",
+    providers: [{ id: "claude-code", name: "Claude Code" }],
+    enabled: true,
+    settings: { model: "deepseek/deepseek-v4-flash", prefer_cheapest_host: true },
+    schema: {
+      type: "object",
+      properties: {
+        model: { type: "string", title: "Orchestrator model" },
+        prefer_cheapest_host: { type: "boolean", title: "Prefer the cheapest host", default: false },
+      },
+    },
+  };
+  const api = { modelHosts: () => new Promise(() => {}) } as unknown as Api;
+
+  it("renders the switch on, and no ranking until the hosts arrive", () => {
+    const html = renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <ModulePane
+          module={agentModule}
+          draft={{ provider: agentModule.provider, enabled: true, settings: { ...agentModule.settings } }}
+          pull={{} as ImagePull}
+          onDraft={() => {}}
+          onReset={() => {}}
+          onSaved={() => {}}
+        />
+      </ApiContext.Provider>,
+    );
+    expect(html).toContain("Prefer the cheapest host");
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('aria-checked="true"');
+    expect(html).not.toContain("Hosts for");
   });
 });

@@ -266,6 +266,7 @@ fn provider(id: &str, base_url: &str) -> Provider {
         price_feed_id: None,
         model_map: Default::default(),
         disabled_tools: Vec::new(),
+        host_sensitive_models: Vec::new(),
         quota: None,
         normalize_cache_ttl: false,
         trusted: false,

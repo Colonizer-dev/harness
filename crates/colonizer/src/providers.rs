@@ -219,6 +219,10 @@ pub struct Provider {
     /// Claude Code tools stripped from every request through this connection (#295).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_tools: Vec<String>,
+    /// Canonical models the operator flags as host-sensitive: quantisation or context limits differ
+    /// per host, so the cheapest-host policy must leave them alone (issue #1039).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_sensitive_models: Vec<String>,
 }
 
 impl Provider {
@@ -584,12 +588,14 @@ pub(crate) fn resolved_preset<'a>(preset: &'a str, base_url: &str) -> &'a str {
 /// The model env vars a colony can be pointed at, matched against the configured providers. The
 /// first four reach the runner as is (OpenCode's small model among them, which registers its own
 /// gateway route); the two tier models are the mothership's per-task routing and are stripped from
-/// the runner env before launch, so only `used_by` reads them — counting the tier settings in the
-/// module's configured env, while a colony booted onto a tier meets the tier's provider through the
-/// substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent on purpose: the mothership
+/// the runner env before launch, so only `used_by` reads them (the cheapest-host pass in `boot`
+/// walks this list too, after the strip, so it moves only the vars still in the env) — counting
+/// the tier settings in the module's configured env, while a colony booted onto a tier meets the
+/// tier's provider through the substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent
+/// on purpose: the mothership
 /// serves summaries itself, straight to Anthropic, never through the gateway. Order matches the
 /// settings array in [`used_by`].
-const MODEL_VARS: [&str; 6] = [
+pub(crate) const MODEL_VARS: [&str; 6] = [
     "COLONIZER_MODEL",
     "COLONIZER_SUBAGENT_MODEL",
     "COLONIZER_BACKGROUND_MODEL",
@@ -960,7 +966,7 @@ pub fn unreachable_route(backend: &str, provider: &Provider, health: &Value, run
 /// The `<provider>` half of a `<provider>/<model>` setting, when the value shapes up as one: a leading
 /// `[A-Za-z0-9]`, then `[A-Za-z0-9._-]*`, then `/`. Mirrors the runner's PROVIDER_PREFIX
 /// (modules/agents/claude-code/router.mjs) so the two stay in step.
-fn provider_prefix(model: &str) -> Option<&str> {
+pub(crate) fn provider_prefix(model: &str) -> Option<&str> {
     let (prefix, _) = model.split_once('/')?;
     let mut rest = prefix.chars();
     match rest.next() {
@@ -998,9 +1004,16 @@ pub(crate) fn model_eligible(
     providers: &[Provider],
     model: &str,
 ) -> bool {
-    let Some(provider) = gated_provider(providers, model) else {
-        return true;
-    };
+    match gated_provider(providers, model) {
+        Some(provider) => provider_eligible(sensitivity, overrides, provider),
+        None => true,
+    }
+}
+
+/// Whether the gateway would carry work sent to `provider` for a task of this class — the
+/// per-provider half of [`model_eligible`], for callers that hold a provider rather than a
+/// `<provider>/<model>` setting (the cheapest-host reroute's candidate filter, issue #1039).
+pub(crate) fn provider_eligible(sensitivity: Sensitivity, overrides: Option<&SensitivityOverrides>, provider: &Provider) -> bool {
     let mark = ProviderMark::of(provider.trusted, provider.vetted);
     sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides)
 }
@@ -2025,6 +2038,13 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             }
             None => providers.iter().find(|p| p.id == id).and_then(|p| p.vendor.clone()),
         },
+        // Not a Settings field (yet): a hand-edited providers.json row is preserved as is, like a
+        // field this PUT's request shape does not carry.
+        host_sensitive_models: providers
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.host_sensitive_models.clone())
+            .unwrap_or_default(),
     };
     match providers.iter_mut().find(|p| p.id == id) {
         Some(existing) => *existing = provider.clone(),
@@ -2127,6 +2147,7 @@ mod tests {
             price_feed_id: None,
             model_map: BTreeMap::new(),
             disabled_tools: Vec::new(),
+            host_sensitive_models: Vec::new(),
             quota: None,
             normalize_cache_ttl: false,
             trusted: false,

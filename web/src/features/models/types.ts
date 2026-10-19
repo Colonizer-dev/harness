@@ -40,6 +40,41 @@ export interface AgentModuleRoles {
   blocked: string | null;
 }
 
+/** One connected provider serving a canonical model, priced and ranked (issue #1039). */
+export interface ModelHost {
+  provider_id: string;
+  provider_name: string;
+  /** Full model id as used in settings: `<provider_id>/<canonical>`. */
+  model: string;
+  /** $/1M tokens; null when this host has no known price. */
+  input_per_mtok: number | null;
+  output_per_mtok: number | null;
+  cache_read_per_mtok: number | null;
+  /** Internal ordering price: 3 parts input : 1 part output, cache-aware. May be null. */
+  blended_per_mtok: number | null;
+  /** When the price feed last confirmed this price, RFC 3339; null when unknown/local. */
+  last_verified_at: string | null;
+  source: string | null;
+  healthy: boolean;
+  degraded: boolean;
+  out_of_quota: boolean;
+  quota_reset_at: string | null;
+  /** The connection disables one or more agent tools. */
+  tools_limited: boolean;
+  /** The operator marked this model host-sensitive on this connection. */
+  host_sensitive: boolean;
+}
+
+/** One canonical model's connected hosts, cheapest first: GET /api/model-hosts (issue #1039). */
+export interface ModelHostRanking {
+  /** Canonical model id (the part after `<provider>/`). */
+  model: string;
+  /** True when the cheapest-host policy may auto-route this model (open-weight, not host-sensitive). */
+  eligible: boolean;
+  /** Pre-sorted: priced first by blended price ascending, unpriced last. */
+  hosts: ModelHost[];
+}
+
 /** A model on offer, with its provider's health and quota. */
 export interface SwitchableModel {
   id: string;
