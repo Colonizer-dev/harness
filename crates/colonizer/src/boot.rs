@@ -2385,6 +2385,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
         app.session_log(id, "warn", note).await;
     }
+    // Scan for PATH-altering artifacts (issue #1278): executable shims, direnv, version managers,
+    // Makefiles and scripts that change PATH. Log each finding in the colony ledger.
+    let shims = crate::path_shims::scan(&wt);
+    if !shims.is_empty() {
+        let mut msg = String::from("PATH: this repository would change the colony's PATH (");
+        for (i, finding) in shims.iter().enumerate() {
+            if i > 0 {
+                msg.push_str("; ");
+            }
+            msg.push_str(&finding.message());
+        }
+        msg.push_str("). The colony's PATH stays pinned by the image; harness verification does not use it.");
+        app.session_log(id, "warn", msg).await;
+    }
     // The guest's exec policy (modules/agents/*/execpolicy.mjs, issue #877) reads this to tell a
     // write into the microVM's discardable root filesystem from one into a host-backed path: only
     // the writable mounts below survive the VM, so only they can still be the host's to protect.
