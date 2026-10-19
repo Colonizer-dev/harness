@@ -93,9 +93,11 @@ The table above names each one; the shapes:
   or the one **404** an invalid, expired and already-redeemed code all share, indistinguishably. The
   first redeem consumes the code.
 - `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
-  `{status: "approved", token, member_id, refresh}` exactly once (a second poll reads **404**), or
+  `{status: "approved", token, member_id, refresh, relays}` exactly once (a second poll reads **404**), or
   the rejection. `refresh` is the member's refresh credential (64 hex characters, stored hashed on
-  the owner): what trades a fleet token the owner stopped accepting for a fresh one. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
+  the owner): what trades a fleet token the owner stopped accepting for a fresh one. `relays`
+  (issue #861) says whether the owner relays what this member pushes to its own observability
+  backend — the flag the member's sync preview carries. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
   `GET /api/hosts`, `POST /api/fleet/peer/leave` and the history push's two ingest routes (below),
   never minted by `POST /api/tokens`, and never the member's local cockpit token.
 - `POST /api/fleet/peer/refresh` `{member_id, refresh}` (issue #762) answers `{token}`: a fresh
@@ -131,12 +133,15 @@ owner.
   ([§6.11](fleet-export.md#611-fleet-export-bundle-687)), and `id` is its `<origin_host>:<original_id>`.
   `payloads` lists the colony's logs — `{name, sha256, bytes}` with `name` one of `events.jsonl`,
   `harness.jsonl`, `gateway.jsonl`, or `{name, bytes, omitted: true}` for a log too large to send.
-  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}]}`: accepted rows
-  are upserted by id into `sessions.json` (a re-sent row replaces itself, never duplicates), and a
+  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}], "relays"}`:
+  accepted rows are upserted by id into `sessions.json` (a re-sent row replaces itself, never
+  duplicates), and a
   row whose payloads are not all held is refused by name with the hashes it lacks. A body that
   cannot be read as rows is refused whole (**400**/**422**, or **413** past the limits) — the
   member splits such a batch to find the row that caused it. A refusal may name the row itself
-  with a top-level `"row": id`.
+  with a top-level `"row": id`. `relays` (issue #861) repeats on every answer whether the owner
+  relays members' synced history to its own observability backend — the fresher word the member's
+  sync preview prefers over the pairing answer's flag.
 
 The member reads the other answers as states. A **401** refreshes the token once per drain
 (`POST /api/fleet/peer/refresh`, above), stores the new one in the membership and retries the

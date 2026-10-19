@@ -256,6 +256,7 @@ fn contract(root: &Root, url: &str, colonies: &BTreeMap<String, ColonyPolicy>, e
         data_dir: root.0.clone(),
         settings,
         policy: colonies.clone(),
+        relay_members: Vec::new(),
     };
     let path = contract::path(&root.0);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -111,6 +111,10 @@ pub(crate) async fn contract(app: &App, settings: &Map<String, Value>) -> Value 
         "data_dir": app.cfg.data_dir,
         "settings": settings,
         "policy": policy,
+        // Each entry {host_id, enabled, destination_hash} is what a member reports about its own
+        // exporter in its fleet poll answer (#860): the add-on skips relaying a member whose
+        // exporter is enabled with the same destination hash, so nothing is sent twice.
+        "relay_members": [],
     })
 }
 

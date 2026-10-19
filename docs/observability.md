@@ -16,6 +16,7 @@ colonizer.dev. Observability goes only to the endpoint you name.
   for collectors that only speak gRPC on 4317.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
 - [Backfill](observability/backfill.md): replaying the history a destination never received — the window, the rate, the dry run, duplicates and backend limits.
+- [Fleet relay](observability/fleet-relay.md): relaying what fleet members push to the owner's own backend — the switch, the consent members see, identity and the double-send guard.
 - [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Metrics (`GET /metrics`)](observability/metrics.md): the Prometheus catalogue the mothership can
   serve, how to scrape it, and what a series is allowed to name.

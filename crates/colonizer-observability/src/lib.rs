@@ -28,6 +28,8 @@ pub mod backfill;
 pub mod batch;
 pub mod contract;
 pub(crate) mod cursor;
+/// The send-bisect delivery loop backfill and the fleet relay share.
+pub(crate) mod delivery;
 pub mod encode;
 pub mod exporter;
 /// The OTLP/gRPC transport (#851), behind the `otlp-grpc` cargo feature.
@@ -41,6 +43,8 @@ pub mod metrics;
 #[cfg(test)]
 mod observability_conformance;
 pub mod policy;
+/// The fleet relay (#861): members' pushed history to the owner's own backend.
+pub mod relay;
 pub(crate) mod sources;
 pub(crate) mod state;
 pub(crate) mod tailer;

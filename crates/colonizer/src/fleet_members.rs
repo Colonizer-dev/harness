@@ -129,6 +129,11 @@ struct Membership {
     /// leave and a re-join — starts it off again.
     #[serde(default)]
     history_sync: bool,
+    /// Whether the owner relays what this member pushes to its own observability backend (#861),
+    /// as the pairing answer said; a rows answer brings the fresher word. `None` on a membership
+    /// from before relay existed or whose owner answered none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_relays: Option<bool>,
 }
 
 /// A member the owner removed: its token's hash, kept after the token itself is revoked, so the
@@ -329,6 +334,12 @@ impl FleetStore {
         true
     }
 
+    /// The relay flag the owner's pairing answer carried (#861), for the sync preview's fallback
+    /// before the first rows answer brings the fresher word.
+    pub async fn owner_relays(&self) -> Option<bool> {
+        self.state.read().await.membership.as_ref().and_then(|m| m.owner_relays)
+    }
+
     /// Whether a presented Bearer token belongs to a member this owner removed.
     pub async fn is_removed_token(&self, presented: &str) -> bool {
         let hash = crate::api_tokens::hash_token(presented);
@@ -351,6 +362,7 @@ impl FleetStore {
             refresh: t.refresh,
             joined_at: Utc::now(),
             history_sync: false,
+            owner_relays: None,
         });
         self.save(&state).await;
     }
@@ -915,6 +927,9 @@ pub async fn join_confirm(State(app): State<Shared>) -> ApiResult<Value> {
                 // Joining is not consent to push history: the operator turns it on after the
                 // preview (`POST /api/fleet/sync/consent`).
                 history_sync: false,
+                // The relay flag as the owner's answer carried it (#861); `None` from an owner
+                // that sends none, so the preview falls back to the fresher rows-answer word.
+                owner_relays: answer["relays"].as_bool(),
             });
             app.fleet_members.save(&state).await;
             Ok(Json(json!({"status": "joined"})))
@@ -1049,6 +1064,8 @@ pub struct NonceBody {
 /// `POST /api/fleet/peer/pairings/{id}`: the joiner's poll. The nonce is the whole
 /// authentication, and a wrong one is the same 404 a wrong id gets.
 pub async fn peer_pairing(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<NonceBody>) -> ApiResult<Value> {
+    // Read before the state lock: what the answer says about this owner, not about the pairing.
+    let relays = crate::observability::settings::relays_fleet_history(&app).await;
     let mut state = app.fleet_members.state.write().await;
     state.prune();
     let Some(pairing) = state.pending.iter().find(|p| p.id == id) else {
@@ -1070,7 +1087,7 @@ pub async fn peer_pairing(State(app): State<Shared>, Path(id): Path<String>, Jso
             state.pending.retain(|p| p.id != id);
             app.fleet_members.save(&state).await;
             Ok(Json(
-                json!({"status": "approved", "token": token, "member_id": member_id, "refresh": refresh}),
+                json!({"status": "approved", "token": token, "member_id": member_id, "refresh": refresh, "relays": relays}),
             ))
         }
     }
@@ -1427,6 +1444,7 @@ mod tests {
             refresh: None,
             joined_at: Utc::now(),
             history_sync: false,
+            owner_relays: None,
         });
         let body = json!({"code": "AAAA-AAAA-AAAA-AAAA", "nonce": new_nonce().unwrap(), "name": "worker"}).to_string();
         let (status, _) = ask(&router, Method::POST, "/api/fleet/peer/redeem", None, Some(body)).await;
