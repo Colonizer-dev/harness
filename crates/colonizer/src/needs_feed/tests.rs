@@ -36,14 +36,16 @@ fn a_failure_a_newer_colony_for_the_same_issue_has_overtaken_leaves_the_list() {
 
 #[test]
 fn cascade_failures_never_count() {
+    // Issue #1066: a child waiting on a failed parent no longer fails with "no branch to build on",
+    // so only test cascade failures from other causes (missing parent, etc.)
     let sessions = vec![
         failed(
             "a",
             1,
             1,
-            "colony `c8a6d23c` was stopped or parked, so it cannot be stacked on",
+            "there is no colony `missing` to stack on",
         ),
-        failed("b", 2, 1, "colony `a` failed, so it has no branch to build on"),
+        failed("b", 2, 1, "colony `missing` made no changes, so it has no branch to build on"),
     ];
     assert_eq!(rows(&sessions, Utc::now()), 0);
 }
