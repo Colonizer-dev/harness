@@ -491,8 +491,8 @@ function withoutExcludes(segment) {
 function words(text) {
   return String(text ?? '')
     .replace(/\$\{HOME\}/g, '$HOME') // before the split: the braces would break the word apart
-    .split(/[\s;|&<>()"'`\[\]{}]+/)
-    .map((w) => w.replace(/^[@:=+]+/, '').replace(/[,;:]+$/, ''))
+    .split(/[\s;|&<>():"'`\[\]{}=]+/)
+    .map((w) => w.replace(/^[@+]+/, '').replace(/[,;]+$/, ''))
     // One-char words are noise (`echo x`), except the filesystem root, which a `rm -rf /` writes.
     .filter((w) => w.length > 1 || w === '/');
 }

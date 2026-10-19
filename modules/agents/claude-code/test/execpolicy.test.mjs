@@ -876,6 +876,34 @@ test('git <rev>:<path> object specs naming a secret path are refused; other path
   for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
 });
 
+// Additional tests for colon and equals splitting: git object refs and flag-value patterns
+test('colon-separated git refs and equals-separated flag values properly expose secret paths', () => {
+  const policy = policyIn('/repo');
+  // These should be denied because the splitting exposes the secret path
+  const denied = [
+    'git show HEAD:.env',
+    'git cat-file -p HEAD:credentials.json',
+    'git cat-file blob HEAD:.npmrc',
+    'git show main:.git-credentials',
+    'echo --pattern=.env',
+    'cmd --some-flag=.env.local',
+    'tool --config=~/.ssh/id_rsa',
+    '--flag=.env',
+  ];
+  for (const command of denied) {
+    assert.equal(decide(policy, command, '/repo')?.rule, 'secret-paths', command);
+  }
+  // These should pass because they don't reference secret paths
+  const allowed = [
+    'git show HEAD:README.md',
+    'git cat-file -p main:src/index.js',
+    'cmd --pattern=output.json',
+    'tool --config=/etc/normal/path',
+    '--flag=normal-value',
+  ];
+  for (const command of allowed) assert.equal(decide(policy, command, '/repo'), null, command);
+});
+
 // #1279: the harness seeds empty placeholder dotfiles (.env, .envrc, .npmrc, .netrc,
 // .git-credentials, .pypirc, .mcp.json, .gitmodules) at the checkout root, and an agent that ran
 // `git status` and then asked about their names was denied three times over and held. The whole
