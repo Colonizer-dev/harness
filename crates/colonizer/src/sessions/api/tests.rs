@@ -735,7 +735,7 @@ async fn the_message_twin_refuses_a_colony_that_cannot_take_one() {
     let rt = app.runtime("abc").await;
     assert!(matches!(
         submit_message(&app, "abc", &rt, "hello", Some("late-1"), None).await,
-        Err(MessageError::NotAccepting(SessionStatus::Merged))
+        Err(MessageError::Finished(_))
     ));
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1137,5 +1137,111 @@ async fn an_answer_and_the_suspension_claim_cannot_interleave() {
     let held = s.pending_answer.as_ref().expect("the answer is held for the restore");
     assert_eq!(held.question_id, "q1");
     assert!(s.suspended.is_some(), "still suspended, the restore to deliver it");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1287: Notes are queued for colonies that can resume, not delivered to finished ones.
+/// A queued colony accepts notes and queues them; a second note with the same client_id does not
+/// duplicate; a merged colony refuses with an explanation.
+#[tokio::test]
+async fn queued_notes_are_persisted_and_deduplicated() {
+    let (app, root) = app_with_colony("abc", SessionStatus::Queued).await;
+    let rt = app.runtime("abc").await;
+
+    // A note for a queued colony is accepted.
+    let sent = submit_message(&app, "abc", &rt, "please check this", Some("note-1"), None)
+        .await
+        .expect("queued colony accepts notes");
+    assert!(sent.delivered, "newly queued note is accepted");
+    assert_eq!(sent.pending_notes, 1, "one note is now pending");
+
+    // A repeat note with the same client_id does not duplicate.
+    let sent2 = submit_message(&app, "abc", &rt, "please check this", Some("note-1"), None)
+        .await
+        .expect("repeat is idempotent");
+    assert!(!sent2.delivered, "duplicate note is not accepted");
+    assert_eq!(sent2.pending_notes, 1, "still one note; the duplicate is not added");
+
+    // A different note is queued alongside.
+    let sent3 = submit_message(&app, "abc", &rt, "another note", Some("note-2"), None)
+        .await
+        .expect("different client_id queues");
+    assert_eq!(sent3.pending_notes, 2, "now two notes");
+
+    // Session has both notes persisted.
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.pending_notes.len(), 2);
+    assert!(s.pending_notes.iter().any(|n| n.id == "note-1"));
+    assert!(s.pending_notes.iter().any(|n| n.id == "note-2"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #1287: Stopped, parked, blocked, and failed colonies also accept notes.
+#[tokio::test]
+async fn queueable_colonies_accept_notes() {
+    for status in [
+        SessionStatus::Stopped,
+        SessionStatus::Parked,
+        SessionStatus::Blocked,
+        SessionStatus::Failed,
+    ] {
+        let (app, root) = app_with_colony("xyz", status).await;
+        let rt = app.runtime("xyz").await;
+
+        let sent = submit_message(&app, "xyz", &rt, "resume and check", Some("note-1"), None)
+            .await
+            .expect("queueable colony accepts notes");
+        assert_eq!(sent.pending_notes, 1, "{status:?} queues the note");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #1287: Finished colonies (merged, pr_opened, etc.) return 409 with explanations.
+#[tokio::test]
+async fn finished_colonies_refuse_notes_with_explanation() {
+    let test_cases = vec![
+        (SessionStatus::Merged, "the note would go nowhere"),
+        (SessionStatus::PrOpened, "the note would go nowhere"),
+        (SessionStatus::Closed, "the note would go nowhere"),
+        (SessionStatus::NoChanges, "the note would go nowhere"),
+    ];
+
+    for (status, expected_msg_part) in test_cases {
+        let (app, root) = app_with_colony("fin", status).await;
+        let rt = app.runtime("fin").await;
+
+        let err = submit_message(&app, "fin", &rt, "review the pr", Some("note-1"), None)
+            .await
+            .expect_err("finished colony rejects notes");
+
+        match err {
+            MessageError::Finished(explanation) => {
+                assert!(
+                    explanation.contains(expected_msg_part),
+                    "explanation includes status: {explanation} should contain '{expected_msg_part}'"
+                );
+            }
+            other => panic!("expected Finished error, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #1287: Live colonies deliver messages immediately, not queue them.
+#[tokio::test]
+async fn live_colonies_still_deliver_messages_immediately() {
+    let (app, root) = app_with_colony("live", SessionStatus::Running).await;
+    let rt = app.runtime("live").await;
+
+    // A live colony delivers the message immediately (no pending_notes).
+    let sent = submit_message(&app, "live", &rt, "do this now", Some("msg-1"), None)
+        .await
+        .expect("live colony delivers");
+    assert!(sent.delivered, "message is delivered to the live runtime");
+    assert_eq!(sent.pending_notes, 0, "no pending notes for live delivery");
+
     let _ = std::fs::remove_dir_all(root);
 }

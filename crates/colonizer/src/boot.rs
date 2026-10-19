@@ -2038,7 +2038,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // colony without a session id to resume gets the answer appended, so the answer never rides on
     // the resume working. A pre-warm boot (issue #701) says nothing at all: an empty prompt starts
     // no turn, and the answer is delivered as a user message once it arrives.
-    let initial_prompt = if s.prewarming() {
+    let mut initial_prompt = if s.prewarming() {
         String::new()
     } else if let Some(note) = &s.switch_note {
         // A mid-task agent switch (issue #737): the converted transcript carries the task brief, so
@@ -2057,6 +2057,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
             (None, _) => prompt,
         }
+    };
+    // Operator notes while the colony was not live (issue #1287): inject them as the first section.
+    let delivered_notes: Vec<String> = if s.prewarming() {
+        Vec::new()
+    } else if let Some(notes) = s.pending_notes_prompt() {
+        if initial_prompt.is_empty() {
+            initial_prompt = notes;
+        } else {
+            initial_prompt = format!("{initial_prompt}\n\n{notes}");
+        }
+        s.pending_notes.iter().map(|n| n.id.clone()).collect()
+    } else {
+        Vec::new()
     };
     // What a resume brings back (issue #700): the manifest's declared services plus the records
     // the previous run registered, scrubbed of the colony's secret values before any of it reaches
@@ -2538,15 +2551,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
     // only then take it off the record. A boot that failed above never reaches this, and the answer
     // stays for the next resume; a stop cleared it under its own claim. A resume note (issue #876)
-    // is spent the same way, for the same reason.
+    // is spent the same way, for the same reason. Pending notes (issue #1287) are spent the same
+    // way — only the ones this boot's prompt carried.
     let delivered = app
         .update_session(id, |x| {
             let answer = x.pending_answer.take().is_some();
             let note = x.resume_note.take().is_some();
-            (answer, note)
+            let before = x.pending_notes.len();
+            x.pending_notes.retain(|n| !delivered_notes.contains(&n.id));
+            let pending_note_count = before - x.pending_notes.len();
+            (answer, note, pending_note_count)
         })
         .await;
-    if let Some((s, (answered, noted))) = delivered {
+    if let Some((s, (answered, noted, pending_note_count))) = delivered {
         if answered {
             app.session_log(
                 id,
@@ -2558,6 +2575,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         if noted {
             app.session_log(id, "info", "resume note delivered to the agent".into()).await;
+        }
+        if pending_note_count > 0 {
+            app.session_log(
+                id,
+                "info",
+                format!(
+                    "{pending_note_count} operator {} delivered",
+                    if pending_note_count == 1 { "note" } else { "notes" }
+                ),
+            )
+            .await;
         }
     }
     // A switch note is consumed the same way (issue #737): the runner is up, so its first turn

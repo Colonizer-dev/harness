@@ -87,7 +87,12 @@
           delivered.push(item.id);
         } else if (refused(response.status)) {
           await store.delete(item.id);
-          dropped.push({ id: item.id, status: response.status });
+          let error;
+          try {
+            const json = await response.json();
+            if (json.error) error = json.error;
+          } catch {}
+          dropped.push({ id: item.id, status: response.status, ...(error ? { error } : {}) });
         } else {
           stopped = true;
           break; // 5xx or 401/403: try again after the next sync, in the same order

@@ -277,6 +277,12 @@ describe("the page's items", () => {
     expect(droppedText("answer", 400)).toBe("The mothership refused it (400).");
     expect(droppedText("message", 0)).toBe("It waited offline too long, so the queued message was not sent.");
   });
+
+  it("shows the server's explanation for a 409 message drop", () => {
+    expect(droppedText("message", 409, "Colony finished with no changes")).toBe("Colony finished with no changes");
+    expect(droppedText("message", 409, "Session not found")).toBe("Session not found");
+    expect(droppedText("answer", 409, "ignored")).toBe("The question was no longer open, or had changed — it may already have been answered.");
+  });
 });
 
 describe("the worker wiring", () => {
