@@ -571,3 +571,69 @@ async fn the_account_fallback_role_is_install_wide_and_names_a_provider_model() 
 fn role_error_for(app: &Shared, model: &str) -> Option<String> {
     quota_cards::role_error(app, "account_fallback_model", model)
 }
+
+/// `GET /api/model-hosts` (issue #1039): a bare array of the canonical models two or more
+/// providers serve, each host priced (blended rate included) and stamped with the picker's
+/// health/quota flags — priced hosts cheapest first, unpriced last, and a single-host canonical
+/// not listed at all.
+#[tokio::test]
+async fn model_hosts_lists_multi_provider_canonicals_ranked_by_blended_price() {
+    let root = test_root("model-hosts");
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/providers.json"),
+        serde_json::to_vec(&json!([
+            {"id": "zai", "name": "Z.AI", "base_url": "http://127.0.0.1:1", "auth": "none",
+             "models": ["glm-5"],
+             "pricing": {"input_per_mtok": 1.0, "output_per_mtok": 2.0}},
+            {"id": "cheap", "name": "Cheap Host", "base_url": "http://127.0.0.1:1", "auth": "none",
+             "models": ["glm-5"], "pricing": {"input_per_mtok": 0.2, "output_per_mtok": 0.8}},
+            {"id": "solo", "name": "Solo Host", "base_url": "http://127.0.0.1:1", "auth": "none",
+             "models": ["glm-5-air"], "pricing": {"input_per_mtok": 0.1, "output_per_mtok": 0.1}},
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = crate::tests::test_app_with_agents(&root, Vec::new(), |_| {});
+    let Json(body) = hosts(State(app.clone())).await;
+    assert_eq!(
+        body.as_array().map(Vec::len),
+        Some(1),
+        "only glm-5 has two hosts; glm-5-air has one each and is not listed: {body}"
+    );
+    let glm = &body[0];
+    assert_eq!(glm["model"], "glm-5");
+    assert_eq!(glm["eligible"], true, "open-weight and unmarked");
+    assert_eq!(
+        glm["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["provider_id"].clone())
+            .collect::<Vec<_>>(),
+        ["cheap", "zai"],
+        "the cheaper blended price first"
+    );
+    let cheap = &glm["hosts"][0];
+    assert_eq!(cheap["provider_name"], "Cheap Host");
+    assert_eq!(cheap["model"], "cheap/glm-5");
+    assert_eq!(cheap["input_per_mtok"], 0.2);
+    assert_eq!(cheap["output_per_mtok"], 0.8);
+    assert_eq!(cheap["cache_read_per_mtok"], 0.0);
+    // (3·0.2 + 0.8) / 4, computed the same way the ranking computes it.
+    assert_eq!(cheap["blended_per_mtok"], (3.0 * 0.2 + 0.8) / 4.0);
+    assert_eq!(
+        cheap["last_verified_at"],
+        Value::Null,
+        "an operator price carries no verification"
+    );
+    assert_eq!(cheap["source"], Value::Null);
+    assert_eq!(cheap["healthy"], true);
+    assert_eq!(cheap["degraded"], false);
+    assert_eq!(cheap["out_of_quota"], false);
+    assert_eq!(cheap["quota_reset_at"], Value::Null);
+    assert_eq!(cheap["tools_limited"], false);
+    assert_eq!(cheap["host_sensitive"], false);
+    assert_eq!(glm["hosts"][1]["blended_per_mtok"], (3.0 * 1.0 + 2.0) / 4.0);
+    let _ = std::fs::remove_dir_all(root);
+}

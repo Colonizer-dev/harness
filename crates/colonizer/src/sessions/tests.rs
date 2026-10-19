@@ -17,6 +17,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         parent: None,
         stack: false,
         stack_fork: None,
+        retry_of: None,
         origin: None,
         auto_note: None,
         launched_by_token: None,
@@ -166,6 +167,11 @@ pub(crate) async fn admit_resume(
             } else {
                 SessionStatus::Queued
             };
+            // Mirrors `lifecycle::resume`'s claim (issue #1220): a resume that queues gets the
+            // RESUMED priority unless the colony already carries an explicit one.
+            if s.status == SessionStatus::Queued && s.priority.is_none() {
+                s.priority = Some(crate::queue_priority::RESUMED as i32);
+            }
         }
     })
     .await

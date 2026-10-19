@@ -16,10 +16,6 @@
     ],
     "image": "glibc + node >= 20"
   },
-  "session_resume": {
-    "dir": "/root/.claude/projects",
-    "description": "Claude Code keeps one transcript per session under ~/.claude/projects and can resume any of them given its session id, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact."
-  },
   "secrets": [
     {
       "env": [
@@ -129,6 +125,12 @@
         "title": "Gate routing down on cost",
         "description": "Before the rule routes this colony down to the small-task model, estimate the whole cost of the routed task — the context that cheaper model has to load from scratch, its output, and what the orchestrator model re-reads afterwards — and keep the colony on the orchestrator model when routing down would not actually come out cheaper. An explicit tier chosen for the colony is never second-guessed. On by default; it only has something to say once the three token estimates below are set.",
         "default": true
+      },
+      "prefer_cheapest_host": {
+        "type": "boolean",
+        "title": "Prefer the cheapest host",
+        "description": "For open-weight models served by several connected providers, start each colony on the cheapest healthy host instead of the one named in the model setting. Skips hosts that are degraded, out of quota, or have tools disabled, and never moves a model the operator marked host-sensitive. The model itself is kept; only the host serving it may change.",
+        "default": false
       },
       "route_cost_context_tokens": {
         "type": "integer",

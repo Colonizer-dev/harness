@@ -157,14 +157,12 @@ export function OrgDashboard({
   const queued = counts.queued;
 
   // --- KPI tiles (the render's eight, in its order) ---
-  const rollup = orgCost(org.spend);
   const periodSpend = sumHistoryCost(current, org.org);
   const prevSpend = sumHistoryCost(previous, org.org);
-  const cpp = costPerMerged(rollup ?? periodSpend, merged);
   // In-range windowed figures for the sparkline + previous-period delta: merged per day via
   // dailyMerged (bucketed by merge date, falling back to created_at), the failure snapshot over the
   // history-day window (merged by merge date, failed by created date), and cost per merged PR off
-  // the period spend. The tile values stay the dashboard's own readings (see the sub-lines); only
+  // the period spend and in-range merged count. The tile values stay the dashboard's own readings (see the sub-lines); only
   // spark/delta read the window.
   const mergedDaily = dailyMerged(scoped, days);
   const mergedPrevDaily = previous.length > 0 ? dailyMerged(scoped, previous.map((d) => d.day)) : [];
@@ -221,16 +219,16 @@ export function OrgDashboard({
     delivery[2],
     {
       label: "Cost per merged PR",
-      ...(merged > 0
+      ...(mergedTotal(mergedDaily) > 0
         ? {
-            value: formatCost(cpp),
+            value: formatCost(costPerMerged(periodSpend, mergedTotal(mergedDaily))),
             delta: cppDelta != null ? formatDelta(cppDelta) : undefined,
             deltaTone: deltaTone(cppDelta, "down"),
             spark: days.length > 0 ? sparkPoints(cppDaily) : undefined,
-            sub: `${merged} merged`,
+            sub: `${mergedTotal(mergedDaily)} merged in range`,
           }
-        : { value: "—", emptyNote: "nothing merged yet" }),
-      hint: "org spend rollup ÷ merged sessions, GET /api/orgs + GET /api/sessions — the delta reads period spend ÷ merged in range vs the previous period",
+        : { value: "—", emptyNote: periodSpend != null ? "nothing merged in range" : "unmeasured" }),
+      hint: "period spend ÷ merged in range, GET /api/spend/history + GET /api/sessions",
     },
     {
       label: "Spend",
@@ -425,7 +423,7 @@ export function OrgDashboard({
         }))}
         sideFoot={
           mix.shown.length > 0
-            ? `${spendTokens != null ? `${formatTokens(spendTokens)} tokens · ` : ""}${formatCost(rollup ?? periodSpend)} · org total${mix.more > 0 ? ` · +${mix.more} more` : ""}`
+            ? `${spendTokens != null ? `${formatTokens(spendTokens)} tokens · ` : ""}${formatCost(orgCost(org.spend))} · org total${mix.more > 0 ? ` · +${mix.more} more` : ""}`
             : "no measured usage"
         }
       />

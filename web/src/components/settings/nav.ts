@@ -52,7 +52,7 @@ export const FIXED_PAGES: readonly PageInfo[] = [
 
   { id: "providers", group: "models", slug: "providers", label: "Model providers", hint: "Claude and other model endpoints, and their keys" },
 
-  { id: "connections", group: "connections", slug: "github-claude", label: "GitHub & Claude", hint: "The two accounts colonies need" },
+  { id: "connections", group: "connections", slug: "github-models", label: "GitHub & models", hint: "The code host and at least one model your colonies can think with" },
   { id: "secrets", group: "connections", slug: "secrets", label: "Secrets", hint: "Every key and token Colonizer holds, in one place", view: "secrets" },
   { id: "tokens", group: "connections", slug: "api-tokens", label: "API tokens", hint: "Scoped keys for CLIs, agents and CI" },
   { id: "living-brain", group: "connections", slug: "living-brain", label: "Living Brain", hint: "Send colony sessions to your team brain, and let colonies read it" },
@@ -243,7 +243,7 @@ const field = (section: SectionId, label: string, help: string, keywords: string
 /** Fields worth jumping to on the fixed pages. Each label is the text that appears on the page. */
 export const FIELD_ENTRIES: readonly SearchEntry[] = [
   field("connections", "GitHub", "Sign in with the GitHub CLI, or give a token", ["token", "login", "gh", "account"]),
-  field("connections", "Claude", "Log in with your Claude subscription, or give an API key", ["token", "login", "api key", "subscription", "anthropic"]),
+  field("connections", "Models", "Configure an AI model provider for colonies to think with", ["token", "login", "api key", "provider", "minimax", "deepseek", "openrouter"]),
   field("living-brain", "Send colony sessions to Living Brain", "Per org or repository, with a detail level", ["brain", "sync", "sessions", "notes"]),
   field("living-brain", "Give colonies the Living Brain MCP server", "Colonies can search, ask and note the brain while they work", ["mcp", "brain", "tools"]),
   field("remote", "Allow remote access", "Open this cockpit from your phone or another computer through the relay", ["tunnel", "relay", "https", "anywhere", "switch"]),
@@ -295,7 +295,7 @@ export function buildSearchIndex(input: {
 const PAGE_KEYWORDS: Partial<Record<SectionId, string[]>> = {
   cockpit: ["address", "url", "bookmark", "qr", "link"],
   setup: ["checklist", "first colony", "onboarding", "start"],
-  connections: ["github", "claude", "login", "token", "api key", "account"],
+  connections: ["github", "models", "login", "token", "api key", "account", "provider", "anthropic"],
   providers: ["models", "anthropic", "minimax", "key", "endpoint", "gateway", "fallback"],
   tokens: ["api key", "secret", "scope", "ci", "cli", "agent"],
   secrets: ["keys", "token", "password", "vault", "credential", "api key"],

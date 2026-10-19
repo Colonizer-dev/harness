@@ -954,6 +954,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         other => other,
     };
+    // Screen the issue for hidden input text (issue #1277).
+    let issue = match issue {
+        Some(mut issue) => {
+            crate::promptdecode::screen_launch(app, &s.id, &app.org_settings(&s.org), &mut issue).await;
+            Some(issue)
+        }
+        other => other,
+    };
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked
@@ -1264,6 +1272,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         &task_signals,
     )
     .await;
+    // The cheapest-host hint (issue #1039): the agent module opts this colony's open-weight models
+    // into starting on the cheapest healthy host serving them. The flag is read here; the rewrite
+    // runs after every model substitution below is final.
+    let prefer_cheapest_host = flag("prefer_cheapest_host").unwrap_or(false);
     let route_settings = crate::routing::RoutingSettings {
         enabled: flag("route_per_task").unwrap_or(true),
         chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
@@ -1404,6 +1416,53 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // tally, and leaving them in would make the boot probe check providers this colony is not using.
     runner_env.remove("COLONIZER_MODEL_LOW");
     runner_env.remove("COLONIZER_MODEL_HIGH");
+    // The cheapest-host rewrite (issue #1039), the last hand on the model vars: every substitution
+    // above is final, and only the host prefix of a `provider/model` ever changes. Open-weight
+    // models only — a closed model, or one any operator marked host-sensitive, keeps its named
+    // host, as does a model nobody prices or a host that is degraded, out of quota or has its
+    // tools disabled. The tier vars are stripped just above, so of MODEL_VARS only the vars still
+    // in the env move; the summary model is not on that list and never does. A model the operator
+    // named at launch (`--model` / the MCP `start`) is their statement of intent and is never
+    // rewritten — provenance.rs says so, and the playbook's own switch writes the same override,
+    // so boot leaving it alone is consistent. The candidate filter shares the sensitivity inputs
+    // `resolve_sensitivity_model`/`model_fix` resolved against, so the policy cannot move a colony
+    // onto a host the gateway would then 403.
+    let operator_named = [
+        s.model_override.as_deref().map(|_| "COLONIZER_MODEL"),
+        s.subagent_model_override.as_deref().map(|_| "COLONIZER_SUBAGENT_MODEL"),
+    ]
+    .into_iter()
+    .flatten();
+    let mut cheapest_host: Vec<(String, String)> = Vec::new();
+    if prefer_cheapest_host {
+        let feed = app.price_feed.entries();
+        let state = |p: &providers::Provider| crate::model_hosts::host_state(app, p);
+        let eligible = |p: &providers::Provider| providers::provider_eligible(sensitivity, overrides, p);
+        for var in providers::MODEL_VARS {
+            if operator_named.clone().any(|named| named == var) {
+                continue;
+            }
+            let Some(current) = runner_env.get(var).and_then(Value::as_str).map(str::to_string) else {
+                continue;
+            };
+            let Some(rerouted) = crate::model_hosts::reroute_model(&configured, Some(&feed), &current, &state, &eligible) else {
+                continue;
+            };
+            runner_env.insert(var.into(), Value::String(rerouted.clone()));
+            if var == "COLONIZER_MODEL" {
+                effective_model = rerouted.clone();
+            }
+            cheapest_host.push((current, rerouted));
+        }
+        if !cheapest_host.is_empty() {
+            let said = cheapest_host
+                .iter()
+                .map(|(from, to)| format!("{from} → {to}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log.info(format!("cheapest host: {said}")).await;
+        }
+    }
     let model_changed = !effective_model.is_empty() && effective_model != module_model;
     let mut message = format!("model routing: {}", tier_decision.reason);
     if model_changed {
@@ -1436,7 +1495,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
-    let record = json!({
+    let mut record = json!({
         // Which decision this is and how Jev took part (issue #583), so a report can compare
         // Jev-acted decisions against rule ones by outcome without re-deriving either.
         "point": crate::routing::DECISION_POINT,
@@ -1458,6 +1517,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "cost": cost_record,
         "sensitivity": sensitivity.as_str(),
     });
+    // What the cheapest-host policy moved (issue #1039), so a boot can be checked against the
+    // ranking `GET /api/model-hosts` shows. Absent when the policy is off or moved nothing.
+    if !cheapest_host.is_empty() {
+        record["cheapest_host"] = json!(
+            cheapest_host
+                .iter()
+                .map(|(from, to)| json!({ "from": from, "to": to }))
+                .collect::<Vec<_>>()
+        );
+    }
     app.update_session(id, |x| {
         x.model_routing = Some(record.clone());
         x.sensitivity = Some(sensitivity.as_str().to_string());
@@ -1842,6 +1911,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
+    let mut pack_hosts: Vec<(&str, Vec<String>)> = Vec::new();
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         let mut resolved = Vec::new();
@@ -1872,6 +1942,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         // So are two packs defining the same ant (issue #1163): Claude Code
         // loads `agents/<file>.md` by name.
         crate::plugins::check_ant_uniqueness(&resolved)?;
+        // Collect the MCP hosts each enabled pack declares, for the egress policy.
+        for (pack_name, pack_dir) in resolved.iter() {
+            if let Ok(hosts) = crate::plugins::mcp_hosts(pack_dir)
+                && !hosts.is_empty()
+            {
+                pack_hosts.push((pack_name, hosts));
+            }
+        }
         // The runner only ever sees in-VM paths, never the mothership's.
         runner_env.insert("COLONIZER_PLUGIN_DIRS".into(), Value::String(targets.join(",")));
         // Belt and braces for ECC, whose hooks are dropped at staging time. Its
@@ -2217,8 +2295,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
     // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
-    // its vendor's declared hosts without the operator restating them.
-    let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
+    // its vendor's declared hosts without the operator restating them. Enabled packs' declared MCP
+    // hosts join too, so the agent reaches the tool servers the packs' skills call.
+    let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent), &pack_hosts);
     // The fleet floor (#690): when this mothership belongs to a fleet, the owner's policy clamps
     // the colony's own — local tightens, never loosens. Refused loosenings are logged and recorded.
     if let Some(floor) = crate::fleet_policy::load(&app.cfg.config_dir).and_then(|p| p.floor(&s.org, &s.repo)) {
@@ -2323,6 +2402,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     log.info(crate::path_policy::summary(&policy, &planned)).await;
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
         app.session_log(id, "warn", note).await;
+    }
+    // Scan for PATH-altering artifacts (issue #1278): executable shims, direnv, version managers,
+    // Makefiles and scripts that change PATH. Log each finding in the colony ledger.
+    let shims = crate::path_shims::scan(&wt);
+    if !shims.is_empty() {
+        let mut msg = String::from("PATH: this repository would change the colony's PATH (");
+        for (i, finding) in shims.iter().enumerate() {
+            if i > 0 {
+                msg.push_str("; ");
+            }
+            msg.push_str(&finding.message());
+        }
+        msg.push_str("). The colony's PATH stays pinned by the image; harness verification does not use it.");
+        app.session_log(id, "warn", msg).await;
     }
     // The guest's exec policy (modules/agents/*/execpolicy.mjs, issue #877) reads this to tell a
     // write into the microVM's discardable root filesystem from one into a host-backed path: only
@@ -3511,7 +3604,7 @@ mod tests {
             };
             // The default policy is Open with no operator entries: today's fence, plus the
             // always-blocked deny set every colony carries (#303).
-            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None);
+            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None, &[]);
             let (profiles, rules, record) =
                 colony_network(mesh.clone(), routes, gateway, &resolved, &["api.anthropic.com".into()]);
             // `public` alone, never the broad `host` profile (#375) — in every combination, so a
@@ -3948,10 +4041,18 @@ mod tests {
 
     /// A minimal pack on disk: a manifest and one skill, the shape `plugins::validate` accepts.
     fn pack(data_dir: &std::path::Path, name: &str, skill: &str) {
+        pack_with_mcp(data_dir, name, skill, None);
+    }
+
+    /// A pack with an optional `mcp.json` file declaring remote servers and hosts.
+    fn pack_with_mcp(data_dir: &std::path::Path, name: &str, skill: &str, mcp_config: Option<&str>) {
         let dir = data_dir.join("plugins").join(name);
         std::fs::create_dir_all(dir.join("skills").join(skill)).unwrap();
         std::fs::write(dir.join("plugin.json"), "{}").unwrap();
         std::fs::write(dir.join("skills").join(skill).join("SKILL.md"), "---\n").unwrap();
+        if let Some(mcp) = mcp_config {
+            std::fs::write(dir.join("mcp.json"), mcp).unwrap();
+        }
     }
 
     /// An install whose assets carry the guest binary (an ELF-magic stand-in; `linux_binary` checks
@@ -4079,6 +4180,83 @@ mod tests {
         );
         let info = said(&app, "packs", "info").await;
         assert!(info.iter().any(|line| line == "loading 2 plugin directories"), "{info:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An allowlist colony with a remote-MCP pack gets its declared hosts allowed and others
+    /// refused. Pack hosts are collected from mcp.json and recorded in egress.json with the
+    /// pack's provenance (issue #1165).
+    #[tokio::test]
+    async fn an_allowlist_colony_with_pack_hosts_allows_declared_hosts_only() {
+        let root = crate::app::tests::temp_root();
+        let app = pack_boot_app(&root, vec![claude_module(), pi_module(true)]).await;
+        // A pack with a remote MCP server declaring two hosts.
+        let mcp_config = r#"{
+            "mcpServers": {
+                "example_tool": {
+                    "url": "https://example-tool.example.com",
+                    "hosts": ["tool.example.com", "api.example.io"]
+                }
+            }
+        }"#;
+        pack_with_mcp(&app.cfg.data_dir, "with_tools", "demo", Some(mcp_config));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // Allowlist mode with the pack enabled.
+        let mut modules = crate::config::ModulesConfig::default();
+        modules
+            .sandbox
+            .settings
+            .insert("egress".into(), serde_json::json!("allowlist"));
+        *app.modules.write().await = modules.clone();
+        std::fs::write(
+            root.join("config/modules.json"),
+            serde_json::to_string_pretty(&modules).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("config/orgs.json"),
+            json!({"acme": {"agent": {"skillsets": {"with_tools": true}}}}).to_string(),
+        )
+        .unwrap();
+        resume_boot(app.clone(), "packs").await;
+        // Read the egress.json record written during boot.
+        let egress_data = app.store().read_file("packs", "egress.json").await.unwrap().unwrap();
+        let egress_record: serde_json::Value = serde_json::from_slice(&egress_data).unwrap();
+        // The pack's hosts should be in the allow list.
+        let allow = egress_record["allow"]
+            .as_array()
+            .expect("allow is an array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            allow.contains(&"tool.example.com"),
+            "pack host tool.example.com should be in allow list: {allow:?}"
+        );
+        assert!(
+            allow.contains(&"api.example.io"),
+            "pack host api.example.io should be in allow list: {allow:?}"
+        );
+        // The packs array should record which pack contributed each host.
+        let packs = egress_record["packs"]
+            .as_array()
+            .expect("packs field exists in allowlist mode with pack hosts");
+        assert_eq!(packs.len(), 1, "exactly one pack contributed: {packs:?}");
+        assert_eq!(packs[0]["pack"].as_str(), Some("with_tools"));
+        let pack_allow = packs[0]["allow"]
+            .as_array()
+            .expect("pack allow is an array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(pack_allow.len(), 2, "pack contributed both hosts: {pack_allow:?}");
+        assert!(pack_allow.contains(&"tool.example.com"));
+        assert!(pack_allow.contains(&"api.example.io"));
+        // A non-declared host should not be in the allow list.
+        assert!(
+            !allow.contains(&"other.example.com"),
+            "non-declared host should not be in allow list"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

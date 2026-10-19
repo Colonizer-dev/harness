@@ -152,6 +152,7 @@ fn overlap_request(repo: &str, serialize: Option<bool>) -> Json<NewSession> {
         host: None,
         serialize,
         handoff: None,
+        retry_of: None,
     })
 }
 
@@ -646,6 +647,7 @@ async fn a_switched_off_org_refuses_new_colonies_and_names_the_way_back_on() {
             host: None,
             serialize: None,
             handoff: None,
+            retry_of: None,
         }),
     )
     .await
@@ -733,6 +735,7 @@ async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_ab
             host: None,
             serialize: None,
             handoff: None,
+            retry_of: None,
         }),
     )
     .await
@@ -779,6 +782,7 @@ fn stack_request(repo: &str, after: Option<String>, stack: bool) -> Json<NewSess
         host: None,
         serialize: None,
         handoff: None,
+        retry_of: None,
     })
 }
 
@@ -921,7 +925,9 @@ async fn by_default_a_colony_behind_a_closed_parent_is_refused_naming_the_stack_
 }
 
 #[tokio::test]
-async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
+async fn create_stacks_on_a_failed_colony_and_waits_for_it_to_recover() {
+    // Issue #1066: a failed parent may be resumed and publish a branch, so the child is queued
+    // behind it instead of being refused.
     let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
     let app = app_that_can_create(&root);
     let mut dead = colony("acme", SessionStatus::Failed);
@@ -930,20 +936,18 @@ async fn create_refuses_to_stack_on_a_colony_that_can_never_lend_a_branch() {
     dead.repo = "acme/app".into();
     app.sessions.write().await.push(dead);
 
-    let err = create(
+    let Json(child) = create(
         State(app.clone()),
         None,
         HeaderMap::new(),
         stack_request("acme/app", Some("dead".into()), true),
     )
     .await
-    .unwrap_err();
-    assert_eq!(err.0, StatusCode::CONFLICT, "a refusal, like the duplicate-issue one");
-    let message = err.1.to_string();
-    assert!(message.contains("dead"), "{message}");
-    assert!(message.contains("failed"), "it says which reason applies: {message}");
+    .expect("a failed parent is waited on, not refused");
+    assert_eq!(child.parent.as_deref(), Some("dead"), "the child names its parent");
+    assert_eq!(child.status, SessionStatus::Queued, "the child waits for the parent");
     let sessions = app.sessions.read().await;
-    assert_eq!(sessions.len(), 1, "nothing was created");
+    assert_eq!(sessions.len(), 2, "the child was created behind the parent");
     drop(sessions);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1472,4 +1476,149 @@ async fn a_launch_proceeds_when_this_mothership_can_push_to_the_repository() {
         "the colony exists; its boot is a spawned task the one-thread runtime drops before polling"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A failed colony's retry (issue #1073) is the colony that colony would have been: same
+/// repository, issue, instructions, title and model choices, a new id, and `retry_of` pointing back
+/// at the failure. It is admitted through `create`, so the launch really happened.
+#[tokio::test]
+async fn a_failed_colony_retries_into_a_fresh_colony_with_its_settings() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+    let _gh = fake_github_with_push_access(&app, &root, "acme/writable", "octo", true);
+
+    let mut source = colony("acme", SessionStatus::Failed);
+    source.id = "deadbeef".into();
+    source.repo = "acme/writable".into();
+    source.issue = Some(4242);
+    source.issue_title = "Fix the flaky test".into();
+    source.instructions = "run the suite twice".into();
+    source.autopilot = true;
+    source.verify = Some("cargo test".into());
+    source.model_tier = Some("high".into());
+    source.model_override = Some("opus".into());
+    source.claude_account = Some("work".into());
+    app.sessions.write().await.push(source);
+
+    let Json(created) = retry(State(app.clone()), Path("deadbeef".into()), None)
+        .await
+        .unwrap_or_else(|e| panic!("retry refused a failed colony: {:#}", e.1));
+    assert_ne!(created.id, "deadbeef", "a retry is a new colony, not the old record");
+    assert_eq!(created.retry_of.as_deref(), Some("deadbeef"), "linked back to the failure");
+    assert_eq!(created.repo, "acme/writable");
+    assert_eq!(created.issue, Some(4242));
+    assert_eq!(created.issue_title, "Fix the flaky test");
+    assert_eq!(created.instructions, "run the suite twice");
+    assert!(created.autopilot, "the operator's autopilot choice carries over");
+    assert_eq!(created.verify.as_deref(), Some("cargo test"));
+    assert_eq!(created.model_tier.as_deref(), Some("high"));
+    assert_eq!(created.model_override.as_deref(), Some("opus"));
+    assert_eq!(created.claude_account.as_deref(), Some("work"));
+    assert_eq!(created.parent, None, "an unstacked colony retries unstacked");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Only a `Failed` colony is retried. A live one and a resumable one are both refused, and the
+/// resumable refusal names `/resume` — retrying it would throw away a worktree for nothing.
+#[tokio::test]
+async fn retrying_a_colony_that_is_not_failed_is_refused() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_that_can_create(&root);
+
+    for (status, git_admin_dir, says_resume) in [
+        (SessionStatus::Running, Some("git"), false),
+        (SessionStatus::Idle, Some("git"), false),
+        (SessionStatus::PrOpened, Some("git"), false),
+        (SessionStatus::Stopped, Some("git"), true),
+        (SessionStatus::Parked, Some("git"), true),
+    ] {
+        let mut s = colony("acme", status);
+        s.id = "live".into();
+        s.repo = "acme/app".into();
+        s.git_admin_dir = git_admin_dir.map(str::to_string);
+        app.sessions.write().await.push(s);
+
+        let err = retry(State(app.clone()), Path("live".into()), None).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT, "{status:?} is not a retry");
+        assert!(err.1.to_string().contains(status.as_str()), "{status:?}: {}", err.1);
+        assert_eq!(
+            says_resume,
+            err.1.to_string().contains("resume it instead"),
+            "{status:?}: a resumable colony is pointed at /resume — {err:?}"
+        );
+        app.sessions.write().await.retain(|x| x.id != "live");
+    }
+
+    // An unknown id is a plain 404, not a 409 about a status.
+    let err = retry(State(app.clone()), Path("nosuch".into()), None).await.unwrap_err();
+    assert_eq!(err.0, StatusCode::NOT_FOUND, "{err:?}");
+    assert_eq!(app.sessions.read().await.len(), 0, "no refused retry created anything");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The stack parent a retry hands to `create`: a live parent stays, a failed one is replaced by the
+/// newest colony that retried it, a missing one is dropped, and a cycle in the lineage terminates.
+#[test]
+fn a_retry_follows_a_failed_stack_parent_to_its_replacement() {
+    fn session(id: &str, status: SessionStatus) -> Session {
+        let mut s = colony("acme", status);
+        s.id = id.into();
+        s
+    }
+    fn retried_by(mut s: Session, of: &str) -> Session {
+        s.retry_of = Some(of.into());
+        s
+    }
+
+    // A parent that can still lend its branch is used as it stands.
+    let live = session("live", SessionStatus::PrOpened);
+    assert_eq!(
+        retry_parent(std::slice::from_ref(&live), Some("live")).as_deref(),
+        Some("live")
+    );
+    // Merged, stopped and parked are `create`'s own business (queue_decision answers each), so the
+    // parent is left alone rather than second-guessed here.
+    for status in [SessionStatus::Merged, SessionStatus::Stopped, SessionStatus::Parked] {
+        let p = session("p", status);
+        assert_eq!(retry_parent(&[p], Some("p")).as_deref(), Some("p"), "{status:?}");
+    }
+    // A parent that is gone from the record has neither a branch nor a replacement.
+    assert_eq!(retry_parent(&[], Some("p")), None);
+    assert_eq!(retry_parent(&[], None), None);
+
+    // A failed parent is replaced by the newest retry of it, so a retry stacked under a dead parent
+    // still lands rather than being refused for a branch that will never come.
+    let mut old = retried_by(session("old", SessionStatus::Failed), "dead");
+    old.created_at = Utc::now() - chrono::Duration::hours(2);
+    let mut newest = retried_by(session("newest", SessionStatus::Failed), "dead");
+    newest.created_at = Utc::now();
+    let mut older = retried_by(session("older", SessionStatus::Failed), "dead");
+    older.created_at = Utc::now() - chrono::Duration::hours(1);
+    let dead = session("dead", SessionStatus::Failed);
+    assert_eq!(
+        retry_parent(&[older, dead, old, newest], Some("dead")).as_deref(),
+        Some("newest"),
+        "the newest retry of the failed parent takes its place"
+    );
+    // A failed parent nobody retried stays as it is — `create` refuses with its own reason.
+    assert_eq!(
+        retry_parent(&[session("dead", SessionStatus::Failed)], Some("dead")).as_deref(),
+        Some("dead")
+    );
+
+    // The walk follows a chain, and a lineage that cycles back on itself terminates rather than
+    // spinning: a -> b -> a has no end, and the cap is what says so.
+    let a = retried_by(session("a", SessionStatus::Failed), "b");
+    let b = retried_by(session("b", SessionStatus::Failed), "a");
+    let cyclic = retry_parent(&[a, b], Some("a")).expect("a lineage, however circular, resolves");
+    assert!(
+        cyclic == "a" || cyclic == "b",
+        "the walk stopped inside the cycle, at {cyclic}"
+    );
+    // A long dead chain is capped rather than walked forever, and still names a real colony.
+    let chain: Vec<Session> = (0..40)
+        .map(|n| retried_by(session(&format!("c{n}"), SessionStatus::Failed), &format!("c{}", n + 1)))
+        .collect();
+    let walked = retry_parent(&chain, Some("c0")).expect("a chain resolves");
+    assert!(walked.starts_with('c'), "the walk stopped on a colony in the chain: {walked}");
 }

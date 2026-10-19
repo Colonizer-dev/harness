@@ -1418,6 +1418,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
         .route("/api/sessions/{id}/prewarm", routing::post(prewarm))
+        .route("/api/sessions/{id}/retry", routing::post(retry))
         .route("/api/sessions/{id}/seen", routing::post(seen))
         .route("/api/sessions/{id}/messages", routing::post(message))
         .route("/api/sessions/{id}/events", routing::get(events_ws))

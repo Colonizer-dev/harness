@@ -453,6 +453,11 @@ pub struct Session {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack_fork: Option<String>,
+    /// The colony this one replaces (issue #1073): set when `POST /api/sessions/{id}/retry` starts a
+    /// fresh colony from a failed one's settings, so the cockpit can say "retry of X". Unlike
+    /// `parent` this is not a stack relationship — the two colonies share settings, nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
     /// Who launched the colony when the operator did not: `Some("burn_down")` marks a colony the
     /// burn-down scheduler auto-launched, so the global stop can find it and the UI can label it;
     /// `Some("redteam")` a red-team hunter, `Some("map")` a mapping colony. `None` for anything a
@@ -483,7 +488,7 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     /// Why this colony is where it is, in placement's words (issue #688): the member and its free
-    /// capacity, or that a peer had room but cross-member launch is not built yet. Recorded on a
+    /// capacity, or that a peer had room but cross-member launch is not built yet (issue #1252). Recorded on a
     /// fresh launch; `None` on colonies written before it existed or re-admitted from the queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<String>,
@@ -861,6 +866,7 @@ impl Default for Session {
             parent: None,
             stack: false,
             stack_fork: None,
+            retry_of: None,
             origin: None,
             auto_note: None,
             launched_by_token: None,
