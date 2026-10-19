@@ -93,7 +93,14 @@ bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 
 The add-on is found, in order, at `COLONIZER_OBSERVABILITY_BIN`,
 `<data>/addons/observability/<version>/colonizer-observability`, or beside the `colonizer` binary.
-Its version must match the mothership's. Release tarballs do not ship it yet; build it with:
+Its version must match the mothership's. Releases carry it as its own tarball,
+`colonizer-observability-<platform>.tar.gz` (`linux-x86_64`, `darwin-arm64`), checksummed in
+SHA256SUMS and attested the same way as the main artifacts — not inside the app's own tarball, so a
+default install does not pull it in. `scripts/install-release.sh` and `colonizer setup` install it
+beside `colonizer` whenever the release carries it; an older release without it installs the app
+alone — as do installs from a local archive or the macOS DMG, which have no SHA256SUMS row to opt
+in from; `colonizer setup`, or a re-run of the installer from a release that carries it, adds it.
+Building it yourself still works the same way:
 
 ```sh
 cargo build --release -p colonizer-observability

@@ -343,7 +343,8 @@ impl Supervisor {
                 r.state = "no_addon";
                 r.binary = None;
                 r.error = Some(format!(
-                    "the {BINARY} add-on is not installed: build it (`cargo build --release -p colonizer-observability`) \
+                    "the {BINARY} add-on is not installed: install it with `colonizer setup` (release tarballs ship it \
+                     beside the colonizer binary), or build it yourself (`cargo build --release -p colonizer-observability`) \
                      and put it beside the colonizer binary, or name it with {BINARY_ENV}"
                 ));
             });
@@ -530,7 +531,8 @@ async fn test(State(app): State<Shared>) -> ApiResult<Value> {
         return Err(client_error(
             StatusCode::SERVICE_UNAVAILABLE,
             &format!(
-                "the {BINARY} add-on is not installed; build it and put it beside the colonizer binary, or name it with {BINARY_ENV}"
+                "the {BINARY} add-on is not installed; install it with `colonizer setup` (release tarballs ship it beside \
+                 the colonizer binary), or build it yourself and put it beside the colonizer binary, or name it with {BINARY_ENV}"
             ),
         ));
     };
@@ -680,7 +682,8 @@ async fn backfill_start(State(app): State<Shared>, Json(body): Json<BackfillRequ
         return Err(client_error(
             StatusCode::SERVICE_UNAVAILABLE,
             &format!(
-                "the {BINARY} add-on is not installed; build it and put it beside the colonizer binary, or name it with {BINARY_ENV}"
+                "the {BINARY} add-on is not installed; install it with `colonizer setup` (release tarballs ship it beside \
+                 the colonizer binary), or build it yourself and put it beside the colonizer binary, or name it with {BINARY_ENV}"
             ),
         ));
     };

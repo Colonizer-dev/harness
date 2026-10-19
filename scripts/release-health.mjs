@@ -20,8 +20,19 @@ import { fileURLToPath } from 'node:url';
 const REPO = 'Colonizer-dev/harness';
 const SITE = 'https://colonizer.dev';
 const CRATES = ['colonizer-harness', 'colonizer-agentd'];
-// Keep in step with the assets release.yml attaches, Colonizer-arm64.dmg included (#1138).
-export const ASSETS = ['colonizer-linux-x86_64.tar.gz', 'colonizer-darwin-arm64.tar.gz', 'Colonizer-arm64.dmg', 'install.sh', 'SHA256SUMS'];
+// Keep in step with the assets release.yml attaches, Colonizer-arm64.dmg included (#1138) and the
+// observability add-on's own tarballs included (#1059). Every release is checked against the whole
+// list, the way the DMG was, so until the first release that ships the add-on the nightly reports
+// its two tarballs as missing on the releases that predate it.
+export const ASSETS = [
+  'colonizer-linux-x86_64.tar.gz',
+  'colonizer-darwin-arm64.tar.gz',
+  'colonizer-observability-linux-x86_64.tar.gz',
+  'colonizer-observability-darwin-arm64.tar.gz',
+  'Colonizer-arm64.dmg',
+  'install.sh',
+  'SHA256SUMS',
+];
 const USER_AGENT = 'colonizer-release-health';
 
 const args = process.argv.slice(2);
