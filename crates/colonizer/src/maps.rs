@@ -564,11 +564,7 @@ pub async fn create(State(app): State<Shared>, Path((owner, name)): Path<(String
 
 /// Adds the archify skillset to a mapping colony's plugin list (the comma-separated `plugins`).
 pub fn with_archify(plugins: &str) -> String {
-    let mut names = crate::plugins::parse_list(plugins);
-    if !names.iter().any(|n| n == ARCHIFY_SKILLSET) {
-        names.push(ARCHIFY_SKILLSET.to_string());
-    }
-    names.join(",")
+    crate::plugins::with_skillset(plugins, ARCHIFY_SKILLSET)
 }
 
 // ---------------------------------------------------------------------------

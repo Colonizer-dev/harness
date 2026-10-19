@@ -66,6 +66,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::setup_state::FEATURE,
     &crate::supply_chain_loop::FEATURE,
     &crate::switch_agent::FEATURE,
+    &crate::ua_graph::FEATURE,
     &crate::vault::FEATURE,
     &crate::notify::subscriptions::FEATURE,
 ];
