@@ -790,12 +790,12 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
 }
 
 /// The mirror's fetch, with the repair ladder behind it (`mirror_health`): a fetch whose stderr
-/// names a corrupt object first gets its corrupt loose objects cleaned and is retried, then, still
-/// corrupt, a full re-clone of the mirror and a third try. Any other failure — and a corruption
-/// both rungs could not fix — comes back unchanged for the boot-retry machinery above to count.
-/// A rung that lands announces one `mirror_repaired` line for the repository and re-queues the
-/// colonies the corruption had already failed; a ladder that runs out — a failed re-clone
-/// included — announces `mirror_needs_attention`.
+/// names a corrupt object first gets its corrupt loose objects cleaned and is retried, then, if
+/// still failing (for any reason), a full re-clone of the mirror and a third try. Any other failure
+/// — and any failure the ladder could not fix — comes back unchanged for the boot-retry machinery
+/// above to count. A rung that lands announces one `mirror_repaired` line for the repository and
+/// re-queues the colonies the corruption had already failed; a ladder that runs out — a failed
+/// re-clone included — announces `mirror_needs_attention`.
 async fn fetch_with_mirror_repair(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger) -> Result<()> {
     async fn fetch(app: &App, bare: &FsPath) -> Result<String> {
         exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await
@@ -814,22 +814,20 @@ async fn fetch_with_mirror_repair(app: &App, repo: &str, bare: &FsPath, log: &Se
                 None
             }
         };
-        if let Err(err) = fetch(app, bare).await {
-            if !crate::mirror_health::is_corruption_error(&err.to_string()) {
-                return Err(err);
-            }
-            log.warn("fetching origin still fails on corruption; re-cloning the mirror")
+        // If fetch still fails after cleanup, regardless of error type, proceed to reclone the mirror
+        if let Err(_err) = fetch(app, bare).await {
+            log.warn("fetching origin still fails after cleanup; re-cloning the mirror")
                 .await;
             let old = match crate::mirror_health::reclone_mirror(app, repo, bare, log).await {
                 Ok(old) => old,
                 Err(err) => {
                     crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
-                    return Err(err);
+                    return Err(err).context("repo cache corruption detected but unrecoverable: re-clone failed");
                 }
             };
             if let Err(err) = fetch(app, bare).await {
                 crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
-                return Err(err);
+                return Err(err).context("repo cache corruption detected but unrecoverable: fetch failed even after re-clone");
             }
             crate::mirror_health::repaired_by_recloning(app, repo, &old).await;
         } else {
