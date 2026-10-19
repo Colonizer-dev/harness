@@ -14,11 +14,17 @@
 //!
 //! A running child holds its cursors in memory and would rewrite the file over the deletion, so
 //! the route parks a per-data-dir *pending* entry that the supervision loop (supervisor.rs) sees on
-//! its next tick: it stops the child and starts nothing until the entry goes. The route waits for
-//! the loop's acknowledgement before deleting, and the entry carries its own expiry so a request
-//! that dies mid-reset cannot park export for good. While a backfill runs the route refuses (409):
-//! a backfill reads `state.json` to know where history ends, and moving that line mid-run would
-//! replay or skip records.
+//! its next tick: it stops the child and starts nothing until the entry goes. The entry stands for
+//! the whole handshake — waiting, deleting and only then clearing — and it carries its own expiry so
+//! a request that dies mid-reset cannot park export for good. The route waits for the loop's
+//! acknowledgement before deleting; if the child has not stopped by [`SETTLE_BY`] it refuses (409)
+//! and deletes nothing, because a child that may still be up would rewrite the file back.
+//!
+//! Three refusals, all 409 and none of them deleting: a backfill is registered (it reads
+//! `state.json` to know where history ends, and moving that line mid-run would replay or skip
+//! records); another reset already holds the pending entry for this data dir (they would share one
+//! entry, and the first to answer would release the supervisor under the second); and the exporter
+//! is still stopping.
 
 use super::supervisor;
 use crate::{ApiResult, Shared, client_error};
@@ -62,10 +68,21 @@ pub(super) fn pending(data_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn register(data_dir: &Path) {
-    if let Ok(mut map) = pendings().lock() {
-        map.insert(data_dir.to_path_buf(), Instant::now());
+/// Registers a reset in flight, or refuses one already in flight: two resets on one data dir would
+/// share the single pending entry, and whichever answered first would clear it out from under the
+/// other — which would then delete into a child the supervisor had already been told to stop.
+/// `false` means another reset holds the entry.
+fn register(data_dir: &Path) -> bool {
+    let Ok(mut map) = pendings().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    map.retain(|_, at| at.elapsed() < PENDING_TTL);
+    if map.contains_key(data_dir) {
+        return false;
     }
+    map.insert(data_dir.to_path_buf(), now);
+    true
 }
 
 fn clear(data_dir: &Path) {
@@ -101,13 +118,17 @@ fn targets(data_dir: &Path, hash_key: bool) -> Vec<(PathBuf, u64)> {
 /// has acknowledged the pending entry (`resetting`), or its last word names a state no live child
 /// is in (`off`, `invalid`, `refused`, `no_addon`, `failed`, `restarting`), or there is no word at
 /// all — no loop running, so no child it is keeping alive. `running` and `starting` keep waiting,
-/// up to [`SETTLE_BY`]: past it the deletion goes ahead anyway, because a supervisor that stopped
-/// answering also stopped holding a child (`kill_on_drop`).
-async fn wait_until_no_child(data_dir: &Path) {
-    let deadline = Instant::now() + SETTLE_BY;
-    while matches!(supervisor::runtime_state(data_dir), "running" | "starting") && Instant::now() < deadline {
+/// up to [`SETTLE_BY`]. Past it the answer is `false` and the route refuses (409) rather than
+/// deletes: a child that may still be up holds its cursors in memory and would rewrite
+/// `state.json` over the deletion, undoing the reset — the operator can ask again.
+async fn wait_until_no_child(data_dir: &Path) -> bool {
+    // Tokio's clock, not the wall's: the deadline is an await, and a test may run it on paused
+    // time.
+    let deadline = tokio::time::Instant::now() + SETTLE_BY;
+    while matches!(supervisor::runtime_state(data_dir), "running" | "starting") && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(POLL).await;
     }
+    !matches!(supervisor::runtime_state(data_dir), "running" | "starting")
 }
 
 /// The `POST /api/observability/reset` body. Owner-only — the route is nowhere in the feature's
@@ -132,7 +153,9 @@ fn listed(targets: &[(PathBuf, u64)]) -> Vec<Value> {
 /// `POST /api/observability/reset` (issue #850): delete the exporter's committed cursors so the
 /// next start begins at "now", stopping the child first (it holds the cursors in memory and would
 /// rewrite the file) and letting the supervision loop restart it on its next tick. `dry_run` lists
-/// what would go; `hash_key` adds the pseudonym key. 409 while a backfill runs.
+/// what would go; `hash_key` adds the pseudonym key. 409 while a backfill runs, while another
+/// reset is in flight, and while the child has not stopped by [`SETTLE_BY`] — nothing is deleted
+/// in any of those three.
 pub(super) async fn reset(State(app): State<Shared>, Json(body): Json<ResetRequest>) -> ApiResult<Value> {
     let data_dir = app.cfg.data_dir.clone();
     if supervisor::backfill_running(&data_dir) {
@@ -145,10 +168,21 @@ pub(super) async fn reset(State(app): State<Shared>, Json(body): Json<ResetReque
     if body.dry_run {
         return Ok(Json(json!({"dry_run": true, "delete": listed(&targets)})));
     }
+    if !register(&data_dir) {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "another reset is already in flight for this data directory; wait for it to finish",
+        ));
+    }
 
-    register(&data_dir);
+    let key = hash_file(&data_dir);
     let outcome = async {
-        wait_until_no_child(&data_dir).await;
+        if !wait_until_no_child(&data_dir).await {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                "the exporter is still stopping; try again",
+            ));
+        }
         let mut deleted = Vec::new();
         for (path, bytes) in &targets {
             match tokio::fs::remove_file(path).await {
@@ -167,11 +201,13 @@ pub(super) async fn reset(State(app): State<Shared>, Json(body): Json<ResetReque
     .await;
     // Always: a pending entry left behind would hold the supervisor back for the TTL.
     clear(&data_dir);
-    if body.hash_key {
-        // The scrape endpoint parks the old key; the next hashed scrape loads what is on disk now.
+    let deleted = outcome?;
+    // Only once the deletion has actually happened, and only for a key that was among the files
+    // that went: the scrape endpoint parks the old key, and the next hashed scrape loads what is
+    // on disk now — a refusal or a missing key leaves it where it belongs.
+    if deleted.iter().any(|d| d["path"] == json!(key.display().to_string())) {
         super::metrics::forget_hash_key();
     }
-    let deleted = outcome?;
     Ok(Json(json!({"reset": true, "deleted": deleted})))
 }
 
@@ -373,9 +409,7 @@ mod tests {
         assert!(!state_file(&app.cfg.data_dir).exists());
 
         // A `running` child holds the deletion until the loop has stopped it: here a stand-in loop
-        // flips the state a moment in, and the route waits for that flip before it deletes. A
-        // supervisor that never answers is covered by the deadline — `SETTLE_BY` — after which
-        // the route deletes anyway, because a dead supervisor means no live child either.
+        // flips the state a moment in, and the route waits for that flip before it deletes.
         supervisor::test_set_runtime(&app.cfg.data_dir, "running");
         std::fs::write(state_file(&app.cfg.data_dir), b"{}").unwrap();
         let data_dir = app.cfg.data_dir.clone();
@@ -392,6 +426,71 @@ mod tests {
         );
         assert!(!state_file(&app.cfg.data_dir).exists());
         assert!(!pending(&app.cfg.data_dir));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A child that never stops is not something to delete under: past `SETTLE_BY` the route
+    /// refuses (409) and leaves `state.json` alone, because a live child holds the cursors in
+    /// memory and would write them back over the deletion. The pending entry goes either way, so
+    /// the next attempt — or the supervision loop — is not held back. Paused time, so the deadline
+    /// is crossed in the test's own microseconds.
+    #[tokio::test(start_paused = true)]
+    async fn a_reset_refuses_rather_than_delete_under_a_child_that_will_not_stop() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        seed(&app.cfg.data_dir);
+        // A supervision loop that says `running` and never answers.
+        supervisor::test_set_runtime(&app.cfg.data_dir, "running");
+        let err = reset(State(app.clone()), request(false, false)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(
+            err.message().contains("still stopping"),
+            "the refusal names what to do: {}",
+            err.message()
+        );
+        assert!(
+            state_file(&app.cfg.data_dir).is_file(),
+            "nothing was deleted under a child that may still be live"
+        );
+        assert!(!pending(&app.cfg.data_dir), "and the supervisor is not held back");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two resets on one data dir would share the pending entry, and the first to answer would
+    /// release the supervision loop out from under the second. So the second is refused (409) and
+    /// deletes nothing; the entry it did not take is the first one's.
+    #[tokio::test]
+    async fn a_reset_is_refused_while_another_is_in_flight() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        seed(&app.cfg.data_dir);
+        // A stand-in for the reset in flight: the entry stands for the whole handshake.
+        assert!(register(&app.cfg.data_dir));
+        assert!(pending(&app.cfg.data_dir));
+        let err = reset(State(app.clone()), request(false, false)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert!(err.message().contains("already in flight"), "{}", err.message());
+        assert!(state_file(&app.cfg.data_dir).is_file(), "the refused reset deleted nothing");
+        assert!(
+            pending(&app.cfg.data_dir),
+            "and it did not take the entry that was already standing"
+        );
+        clear(&app.cfg.data_dir);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A dry run never registers: listing what would go must not hold the supervisor back, even
+    /// while a real reset is in flight.
+    #[tokio::test]
+    async fn a_dry_run_does_not_register_a_pending_entry() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        seed(&app.cfg.data_dir);
+        assert!(register(&app.cfg.data_dir));
+        let Json(answer) = reset(State(app.clone()), request(true, false)).await.unwrap();
+        assert_eq!(answer["dry_run"], json!(true), "{answer}");
+        assert!(pending(&app.cfg.data_dir), "the entry in flight is untouched");
+        clear(&app.cfg.data_dir);
         let _ = std::fs::remove_dir_all(root);
     }
 }

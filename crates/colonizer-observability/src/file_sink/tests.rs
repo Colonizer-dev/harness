@@ -188,6 +188,22 @@ async fn each_line_is_one_otlp_json_request_in_a_private_directory() {
         assert!(strings.iter().any(|s| s.contains("line ")), "an OTLP request: {strings:?}");
         let value: serde_json::Value = serde_json::from_slice(line).unwrap();
         assert!(value["resourceLogs"][0]["scopeLogs"][0]["logRecords"].is_array(), "{value}");
+        // Into the generated message, which is what the collector's `otlpjsonfile` receiver parses
+        // a line into: the shape the doc's YAML promises is the shape a receiver accepts.
+        let typed: ExportLogsServiceRequest = serde_json::from_slice(line).unwrap();
+        assert!(
+            typed
+                .resource_logs
+                .iter()
+                .flat_map(|r| &r.scope_logs)
+                .flat_map(|s| &s.log_records)
+                .any(|r| r
+                    .body
+                    .as_ref()
+                    .and_then(|b| b.value.as_ref())
+                    .is_some_and(|v| matches!(v, any_value::Value::StringValue(s) if s.starts_with("line ")))),
+            "a receiver's parse keeps the bodies: {typed:?}"
+        );
     }
     // The bodies the requests carry, in order — every record of every line.
     let bodies: Vec<String> = raw

@@ -350,11 +350,12 @@ colonizer observability reset --hash-key   # also drop the pseudonymising key
 ```
 
 It always lists what will be deleted first — `state.json`, plus `hash.key` with `--hash-key`,
-each with its size — then asks `y/N` unless `--yes`. When stdin is not a terminal (a script, a
-pipe) and `--yes` was not given it refuses with exit code 2 rather than delete what nobody
-confirmed. The ledgers, the file sink's output and everything else under `<data>/observability/`
-are never touched. With the global `--json` both answers print: the dry run's listing and the
-deletion's.
+each with its size — then asks `y/N` unless `--yes`. When nobody can answer that question it
+refuses with exit code 2 rather than delete what nobody confirmed: stdin is not a terminal (a
+script, a pipe), or `--json` is in play. The ledgers, the file sink's output and everything else
+under `<data>/observability/` are never touched. With the global `--json` both answers print: the
+dry run's listing and the deletion's — or, when it refused, one JSON object naming what would have
+been deleted.
 
 ## `--json`
 

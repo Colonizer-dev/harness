@@ -678,12 +678,9 @@ pub async fn scrape(
     let Some(config) = config.filter(|c| c.prometheus) else {
         return crate::client_error(StatusCode::NOT_FOUND, "metrics are not enabled on this install").into_response();
     };
-    if let Some(denied) = super::access::install_wide_denial(
-        token.as_ref().map(|v| &**v),
-        phone.is_some(),
-        PATH,
-        "scrape it from the computer",
-    ) {
+    if let Some(denied) =
+        super::access::install_wide_denial(token.as_deref(), phone.is_some(), PATH, "scrape it from the computer")
+    {
         return denied.into_response();
     }
     let hashed = config.repo_names == "hashed";

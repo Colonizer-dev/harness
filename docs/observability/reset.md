@@ -42,15 +42,17 @@ colonizer observability reset --hash-key  # also drops the pseudonymising key
 ```
 
 The CLI always runs a dry run first — one line per file, with its size, as the mothership
-measured it — then asks `y/N` (unless `--yes`). When stdin is not a terminal and `--yes` was not
-given, it refuses with exit code 2 rather than delete what no one confirmed: a script must say
-`--yes` out loud.
+measured it — then asks `y/N` (unless `--yes`). When no one can answer that question it refuses
+with exit code 2 rather than delete what no one confirmed: stdin is not a terminal (a script, a
+pipe), or `--json` is in play, whose output must stay one JSON document to be worth parsing. A
+script must say `--yes` out loud. With `--json` the refusal is itself a JSON object naming what
+would have been deleted.
 
 The same call as an API route, **owner-only** (never in a token's scope):
 
 | Route | Does |
 | :--- | :--- |
-| `POST /api/observability/reset` | `{dry_run?, hash_key?}`. With `dry_run` the answer is `{dry_run: true, delete: [{path, bytes}, …]}` and nothing is deleted; otherwise `{reset: true, deleted: [{path, bytes}, …]}`. 409 while a [backfill](backfill.md) is registered — it reads `state.json` to know where history ends. |
+| `POST /api/observability/reset` | `{dry_run?, hash_key?}`. With `dry_run` the answer is `{dry_run: true, delete: [{path, bytes}, …]}` and nothing is deleted; otherwise `{reset: true, deleted: [{path, bytes}, …]}`. 409, deleting nothing, while a [backfill](backfill.md) is registered — it reads `state.json` to know where history ends — while another reset is in flight for this data directory, or while the exporter is still stopping (the child had not stopped within the settle window). |
 
 What a reset deletes, all of it and only it:
 
@@ -64,9 +66,12 @@ It never touches the source ledgers, the file sink's output (`<data>/observabili
 [file output](file-output.md)), `status.json`, `backfill.json`, the contract, the logs, or anything
 else under `<data>`. The route stops the supervised child first — it holds the cursors in memory
 and would rewrite `state.json` over the deletion — and the supervisor restarts it on its next
-tick (within five seconds). A child that finds no `state.json` starts as if its destination were
+tick (within five seconds). A child that finds no `state.json` starts as if every destination were
 new: **Start from** = `now` (the default) seeds every file at its end, `backlog` re-reads within
-**Max backlog (days)**; the settle is per destination and survives the reset.
+**Max backlog (days)**. The settle is per destination, but a reset settles them again: the list of
+already-settled destinations lives in `state.json` itself (`destinations`), and deleting that file
+takes the list with it — which is the point, since the cursors the list existed to protect are the
+ones being forgotten.
 
 ## Uninstalling
 

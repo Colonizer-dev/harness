@@ -415,6 +415,13 @@ impl Supervisor {
             return;
         }
         self.policy = Some(contract["policy"].clone());
+        // Everything above awaited — the modules lock, the contract, the add-on's `--version`, the
+        // write — and a reset may have registered in any of them. Its child would rewrite
+        // `state.json` over the deletion, so a pending entry this late ends the tick instead of
+        // the start; the next tick, with nothing pending, starts it from the file the reset left.
+        if super::reset::pending(&data_dir) {
+            return self.stop(&data_dir, "resetting", None).await;
+        }
         match spawn(&binary, &data_dir, &effective.headers).await {
             Ok(child) => {
                 self.child = Some(child);
@@ -524,7 +531,7 @@ async fn status(
     phone: Option<Extension<crate::phone::PhoneDevice>>,
 ) -> ApiResult<Value> {
     if let Some(denied) = super::access::install_wide_denial(
-        token.as_ref().map(|v| &**v),
+        token.as_deref(),
         phone.is_some(),
         "/api/observability/status",
         "read it in the cockpit on your computer",

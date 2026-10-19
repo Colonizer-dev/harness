@@ -41,46 +41,59 @@ pub(crate) use supervisor::{routes, start_tasks};
 /// * `ok` — configured, resolved, child running and `status.json` reporting no complaint.
 ///
 /// It must never slow the status poll down: it resolves the config with a default identity (the
-/// Off/Invalid/On verdict never reads it, so the poll never runs the hostname probe), and its only
-/// awaits are the modules read lock — never anything shared with the event or session write paths.
+/// Off/Invalid/On verdict never reads it, so the poll never runs the hostname probe), it reads no
+/// secret until the verdict is otherwise `ok` — the keychain read is seconds — and the only files
+/// it touches are the add-on's own small `status.json`. Its awaits are the modules read lock, an
+/// offloaded keychain read and that one small file — never anything shared with the event or
+/// session write paths.
 pub(crate) async fn compact_status(app: &crate::App) -> &'static str {
     use env::{Identity, Resolved};
 
-    // The same read `supervisor::resolve` makes — module choice and secret — but with a default
-    // identity: the Off/Invalid/On verdict never looks at it (only resource attributes do), so the
-    // status poll never runs the hostname probe or the fleet read on observability's account.
+    let var = |name: &str| std::env::var(name).ok();
+    // The same read `supervisor::resolve` makes — module choice and the environment — with a
+    // default identity: the Off/Invalid/On verdict never looks at it (only resource attributes
+    // do), so the status poll never runs the hostname probe or the fleet read on observability's
+    // account. This pass carries no secret: an install that never turned the exporter on, and one
+    // whose file sink needs no header at all, never touch the keychain on the poll.
     let module = app.modules.read().await.observability.clone();
-    let secret = crate::util::read_secret(&app.cfg.config_dir.join("observability-headers"));
-    match env::resolve(
-        module.as_ref(),
-        &|name| std::env::var(name).ok(),
-        secret,
-        &Identity::default(),
-    ) {
-        Resolved::Off(_) => "off",
-        Resolved::Invalid(_) => "degraded",
-        Resolved::On(_) => {
-            let data_dir = app.cfg.data_dir.clone();
-            if !matches!(supervisor::runtime_state(&data_dir), "running" | "starting") {
-                return "degraded";
-            }
-            // The add-on's own word: retrying or auth-failed overall, or any signal backing off
-            // or auth-failed. Anything else — including a status.json it has not written yet —
-            // leaves the install ok.
-            let status: Option<serde_json::Value> = std::fs::read(supervisor::status_path(&data_dir))
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok());
-            let complaining = status.is_some_and(|s| {
-                matches!(s["state"].as_str(), Some("retrying" | "auth_failed"))
-                    || s["signals"].as_object().is_some_and(|signals| {
-                        signals
-                            .values()
-                            .any(|v| matches!(v["state"].as_str(), Some("backing_off" | "auth_failed")))
-                    })
-            });
-            if complaining { "degraded" } else { "ok" }
-        }
+    match env::resolve(module.as_ref(), &var, None, &Identity::default()) {
+        Resolved::Off(_) => return "off",
+        Resolved::Invalid(_) => return "degraded",
+        Resolved::On(_) => {}
     }
+    let data_dir = app.cfg.data_dir.clone();
+    if !matches!(supervisor::runtime_state(&data_dir), "running" | "starting") {
+        return "degraded";
+    }
+    // Configured, resolved and a child up: now the one fault the no-secret pass cannot see is
+    // worth a look — a malformed header list in the secret is an `Invalid`, and this install is
+    // about to say `ok`. The read is off the runtime's threads, and only this path pays for it.
+    let headers = app.cfg.config_dir.join("observability-headers");
+    let secret = tokio::task::spawn_blocking(move || crate::util::read_secret(&headers))
+        .await
+        .ok()
+        .flatten();
+    if matches!(
+        env::resolve(module.as_ref(), &var, secret, &Identity::default()),
+        Resolved::Invalid(_)
+    ) {
+        return "degraded";
+    }
+    // The add-on's own word: retrying or auth-failed overall, or any signal backing off
+    // or auth-failed. Anything else — including a status.json it has not written yet —
+    // leaves the install ok. A small file, read straight through.
+    let status: Option<serde_json::Value> = std::fs::read(supervisor::status_path(&data_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let complaining = status.is_some_and(|s| {
+        matches!(s["state"].as_str(), Some("retrying" | "auth_failed"))
+            || s["signals"].as_object().is_some_and(|signals| {
+                signals
+                    .values()
+                    .any(|v| matches!(v["state"].as_str(), Some("backing_off" | "auth_failed")))
+            })
+    });
+    if complaining { "degraded" } else { "ok" }
 }
 
 #[cfg(test)]

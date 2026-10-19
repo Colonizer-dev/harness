@@ -318,3 +318,39 @@ async fn compact_status_maps_off_degraded_and_ok() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// The compact field reaches for the keychain (seconds) only once everything else says the install
+/// is healthy: a malformed header list in the secret is the one fault no other read can see, so an
+/// otherwise `ok` install that carries one must still read `degraded` — and the reads before that
+/// never pay for the keychain at all.
+#[tokio::test]
+async fn compact_status_reads_the_header_secret_only_when_the_rest_is_healthy() {
+    let root = crate::tests::temp_root();
+    let app = crate::tests::test_app(&root);
+    plant(&app, "otlp", true, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    let headers = app.cfg.config_dir.join("observability-headers");
+    std::fs::create_dir_all(headers.parent().unwrap()).unwrap();
+    // A pair with no `=`: under the add-on's own rules a malformed list sends nothing, so the
+    // exporter is not running what the operator configured.
+    std::fs::write(&headers, "Authorization: Basic not-a-pair").unwrap();
+
+    // Nothing is meant to run: off, and the secret is never consulted — the keychain read is the
+    // slow part of this poll and an install that never turned export on never pays for it.
+    plant(&app, "otlp", false, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(super::compact_status(&app).await, "off");
+
+    // Configured but no child up: degraded, again without the secret.
+    plant(&app, "otlp", true, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(super::compact_status(&app).await, "degraded");
+
+    // Healthy on every other count: now the secret is read, and its verdict is the last word.
+    super::supervisor::test_set_runtime(&app.cfg.data_dir, "running");
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "a malformed header list in the secret is an Invalid, not an ok install"
+    );
+    std::fs::write(&headers, "x-honeycomb-team=abc").unwrap();
+    assert_eq!(super::compact_status(&app).await, "ok", "a good list leaves it ok");
+    std::fs::remove_dir_all(root).ok();
+}

@@ -115,5 +115,8 @@ Forgets where the export got to, so it starts over (issue #850; [Resetting](../o
 `{dry_run?, hash_key?}` → with `dry_run`, `{dry_run: true, delete: [{path, bytes}, …]}` and nothing
 deleted; otherwise `{reset: true, deleted: [{path, bytes}, …]}`. It deletes
 `<data>/observability/state.json` — and with `hash_key` also `<data>/observability/hash.key` —
-nothing else: not the ledgers, not the file sink's output, not `status.json`. `409` while a
-backfill is registered, because a backfill reads `state.json` to know where history ends.
+nothing else: not the ledgers, not the file sink's output, not `status.json`. `409`, deleting
+nothing, in three cases: a backfill is registered, because a backfill reads `state.json` to know
+where history ends; another reset already holds this data directory's pending entry; or the
+exporter is still stopping — the child had not stopped within the settle window, and a live child
+would write its cursors back over the deletion.

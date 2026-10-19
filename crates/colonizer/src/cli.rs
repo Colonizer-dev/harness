@@ -2308,8 +2308,9 @@ fn print_backfill_preview(answer: &Value) {
 /// supervised child, deletes `state.json` (and with `--hash-key` the pseudonymising key) and lets
 /// the loop restart the child from nothing. A dry run goes first, always, so what will be deleted
 /// is listed from the mothership's own answer rather than guessed at on this side of the wire;
-/// then, unless `--yes`, a y/N prompt — and none at all when stdin is not a terminal, because
-/// nothing can answer one there (docs/observability/reset.md).
+/// then, unless `--yes`, a y/N prompt — and no prompt at all when there is nobody to answer one:
+/// a non-terminal stdin, or `--json`, whose output must stay a single JSON document to be worth
+/// parsing. Either way the command refuses with exit code 2 and deletes nothing (docs/cli.md).
 async fn observability_reset_command(cli: &Cli, yes: bool, hash_key: bool) -> i32 {
     use std::io::IsTerminal as _;
 
@@ -2322,21 +2323,34 @@ async fn observability_reset_command(cli: &Cli, yes: bool, hash_key: bool) -> i3
             )
             .await?
             .unwrap_or(Value::Null);
+        // A pipe, a script or `--json` has nobody to answer a prompt: refusing beats deleting what
+        // nobody confirmed, and it beats mixing a human question into a machine-readable answer.
+        // `--yes` says it out loud instead.
+        let nobody_answers = json || !std::io::stdin().is_terminal();
+        if nobody_answers && !yes {
+            const REFUSAL: &str = "observability reset deletes the exporter's saved positions; \
+                rerun it with --yes to delete them without asking";
+            if json {
+                println!(
+                    "{}",
+                    pretty(&json!({
+                        "reset": false,
+                        "delete": dry["delete"].clone(),
+                        "error": REFUSAL,
+                    }))?
+                );
+            } else {
+                print_reset_listing("would delete", &dry);
+                eprintln!("colonizer: {REFUSAL}");
+            }
+            return Ok(EXIT_USAGE);
+        }
         if json {
             println!("{}", pretty(&dry)?);
         } else {
             print_reset_listing("would delete", &dry);
         }
         if !yes {
-            // A pipe or a script on the other end cannot answer a prompt; refusing beats deleting
-            // what nobody confirmed. `--yes` says it out loud instead.
-            if !std::io::stdin().is_terminal() {
-                eprintln!(
-                    "colonizer: observability reset deletes the exporter's saved positions; \
-                     rerun it with --yes to delete them without asking"
-                );
-                return Ok(EXIT_USAGE);
-            }
             print!("delete the above? [y/N] ");
             let _ = std::io::stdout().flush();
             let mut answer = String::new();
