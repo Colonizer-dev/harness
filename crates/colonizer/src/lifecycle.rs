@@ -641,7 +641,12 @@ pub(crate) async fn park_colony(
                     vm_kept,
                     question_risk,
                 });
-                x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
+                // When parking for control_defeat (issue #1288), preserve the existing attention
+                // which carries the signature and evidence. For other parking reasons, set
+                // attention to the park reason alone.
+                if reason != crate::watchdog::CONTROL_DEFEAT_PARK_REASON {
+                    x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
+                }
                 // Parked by the host ends the wait outright, as a stop does: the held answer and
                 // the suspension belong to a runner this park is taking down or leaving idle, and
                 // a park is not a question's rest state (issue #562's rule, issue #213's case).
@@ -3890,5 +3895,94 @@ exit 0
 
         assert!(high_key < mid_key, "priority 15 should come before priority 10");
         assert!(mid_key < low_key, "priority 10 should come before priority 5");
+    }
+
+    #[tokio::test]
+    async fn control_defeat_parks_the_colony_and_frees_the_slot_with_evidence_preserved() {
+        use crate::sessions::tests::app_with_colony;
+        let (app, _root) = app_with_colony("cd1", SessionStatus::Running).await;
+
+        // Set up control_defeat attention with evidence (simulating what flag_control_defeat does)
+        let evidence = json!([
+            {"kind": "egress_denied", "control": "egress", "target": "evil.example", "detail": "denied"},
+            {"kind": "egress_denied", "control": "egress", "target": "evil.example", "detail": "denied again"},
+            {"kind": "egress_denied", "control": "egress", "target": "evil.example", "detail": "denied thrice"},
+        ]);
+        app.update_session("cd1", |x| {
+            x.attention = Some(json!({
+                "reason": "control_defeat",
+                "since": Utc::now(),
+                "nudges": 0,
+                "signature": "repeated_denial",
+                "detail": "evil.example refused the colony 3 times in 10 min",
+                "evidence": evidence.clone(),
+            }));
+        })
+        .await;
+
+        // Park the colony for control_defeat
+        let s = app.session("cd1").await.unwrap();
+        assert!(s.status.is_live(), "colony is running before park");
+        let parked = park_colony(
+            &app,
+            &s,
+            crate::watchdog::CONTROL_DEFEAT_PARK_REASON,
+            None,
+            "control_defeat park test".into(),
+            "control_defeat park test".into(),
+        )
+        .await;
+        assert!(parked, "park_colony should succeed");
+
+        // Verify the colony is parked with the correct reason
+        let s = app.session("cd1").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Parked);
+        assert_eq!(
+            s.parked.as_ref().map(|p| p.reason.as_str()),
+            Some(crate::watchdog::CONTROL_DEFEAT_PARK_REASON)
+        );
+
+        // Verify the control_defeat attention and evidence are preserved
+        let attention = s.attention.as_ref().expect("attention should be preserved");
+        assert_eq!(attention["reason"], "control_defeat");
+        assert_eq!(attention["signature"], "repeated_denial");
+        assert_eq!(
+            attention["evidence"].as_array().map(|a| a.len()),
+            Some(3),
+            "evidence should be preserved"
+        );
+        assert_eq!(
+            attention["evidence"][0]["target"], "evil.example",
+            "evidence details should be intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_defeat_park_is_not_auto_resumed_by_hold_timeout_logic() {
+        use crate::queue;
+        let s = colony("acme", SessionStatus::Parked);
+        let mut s = s;
+        s.parked = Some(Park {
+            at: Utc::now() - chrono::Duration::hours(2),
+            reason: crate::watchdog::CONTROL_DEFEAT_PARK_REASON.into(),
+            resets_at: None,
+            vm_kept: true,
+            question_risk: None,
+        });
+
+        // hold_parked checks if reason == HOLD_TIMEOUT_REASON, so control_defeat parks should
+        // not match and should not be auto-resumed.
+        assert!(
+            !queue::hold_parked(&s),
+            "control_defeat parks should not be identified as hold-timeout parks"
+        );
+
+        // hold_park_action should return Wait for control_defeat parks
+        let action = queue::hold_park_action(&s, Utc::now(), None);
+        assert_eq!(
+            action,
+            queue::HoldParkAction::Wait,
+            "control_defeat parks should not be auto-resumed"
+        );
     }
 }
