@@ -291,10 +291,18 @@ pub fn note_reach_result(trail: &mut BoundaryTrail, tool_call_id: &str, is_error
     })
 }
 
+/// The park reason used when control_defeat fires (issue #1288): distinct from hold_timeout so
+/// auto-resume does not trigger.
+pub(crate) const CONTROL_DEFEAT_PARK_REASON: &str = "control_defeat";
+
 /// Raises the control-defeat flag on a colony (issue #609): the attention item carries the
 /// signature, a sentence and the boundary events that are its evidence, and the log says why. Not a
 /// stop: a signature is a pattern, not proof, so a person decides (docs/boundaries.md). A colony
 /// already flagged for control-defeat keeps its first evidence and gets a log line only.
+///
+/// When a control-defeat signature fires, the colony is immediately parked (issue #1288): the
+/// microVM slot is freed while keeping the worktree and transcript, and only the operator's
+/// resume brings it back.
 pub(crate) async fn flag_control_defeat(app: &Shared, id: &str, defeat: Defeat) {
     let Some(s) = app.session(id).await else { return };
     let message = format!(
@@ -316,6 +324,20 @@ pub(crate) async fn flag_control_defeat(app: &Shared, id: &str, defeat: Defeat) 
             }));
         })
         .await;
+        // Park the colony immediately to free the VM slot. The evidence and other details are
+        // preserved in the attention field; the park record's reason is distinct from the
+        // attention reason so hold-timeout auto-resume does not apply.
+        if let Some(s) = app.session(id).await {
+            crate::lifecycle::park_colony(
+                app,
+                &s,
+                CONTROL_DEFEAT_PARK_REASON,
+                None,
+                "a control-defeat signature was flagged; the colony is parked to release its slot — the worktree is kept, so you can resume it once you investigate".into(),
+                "control-defeat signature flagged; parked to release the slot — worktree kept, resume to continue".into(),
+            )
+            .await;
+        }
     }
     app.session_log_as(Origin::Watchdog, id, "error", message).await;
 }
