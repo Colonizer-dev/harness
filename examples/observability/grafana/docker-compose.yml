@@ -1,0 +1,78 @@
+# The Colonizer observability stack (#862): Alloy collects OTLP and fans it out to Loki (logs),
+# Tempo (traces + span metrics) and Prometheus (metrics); Grafana loads the provisioned
+# datasources and dashboards from the directory this file sits in. grafana/README.md walks
+# through it. Every published port is bound to 127.0.0.1 — nothing here is reachable off-machine.
+#
+# Images are digest-pinned to the manifest list (tag@sha256 of the OCI index). To bump a tag,
+# resolve the new digest and update both: `docker manifest inspect <image:tag>` prints it.
+
+services:
+  alloy:
+    # v1.20.1
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    command: ["run", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - ./alloy:/etc/alloy:ro
+    depends_on: [loki, tempo, prometheus]
+
+  loki:
+    # 3.7.8
+    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./loki:/etc/loki:ro
+      - loki-data:/loki
+
+  tempo:
+    # 3.1.0
+    image: grafana/tempo:3.1.0@sha256:3076b8dcdfb32fd6bc5ccef85e7b7313e6199b9cb84366257fc17ecb696db5fd
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo:/etc/tempo:ro
+      - tempo-data:/var/tempo
+    depends_on: [prometheus]
+
+  prometheus:
+    # v3.15.0 — remote-write receiver on (Tempo and Alloy push to /api/v1/write), token-guarded
+    # scrape of the mothership (prometheus/prometheus.yml). Exits without secrets/prometheus.token.
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-remote-write-receiver
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - ./secrets:/etc/prometheus/secrets:ro
+      - prometheus-data:/prometheus
+    # The mothership binds 127.0.0.1 by default; this makes `host.docker.internal` resolve to
+    # the host so the scrape job can reach it wherever the bridge can.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    # 13.1.0 — anonymous Admin on a port bound to 127.0.0.1 only: local convenience with no
+    # committed password. Anything off-machine cannot reach it to use it.
+    image: grafana/grafana:13.1.0@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [loki, tempo, prometheus]
+
+volumes:
+  loki-data:
+  tempo-data:
+  prometheus-data:
+  grafana-data:
