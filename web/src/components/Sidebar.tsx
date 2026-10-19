@@ -696,9 +696,12 @@ export function NewSession({
 
   // One colony per issue, launched in the order they appear. Past the parallel limit the harness
   // queues them, so a batch is a plan rather than a burst.
-  const launchSelected = async () => {
+  const launchSelected = async (overrideAllowDuplicate?: boolean) => {
     if (!activeRepo) return;
-    const held = new Set(overrideHeld ? [] : heldInBatch(sessions, activeRepo, selected));
+    // Use the override if provided (for "Take over" action), otherwise use the state
+    const shouldAllowDuplicate = overrideAllowDuplicate !== undefined ? overrideAllowDuplicate : allowDuplicate;
+    const heldOverride = shouldAllowDuplicate || queueBehind;
+    const held = new Set(heldOverride ? [] : heldInBatch(sessions, activeRepo, selected));
     const epics = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number) && isEpic(i));
     if (epics.length > 0) console.info(`batch launch: skipping epic${epics.length === 1 ? "" : "s"} ${epics.map((i) => `#${i.number}`).join(", ")}`);
     const batch = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number) && !isEpic(i));
@@ -716,7 +719,7 @@ export function NewSession({
           issue: issue.number,
           title: issue.title,
           autopilot: autopilotDefault,
-          allow_duplicate: allowDuplicate || undefined,
+          allow_duplicate: shouldAllowDuplicate || undefined,
           queue_behind_holder: queueBehind || undefined,
         });
         if (session.status === "queued") {
@@ -863,7 +866,11 @@ export function NewSession({
                 </p>
               )}
               {batchRefusal && !allowDuplicate && (
-                <DuplicateNotice holder={batchRefusal} onOpen={batchRefusal.colony ? openColonyById(batchRefusal.colony) : undefined} />
+                <DuplicateNotice
+                  holder={batchRefusal}
+                  onOpen={batchRefusal.colony ? openColonyById(batchRefusal.colony) : undefined}
+                  onTakeOver={batchRefusal.stale_hint ? () => launchSelected(true) : undefined}
+                />
               )}
             </div>
           )}
@@ -1040,18 +1047,20 @@ function IssueRow({
   const epic = epicMarker(issue);
   const [allowEpic, setAllowEpic] = useState(false);
 
-  const start = async () => {
+  const start = async (overrideAllowDuplicate?: boolean) => {
     setStarting(true);
     setLaunchError(null);
     setRefusal(null);
     try {
+      // Use the override if provided (for "Take over" action), otherwise use the state
+      const shouldAllowDuplicate = overrideAllowDuplicate !== undefined ? overrideAllowDuplicate : allowDuplicate;
       const session = await api.createSession({
         repo,
         issue: issue.number,
         title: issue.title,
         instructions: instructions.trim() || undefined,
         autopilot: autopilot ?? undefined,
-        allow_duplicate: allowDuplicate || undefined,
+        allow_duplicate: shouldAllowDuplicate || undefined,
         allow_epic: allowEpic || undefined,
         queue_behind_holder: queueBehind || undefined,
       });
@@ -1162,7 +1171,11 @@ function IssueRow({
             </p>
           )}
           {refusal && !allowDuplicate && (
-            <DuplicateNotice holder={refusal} onOpen={refusal.colony ? openColonyById?.(refusal.colony) : undefined} />
+            <DuplicateNotice
+              holder={refusal}
+              onOpen={refusal.colony ? openColonyById?.(refusal.colony) : undefined}
+              onTakeOver={refusal.stale_hint ? () => start(true) : undefined}
+            />
           )}
           {(holder || launchError || refusal) && (
             <>
