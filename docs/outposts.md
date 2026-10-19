@@ -4,7 +4,7 @@ First slice of [#141](https://github.com/Colonizer-dev/harness/issues/141) (clos
 this slice). It draws the control/execution seam and ships the local side of it. Remote
 outposts — other machines joining the mesh and hosting colonies — are PLANNED, not
 present. The design gate for them, and for a hosted Colonizer, was
-[#298](https://github.com/Colonizer-dev/harness/issues/298), closed with the hosted contract
+[#1252](https://github.com/Colonizer-dev/harness/issues/1252), closed with the hosted contract
 ([hosted.md](hosted.md#the-outpost-seam)); the outpost protocol and enrollment it names are a
 follow-up tracked in [#1252](https://github.com/Colonizer-dev/harness/issues/1252).
 

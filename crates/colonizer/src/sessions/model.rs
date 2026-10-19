@@ -483,7 +483,7 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     /// Why this colony is where it is, in placement's words (issue #688): the member and its free
-    /// capacity, or that a peer had room but cross-member launch is not built yet. Recorded on a
+    /// capacity, or that a peer had room but cross-member launch is not built yet (issue #1252). Recorded on a
     /// fresh launch; `None` on colonies written before it existed or re-admitted from the queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<String>,
