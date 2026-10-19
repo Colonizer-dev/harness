@@ -1375,9 +1375,160 @@ async fn push_is_accepted_by_a_real_loki() {
         structured_metadata: true,
         ..Settings::default()
     };
-    let transport = Transport::new(&settings, Vec::new()).unwrap();
+    let transport = Transport::new(&settings, Path::new("."), Vec::new()).unwrap();
     match transport.send(&request).await {
         Outcome::Sent { rejected, .. } => assert_eq!(rejected, 0, "the push was accepted in full"),
         other => panic!("the real Loki did not accept the push: {other:?}"),
     }
+}
+
+/// A server that reads one request per connection, reports its arrival, and then holds the
+/// connection open until released — the Collector cannot do this (its responder is synchronous),
+/// and a request that hangs is what a stop must cancel.
+struct Held {
+    url: String,
+    /// One entry per complete request that arrived, body only.
+    requests: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// How many requests have arrived; a watch, so a test can await it.
+    arrived: tokio::sync::watch::Receiver<u32>,
+    release: tokio::sync::watch::Sender<bool>,
+}
+
+impl Held {
+    async fn start() -> Held {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let (arrived_tx, arrived) = tokio::sync::watch::channel(0u32);
+        let (release, release_rx) = tokio::sync::watch::channel(false);
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let seen = seen.clone();
+                let mut waiting = release_rx.clone();
+                let tell = arrived_tx.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 16384];
+                    // One request: the headers, then `content-length` bytes of body.
+                    let body = loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        let Some(head) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&buf[..head]).to_ascii_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= head + 4 + len {
+                            break buf[head + 4..head + 4 + len].to_vec();
+                        }
+                    };
+                    seen.lock().unwrap().push(body);
+                    tell.send_modify(|n| *n += 1);
+                    // Held open until the test says otherwise; the release latch stays set, so
+                    // every later connection is answered at once.
+                    while !*waiting.borrow_and_update() {
+                        if waiting.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                    let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}").await;
+                });
+            }
+        });
+        Held {
+            url,
+            requests,
+            arrived,
+            release,
+        }
+    }
+}
+
+/// The `run` loop of `main.rs` as it races the stop signal (#850): a stop that lands while a
+/// request hangs cancels it — the loop leaves without an answer, the batch's cursor is never
+/// committed, and a fresh exporter replays it, so every line gets out and none is lost. The
+/// cancelled try may have reached the backend before the cancel, so delivery is at-least-once.
+#[tokio::test]
+async fn stop_cancels_a_request_still_in_flight_and_commits_nothing() {
+    let root = root("cancel");
+    let mut held = Held::start().await;
+    for i in 0..3 {
+        harness(&root, &format!("line {i}"));
+    }
+    // Uncompressed protobuf, so the recorded bodies decode without a gunzip step; the long
+    // timeout is what makes "the stop was not awaited" observable.
+    let path = contract(&root, &held.url, |s| {
+        s.timeout_secs = 120;
+        s.compression = "none".into();
+    });
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let x = Exporter::new(&path, Vec::new()).unwrap();
+    let task = tokio::spawn(async move {
+        let mut exporter = x;
+        let mut stop_rx = stop_rx;
+        loop {
+            let wait = tokio::select! {
+                wait = exporter.tick() => wait,
+                _ = stop_rx.changed() => break,
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = stop_rx.changed() => break,
+            }
+        }
+        exporter.shutdown();
+    });
+
+    // The request reaches the server, which never answers it.
+    tokio::time::timeout(Duration::from_secs(2), held.arrived.changed())
+        .await
+        .expect("the request went out")
+        .unwrap();
+    assert_eq!(held.requests.lock().unwrap().len(), 1);
+
+    // A stop now must break the loop at once — with the tick awaited rather than raced, this
+    // would sit out the client's 120 s timeout and the 2 s deadline here would fail.
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+    assert_eq!(committed_offset(&root), None, "the cancelled request committed nothing");
+    assert_eq!(x_status_state(&root), "stopped", "a clean shutdown ran after the cancel");
+
+    // Released, the same endpoint answers the replay; every line arrives, once acked.
+    held.release.send(true).unwrap();
+    let mut y = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(y.tick().await, TICK, "the replay is acked");
+    assert_eq!(committed_offset(&root), Some(file_size(&root)));
+    let requests = held.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "the cancelled try and the replay");
+    for request in &requests {
+        let decoded = ExportLogsServiceRequest::decode(request.as_slice()).unwrap();
+        let bodies: Vec<&str> = decoded
+            .resource_logs
+            .iter()
+            .flat_map(|r| &r.scope_logs)
+            .flat_map(|s| &s.log_records)
+            .filter_map(|r| match r.body.as_ref()?.value.as_ref()? {
+                crate::proto::common::v1::any_value::Value::StringValue(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bodies, ["line 0", "line 1", "line 2"], "each try carried the whole batch");
+    }
+}
+
+/// The `state` of the exporter's last written status.json — set by the cancelled run's shutdown.
+fn x_status_state(root: &Root) -> String {
+    let bytes = std::fs::read(root.0.join("observability/status.json")).unwrap();
+    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["state"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }

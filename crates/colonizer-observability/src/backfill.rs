@@ -200,7 +200,7 @@ impl Backfill {
                 contract.mothership_version
             ));
         }
-        let transport = Transport::new(&contract.settings, headers)?;
+        let transport = Transport::new(&contract.settings, &contract.data_dir, headers)?;
         let policy = policy_for(&contract);
         let resource = resource_for(&policy, &contract);
         let data_dir = contract.data_dir.clone();

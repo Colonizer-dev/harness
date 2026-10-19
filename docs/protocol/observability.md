@@ -2,7 +2,8 @@
 
 The Prometheus surface of the [`observability`](../observability.md) module kind. The catalogue, the
 scrape configuration and the privacy rules are in [Metrics (`GET /metrics`)"](../observability/metrics.md);
-this page is the wire contract.
+this page is the wire contract — the scrape route below, the module's `/api` surface (the backfill
+routes, the status route and the reset route) at the end.
 
 ## The route
 
@@ -92,3 +93,27 @@ served by the mothership and done by the add-on it supervises
 `{state: "running"|"complete"|"cancelled"|"failed", window, records_sent, bytes_sent, cursors,
 started_unix, updated_unix, …}`, read from the add-on's
 `<data>/observability/backfill.json` (`error` beside a `failed` state).
+
+## `GET /api/observability/status`
+
+The module's own page: whether export is on, why not, where each setting came from, the header
+*names* (never values), the add-on's own health and any backfill's progress. It answers
+**who may read it exactly as the scrape route does** — the owner and an unbounded `read`-or-better
+token (`200`); any token with a non-empty `orgs` or `repos`, a `fleet` token and a paired phone
+(`403`, the same words the table above gives for `/metrics`): the page is as install-wide as the
+catalogue is. Unlike the scrape route it is always `200` when the module is off — the page that
+says why nothing runs is the one an operator configuring it needs.
+
+`GET /api/status`, the cockpit's poll, carries the one word `observability`: `off`, `ok` or
+`degraded` ([the harness API](harness-api.md)).
+
+## `POST /api/observability/reset`
+
+Forgets where the export got to, so it starts over (issue #850; [Resetting](../observability/reset.md)).
+**Owner-only** — it is nowhere in a token's scope, unlike the status route above.
+
+`{dry_run?, hash_key?}` → with `dry_run`, `{dry_run: true, delete: [{path, bytes}, …]}` and nothing
+deleted; otherwise `{reset: true, deleted: [{path, bytes}, …]}`. It deletes
+`<data>/observability/state.json` — and with `hash_key` also `<data>/observability/hash.key` —
+nothing else: not the ledgers, not the file sink's output, not `status.json`. `409` while a
+backfill is registered, because a backfill reads `state.json` to know where history ends.

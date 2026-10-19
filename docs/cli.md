@@ -337,6 +337,25 @@ it: the cockpit's Settings → Modules → Observability, or the `backfill` obje
 /api/observability/backfill` stops it within one tick, and a restart resumes where it stopped. With
 the global `--json` both print the mothership's answer.
 
+### Observability reset
+
+`observability reset` forgets where the export got to, so it starts over — the mothership stops
+the supervised add-on, deletes its saved positions and lets the supervisor restart it from
+nothing ([Resetting](observability/reset.md)).
+
+```sh
+colonizer observability reset              # list, ask, delete
+colonizer observability reset --yes        # no prompt
+colonizer observability reset --hash-key   # also drop the pseudonymising key
+```
+
+It always lists what will be deleted first — `state.json`, plus `hash.key` with `--hash-key`,
+each with its size — then asks `y/N` unless `--yes`. When stdin is not a terminal (a script, a
+pipe) and `--yes` was not given it refuses with exit code 2 rather than delete what nobody
+confirmed. The ledgers, the file sink's output and everything else under `<data>/observability/`
+are never touched. With the global `--json` both answers print: the dry run's listing and the
+deletion's.
+
 ## `--json`
 
 `--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —

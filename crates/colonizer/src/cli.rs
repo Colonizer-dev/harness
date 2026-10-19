@@ -438,6 +438,17 @@ enum ObservabilityCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Forget where the export got to, so it starts over; --hash-key also drops its pseudonyms
+    /// (docs/observability/reset.md)
+    Reset {
+        /// Do not ask first; delete at once
+        #[arg(long)]
+        yes: bool,
+        /// Also delete the hash key, so records re-sent after the reset are pseudonymised afresh
+        /// and cannot be tied to the ones sent before it
+        #[arg(long)]
+        hash_key: bool,
+    },
 }
 
 /// The `redteam` subcommands.
@@ -2073,6 +2084,9 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                     dry_run,
                 },
         } => observability_backfill_command(cli, since, until, repo, rate, dry_run).await,
+        Command::Observability {
+            command: ObservabilityCommand::Reset { yes, hash_key },
+        } => observability_reset_command(cli, yes, hash_key).await,
     }
 }
 
@@ -2287,6 +2301,86 @@ fn print_backfill_preview(answer: &Value) {
         });
     if let Some(estimated) = estimated {
         println!("backend volume \u{2248} {:.1} MiB encoded (before gzip)", mib(estimated));
+    }
+}
+
+/// `observability reset` (issue #850): forget where the export got to — the mothership stops the
+/// supervised child, deletes `state.json` (and with `--hash-key` the pseudonymising key) and lets
+/// the loop restart the child from nothing. A dry run goes first, always, so what will be deleted
+/// is listed from the mothership's own answer rather than guessed at on this side of the wire;
+/// then, unless `--yes`, a y/N prompt — and none at all when stdin is not a terminal, because
+/// nothing can answer one there (docs/observability/reset.md).
+async fn observability_reset_command(cli: &Cli, yes: bool, hash_key: bool) -> i32 {
+    use std::io::IsTerminal as _;
+
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        let dry = machine
+            .post(
+                "/api/observability/reset",
+                Some(&json!({"dry_run": true, "hash_key": hash_key})),
+            )
+            .await?
+            .unwrap_or(Value::Null);
+        if json {
+            println!("{}", pretty(&dry)?);
+        } else {
+            print_reset_listing("would delete", &dry);
+        }
+        if !yes {
+            // A pipe or a script on the other end cannot answer a prompt; refusing beats deleting
+            // what nobody confirmed. `--yes` says it out loud instead.
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "colonizer: observability reset deletes the exporter's saved positions; \
+                     rerun it with --yes to delete them without asking"
+                );
+                return Ok(EXIT_USAGE);
+            }
+            print!("delete the above? [y/N] ");
+            let _ = std::io::stdout().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).map_err(anyhow::Error::from)?;
+            if !answer.trim().eq_ignore_ascii_case("y") && !answer.trim().eq_ignore_ascii_case("yes") {
+                println!("aborted; nothing was deleted");
+                return Ok(EXIT_OK);
+            }
+        }
+        let done = machine
+            .post("/api/observability/reset", Some(&json!({"hash_key": hash_key})))
+            .await?
+            .unwrap_or(Value::Null);
+        if json {
+            println!("{}", pretty(&done)?);
+        } else {
+            print_reset_listing("deleted", &done);
+            println!(
+                "the exporter restarts from scratch when the supervisor picks it up again (within \
+                 a tick){}",
+                if hash_key {
+                    "; new records are pseudonymised with a fresh key"
+                } else {
+                    ""
+                }
+            );
+        }
+        Ok(EXIT_OK)
+    })
+    .await
+}
+
+/// One line per file a reset answer names — the dry run's `delete` or the deed's `deleted` —
+/// `print_backfill_preview`'s shape: the path and its size, as the mothership measured both.
+fn print_reset_listing(what: &str, answer: &Value) {
+    let key = if answer["delete"].is_array() { "delete" } else { "deleted" };
+    if let Some(entries) = answer[key].as_array() {
+        for entry in entries {
+            println!(
+                "{what} {} ({} bytes)",
+                entry["path"].as_str().unwrap_or("?"),
+                entry["bytes"].as_u64().unwrap_or(0),
+            );
+        }
     }
 }
 

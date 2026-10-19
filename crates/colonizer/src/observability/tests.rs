@@ -245,3 +245,76 @@ async fn observability_ranges_are_checked_at_save_time() {
     assert!(err.message().contains("between 5 and 86400"), "{}", err.message());
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Plants a module choice straight into the in-memory store, past the save-time checks — the
+/// compact field must still read a coherent word for a module the cockpit's validation would
+/// never have let through, because the file on disk can say anything.
+async fn plant(app: &Shared, provider: &str, enabled: bool, settings: &[(&str, Value)]) {
+    app.modules.write().await.observability = Some(crate::config::ModuleChoice {
+        provider: provider.into(),
+        enabled,
+        settings: obs_settings(settings),
+    });
+}
+
+/// The compact `/api/status` field (#850): `off` when nothing is meant to run, `degraded` when
+/// something is meant to run and is not healthy, `ok` when it is. Every rung is checked from the
+/// same install so the ordering — verdict, then child, then the add-on's own word — is the one
+/// the handler implements.
+#[tokio::test]
+async fn compact_status_maps_off_degraded_and_ok() {
+    let root = crate::tests::temp_root();
+    let app = crate::tests::test_app(&root);
+    assert_eq!(
+        super::compact_status(&app).await,
+        "off",
+        "never configured is off, not a fault"
+    );
+
+    // Saved but switched off: still off — an operator who turned it off meant it off.
+    plant(&app, "otlp", false, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(super::compact_status(&app).await, "off");
+
+    // Saved on with a config that cannot resolve (no endpoint): degraded, not off — the module
+    // is meant to be running and is not.
+    plant(&app, "otlp", true, &[]).await;
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "configured but invalid is degraded"
+    );
+
+    // A config that resolves: degraded while no supervision loop has a child up.
+    plant(&app, "otlp", true, &[("endpoint", json!("https://otlp.example.com"))]).await;
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "configured but the child is not running"
+    );
+
+    // The loop says running and the add-on has written no complaint: ok.
+    super::supervisor::test_set_runtime(&app.cfg.data_dir, "running");
+    assert_eq!(super::compact_status(&app).await, "ok", "running with no status.json is ok");
+
+    let status = |body: Value| {
+        let path = super::supervisor::status_path(&app.cfg.data_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body.to_string()).unwrap()
+    };
+    // The add-on's own word, first overall then per signal.
+    status(json!({"state": "retrying", "signals": {}}));
+    assert_eq!(super::compact_status(&app).await, "degraded", "the add-on is retrying");
+    status(json!({"state": "running", "signals": {"logs": {"state": "backing_off"}}}));
+    assert_eq!(super::compact_status(&app).await, "degraded", "a signal is backing off");
+    status(json!({"state": "running", "signals": {"logs": {"state": "ok"}}}));
+    assert_eq!(super::compact_status(&app).await, "ok");
+
+    // And the supervisor's verdict outranks a happy status.json.
+    super::supervisor::test_set_runtime(&app.cfg.data_dir, "refused");
+    assert_eq!(
+        super::compact_status(&app).await,
+        "degraded",
+        "refused is degraded whatever the file says"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

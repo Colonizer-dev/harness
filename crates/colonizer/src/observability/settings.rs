@@ -370,6 +370,16 @@ pub fn validate(
         }
         return Ok(());
     }
+    if provider == FILE {
+        // The sink lives under the data dir; a dir that names anywhere else — or climbs out with
+        // `..` — would write export records somewhere the operator never chose.
+        let dir = str_at(settings, "dir", "");
+        let path = std::path::Path::new(&dir);
+        if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err("dir must be relative to the data dir, with no `..`; leave it empty for the default".into());
+        }
+        return Ok(());
+    }
     if provider != OTLP {
         return Ok(());
     }
@@ -588,6 +598,12 @@ mod tests {
         assert!(validate(OTLP, &stored, &Map::new(), false, false).is_ok());
         // The file provider has no endpoint to need.
         assert!(validate(FILE, &stored, &settings(&[("max_mb", json!(128))]), true, false).is_ok());
+        // Its dir must stay under the data dir: absolute or `..`-climbing paths are refused.
+        for dir in ["/var/lib/observability", "../escape", "a/../../b"] {
+            let err = validate(FILE, &stored, &settings(&[("dir", json!(dir))]), true, false).unwrap_err();
+            assert!(err.contains("dir must be relative"), "dir {dir}: {err}");
+        }
+        assert!(validate(FILE, &stored, &settings(&[("dir", json!("otlp/here"))]), true, false).is_ok());
     }
 
     #[test]
