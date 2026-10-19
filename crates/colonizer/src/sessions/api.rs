@@ -393,7 +393,7 @@ pub async fn message(
     Path(id): Path<String>,
     scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
     Json(body): Json<Value>,
-) -> Result<Json<Value>, crate::AppError> {
+) -> Result<axum::response::Response, crate::AppError> {
     let client = body["id"].as_str().unwrap_or_default();
     if !valid_client_id(client) {
         return Err(client_error(
@@ -413,12 +413,20 @@ pub async fn message(
     )
     .await
     {
-        Ok(sent) => Ok(Json(json!({"id": sent.id, "duplicate": !sent.delivered}))),
+        Ok(sent) => {
+            let response = json!({
+                "id": sent.id,
+                "duplicate": !sent.delivered,
+                "pending_notes": sent.pending_notes
+            });
+            if sent.pending_notes > 0 {
+                Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+            } else {
+                Ok(Json(response).into_response())
+            }
+        }
         Err(MessageError::NoSession) => Err(client_error(StatusCode::NOT_FOUND, "no such session")),
-        Err(MessageError::NotAccepting(status)) => Err(client_error(
-            StatusCode::CONFLICT,
-            &format!("the colony is {} and cannot take a message; resume it first", status.as_str()),
-        )),
+        Err(MessageError::Finished(explanation)) => Err(client_error(StatusCode::CONFLICT, &explanation)),
         Err(MessageError::Undelivered) => Err(client_error(
             StatusCode::CONFLICT,
             "the colony is stopping and cannot take a message; retry once it has resumed",
@@ -448,25 +456,33 @@ const SEEN_CLIENTS_MAX: usize = 512;
 #[derive(Debug)]
 pub(crate) enum MessageError {
     NoSession,
-    NotAccepting(SessionStatus),
+    /// The colony is finished and cannot take a message.
+    Finished(String),
     /// Empty or oversized text — the socket drops it, HTTP answers 400.
     Invalid,
     /// The send into the runner's channel failed (its receiver is gone — the colony is stopping):
     /// nothing was delivered, and nothing was remembered. The socket drops it as ever; HTTP
-    /// answers a 409 so the queue's retry is not absorbed as a duplicate.
+    /// answers a 409 so the queue's retry is not absorbed as a duplicate. Also used for socket
+    /// messages without a client_id that arrive for non-live colonies and cannot be queued.
     Undelivered,
 }
 
 /// What one user message turned into, for the HTTP twin's reply.
+#[derive(Debug)]
 pub(crate) struct Sent {
     pub(crate) id: String,
     pub(crate) delivered: bool,
+    /// The number of notes currently pending for the session (when queued as a note, else 0).
+    pub(crate) pending_notes: usize,
 }
 
-/// The one user-message path (issue #746): the events socket's `user_message` command and
+/// The one user-message path (issue #746, #1287): the events socket's `user_message` command and
 /// `POST /api/sessions/{id}/messages` both forward through here, so both check the colony, trim
-/// and size-check the text, and mark a scoped token's message the same way. `client_id` is the
-/// HTTP twin's dedupe key; the socket passes `None` and mints its own `u-<short_id>`.
+/// and size-check the text, and mark a scoped token's message the same way. For live colonies,
+/// the message is delivered immediately. For queued/stopped/parked/blocked/failed colonies, it is
+/// queued as a pending note for the next resume. For finished colonies, a 409 with explanation is
+/// returned. `client_id` is the HTTP twin's dedupe key; the socket passes `None` and mints its own
+/// `u-<short_id>`.
 pub(crate) async fn submit_message(
     app: &Shared,
     id: &str,
@@ -476,9 +492,6 @@ pub(crate) async fn submit_message(
     scoped: Option<&crate::api_tokens::ScopedToken>,
 ) -> Result<Sent, MessageError> {
     let s = app.session(id).await.ok_or(MessageError::NoSession)?;
-    if !accepts_commands(s.status) {
-        return Err(MessageError::NotAccepting(s.status));
-    }
     let text = raw_text.trim();
     if text.is_empty() || text.len() > 100_000 {
         return Err(MessageError::Invalid);
@@ -493,35 +506,86 @@ pub(crate) async fn submit_message(
         Some(client) => format!("u-{client}"),
         None => format!("u-{}", short_id()),
     };
-    let forward = json!({"type": "user_message", "id": mid, "text": text});
-    let Some(client) = client_id else {
+
+    // Handle live colonies: deliver the message immediately.
+    if accepts_commands(s.status) {
+        let forward = json!({"type": "user_message", "id": mid, "text": text});
+        let Some(client) = client_id else {
+            rt.commands.send(forward).map_err(|_| MessageError::Undelivered)?;
+            return Ok(Sent {
+                id: mid,
+                delivered: true,
+                pending_notes: 0,
+            });
+        };
+        // A repeat client id is answered, not delivered twice. The check, the send and the record are
+        // one step under the lock (the send is a synchronous channel push), so two retries racing each
+        // other cannot both deliver. A fresh id is recorded only once its send has gone through: the
+        // channel dies with the runner (a stopping colony), and an id remembered ahead of a failed
+        // send would read every retry as a duplicate — the message lost without a trace.
+        let mut seen = SEEN_CLIENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if seen.iter().any(|(s, c)| s == id && c == client) {
+            return Ok(Sent {
+                id: mid,
+                delivered: false,
+                pending_notes: 0,
+            });
+        }
         rt.commands.send(forward).map_err(|_| MessageError::Undelivered)?;
+        seen.push_back((id.to_string(), client.to_string()));
+        while seen.len() > SEEN_CLIENTS_MAX {
+            seen.pop_front();
+        }
         return Ok(Sent {
             id: mid,
             delivered: true,
+            pending_notes: 0,
         });
-    };
-    // A repeat client id is answered, not delivered twice. The check, the send and the record are
-    // one step under the lock (the send is a synchronous channel push), so two retries racing each
-    // other cannot both deliver. A fresh id is recorded only once its send has gone through: the
-    // channel dies with the runner (a stopping colony), and an id remembered ahead of a failed
-    // send would read every retry as a duplicate — the message lost without a trace.
-    let mut seen = SEEN_CLIENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if seen.iter().any(|(s, c)| s == id && c == client) {
+    }
+
+    // Handle non-live colonies: check if they can queue a note.
+    if can_queue_note(s.status) {
+        let Some(client) = client_id else {
+            // Socket messages without a client_id cannot be queued; they're ephemeral.
+            return Err(MessageError::Undelivered);
+        };
+        // Check SEEN_CLIENTS first: an outbox retry after the colony starts doesn't duplicate.
+        let is_duplicate = {
+            let seen = SEEN_CLIENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            seen.iter().any(|(s, c)| s == id && c == client)
+        };
+        // Queue the note with idempotency: same client_id does not create a duplicate.
+        let (pending_notes, delivered) = app
+            .update_session(id, |s| {
+                let is_new = !s.pending_notes.iter().any(|n| n.id == client);
+                if is_new {
+                    s.pending_notes.push(crate::sessions::model::PendingNote {
+                        text: text.clone(),
+                        id: client.to_string(),
+                    });
+                }
+                (s.pending_notes.len(), is_new)
+            })
+            .await
+            .ok_or(MessageError::NoSession)?
+            .1;
+        // Record in SEEN_CLIENTS if this is a new note (not already there).
+        if delivered && !is_duplicate {
+            let mut seen = SEEN_CLIENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            seen.push_back((id.to_string(), client.to_string()));
+            while seen.len() > SEEN_CLIENTS_MAX {
+                seen.pop_front();
+            }
+        }
         return Ok(Sent {
             id: mid,
-            delivered: false,
+            delivered: delivered && !is_duplicate,
+            pending_notes,
         });
     }
-    rt.commands.send(forward).map_err(|_| MessageError::Undelivered)?;
-    seen.push_back((id.to_string(), client.to_string()));
-    while seen.len() > SEEN_CLIENTS_MAX {
-        seen.pop_front();
-    }
-    Ok(Sent {
-        id: mid,
-        delivered: true,
-    })
+
+    // Handle finished colonies: return error with explanation.
+    Err(MessageError::Finished(finished_explanation(s.status)))
 }
 
 /// An answer as the API takes it: the question it answers, one choice per question label, and the
@@ -1217,6 +1281,31 @@ async fn events_socket(
 /// there is no agent to receive it.
 fn accepts_commands(status: SessionStatus) -> bool {
     status.is_live()
+}
+
+/// Whether a colony can queue an operator note for later delivery on resume (issue #1287).
+/// These are statuses where the colony will resume through the same boot path.
+fn can_queue_note(status: SessionStatus) -> bool {
+    use SessionStatus::*;
+    matches!(status, Queued | Stopped | Parked | Blocked | Failed)
+}
+
+/// Why a colony that cannot queue a note refuses it (issue #1287): a finished one says the note
+/// would go nowhere; anything else (a publishing colony, say) asks for a retry.
+fn finished_explanation(status: SessionStatus) -> String {
+    use SessionStatus::*;
+    match status {
+        PrOpened => "colony finished (pr_opened): the note would go nowhere; comment on the pull \
+             request instead"
+            .to_string(),
+        Merged | Closed | NoChanges => {
+            format!("colony finished ({}): the note would go nowhere", status.as_str())
+        }
+        _ => format!(
+            "the colony is {} and cannot take a message; retry once it has resumed",
+            status.as_str()
+        ),
+    }
 }
 
 async fn client_command(

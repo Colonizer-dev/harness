@@ -87,6 +87,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         pending_answer: None,
         switch_note: None,
         resume_note: None,
+        pending_notes: Vec::new(),
         answered_questions: Vec::new(),
         secret_fix_rounds: 0,
         push_conflict_rounds: 0,
