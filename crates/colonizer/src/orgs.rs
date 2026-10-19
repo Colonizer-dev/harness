@@ -1146,24 +1146,56 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     // awaiting an answer, which have to be answerable. The known-orgs record is deliberately *not* a
     // source here: it is a seen-set and avatar cache that nothing is ever removed from, so reading
     // it as a list would keep an org the account has left a workspace forever.
-    let mut orgs: BTreeSet<String> = saved.keys().cloned().collect();
-    orgs.extend(sessions.iter().map(|s| s.org.clone()));
-    orgs.extend(app.repo_owners.read().await.iter().cloned());
-    orgs.extend(new_orgs.keys().cloned());
+    // Issue #1284: deduplicate orgs case-insensitively, preferring saved settings keys, then
+    // the majority casing among sessions, then other sources.
+    let mut canonical_orgs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Saved settings keys are canonical if they appear.
+    for key in saved.keys() {
+        canonical_orgs.insert(key.to_ascii_lowercase(), key.clone());
+    }
+    // Sessions map lowercased org to a casing; the majority wins, ties go lexicographically smallest.
+    let mut session_casings: std::collections::HashMap<String, std::collections::HashMap<String, usize>> =
+        std::collections::HashMap::new();
+    for s in sessions.iter() {
+        *session_casings
+            .entry(s.org.to_ascii_lowercase())
+            .or_default()
+            .entry(s.org.clone())
+            .or_insert(0) += 1;
+    }
+    for (lower, casings) in session_casings {
+        let lower_copy = lower.clone();
+        canonical_orgs.entry(lower).or_insert_with(|| {
+            casings
+                .into_iter()
+                .max_by_key(|(casing, count)| (*count, std::cmp::Reverse(casing.clone())))
+                .map(|(casing, _)| casing)
+                .unwrap_or_else(|| lower_copy.clone())
+        });
+    }
+    // Remaining new_orgs and repo_owners fill in unknowns.
+    for key in new_orgs.keys().chain(app.repo_owners.read().await.iter()) {
+        canonical_orgs.entry(key.to_ascii_lowercase()).or_insert_with(|| key.clone());
+    }
+
     let proposals = app.memory.proposals().await;
     Json(
-        orgs.into_iter()
+        canonical_orgs
+            .into_values()
             .filter(|org| valid_org(org))
             .map(|org| {
-                let live = sessions.iter().filter(|s| s.org == org && s.status.is_live()).count();
-                let total = sessions.iter().filter(|s| s.org == org).count();
-                let spending = sessions.iter().filter(|s| s.org == org);
+                let live = sessions
+                    .iter()
+                    .filter(|s| s.org.eq_ignore_ascii_case(&org) && s.status.is_live())
+                    .count();
+                let total = sessions.iter().filter(|s| s.org.eq_ignore_ascii_case(&org)).count();
+                let spending = sessions.iter().filter(|s| s.org.eq_ignore_ascii_case(&org));
                 let spend = spend::rollup_sessions(spending);
                 let pending = proposals
                     .iter()
                     .filter(|p| match p.note.scope.as_str() {
-                        "org" => p.note.key == org,
-                        "repo" => p.note.key.split('/').next() == Some(org.as_str()),
+                        "org" => p.note.key.eq_ignore_ascii_case(&org),
+                        "repo" => p.note.key.split('/').next().is_some_and(|o| o.eq_ignore_ascii_case(&org)),
                         _ => false,
                     })
                     .count();
@@ -1171,22 +1203,34 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                 // sighting that is waiting for an answer; an org that only shows up in the colony
                 // list has none, and the UI falls back to an initial.
                 let avatar = known
-                    .get(&org)
-                    .and_then(|k| k.avatar_url.clone())
-                    .or_else(|| new_orgs.get(&org).cloned().flatten());
-                let awaiting = new_orgs.contains_key(&org) && !known.contains_key(&org);
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&org))
+                    .and_then(|(_, k)| k.avatar_url.clone())
+                    .or_else(|| {
+                        new_orgs
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&org))
+                            .and_then(|(_, v)| v.clone())
+                    });
+                let awaiting = new_orgs.iter().any(|(k, _)| k.eq_ignore_ascii_case(&org))
+                    && !known.iter().any(|(k, _)| k.eq_ignore_ascii_case(&org));
+                let settings = saved
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&org))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
                 let mut entry = json!({
                     "org": org,
                     "colonies": {"live": live, "total": total},
                     "spend": spend::spend_json(&spend),
                     "pending_memory": pending,
-                    "settings": saved.get(&org).cloned().unwrap_or_default(),
+                    "settings": settings,
                 });
                 if let Some(avatar_url) = avatar {
                     entry["avatar_url"] = Value::String(avatar_url);
                 }
-                if let Some(description) = descriptions.get(&org) {
-                    entry["description"] = Value::String(description.clone());
+                if let Some(description) = descriptions.iter().find(|(k, _)| k.eq_ignore_ascii_case(&org)) {
+                    entry["description"] = Value::String(description.1.clone());
                 }
                 if awaiting {
                     entry["awaiting_decision"] = Value::Bool(true);

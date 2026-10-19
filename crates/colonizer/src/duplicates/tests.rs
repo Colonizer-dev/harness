@@ -225,3 +225,20 @@ async fn the_409_body_carries_the_holder_beside_the_message() {
     assert_eq!(body["duplicate"]["status"], "running");
     assert_eq!(body["duplicate"]["queueable"], true);
 }
+
+/// Issue #1284: issue_held_by matches repos case-insensitively.
+#[test]
+fn issue_held_by_matches_repo_case_insensitively() {
+    let mut holder = held("first", SessionStatus::Running);
+    holder.repo = "Acme/App".to_string();
+    holder.issue = Some(7);
+    let result = issue_held_by(&[holder.clone()], "acme/app", 7);
+    assert!(result.is_some(), "case-insensitive repo match");
+    let result2 = issue_held_by(&[holder.clone()], "ACME/APP", 7);
+    assert!(result2.is_some(), "uppercase repo match");
+    let mut holder2 = held("second", SessionStatus::Running);
+    holder2.repo = "acme/app".to_string();
+    holder2.issue = Some(7);
+    let result3 = issue_held_by(&[holder2.clone(), holder.clone()], "acme/app", 7);
+    assert_eq!(result3.map(|s| s.id), Some("second".to_string()), "first non-waiter wins");
+}

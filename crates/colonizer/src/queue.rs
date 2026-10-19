@@ -17,7 +17,8 @@ use crate::{events::*, lifecycle::*, publish::*, sessions::*};
 /// Whether another colony of `repo` (in `org`) can start right now. Three limits apply together and the
 /// tightest wins: the global one, the org's own if it sets one, and the per-repository one. A queued
 /// colony holds no microVM, so it counts towards none of them — and neither does a publish claimed from
-/// a stopped, failed or no-changes colony, which boots nothing (`Session::holds_slot`).
+/// a stopped, failed or no-changes colony, which boots nothing (`Session::holds_slot`). Comparisons
+/// are case-insensitive (issue #1284).
 pub(crate) fn has_room(
     sessions: &[Session],
     org: &str,
@@ -30,10 +31,10 @@ pub(crate) fn has_room(
     if busy().count() >= max_parallel {
         return false;
     }
-    if org_limit.is_some_and(|limit| busy().filter(|s| s.org == org).count() as u64 >= limit) {
+    if org_limit.is_some_and(|limit| busy().filter(|s| s.org.eq_ignore_ascii_case(org)).count() as u64 >= limit) {
         return false;
     }
-    (busy().filter(|s| s.repo == repo).count() as u64) < repo_limit
+    (busy().filter(|s| s.repo.eq_ignore_ascii_case(repo)).count() as u64) < repo_limit
 }
 
 /// The per-repository limit for a colony of an org whose settings are `org`: its own, else the global.
@@ -5431,5 +5432,22 @@ mod tests {
         assert!(after.iter().skip(1).all(|s| s.status == SessionStatus::Blocked), "{after:?}");
         assert!(after.iter().all(|s| s.status != SessionStatus::Failed));
         let _ = std::fs::remove_dir_all(root_dir);
+    }
+
+    /// Issue #1284: has_room counts case-duplicate repos against the same limit.
+    #[test]
+    fn has_room_counts_case_duplicates_together() {
+        let mut s1 = colony("acme", SessionStatus::Running);
+        s1.repo = "Acme/App".to_string();
+        let mut s2 = colony("acme", SessionStatus::Running);
+        s2.repo = "acme/app".to_string();
+        s2.id = "s2".to_string();
+        let sessions = vec![s1, s2];
+        // Two sessions on the same repo (case-insensitive) against a limit of 1 per repo means no room.
+        assert!(!has_room(&sessions, "acme", "acme/APP", 10, None, 1));
+        // With a limit of 2 and 2 existing sessions, no room.
+        assert!(!has_room(&sessions, "acme", "acme/APP", 10, None, 2));
+        // With a limit of 3, there's room for one more.
+        assert!(has_room(&sessions, "acme", "acme/APP", 10, None, 3));
     }
 }
