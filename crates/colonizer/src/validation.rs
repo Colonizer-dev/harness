@@ -382,6 +382,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             host: None,
             serialize: None,
             handoff: None,
+            retry_of: None,
         }),
     )
     .await
