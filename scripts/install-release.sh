@@ -20,6 +20,11 @@
 # before the workflow began signing them, which carries no attestation to find. Skips become fatal
 # under COLONIZER_REQUIRE_ATTESTATION=1.
 #
+# Releases also carry the observability add-on, colonizer-observability-<platform>.tar.gz (#1059):
+# when SHA256SUMS lists it, it is downloaded, checksummed and attested like the app, and its binary
+# lands in the same slot beside bin/colonizer — where the mothership looks for it. A release without
+# that row (every release before the add-on shipped) installs the app alone, with a note.
+#
 # Anthropic's code is not in a release, because it is not ours to redistribute, so two things come from
 # Anthropic's own channels instead, each checked before it is used:
 # - the Claude Agent SDK the agent module runs, from the npm registry, against the checksum the release
@@ -132,6 +137,33 @@ main() {
     guest_node "$tmp/unpack/colonizer/bin/node-guest" "$tmp/unpack/colonizer/node.lock" "linux-x64"
   fi
 
+  # The observability add-on (#1059): the mothership looks for it beside its own binary, so it goes
+  # into the same slot this install fills. Everything is downloaded and checked here, before any
+  # slot is touched, so a refusal leaves the install exactly as it was. The already-verified
+  # SHA256SUMS says whether this release carries the add-on at all: one without the row (every
+  # release before the add-on shipped, and a COLONIZER_LOCAL_ARCHIVE install, which fetches no
+  # SHA256SUMS) skips it and installs the app alone.
+  observability=
+  if [ -f "$tmp/SHA256SUMS" ]; then
+    observability="colonizer-observability-$platform.tar.gz"
+    expected=$(awk -v f="$observability" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
+    if [ -z "$expected" ]; then
+      echo "no $observability in this release; installing without the observability add-on"
+      observability=
+    else
+      say "downloading the observability add-on ($platform)"
+      fetch "$base/$observability" "$tmp/$observability"
+      [ "$(sha256_of "$tmp/$observability")" = "$expected" ] ||
+        fail "checksum mismatch for $observability; nothing was installed"
+      verify_provenance "$tmp/$observability"
+      rm -rf "$tmp/obs-unpack"
+      mkdir -p "$tmp/obs-unpack"
+      tar -xzf "$tmp/$observability" -C "$tmp/obs-unpack"
+      [ -x "$tmp/obs-unpack/colonizer-observability/bin/colonizer-observability" ] ||
+        fail "$observability has no colonizer-observability/bin/colonizer-observability"
+    fi
+  fi
+
   # $app is a symlink to the directory this version lives in, so installing it is a single rename:
   # whenever the script stops, $app is either the whole old app or the whole new one, never nothing.
   dir=$(dirname "$app")
@@ -161,6 +193,10 @@ main() {
     fail "every app slot is in use by a pid ($busy ); restart colonizer (or wait for 'colonizer update') then install again"
   rm -rf "${dir:?}/$slot"
   mv "$tmp/unpack/colonizer" "$dir/$slot"
+  if [ -n "$observability" ]; then
+    install -m 755 "$tmp/obs-unpack/colonizer-observability/bin/colonizer-observability" \
+      "$dir/$slot/bin/colonizer-observability"
+  fi
 
   # The macOS Keychain ties each saved secret to the binary that wrote it, so an ad-hoc signed app
   # loses that access the moment an update replaces it — and a mothership updating in place passes its
