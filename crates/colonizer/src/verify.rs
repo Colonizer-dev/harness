@@ -1863,6 +1863,26 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
     let _serial = rt.verify_lock.lock().await;
     let Some(s) = app.session(&id).await else { return };
     let runner = microsandbox_runner(app.cfg.msb.clone());
+
+    // Invoke judge before verify if enabled for this org
+    let org_settings = app.org_settings(&s.org);
+    if let Some(guest_agents_config) = &org_settings.guest_agents {
+        if guest_agents_config.judge.enabled.unwrap_or(false) {
+            match crate::guest_agents::invoke_judge(&app, &s, None, None).await {
+                Ok(judge_findings) => {
+                    if !judge_findings.is_empty() {
+                        let msg = crate::guest_agents::judge_findings_message(&judge_findings);
+                        crate::recovery::send_user_message(&rt, "judge", &msg);
+                    }
+                }
+                Err(e) => {
+                    app.session_log(&id, "warn", format!("judge invocation failed: {e:#}"))
+                        .await;
+                }
+            }
+        }
+    }
+
     // `gate_publish` is what makes this the path that may publish, so it is what buys the
     // repository's pre-publish checks (issue #1055); a turn recorded without publishing pays for
     // none of them.
