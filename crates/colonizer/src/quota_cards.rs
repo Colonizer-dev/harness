@@ -12,7 +12,7 @@
 
 use crate::{
     ApiResult, Shared, client_error,
-    config::setting_str,
+    config::{ModuleChoice, ModulesConfig, setting, setting_str},
     config_unreadable,
     gateway::{ColonyQuotaHit, health},
     lifecycle, orgs, provider_quota,
@@ -624,9 +624,11 @@ async fn check_switch_model(app: &Shared, provider: &str, model: &str) -> Result
     Ok(())
 }
 
-/// The role models a colony boots with — `(model, subagent_model, background_model)` — resolved the
-/// way boot does: its launch overrides, else its org's settings, else the agent module's defaults.
-fn role_models(app: &Shared, modules: &crate::config::ModulesConfig, s: &Session) -> [Option<String>; 3] {
+/// The colony's org-effective agent-module settings and their schema — the resolution boot and
+/// [`role_models`] both read, shared so the playbook's cheapest-host retry reads the same flag
+/// boot does. The agent id is the colony's own unless it is blank, in which case the configured
+/// provider; org overrides layer on top.
+fn agent_choice(app: &Shared, modules: &ModulesConfig, s: &Session) -> (ModuleChoice, Value) {
     let org = app.org_settings(&s.org);
     let agent_id = if s.agent.is_empty() {
         modules.agent.provider.clone()
@@ -640,6 +642,22 @@ fn role_models(app: &Shared, modules: &crate::config::ModulesConfig, s: &Session
         .find(|a| a.id == agent_id)
         .map(|a| a.schema.clone())
         .unwrap_or(Value::Null);
+    (choice, schema)
+}
+
+/// One boolean agent-module setting for this colony, read the same way [`role_models`] resolves
+/// the model — through the org-effective agent module — so the playbook's cheapest-host retry
+/// (issue #1039) sees the same flag boot read at `prefer_cheapest_host`.
+#[allow(dead_code)]
+pub(crate) fn agent_flag(app: &Shared, modules: &ModulesConfig, s: &Session, key: &str) -> bool {
+    let (choice, schema) = agent_choice(app, modules, s);
+    setting(&choice, &schema, key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The role models a colony boots with — `(model, subagent_model, background_model)` — resolved the
+/// way boot does: its launch overrides, else its org's settings, else the agent module's defaults.
+pub(crate) fn role_models(app: &Shared, modules: &ModulesConfig, s: &Session) -> [Option<String>; 3] {
+    let (choice, schema) = agent_choice(app, modules, s);
     let pick = |key: &str| Some(setting_str(&choice, &schema, key)).filter(|m| !m.is_empty());
     [
         s.model_override.clone().or_else(|| pick("model")),

@@ -50,7 +50,8 @@ const MAC: RuntimeInfo = {
 /** GET /api/status: a healthy Linux box, with overrides for whatever is broken. */
 const status = (over: Partial<HarnessStatus> = {}): HarnessStatus => ({
   github: { connected: true, login: "octocat", name: "The Octocat", source: "gh CLI login" },
-  claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN" },
+  claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN", health_status: "ok" },
+  model_providers: [],
   sandbox: { msb_version: "msb 0.6.18", image: NODE_IMAGE, claude_bin: "/opt/claude/bin/claude", claude_bin_error: null },
   mesh: { enabled: true, provider: "headscale", state: "running", harness_ip: "100.64.0.1", nodes: 2, error: null },
   runtime: { ...LINUX },
@@ -78,7 +79,7 @@ const telemetry = (enabled: boolean | null): TelemetryStatus => ({
 /** A healthy status whose Claude object carries the expiry and identity fields the mothership sends
  *  once a token is saved — the shape the row's advisories read. */
 const claudeWith = (over: Partial<HarnessStatus["claude"]> = {}): HarnessStatus =>
-  status({ claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN", ...over } });
+  status({ claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN", health_status: "ok", ...over } });
 
 /** A whole Setup input, healthy by default; override any part. */
 const input = (over: Partial<SetupInput> = {}): SetupInput => ({
@@ -99,7 +100,7 @@ const row = (of: SetupInput, id: SetupRowId): SetupRow => setupRows(of).find((r)
 
 describe("setupRows", () => {
   it("lays the rows out in the issue's order, live map last", () => {
-    expect(setupRows(input()).map((r) => r.id)).toEqual(["machine", "stack", "github", "claude", "launch", "map"]);
+    expect(setupRows(input()).map((r) => r.id)).toEqual(["machine", "stack", "github", "model", "launch", "map"]);
   });
 
   describe("row 1 — This machine", () => {
@@ -250,7 +251,7 @@ describe("setupRows", () => {
       const machine = row(old, "machine");
       expect(machine.state).toBe("done");
       expect(machine.error).toBeUndefined();
-      expect(row(old, "claude").notes).toEqual([]);
+      expect(row(old, "model").notes).toEqual([]);
       expect(shouldAutoOpen(setupRows(old))).toBe(false);
       expect(launchEnabled(setupRows(old))).toBe(true);
     });
@@ -279,7 +280,7 @@ describe("setupRows", () => {
         const rows = setupRows(soft);
         expect(row(soft, "machine").state).toBe("done");
         expect(row(soft, "github").state).toBe("done");
-        expect(row(soft, "claude").state).toBe("done");
+        expect(row(soft, "model").state).toBe("done");
         expect(row(soft, "stack").state).not.toBe("blocked");
         expect(row(soft, "stack").gatesLaunch).toBe(false);
         expect(launchEnabled(rows)).toBe(true);
@@ -328,17 +329,17 @@ describe("setupRows", () => {
     });
   });
 
-  describe("row 4 — Claude", () => {
-    it("names the login source when configured", () => {
-      expect(row(input(), "claude")).toMatchObject({ state: "done", detail: "Claude subscription" });
+  describe("row 4 — Model", () => {
+    it("names the login source when Claude is configured", () => {
+      expect(row(input(), "model")).toMatchObject({ state: "done", detail: "Claude subscription" });
     });
 
-    it("blocks when Claude is not configured", () => {
-      const down = input({ status: status({ claude: { configured: false, source: null, kind: null } }) });
-      const claude = row(down, "claude");
-      expect(claude.state).toBe("blocked");
-      expect(claude.gatesLaunch).toBe(true);
-      expect(claude.fix).toContain("setup-token");
+    it("blocks when neither Claude nor other providers are configured", () => {
+      const down = input({ status: status({ claude: { configured: false, source: null, kind: null }, model_providers: [] }) });
+      const model = row(down, "model");
+      expect(model.state).toBe("blocked");
+      expect(model.gatesLaunch).toBe(true);
+      expect(model.fix).toContain("Claude subscription");
       expect(shouldAutoOpen(setupRows(down))).toBe(true);
       expect(launchEnabled(setupRows(down))).toBe(false);
     });
@@ -350,40 +351,40 @@ describe("setupRows", () => {
           mesh: { enabled: true, provider: "headscale", state: "unavailable", harness_ip: null, nodes: 0, error: null },
         }),
       });
-      const claude = row(macNoBin, "claude");
-      expect(claude.state).toBe("done"); // configured — the row is green, the note rides along
-      expect(claude.notes.join(" ")).toContain("a saved token still works");
-      expect(claude.notes.join(" ")).toContain("executable file not found");
-      expect(claude.gatesLaunch).toBe(true);
+      const model = row(macNoBin, "model");
+      expect(model.state).toBe("done"); // configured — the row is green, the note rides along
+      expect(model.notes.join(" ")).toContain("a saved token still works");
+      expect(model.notes.join(" ")).toContain("executable file not found");
+      expect(model.gatesLaunch).toBe(true);
       expect(shouldAutoOpen(setupRows(macNoBin))).toBe(false);
       expect(launchEnabled(setupRows(macNoBin))).toBe(true);
     });
 
     it("says nothing about an expiry that is well in the future", () => {
       const future = input({ status: claudeWith({ expires_at: new Date(NOW + 90 * DAY).toISOString() }) });
-      const claude = row(future, "claude");
-      expect(claude.state).toBe("done");
-      expect(claude.notes).toEqual([]);
+      const model = row(future, "model");
+      expect(model.state).toBe("done");
+      expect(model.notes).toEqual([]);
     });
 
     it("notes a real expiry within 30 days, without changing anything else about the row", () => {
       const soon = input({ status: claudeWith({ expires_at: new Date(NOW + 12 * DAY).toISOString() }) });
-      const claude = row(soon, "claude");
-      expect(claude.notes).toEqual(["The Claude token expires in 12 days; sign in again to refresh it."]);
-      expect(claude.state).toBe("done");
-      expect(claude.gatesLaunch).toBe(true);
-      expect(claude.error).toBeUndefined();
+      const model = row(soon, "model");
+      expect(model.notes).toEqual(["The Claude token expires in 12 days; sign in again to refresh it."]);
+      expect(model.state).toBe("done");
+      expect(model.gatesLaunch).toBe(true);
+      expect(model.error).toBeUndefined();
     });
 
     it("draws the 30-day line exactly where the credential panel does — 30 days warns, a hair more does not", () => {
-      const at30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY).toISOString() }) }), "claude");
+      const at30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY).toISOString() }) }), "model");
       expect(at30.notes.join(" ")).toContain("expires in 30 days");
-      const justPast30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY + 1).toISOString() }) }), "claude");
+      const justPast30 = row(input({ status: claudeWith({ expires_at: new Date(NOW + 30 * DAY + 1).toISOString() }) }), "model");
       expect(justPast30.notes).toEqual([]);
     });
 
     it("counts a partly-lived last day as one day", () => {
-      const hoursLeft = row(input({ status: claudeWith({ expires_at: new Date(NOW + 5 * 3_600_000).toISOString() }) }), "claude");
+      const hoursLeft = row(input({ status: claudeWith({ expires_at: new Date(NOW + 5 * 3_600_000).toISOString() }) }), "model");
       expect(hoursLeft.notes.join(" ")).toContain("expires in 1 day");
       expect(hoursLeft.notes.join(" ")).not.toContain("days");
     });
@@ -392,31 +393,31 @@ describe("setupRows", () => {
       // The mothership guesses a subscription token's expiry from the save date plus a year;
       // the note has to say so instead of presenting the date as Anthropic's.
       const guessed = input({ status: claudeWith({ expires_at: new Date(NOW + 10 * DAY).toISOString(), expires_estimated: true }) });
-      const claude = row(guessed, "claude");
-      expect(claude.notes).toEqual([
+      const model = row(guessed, "model");
+      expect(model.notes).toEqual([
         "The Claude token is estimated to expire in 10 days — a guess from when the token was saved, not a date Anthropic gave.",
       ]);
-      expect(claude.state).toBe("done");
+      expect(model.state).toBe("done");
     });
 
     it("says plainly when the token is already past a real expiry", () => {
       const past = input({ status: claudeWith({ expires_at: new Date(NOW - 3 * DAY).toISOString() }) });
-      const claude = row(past, "claude");
-      expect(claude.notes).toEqual(["The Claude token expired on 2026-09-15; sign in again to get a fresh one."]);
-      expect(claude.state).toBe("done");
+      const model = row(past, "model");
+      expect(model.notes).toEqual(["The Claude token expired on 2026-09-15; sign in again to get a fresh one."]);
+      expect(model.state).toBe("done");
     });
 
     it("does not state a passed estimated expiry as fact either", () => {
       const past = input({ status: claudeWith({ expires_at: new Date(NOW - 3 * DAY).toISOString(), expires_estimated: true }) });
-      const claude = row(past, "claude");
-      expect(claude.notes).toEqual([
+      const model = row(past, "model");
+      expect(model.notes).toEqual([
         "The Claude token is past its estimated expiry (2026-09-15) — a guess from when the token was saved, not a date Anthropic gave; sign in again to be sure.",
       ]);
     });
 
     it("invents no expiry note for a timestamp it cannot parse", () => {
       const unparseable = input({ status: claudeWith({ expires_at: "not a date" }) });
-      expect(row(unparseable, "claude").notes).toEqual([]);
+      expect(row(unparseable, "model").notes).toEqual([]);
     });
 
     it("passes the mothership's account note through when it could not identify an account", () => {
@@ -426,12 +427,12 @@ describe("setupRows", () => {
           account_note: "this token is only allowed to make model requests, so Anthropic will not say which account it belongs to",
         }),
       });
-      const claude = row(unidentified, "claude");
-      expect(claude.notes).toContain(
+      const model = row(unidentified, "model");
+      expect(model.notes).toContain(
         "this token is only allowed to make model requests, so Anthropic will not say which account it belongs to",
       );
-      expect(claude.detail).toBe("Claude subscription");
-      expect(claude.state).toBe("done");
+      expect(model.detail).toBe("Claude subscription");
+      expect(model.state).toBe("done");
     });
 
     it("keeps every expiry and account advisory advisory: the row stays green, launch stays on, nothing reads red", () => {
@@ -445,16 +446,75 @@ describe("setupRows", () => {
       ];
       for (const advisory of advisories) {
         const withIt = input({ status: claudeWith(advisory) });
-        const claude = row(withIt, "claude");
+        const model = row(withIt, "model");
         const which = JSON.stringify(advisory);
-        expect(claude.notes.length, which).toBeGreaterThan(0);
-        expect(claude.state, which).toBe("done"); // never red
-        expect(claude.gatesLaunch, which).toBe(true);
-        expect(claude.error, which).toBeUndefined();
+        expect(model.notes.length, which).toBeGreaterThan(0);
+        expect(model.state, which).toBe("done"); // never red
+        expect(model.gatesLaunch, which).toBe(true);
+        expect(model.error, which).toBeUndefined();
         expect(shouldAutoOpen(setupRows(withIt)), which).toBe(false);
         expect(launchEnabled(setupRows(withIt)), which).toBe(true);
         expect(setupView(withIt).launchEnabled, which).toBe(true);
       }
+    });
+
+    it("is done when MiniMax provider is configured and not degraded (no Claude)", () => {
+      const minimax = input({
+        status: status({
+          claude: { configured: false, source: null, kind: null },
+          model_providers: [
+            { id: "minimax", name: "MiniMax", requests: 10, failure_pct: 0, avg_latency_ms: 500, degraded: false },
+          ],
+        }),
+      });
+      const model = row(minimax, "model");
+      expect(model.state).toBe("done");
+      expect(model.gatesLaunch).toBe(true);
+      expect(shouldAutoOpen(setupRows(minimax))).toBe(false);
+      expect(launchEnabled(setupRows(minimax))).toBe(true);
+    });
+
+    it("is done when Claude is configured and healthy", () => {
+      const healthy = input({
+        status: status({
+          claude: { configured: true, source: "Claude subscription", kind: "CLAUDE_CODE_OAUTH_TOKEN", health_status: "ok" },
+          model_providers: [],
+        }),
+      });
+      const model = row(healthy, "model");
+      expect(model.state).toBe("done");
+      expect(model.gatesLaunch).toBe(true);
+      expect(launchEnabled(setupRows(healthy))).toBe(true);
+    });
+
+    it("is done when any non-degraded provider exists", () => {
+      const withProvider = input({
+        status: status({
+          claude: { configured: false, source: null, kind: null },
+          model_providers: [
+            { id: "byteplus", name: "BytePlus", requests: 10, failure_pct: 0, avg_latency_ms: 500, degraded: false },
+          ],
+        }),
+      });
+      const model = row(withProvider, "model");
+      expect(model.state).toBe("done");
+      expect(model.gatesLaunch).toBe(true);
+      expect(launchEnabled(setupRows(withProvider))).toBe(true);
+    });
+
+    it("is blocked when only degraded providers exist and Claude is not configured", () => {
+      const degraded = input({
+        status: status({
+          claude: { configured: false, source: null, kind: null },
+          model_providers: [
+            { id: "byteplus", name: "BytePlus", requests: 10, failure_pct: 80, avg_latency_ms: 5000, degraded: true },
+          ],
+        }),
+      });
+      const model = row(degraded, "model");
+      expect(model.state).toBe("blocked");
+      expect(model.gatesLaunch).toBe(true);
+      expect(launchEnabled(setupRows(degraded))).toBe(false);
     });
   });
 
@@ -504,17 +564,17 @@ describe("setupProgress", () => {
 });
 
 describe("firstActionableRow", () => {
-  it("lands on row 4 when rows 1-3 are done and Claude is not yet configured", () => {
-    const partial = input({ status: status({ claude: { configured: false, source: null, kind: null } }) });
-    expect(firstActionableRow(setupRows(partial))?.id).toBe("claude");
+  it("lands on row 4 when rows 1-3 are done and model is not yet configured", () => {
+    const partial = input({ status: status({ claude: { configured: false, source: null, kind: null }, model_providers: [] }) });
+    expect(firstActionableRow(setupRows(partial))?.id).toBe("model");
   });
 
   it("walks past a pull that is running on its own", () => {
     const waiting = input({
       pull: pull("pulling"),
-      status: status({ claude: { configured: false, source: null, kind: null } }),
+      status: status({ claude: { configured: false, source: null, kind: null }, model_providers: [] }),
     });
-    expect(firstActionableRow(setupRows(waiting))?.id).toBe("claude");
+    expect(firstActionableRow(setupRows(waiting))?.id).toBe("model");
   });
 
   it("is null when everything is settled", () => {
@@ -581,11 +641,11 @@ describe("shouldAutoOpen with colonies present (issue #214)", () => {
     }
   });
 
-  it("leaves the other launch gates (GitHub, Claude) auto-opening with colonies present — only the machine row is scoped", () => {
+  it("leaves the other launch gates (GitHub, Model) auto-opening with colonies present — only the machine row is scoped", () => {
     const noGithub = input({ sessionCount: 3, status: status({ github: { connected: false } }) });
     expect(setupView(noGithub).autoOpen).toBe(true);
-    const noClaude = input({ sessionCount: 3, status: status({ claude: { configured: false, source: null, kind: null } }) });
-    expect(setupView(noClaude).autoOpen).toBe(true);
+    const noModel = input({ sessionCount: 3, status: status({ claude: { configured: false, source: null, kind: null }, model_providers: [] }) });
+    expect(setupView(noModel).autoOpen).toBe(true);
   });
 });
 
@@ -593,7 +653,7 @@ describe("launchEnabled", () => {
   it("needs rows 1, 3 and 4 green and nothing else", () => {
     expect(launchEnabled(setupRows(input()))).toBe(true);
     expect(launchEnabled(setupRows(input({ status: status({ github: { connected: false } }) })))).toBe(false);
-    expect(launchEnabled(setupRows(input({ status: status({ claude: { configured: false, source: null, kind: null } }) })))).toBe(false);
+    expect(launchEnabled(setupRows(input({ status: status({ claude: { configured: false, source: null, kind: null }, model_providers: [] }) })))).toBe(false);
     expect(
       launchEnabled(
         setupRows(input({ status: status({ runtime: { ...LINUX, kvm: { ok: false, error: "/dev/kvm: Permission denied" } } }) })),
@@ -693,9 +753,9 @@ describe("issue #1200 — advisory rows and the Settings dot", () => {
   });
 
   it("goes amber or red when a required row is unmet", () => {
-    const noClaude = healthy({ status: status({ claude: { configured: false, source: null, kind: null } as unknown as HarnessStatus["claude"] }) });
-    expect(noClaude.attention).toBe(true);
-    expect(["warn", "err"]).toContain(setupTone(noClaude));
+    const noModel = healthy({ status: status({ claude: { configured: false, source: null, kind: null }, model_providers: [] } as unknown as HarnessStatus) });
+    expect(noModel.attention).toBe(true);
+    expect(["warn", "err"]).toContain(setupTone(noModel));
     const noGithub = healthy({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }) });
     expect(setupTone(noGithub)).toBe("err");
   });
@@ -708,7 +768,7 @@ describe("issue #1200 — advisory rows and the Settings dot", () => {
   });
 
   it("never lets a required or unknown id be dismissed away", () => {
-    const sneaky = input({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }), dismissed: ["github", "machine", "claude"] });
+    const sneaky = input({ status: status({ github: { connected: false, login: null, name: null, source: null, error: "x" } as unknown as HarnessStatus["github"] }), dismissed: ["github", "machine", "model"] });
     expect(row(sneaky, "github").state).toBe("blocked");
     expect(launchEnabled(setupRows(sneaky))).toBe(false);
   });
