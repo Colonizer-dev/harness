@@ -42,7 +42,7 @@ colonizer-redact = { version = "0.2.15", path = "../colonizer-redact" }
 # validated with (`payload::Batch::parse`) and the consent helpers. Published on crates.io, so
 # colonizer can publish too (#741); the wire contract is docs/usage-data.md. The collector half runs on
 # the venture's side; this crate composes the client half only (docs/usage-data.md).
-cratefield-module-telemetry = "0.3.0"
+cratefield-module-telemetry = "0.3.2"
 futures-util = "0.3.34"
 # Response body frame iteration, so tunnelled answers stream back to the relay in chunks (remote.rs).
 http-body-util = "0.1"
