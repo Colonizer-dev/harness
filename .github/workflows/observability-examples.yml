@@ -53,12 +53,13 @@ jobs:
           done
 
       # promtool resolves authorization credentials_file at check time, so a stub token rides
-      # along at the path the real config expects.
+      # along at the path the real config expects. Only prometheus.yml is bind-mounted: a read-only
+      # directory mount would stop Docker creating the nested secrets/ mountpoint.
       - name: prometheus config checks
         run: |
           printf ci-stub > /tmp/prometheus.token
           docker run --rm \
-            -v "$PWD/examples/observability/grafana/prometheus:/etc/prometheus:ro" \
+            -v "$PWD/examples/observability/grafana/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
             -v /tmp/prometheus.token:/etc/prometheus/secrets/prometheus.token:ro \
             --entrypoint promtool \
             prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e \

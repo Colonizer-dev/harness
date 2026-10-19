@@ -46,7 +46,9 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
-      - ./prometheus:/etc/prometheus:ro
+      # Only the config file is mounted: a read-only directory mount would stop Docker creating the
+      # nested secrets/ mountpoint under /etc/prometheus.
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./secrets:/etc/prometheus/secrets:ro
       - prometheus-data:/prometheus
     # The mothership binds 127.0.0.1 by default; this makes `host.docker.internal` resolve to
