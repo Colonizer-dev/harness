@@ -1373,6 +1373,11 @@ mod tests {
             "application/json",
             "/api/status is still the API"
         );
+        // The quota's hold scope rides on the answer (issue #1129); a healthy queue reports neither
+        // a scope nor a held colony, which is what a cockpit without them has always read.
+        let body: Value = serde_json::from_str(&body_text(res).await).unwrap();
+        assert_eq!(body["quota"]["scope"], Value::Null);
+        assert_eq!(body["quota"]["held"], 0);
 
         // A wrong method on a real route is that route's 405, not the fallback's 404: the match
         // counts, the method does not.

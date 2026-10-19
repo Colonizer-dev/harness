@@ -335,6 +335,8 @@ pub(crate) async fn status(
             "reset_unix": quota.reset_unix,
             "providers": quota.providers,
             "kind": quota.kind,
+            "scope": quota.scope,
+            "held": quota.held,
             "fallback": quota.fallback,
             "provider_details": quota.details.iter().map(providers::QuotaProviderDetail::to_json).collect::<Vec<_>>(),
         }),
