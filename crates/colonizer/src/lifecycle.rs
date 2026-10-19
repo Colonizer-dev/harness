@@ -3836,11 +3836,7 @@ exit 0
         admit_resume(&sessions, "acme", 1, None, "colony_a").await;
 
         let resumed_a = sessions.read().await[0].clone();
-        assert_eq!(
-            resumed_a.status,
-            SessionStatus::Starting,
-            "resumed colony should be admitted"
-        );
+        assert_eq!(resumed_a.status, SessionStatus::Starting, "resumed colony should be admitted");
         assert_eq!(
             resumed_a.priority, None,
             "immediately admitted resume should not get RESUMED priority"
