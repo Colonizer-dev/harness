@@ -1041,6 +1041,19 @@ pub(crate) const PLACEHOLDER_NOTE: &str = "Empty dotfiles such as .env and .netr
      git status and managed by the harness, they need no `ls` or `git check-ignore` — don't \
      inspect, gitignore or edit them.";
 
+/// The brief's line about nested checkouts (issue #1320): a git checkout inside the workspace
+/// has its `.git/config` and `.git/hooks/` mounted read-only, so attempts to clone into the
+/// workspace fail with "Read-only file system" or "Device or resource busy". The agent must
+/// keep nested repos' git dirs outside the workspace using `--separate-git-dir` or clone outside
+/// the workspace entirely.
+pub(crate) const NESTED_CHECKOUT_NOTE: &str = "A git checkout nested inside the workspace has its `.git/config` and `.git/hooks/` mounted \
+     read-only, so a `git clone` into the workspace (by you or by the repo's own build) fails with \
+     \"Read-only file system\" or \"Device or resource busy\". That is the sandbox's path policy, \
+     not a bug: never unmount, remount or otherwise get around those mounts — the watchdog holds \
+     the colony for it. When a nested clone is needed, keep its git dir outside the workspace: \
+     `git clone --separate-git-dir=/tmp/<name>.git <url> <path>`, or clone outside the workspace \
+     and point the build at it.";
+
 pub fn build_prompt(
     s: &Session,
     issue: Option<&Value>,
@@ -1083,6 +1096,9 @@ pub fn build_prompt(
     // agent can still stumble on them with `ls -a`; unprompted it gitignores or inspects them, and
     // the exec policy refuses that as an attempt to reach a secret (issue #1169).
     let _ = writeln!(p, "{PLACEHOLDER_NOTE}\n");
+    // Nested checkouts with read-only `.git` dirs need special handling (issue #1320): cloning
+    // into the workspace fails; the agent must use `--separate-git-dir` or clone outside.
+    let _ = writeln!(p, "{NESTED_CHECKOUT_NOTE}\n");
     if resumed {
         let _ = writeln!(
             p,
@@ -3731,6 +3747,30 @@ mod tests {
                     "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: hidden from \
                      git status and managed by the harness, they need no `ls` or `git check-ignore` — don't inspect, \
                      gitignore or edit them."
+                ),
+                "{prompt}"
+            );
+        }
+    }
+
+    /// Issue #1320: nested checkouts have read-only `.git` dirs, so cloning into the workspace
+    /// fails; the prompt explains this and names the supported route (`--separate-git-dir` outside
+    /// the workspace, or cloning outside the workspace altogether).
+    #[test]
+    fn the_prompt_warns_about_nested_checkouts_with_readonly_git_dirs() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        for resumed in [false, true] {
+            let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
+            assert!(
+                prompt.contains(
+                    "A git checkout nested inside the workspace has its `.git/config` and `.git/hooks/` mounted read-only"
+                ),
+                "{prompt}"
+            );
+            assert!(prompt.contains("--separate-git-dir=/tmp/"), "{prompt}");
+            assert!(
+                prompt.contains(
+                    "never unmount, remount or otherwise get around those mounts — the watchdog holds the colony for it"
                 ),
                 "{prompt}"
             );
