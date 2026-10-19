@@ -232,6 +232,11 @@ pub struct OrgSettings {
     /// default — follows the install's cheap route (issue #1274).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_code_review_model: Option<String>,
+    /// Hidden-text screening of inputs (issue #1277, `promptdecode.rs`): `shadow` records the
+    /// findings and changes nothing. `on` strips hidden text and appends a note. `None` — the
+    /// default — and `off` are the same: no screening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promptdecode: Option<crate::promptdecode::Mode>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -790,6 +795,11 @@ pub fn open_code_review_model(org: &OrgSettings) -> Option<String> {
         .map(String::from)
 }
 
+/// The org's promptdecode input-screening mode (issue #1277): off unless the operator opted in.
+pub fn promptdecode_mode(org: &OrgSettings) -> crate::promptdecode::Mode {
+    org.promptdecode.unwrap_or_default()
+}
+
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
 /// unlike cpus or memory there is no dollar figure the harness can pick for someone else's deployment,
 /// and a default that silently stopped running colonies on upgrade would be a surprise.
@@ -1287,6 +1297,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("open_code_review_model") {
         incoming.open_code_review_model = saved.open_code_review_model.clone();
+    }
+    if !named("promptdecode") {
+        incoming.promptdecode = saved.promptdecode;
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;

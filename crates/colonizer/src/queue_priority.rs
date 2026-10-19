@@ -33,6 +33,9 @@ use crate::{
 /// The priority the cockpit calls High; also what the starvation guard lifts a colony to.
 pub(crate) const HIGH: i64 = 10;
 
+/// The priority for a resumed colony, to preserve its place in the queue ahead of fresh ones.
+/// Falls between normal (0) and High (10).
+pub(crate) const RESUMED: i64 = 5;
 /// The largest priority, up or down, a setting or a request may carry.
 pub(crate) const PRIORITY_LIMIT: i32 = 1_000_000;
 
