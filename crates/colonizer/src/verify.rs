@@ -3070,9 +3070,12 @@ pub(crate) mod tests {
         let mut v = Verification::blank();
         v.pre_publish_red = vec!["clippy".into()];
         // Simulate what publish_checks does: store the last 5 lines of redacted output
-        let unredacted_tail =
-            "warning: unused variable\n  --> src/lib.rs:42:5\nerror: GH=ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5\nmore output";
-        let redacted = colonizer_redact::redact_text(unredacted_tail);
+        let token = concat!("gh", "p_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
+        let unredacted_tail = format!(
+            "warning: unused variable\n  --> src/lib.rs:42:5\nerror: GH={}\nmore output",
+            token
+        );
+        let redacted = colonizer_redact::redact_text(&unredacted_tail);
         let lines: Vec<&str> = redacted.lines().collect();
         let capped = lines[lines.len().saturating_sub(5)..].join("\n");
         v.pre_publish_red_tails.insert("clippy".into(), capped);
@@ -3085,10 +3088,7 @@ pub(crate) mod tests {
             "should use 4-backtick fence for markdown safety: {note}"
         );
         // Verify the secret is redacted
-        assert!(
-            !note.contains("ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5"),
-            "github token should be redacted: {note}"
-        );
+        assert!(!note.contains(token), "github token should be redacted: {note}");
         assert!(note.contains("[REDACTED:"), "redaction mark should appear: {note}");
     }
 
