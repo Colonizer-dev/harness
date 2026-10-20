@@ -601,18 +601,18 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onScope={(s) => {
             setScope(s);
             setDraft(EMPTY_DRAFT);
-            setStage({ step: “edit” });
+            setStage({ step: "edit" });
             setError(null);
           }}
           onDraft={(d) => {
             setDraft(d);
-            setStage({ step: “edit” });
+            setStage({ step: "edit" });
           }}
           onApplyMode={setApply}
           onApply={() => void onApply()}
-          onConfirm={() => void run(switchRequest(scope, draft, “running”))}
-          onCancel={() => setStage({ step: “edit” })}
-          onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, “new”))}
+          onConfirm={() => void run(switchRequest(scope, draft, "running"))}
+          onCancel={() => setStage({ step: "edit" })}
+          onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, "new"))}
           onEditInstallWide={onEditInstallWide}
           judge={{
             module: autonomy,
@@ -636,8 +636,8 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onUseProfile={(profile) => {
             const loaded = profileDraft(assignments, scope, draft, profile);
             setDraft(loaded.draft);
-            setStage({ step: “edit” });
-            setProfileMessage({ text: profileNote(profile.name, loaded.applied.length, loaded.skipped), tone: “info” });
+            setStage({ step: "edit" });
+            setProfileMessage({ text: profileNote(profile.name, loaded.applied.length, loaded.skipped), tone: "info" });
           }}
           onSaveProfile={(name) =>
             profileAction(async () => {
