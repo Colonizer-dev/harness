@@ -9,6 +9,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { AntAvatar } from "../components/AntAvatar";
 import { SESSION_STATUS, isAnsweredWaiting, isLive, statusLabel, store, stored, supersededHeld, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
+import { copyText, manualCopyHint } from "../copy";
 import type { Loop, NewLoop, RepoMap, Session } from "../types";
 import { describeLoopCadence } from "./loops";
 import { MapRefreshCovered, MapRefreshPrompt, mapRefreshKey, mapRefreshPrompt, parseMapRefreshAnswer, type MapRefreshAnswer } from "./MapRefreshPrompt";
@@ -883,10 +884,10 @@ function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; 
           type="button"
           className={MAP_BUTTON}
           onClick={() => {
-            void navigator.clipboard?.writeText(text).then(
-              () => toast("Map JSON copied"),
-              () => toast("Could not copy", "error"),
-            );
+            void copyText(text).then((ok) => {
+              if (ok) toast("Map JSON copied");
+              else toast(manualCopyHint(), "error");
+            });
           }}
         >
           Copy

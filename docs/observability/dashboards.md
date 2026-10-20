@@ -39,13 +39,13 @@ hashing on, the `org` label is HMAC-hashed like every other surface
 ### Colony
 
 `$colony` is a plain textbox, because a colony id is never a label or a series
-([what a series may name](metrics.md#what-a-series-may-name)). Only the root `invoke_agent` span
-carries `span.colonizer.colony.id` — the `turn`, `execute_tool`, `question` and `subagent` spans
-beneath it do not — so the per-colony span panels descend from the root with TraceQL structural
-operators (`>>`): the trace search is `{span.colonizer.colony.id="$colony"}` on the root span
-itself (which closes only when the colony finishes), and turn durations at p50/p95, the table of
-tool calls, tool errors by tool, and questions with `colonizer.answered_by` (a person or the
-autonomy judge) each query `{span.colonizer.colony.id="$colony"} >> {…}` for the spans below it.
+([what a series may name](metrics.md#what-a-series-may-name)). Every span in a colony's trace
+carries `span.colonizer.colony.id`, so the per-colony span panels filter directly on it: the
+trace search is `{span.colonizer.colony.id="$colony"}` (which finds the trace via any span),
+and turn durations at p50/p95, the table of tool calls, tool errors by tool, and questions with
+`colonizer.answered_by` (a person or the autonomy judge) each query by attribute alone,
+e.g. `{span.colonizer.colony.id="$colony" && name=~"execute_tool .*"}`, with no structural
+operator needed.
 The harness log is Loki filtered on the same id as an attribute,
 `| colonizer_colony_id="$colony"`. Tokens and spend are scoped to the colony's org through an
 `$org` variable over `label_values(colonizer_colonies, org)`, because colony-level spend is never

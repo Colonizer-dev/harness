@@ -292,10 +292,18 @@ pub(crate) async fn run(
                                 return PrePublish::Contradicted;
                             }
                             Compared::AllShared(_) | Compared::Unnamed => {
-                                red.push(short_name(&check.command));
+                                let short = short_name(&check.command);
+                                red.push(short.clone());
                                 record
                                     .inconclusive
                                     .push(format!("`{}` fails on the base commit as well", check.command));
+                                // Issue #1363: store the redacted tail for audit in the PR note
+                                if let Some(tail) = evidence {
+                                    let redacted = colonizer_redact::redact_text(&tail);
+                                    let lines: Vec<&str> = redacted.lines().collect();
+                                    let capped = lines[lines.len().saturating_sub(5)..].join("\n");
+                                    record.pre_publish_red_tails.insert(short, capped);
+                                }
                             }
                         }
                     }

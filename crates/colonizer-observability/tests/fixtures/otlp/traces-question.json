@@ -27,6 +27,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
+                {
                   "key": "colonizer.question.risk",
                   "value": {
                     "stringValue": "workspace_write"
@@ -66,6 +72,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
                 {
                   "key": "colonizer.question.risk",
                   "value": {
@@ -119,6 +131,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"
@@ -164,6 +182,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
                 {
                   "key": "colonizer.origin",
                   "value": {
@@ -229,6 +253,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -236,12 +266,6 @@
                 },
                 {
                   "key": "gen_ai.agent.id",
-                  "value": {
-                    "stringValue": "9e57c0de"
-                  }
-                },
-                {
-                  "key": "colonizer.colony.id",
                   "value": {
                     "stringValue": "9e57c0de"
                   }

@@ -100,7 +100,10 @@ It also carries `endpoint`, `last_error` (redacted, header values cut out), `las
 bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `last_partial_success`, and `signals`: per signal (`logs`, `traces`, `metrics`) its `state` (`ok`,
 `backing_off`, `auth_failed`, `off`), `endpoint`, `consecutive_failures`, `last_error`,
-`last_success_unix`, `records_sent` and `bytes_sent`. While a backfill
+`last_success_unix`, `records_sent`, `bytes_sent`, `backlog_bytes` (this signal's share),
+`records_dropped` (records dropped rather than sent, any reason) and `gaps` (holes in what could be
+read, one per `export_gap`). After a 413 the exporter remembers the smaller request size for that
+signal until it restarts. While a backfill
 ([Backfill](observability/backfill.md)) runs, the same route also carries its progress as
 `backfill`.
 

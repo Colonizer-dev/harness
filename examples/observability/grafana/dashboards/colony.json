@@ -67,7 +67,7 @@
             "uid": "colonizer-tempo"
           },
           "limit": 50,
-          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=~\"turn [0-9]+\"} | quantile_over_time(duration, 0.5, 0.95)",
+          "query": "{span.colonizer.colony.id=\"$colony\" && name=~\"turn [0-9]+\"} | quantile_over_time(duration, 0.5, 0.95)",
           "queryType": "traceql",
           "refId": "A"
         }
@@ -100,7 +100,7 @@
             "uid": "colonizer-tempo"
           },
           "limit": 100,
-          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=~\"execute_tool .*\"}",
+          "query": "{span.colonizer.colony.id=\"$colony\" && name=~\"execute_tool .*\"}",
           "queryType": "traceql",
           "refId": "A"
         }
@@ -134,7 +134,7 @@
             "uid": "colonizer-tempo"
           },
           "limit": 50,
-          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=~\"execute_tool .*\" && status=error} | rate() by (span.gen_ai.tool.name)",
+          "query": "{span.colonizer.colony.id=\"$colony\" && name=~\"execute_tool .*\" && status=error} | rate() by (span.gen_ai.tool.name)",
           "queryType": "traceql",
           "refId": "A"
         }
@@ -168,7 +168,7 @@
             "uid": "colonizer-tempo"
           },
           "limit": 50,
-          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=\"question\" && span.colonizer.answered_by!=\"\"} | rate() by (span.colonizer.answered_by)",
+          "query": "{span.colonizer.colony.id=\"$colony\" && name=\"question\" && span.colonizer.answered_by!=\"\"} | rate() by (span.colonizer.answered_by)",
           "queryType": "traceql",
           "refId": "A"
         }
@@ -201,7 +201,7 @@
             "uid": "colonizer-tempo"
           },
           "limit": 50,
-          "query": "{span.colonizer.colony.id=\"$colony\"} >> {name=\"question\"}",
+          "query": "{span.colonizer.colony.id=\"$colony\" && name=\"question\"}",
           "queryType": "traceql",
           "refId": "A"
         }
