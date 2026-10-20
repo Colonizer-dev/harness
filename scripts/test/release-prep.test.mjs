@@ -21,6 +21,7 @@ import {
   plan,
   planCrates,
   prep,
+  rebaseLinks,
   releaseNotesStub,
   releaseVersion,
   setPackageVersion,
@@ -108,6 +109,37 @@ test('versions: next patch, newest release, and the [package] line only', () => 
   assert.match(deps, /serde = \{ version = "1\.0\.229"/, 'a registry dependency is untouched');
 });
 
+test('rebaseLinks: rebase relative links from root to release notes, preserve external URLs and anchors', () => {
+  const root = '/workspace';
+  const notesPath = '/workspace/docs/release-notes/v0.2.11.md';
+
+  // Relative links are rebased; fragments, queries, and titles are preserved.
+  assert.match(rebaseLinks('[x](docs/bench.md#the-rate)', root, notesPath), /\[x\]\(\.\.\/bench\.md#the-rate\)/);
+  assert.match(rebaseLinks('[x](CHANGELOG.md)', root, notesPath), /\[x\]\(\.\.\/\.\.\/CHANGELOG\.md\)/);
+  assert.match(rebaseLinks('![alt](docs/image.png)', root, notesPath), /!\[alt\]\(\.\.\/image\.png\)/);
+  assert.match(rebaseLinks('[id]: docs/file.md', root, notesPath), /\[id\]: \.\.\/file\.md/);
+  assert.match(rebaseLinks('[x](docs/file.md?foo=bar)', root, notesPath), /\[x\]\(\.\.\/file\.md\?foo=bar\)/);
+  assert.match(rebaseLinks('[x](docs/file.md "Title")', root, notesPath), /\[x\]\(\.\.\/file\.md "Title"\)/);
+
+  // External URLs and anchors are untouched, including angle-bracket targets.
+  assert.match(rebaseLinks('[x](https://example.com)', root, notesPath), /\[x\]\(https:\/\/example\.com\)/);
+  assert.match(rebaseLinks('[x](//example.com)', root, notesPath), /\[x\]\(\/\/example\.com\)/);
+  assert.match(rebaseLinks('[x](/docs/bench.md)', root, notesPath), /\[x\]\(\/docs\/bench\.md\)/);
+  assert.match(rebaseLinks('[x](#section)', root, notesPath), /\[x\]\(#section\)/);
+  assert.match(rebaseLinks('[x](<docs/file.md>)', root, notesPath), /\[x\]\(<docs\/file\.md>\)/);
+
+  // Code spans are protected: fenced blocks and inline code are not rebased.
+  assert.match(rebaseLinks('```\n[x](docs/file.md)\n```', root, notesPath), /\[x\]\(docs\/file\.md\)/);
+  assert.match(rebaseLinks('See `[link](docs/file.md)` for details.', root, notesPath), /`\[link\]\(docs\/file\.md\)`/);
+  assert.match(rebaseLinks('Use `$$x` for syntax.', root, notesPath), /`\$\$x`/);
+
+  // Mixed case: rebased links coexist with protected code.
+  const mixed = 'Read [docs/x.md](docs/x.md) or see `[code](docs/y.md)`.';
+  const result = rebaseLinks(mixed, root, notesPath);
+  assert.match(result, /\[docs\/x\.md\]\(\.\.\/x\.md\)/);
+  assert.match(result, /`\[code\]\(docs\/y\.md\)`/);
+});
+
 test('planCrates: bump the crates at the latest release, leave one already at the target', () => {
   const all = { colonizer: 'v0.2.10', 'colonizer-agentd': 'v0.2.10', 'colonizer-observability': 'v0.2.10', 'colonizer-redact': 'v0.2.10' };
   assert.deepEqual(planCrates(all, 'v0.2.10', 'v0.2.11').map((c) => c.action), ['bump', 'bump', 'bump', 'bump']);
@@ -146,6 +178,29 @@ test('prep: a crate already ahead (colonizer-redact) is left alone, its dependen
   assert.equal(packageVersion(toml(root, 'colonizer')), 'v0.2.11');
   assert.match(toml(root, 'colonizer'), /colonizer-redact = \{ version = "0\.2\.11", path/);
   assert.deepEqual(verify(root, 'v0.2.11'), []);
+});
+
+test('prep: release notes links are rebased from root to notes directory; CHANGELOG links stay repo-root-relative', () => {
+  // Create a fragment with links that will be rebased. We need to create actual doc files for check-doc-links.
+  const linkedFragment = '**Fix for the documentation.** See [docs/x.md#heading](docs/x.md#heading) for details. Also [absolute](https://example.com). ([#1381])\n';
+  const root = fixture({ fragments: { '1381.fixed.md': linkedFragment } });
+
+  // Create a doc file that the links reference, so check-doc-links validates properly.
+  mkdirSync(join(root, 'docs'), { recursive: true });
+  writeFileSync(join(root, 'docs', 'x.md'), '# Heading\n\nContent here.\n');
+
+  const r = prep(root, { date: '2026-10-08', lock: false });
+  assert.equal(r.changed, true);
+
+  // In the release notes, the relative link should be rebased from docs/x.md to ../x.md.
+  const notes = readFileSync(join(root, 'docs', 'release-notes', 'v0.2.11.md'), 'utf8');
+  assert.match(notes, /\[docs\/x\.md#heading\]\(\.\.\/x\.md#heading\)/, 'relative link in notes is rebased');
+  assert.match(notes, /\[absolute\]\(https:\/\/example\.com\)/, 'absolute URL in notes is untouched');
+
+  // In CHANGELOG.md, the link should stay as written in the fragment (repo-root-relative).
+  const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
+  assert.match(changelog, /\[docs\/x\.md#heading\]\(docs\/x\.md#heading\)/, 'relative link in CHANGELOG stays repo-root-relative');
+  assert.match(changelog, /\[absolute\]\(https:\/\/example\.com\)/, 'absolute URL in CHANGELOG is untouched');
 });
 
 test('prep: no fragment is a no-op that touches nothing', () => {
