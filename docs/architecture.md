@@ -550,9 +550,9 @@ Settings form):
 - `merge_train_quiet_minutes` — how long a pull request's head must have been unchanged before it merges
   (default 10; 0 merges as soon as the head's checks are green). Used by the tick and the loop alike.
 
-A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
-no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
-branch's own CI is green. A colony another merge superseded (issue #673; see
+A pull request merges only when mergeability is clean, every check (required or not) has passed except those
+listed in `merge_advisory_checks` for that repository, it is not a draft, it carries no HOLD / do-not-merge / WIP
+label or title, it passes the identity and attribution guards, and the base branch's own CI is green. A colony another merge superseded (issue #673; see
 [colonies.md](colonies.md#when-a-merge-supersedes-a-colony)) is skipped until it is kept, so the train
 never lands a second copy of work that is already in main.
 

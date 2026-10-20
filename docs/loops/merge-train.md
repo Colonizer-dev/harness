@@ -17,12 +17,15 @@ Each run follows the rules an operator would follow by hand:
    completed and successful. A run still going means wait; a cancelled run — re-queued or not — is
    a wait too, never red. A main that is not green merges nothing.
 2. **Merge only on fresh CI.** A pull request merges only when it is behind its base by 0 and every
-   check on that exact head is green. GitHub's CLEAN is not enough: it can reflect CI that ran on an
-   older base. The head must also have been quiet — unchanged for the publish module's
-   `merge_train_quiet_minutes` (default 10) — and the merge is pinned to it, so a commit pushed after
-   the first green run is never squashed away; a branch that still gets commits after the merged head
-   is kept and raised as "commits not merged" ([merge train](../architecture.md#merge-train), issue
-   #1075). A remaining quiet wait no longer than `ci_wait_minutes` is sat out once in the run.
+   check on that exact head is green. Every check on the head commit, required or not, must have
+   passed, except checks listed for the repo in the publish setting `merge_advisory_checks` (e.g.
+   `owner/repo=image|collector`) which may be failing or pending. GitHub's CLEAN is not enough: it
+   can reflect CI that ran on an older base. The head must also have been quiet — unchanged for the
+   publish module's `merge_train_quiet_minutes` (default 10) — and the merge is pinned to it, so a
+   commit pushed after the first green run is never squashed away; a branch that still gets commits
+   after the merged head is kept and raised as "commits not merged" ([merge
+   train](../architecture.md#merge-train), issue #1075). A remaining quiet wait no longer than
+   `ci_wait_minutes` is sat out once in the run.
 3. **One at a time.** After a merge, every candidate still waiting in the run that shares a file
    with the one merged is brought onto the new base at once (`update-branch`, or the host's
    mechanical rebase — or `needs_redo` — when it now conflicts), so a file the train just touched
