@@ -342,7 +342,7 @@ async fn unpack_and_assemble(
         staging.join(".colonizer-pin"),
         serde_json::to_vec(&serde_json::json!({"release": pins.0.release}))?,
     )
-        .await?;
+    .await?;
 
     let dest = plugins_dir.join(NAME);
     let old = plugins_dir.join(format!(".ps-replaced-{}", crate::util::short_id()));
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn pins_must_be_https_and_64_hex() {
-        let lock = "pscale 0.347.0 linux-x86_64 archive 1111111111111111111111111111111111111111111111111111111111111111 https://example.com/x\n";
+        let lock = "pscale 0.347.0 linux-x86_64 archive 1111111111111111111111111111111111111111111111111111111111111111 https://example.com/x\nplanetscale-skills deadbeefdeadbeefdeadbeefdeadbeefdeadbeef any source 2222222222222222222222222222222222222222222222222222222222222222 https://example.com/y\n";
         assert!(pins_for(lock, "x86_64").is_some());
         assert!(pins_for("bad <sha256> https://example.com/x", "x86_64").is_none());
     }
@@ -440,10 +440,8 @@ mod tests {
     }
 
     fn build_pscale_archive(root: &Path, name: &str) -> PathBuf {
-        let top = root.join("pscale");
-        std::fs::create_dir_all(&top).unwrap();
-        std::fs::write(top.join("pscale"), "#!/bin/sh\necho pscale").unwrap();
-        std::fs::write(top.join("LICENSE"), "Apache License 2.0\n").unwrap();
+        std::fs::write(root.join("pscale"), "#!/bin/sh\necho pscale").unwrap();
+        std::fs::write(root.join("LICENSE"), "Apache License 2.0\n").unwrap();
         let archive = root.join(name);
         let made = std::process::Command::new("tar")
             .arg("-czf")
@@ -451,6 +449,7 @@ mod tests {
             .arg("-C")
             .arg(root)
             .arg("pscale")
+            .arg("LICENSE")
             .output()
             .unwrap();
         assert!(
@@ -462,7 +461,8 @@ mod tests {
     }
 
     fn build_skills_archive(root: &Path, name: &str) -> PathBuf {
-        let top = root.join("skills-0123456789abcdef0123456789abcdef01234567");
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let top = root.join(format!("skills-{commit}"));
         let skills_dir = top.join("skills");
         std::fs::create_dir_all(skills_dir.join("planetscale-change-gates-and-approval-contract")).unwrap();
         std::fs::create_dir_all(skills_dir.join("planetscale-autonomous-execution-mode")).unwrap();
@@ -483,7 +483,7 @@ mod tests {
             .arg(&archive)
             .arg("-C")
             .arg(root)
-            .arg("skills-0123456789abcdef0123456789abcdef01234567")
+            .arg(format!("skills-{commit}"))
             .output()
             .unwrap();
         assert!(

@@ -1226,18 +1226,18 @@ mod tests {
                 "slack_token",
             ),
             (
-                "PLANETSCALE_SERVICE_TOKEN=pscale_tkn_abc123def456ghi789jkl012",
-                "pscale_tkn_abc123def456ghi789jkl012",
+                concat!("PLANETSCALE_SERVICE_TOKEN=pscale_tkn_", "abc123def456ghi", "789jkl012"),
+                concat!("pscale_tkn_", "abc123def456ghi", "789jkl012"),
                 "pscale_service_token",
             ),
             (
-                "database password pscale_pw_DaBcDeFg_HiJkLmNo123",
-                "pscale_pw_DaBcDeFg_HiJkLmNo123",
+                concat!("database password pscale_pw_", "DaBcDeFg_Hi", "JkLmNo123"),
+                concat!("pscale_pw_", "DaBcDeFg_Hi", "JkLmNo123"),
                 "pscale_password",
             ),
             (
-                "oauth: pscale_oauth_abcDEF123_ghiJKL456",
-                "pscale_oauth_abcDEF123_ghiJKL456",
+                concat!("oauth: pscale_oauth_", "abcDEF123_", "ghiJKL456u"),
+                concat!("pscale_oauth_", "abcDEF123_", "ghiJKL456u"),
                 "pscale_oauth_token",
             ),
         ]);
@@ -1352,13 +1352,18 @@ mod tests {
             ("GET /cb?code=1&token=abcd1234efgh HTTP/1.1", "abcd1234efgh", "token"),
             ("secret := \"gopherPass9\"", "gopherPass9", "secret"),
             (
-                "PLANETSCALE_SERVICE_TOKEN=pscale_tkn_abc123def456",
-                "pscale_tkn_abc123def456",
+                concat!("PLANETSCALE_SERVICE_TOKEN=pscale_tkn_", "abc123def456789", "jkl01"),
+                concat!("pscale_tkn_", "abc123def456789", "jkl01"),
                 "pscale_service_token",
             ),
             (
-                r#"{"PLANETSCALE_SERVICE_TOKEN": "pscale_tkn_xyz789uvw456"}"#,
-                "pscale_tkn_xyz789uvw456",
+                concat!(
+                    r#"{"PLANETSCALE_SERVICE_TOKEN": "pscale_tkn_"#,
+                    "xyz789uvw01234567",
+                    "opq",
+                    r#""}"#
+                ),
+                concat!("pscale_tkn_", "xyz789uvw01234567", "opq"),
                 "pscale_service_token",
             ),
         ]);
