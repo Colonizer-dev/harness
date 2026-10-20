@@ -1530,6 +1530,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
+    // Warn about tier inversions during boot (issue #1366): cheap-to-find now, logged as a structured field.
+    let price_fn = |m: &str| {
+        let providers = app.providers();
+        let feed = app.price_feed.entries();
+        crate::providers::pricing_for(&providers, m, Some(feed.as_ref())).map(|p| (p.input_per_mtok + p.output_per_mtok) / 2.0)
+    };
+    let inversions = crate::routing::tier_inversions(&model, &model_low, &model_high, price_fn);
+    if !inversions.is_empty() {
+        for msg in &inversions {
+            log.warn(format!("tier inversion: {msg}")).await;
+        }
+    }
+
     let mut record = json!({
         // Which decision this is and how Jev took part (issue #583), so a report can compare
         // Jev-acted decisions against rule ones by outcome without re-deriving either.
@@ -1542,7 +1555,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "source": tier_decision.source,
         "score": tier_decision.score,
         "reason": tier_decision.reason,
-        "model": if model_changed { json!(effective_model) } else { Value::Null },
+        // Always set model to the resolved lead model, so the web can display which model ran (issue #1366).
+        "model": if effective_model.is_empty() { Value::Null } else { json!(effective_model) },
         // The harness the decision was made for, so a routing record can be joined against the
         // spend journal's per-harness rows (issue #296).
         "agent": agent.id.clone(),
