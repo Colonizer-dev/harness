@@ -11,4 +11,4 @@
 node      24-bookworm   any  image  14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0  node:24-bookworm
 python    3.13-bookworm any  image  073ffebb96ae4d0ed73ccad59f08c47bd84af8a79f5258130f8458ac50ad9ff4  python:3.13-bookworm
 rust      1-bookworm    any  image  e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29  rust:1-bookworm
-go        1-bookworm    any  image  5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61  golang:1-bookworm
+go        1-bookworm    any  image  5c3e9b43cfd3bb95c7937462e29d87ada57b481a96fa23ad0eb61778d7a00110  golang:1-bookworm
