@@ -59,8 +59,15 @@ pub struct SignalStatus {
     pub reason: Option<&'static str>,
     pub records_sent: u64,
     pub bytes_sent: u64,
-    /// This signal's ledger bytes not yet behind a committed cursor (an estimate).
+    /// Ledger bytes of this signal not yet behind a committed cursor (its share of the status's
+    /// global `backlog_bytes`).
     pub backlog_bytes: u64,
+    /// Records of this signal dropped rather than sent: refused by the backend, past the backlog
+    /// window, oversized, malformed, or lost to a hole. The per-signal mirror of the `dropped` map.
+    pub records_dropped: u64,
+    /// Holes in what this signal could read (rotation, truncation, backlog expiry, a deleted
+    /// colony): one per `export_gap` record the tailer produced for it.
+    pub gaps: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -69,6 +76,36 @@ pub struct PartialSuccess {
     pub signal: &'static str,
     pub rejected: u64,
     pub message: Option<String>,
+}
+
+/// Per-signal request-size budgets, held in place of [`crate::batch::DEFAULT_REQUEST_BYTES`] for
+/// the rest of the process once a `413` says the default no longer fits the backend. Not persisted:
+/// a restart re-reads the config and starts at the default again.
+#[derive(Clone, Debug, Default)]
+pub struct Caps(BTreeMap<&'static str, usize>);
+
+/// The smallest a `413`-shrunk budget may fall: 16 KiB, six halvings from the 1 MiB default. Below
+/// this the resource-and-scope envelope alone would crowd out almost every record, so the shrink
+/// path would truncate or drop records rather than fit more per request, and a limit that small is
+/// not one a real collector sets. ([`crate::batch::MIN_REQUEST_BYTES`] is the *config's* floor.)
+const MIN_CAP_BYTES: usize = 16 * 1024;
+
+impl Caps {
+    /// The budget requests of `signal` are built within.
+    pub fn get(&self, signal: &'static str) -> usize {
+        self.0.get(signal).copied().unwrap_or(crate::batch::DEFAULT_REQUEST_BYTES)
+    }
+
+    /// Remembers half `signal`'s budget, floored at [`MIN_CAP_BYTES`].
+    pub fn halve(&mut self, signal: &'static str) {
+        let next = (self.get(signal) / 2).max(MIN_CAP_BYTES);
+        self.0.insert(signal, next);
+    }
+
+    /// Whether `signal`'s budget was shrunk, and to what.
+    pub fn shrunk_to(&self, signal: &'static str) -> Option<usize> {
+        self.0.get(signal).copied()
+    }
 }
 
 impl Status {
@@ -108,6 +145,21 @@ impl Status {
         s.last_error = Some(message);
         s.reason = reason;
     }
+
+    /// Counts `n` records of `signal` dropped rather than sent: the same counts the `dropped` map
+    /// holds by reason, seen per signal.
+    pub fn dropped_records(&mut self, signal: &'static str, n: u64) {
+        if n > 0 {
+            self.signal(signal).records_dropped += n;
+        }
+    }
+
+    /// Counts `n` holes in what could be read: one per `export_gap` record.
+    pub fn counted_gaps(&mut self, signal: &'static str, n: u64) {
+        if n > 0 {
+            self.signal(signal).gaps += n;
+        }
+    }
 }
 
 /// The bytes of one source not yet behind its committed cursor: the rest of the file the cursor is
@@ -144,4 +196,40 @@ pub(crate) fn backlog_by_signal(files: &[SourceFile], state: &State, destination
         *out.entry(signal.to_string()).or_default() += backlog_bytes(file, &cursor);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_signal_never_shrunk_is_budgeted_at_the_default() {
+        let mut caps = Caps::default();
+        assert_eq!(caps.get("logs"), crate::batch::DEFAULT_REQUEST_BYTES);
+        assert_eq!(caps.get("metrics"), crate::batch::DEFAULT_REQUEST_BYTES);
+        assert_eq!(caps.shrunk_to("logs"), None, "never halved");
+        caps.halve("logs");
+        assert_eq!(
+            caps.get("traces"),
+            crate::batch::DEFAULT_REQUEST_BYTES,
+            "one signal's halving leaves the others alone"
+        );
+    }
+
+    #[test]
+    fn halving_halves_and_floors_at_min_cap_bytes() {
+        let mut caps = Caps::default();
+        caps.halve("logs");
+        assert_eq!(caps.shrunk_to("logs"), Some(crate::batch::DEFAULT_REQUEST_BYTES / 2));
+        caps.halve("logs");
+        assert_eq!(caps.get("logs"), crate::batch::DEFAULT_REQUEST_BYTES / 4);
+        // Well past the floor: six halvings reach it from the 1 MiB default, and it holds.
+        for _ in 0..16 {
+            caps.halve("logs");
+        }
+        assert_eq!(caps.get("logs"), MIN_CAP_BYTES);
+        assert_eq!(caps.shrunk_to("logs"), Some(MIN_CAP_BYTES));
+        caps.halve("logs");
+        assert_eq!(caps.get("logs"), MIN_CAP_BYTES, "halving at the floor stays there");
+    }
 }
