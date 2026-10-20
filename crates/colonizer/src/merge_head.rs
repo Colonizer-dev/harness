@@ -67,11 +67,19 @@ fn word(v: &Value, key: &str) -> String {
 
 /// `GET /repos/{repo}/commits/{sha}/check-runs` plus `…/status` for one commit: anything failed
 /// fails, anything unfinished (or finished without a passing conclusion) is pending, and a commit
-/// with neither check runs nor statuses has not been checked at all.
-pub(crate) fn head_ci_from(check_runs: Option<&Value>, status: Option<&Value>) -> HeadCi {
+/// with neither check runs nor statuses has not been checked at all. Checks in `advisory` are skipped.
+pub(crate) fn head_ci_from(check_runs: Option<&Value>, status: Option<&Value>, advisory: &[String]) -> HeadCi {
+    let advisory_lower: std::collections::HashSet<_> = advisory.iter().map(|s| s.to_lowercase()).collect();
     let mut seen = false;
+    let mut seen_any = false;
     let mut pending = false;
     for run in check_runs.and_then(|v| v["check_runs"].as_array()).into_iter().flatten() {
+        let name = run["name"].as_str().unwrap_or("").to_lowercase();
+        seen_any = true;
+        // Skip advisory checks.
+        if advisory_lower.contains(&name) {
+            continue;
+        }
         seen = true;
         let (state, conclusion) = (word(run, "status"), word(run, "conclusion"));
         if FAILING.contains(&conclusion.as_str()) {
@@ -81,6 +89,12 @@ pub(crate) fn head_ci_from(check_runs: Option<&Value>, status: Option<&Value>) -
     }
     // The combined status of a commit with no statuses says `pending`: only real ones count.
     for status in status.and_then(|v| v["statuses"].as_array()).into_iter().flatten() {
+        let context = status["context"].as_str().unwrap_or("").to_lowercase();
+        seen_any = true;
+        // Skip advisory checks.
+        if advisory_lower.contains(&context) {
+            continue;
+        }
         seen = true;
         match word(status, "state").as_str() {
             "FAILURE" | "ERROR" => return HeadCi::Failing,
@@ -88,10 +102,17 @@ pub(crate) fn head_ci_from(check_runs: Option<&Value>, status: Option<&Value>) -
             _ => pending = true,
         }
     }
-    match (seen, pending) {
-        (false, _) => HeadCi::NotRun,
-        (true, true) => HeadCi::Pending,
-        (true, false) => HeadCi::Green,
+    match (seen, seen_any) {
+        (false, false) => HeadCi::NotRun,
+        // All checks are advisory; with no non-advisory checks run, not actually run
+        (false, true) => HeadCi::NotRun,
+        (true, _) => {
+            if pending {
+                HeadCi::Pending
+            } else {
+                HeadCi::Green
+            }
+        }
     }
 }
 
@@ -180,6 +201,8 @@ pub(crate) struct Candidate<'a> {
     /// Delete the branch after a clean merge (nothing is stacked on it).
     pub delete_branch: bool,
     pub require_ci: bool,
+    /// Check names that should not block the merge even if failing.
+    pub advisory: &'a [String],
 }
 
 /// A merge that happened.
@@ -210,7 +233,7 @@ pub(crate) enum Outcome {
 
 /// What a merge asks of GitHub.
 pub(crate) trait HeadOps {
-    async fn read_head(&self, repo: &str, sha: &str) -> Result<HeadReading, String>;
+    async fn read_head(&self, repo: &str, sha: &str, advisory: &[String]) -> Result<HeadReading, String>;
     /// Squash-merges pinned to `head` (the merge API's `sha`); the squash commit's sha when GitHub says.
     async fn merge_pinned(&self, repo: &str, number: u64, head: &str, title: &str) -> Result<Option<String>, String>;
     /// The branch's tip; `None` when the branch is gone.
@@ -220,7 +243,7 @@ pub(crate) trait HeadOps {
 
 /// The shared merge: the quiet-head gate, the pinned squash, and the post-merge drift check.
 pub(crate) async fn merge_quiet_head<O: HeadOps>(ops: &O, c: &Candidate<'_>, now: DateTime<Utc>, quiet: Duration) -> Outcome {
-    let reading = match ops.read_head(c.repo, c.head).await {
+    let reading = match ops.read_head(c.repo, c.head, c.advisory).await {
         Ok(r) => r,
         Err(e) => {
             return Outcome::NotYet {
@@ -350,7 +373,7 @@ impl GhHead<'_> {
 }
 
 impl HeadOps for GhHead<'_> {
-    async fn read_head(&self, repo: &str, sha: &str) -> Result<HeadReading, String> {
+    async fn read_head(&self, repo: &str, sha: &str, advisory: &[String]) -> Result<HeadReading, String> {
         let runs = self
             .get(&format!("repos/{repo}/commits/{sha}/check-runs?per_page=100"))
             .await?
@@ -358,7 +381,7 @@ impl HeadOps for GhHead<'_> {
         let status = self.get(&format!("repos/{repo}/commits/{sha}/status")).await.ok().flatten();
         let commit = self.get(&format!("repos/{repo}/commits/{sha}")).await.ok().flatten();
         Ok(HeadReading {
-            ci: head_ci_from(Some(&runs), status.as_ref()),
+            ci: head_ci_from(Some(&runs), status.as_ref(), advisory),
             pushed_at: pushed_at_from(commit.as_ref(), Some(&runs)),
         })
     }
@@ -449,7 +472,7 @@ mod tests {
     }
 
     impl HeadOps for FakeGh {
-        async fn read_head(&self, _repo: &str, sha: &str) -> Result<HeadReading, String> {
+        async fn read_head(&self, _repo: &str, sha: &str, _advisory: &[String]) -> Result<HeadReading, String> {
             self.log.borrow_mut().push(format!("read {sha}"));
             self.heads
                 .borrow()
@@ -481,6 +504,7 @@ mod tests {
             title: "Change 7 (#7)",
             delete_branch: true,
             require_ci: true,
+            advisory: &[],
         }
     }
 
@@ -489,29 +513,81 @@ mod tests {
         let run = |status: &str, conclusion: Option<&str>| json!({"status": status, "conclusion": conclusion, "started_at": "2026-10-05T11:00:00Z"});
         let runs = |items: Vec<Value>| json!({"total_count": items.len(), "check_runs": items});
         let none = json!({"state": "pending", "statuses": []});
-        assert_eq!(head_ci_from(Some(&runs(vec![])), Some(&none)), HeadCi::NotRun);
+        assert_eq!(head_ci_from(Some(&runs(vec![])), Some(&none), &[]), HeadCi::NotRun);
         assert_eq!(
-            head_ci_from(Some(&runs(vec![run("completed", Some("success"))])), Some(&none)),
+            head_ci_from(Some(&runs(vec![run("completed", Some("success"))])), Some(&none), &[]),
             HeadCi::Green
         );
         assert_eq!(
             head_ci_from(
                 Some(&runs(vec![run("completed", Some("success")), run("in_progress", None)])),
-                None
+                None,
+                &[]
             ),
             HeadCi::Pending
         );
         assert_eq!(
-            head_ci_from(Some(&runs(vec![run("completed", Some("failure"))])), None),
+            head_ci_from(Some(&runs(vec![run("completed", Some("failure"))])), None, &[]),
             HeadCi::Failing
         );
         let red_status = json!({"state": "failure", "statuses": [{"state": "failure"}]});
         assert_eq!(
-            head_ci_from(Some(&runs(vec![run("completed", Some("success"))])), Some(&red_status)),
+            head_ci_from(Some(&runs(vec![run("completed", Some("success"))])), Some(&red_status), &[]),
             HeadCi::Failing
         );
         let only_status = json!({"state": "success", "statuses": [{"state": "success"}]});
-        assert_eq!(head_ci_from(None, Some(&only_status)), HeadCi::Green);
+        assert_eq!(head_ci_from(None, Some(&only_status), &[]), HeadCi::Green);
+    }
+
+    #[test]
+    fn a_red_advisory_check_is_ignored_a_red_non_advisory_is_not() {
+        let run = |name: &str, status: &str, conclusion: Option<&str>| json!({"name": name, "status": status, "conclusion": conclusion, "started_at": "2026-10-05T11:00:00Z"});
+        let runs = |items: Vec<Value>| json!({"total_count": items.len(), "check_runs": items});
+        let none = json!({"state": "pending", "statuses": []});
+
+        // A red advisory check only: should be NotRun, not Green (no non-advisory checks ran)
+        let advisory = vec!["advisory-check".to_string()];
+        assert_eq!(
+            head_ci_from(
+                Some(&runs(vec![run("advisory-check", "completed", Some("failure"))])),
+                Some(&none),
+                &advisory
+            ),
+            HeadCi::NotRun
+        );
+
+        // A green advisory check only: should be NotRun (no non-advisory checks ran)
+        assert_eq!(
+            head_ci_from(
+                Some(&runs(vec![run("advisory-check", "completed", Some("success"))])),
+                Some(&none),
+                &advisory
+            ),
+            HeadCi::NotRun
+        );
+
+        // A red non-advisory check makes the head Failing
+        assert_eq!(
+            head_ci_from(
+                Some(&runs(vec![run("required-check", "completed", Some("failure"))])),
+                Some(&none),
+                &advisory
+            ),
+            HeadCi::Failing
+        );
+
+        // Both red, but one is advisory: still Failing (non-advisory red takes precedence)
+        assert_eq!(
+            head_ci_from(
+                Some(&runs(vec![
+                    run("advisory-check", "completed", Some("failure")),
+                    run("required-check", "completed", Some("failure")),
+                ])),
+                Some(&none),
+                &advisory
+            ),
+            HeadCi::Failing
+        );
     }
 
     #[test]

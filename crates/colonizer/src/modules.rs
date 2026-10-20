@@ -756,7 +756,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "merge_train_deny_orgs": {"type": "string", "title": "Organizations the train never merges in", "description": "Comma-separated organization or owner names the train never merges in, whatever the switch above or the overrides say.", "default": ""},
                 "merge_train_authors": {"type": "string", "title": "Allowed commit authors", "description": "Comma-separated GitHub logins or email addresses that a pull request's commits may be authored by; a pull request carrying any other author is left open. Empty means the identity this mothership publishes as: the `gh` login and its noreply email, the author of every publish and catch-up commit. Compared case-insensitively.", "default": ""},
                 "merge_train_forbid": {"type": "string", "title": "Refuse commit messages containing", "description": "Comma-separated, case-insensitive substrings; a pull request any of whose commit messages contains one is never merged. For example `Co-Authored-By: Claude`.", "default": ""},
-                "merge_train_quiet_minutes": {"type": "integer", "title": "Quiet period before a merge (minutes)", "description": "The merge train and its loop merge a pull request only once its head has been unchanged this long, counted from the later of the head commit's time and the first check started on it, and only on checks that ran on that exact head. A push during the merge makes GitHub refuse it, and a branch that gets commits after the merged head is kept and raised as \"commits not merged\". 0 merges as soon as the head's checks are green.", "minimum": 0, "maximum": 1440, "default": 10}
+                "merge_train_quiet_minutes": {"type": "integer", "title": "Quiet period before a merge (minutes)", "description": "The merge train and its loop merge a pull request only once its head has been unchanged this long, counted from the later of the head commit's time and the first check started on it, and only on checks that ran on that exact head. A push during the merge makes GitHub refuse it, and a branch that gets commits after the merged head is kept and raised as \"commits not merged\". 0 merges as soon as the head's checks are green.", "minimum": 0, "maximum": 1440, "default": 10},
+                "merge_advisory_checks": {"type": "string", "title": "Non-required checks to ignore during merge", "format": "merge-advisory-checks", "description": "Comma-separated `owner/repo=check|check` entries: checks that should not block a merge even if they fail. Useful for informational or optional checks that fail while required checks are green. Exact check-name match (case-insensitive). Example: `acme/widget=image|collector`.", "default": ""}
             }}),
         )],
         "memory" => vec![
@@ -1201,6 +1202,14 @@ pub(crate) fn validate_settings(
         if spec["format"].as_str() == Some("merge-train-overrides")
             && let Some(s) = value.as_str()
             && let Err(problem) = crate::merge_train::validate_overrides(s)
+        {
+            return Err(format!("setting `{key}`: {problem}"));
+        }
+        // The merge train's advisory checks setting, checked with the same parser the train reads
+        // them by: a malformed entry is refused here, at save time, never dropped where it matters.
+        if spec["format"].as_str() == Some("merge-advisory-checks")
+            && let Some(s) = value.as_str()
+            && let Err(problem) = crate::merge_train::validate_advisory_checks(s)
         {
             return Err(format!("setting `{key}`: {problem}"));
         }

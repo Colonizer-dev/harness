@@ -102,7 +102,7 @@ impl Fake {
 }
 
 impl HeadOps for Fake {
-    async fn read_head(&self, _repo: &str, sha: &str) -> Result<HeadReading, String> {
+    async fn read_head(&self, _repo: &str, sha: &str, _advisory: &[String]) -> Result<HeadReading, String> {
         self.say(format!("head {sha}"));
         Ok(self.heads.borrow().get(sha).cloned().unwrap_or(HeadReading {
             ci: merge_head::HeadCi::Green,
@@ -288,6 +288,7 @@ fn reading(n: u64, mergeability: Mergeability, ci: CiState, behind: u64) -> Read
                 base_ref_name: Some("main".into()),
                 green_checks: Vec::new(),
                 red_checks: Vec::new(),
+                pending_checks: Vec::new(),
             },
             commits: vec![PrCommit {
                 authors: vec![(
