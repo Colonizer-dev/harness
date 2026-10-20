@@ -166,6 +166,49 @@ test('the default layer denies git add/commit/stash and writes under .git; reads
     'git stash list', 'git stash show', 'git --no-pager stash list']) {
     assert.equal(decide(policy, command, '/workspace'), null, command);
   }
+});
+
+test('the default layer asks pscale commands with write roles or --force', () => {
+  const policy = loadExecPolicy({}, { readFile: () => null });
+  const ask = (command) => {
+    const hit = decide(policy, command, '/workspace');
+    assert.equal(hit?.decision, 'ask', command);
+    assert.ok(['pscale-write-role', 'pscale-force'].includes(hit?.rule), command);
+  };
+  // pscale-write-role asks for admin, writer, readwriter roles
+  for (const command of [
+    'pscale sql db main --role admin --execute "select 1"',
+    'pscale sql db main --role=admin --execute "select 1"',
+    'pscale sql db main --role writer --execute "select 1"',
+    'pscale sql db main --role=readwriter --execute "select 1"',
+    'pscale shell --role admin',
+    'pscale password create --role writer',
+    '/opt/colonizer/plugins/planetscale/bin/pscale sql db --role admin',
+  ]) {
+    ask(command);
+    assert.equal(decide(policy, command, '/workspace').rule, 'pscale-write-role', command);
+  }
+  // pscale-force asks for --force flag
+  for (const command of [
+    'pscale sql db main --force',
+    'pscale branch delete main --force',
+    '/opt/colonizer/plugins/planetscale/bin/pscale branch delete --force',
+  ]) {
+    ask(command);
+    assert.equal(decide(policy, command, '/workspace').rule, 'pscale-force', command);
+  }
+  // These should not ask
+  for (const command of [
+    'pscale sql db main --execute "select 1"',
+    'pscale sql db main --role reader --execute "select 1"',
+    'pscale sql db main --role=reader --execute "select 1"',
+    'pscale auth check --format json',
+    'pscale branch list',
+    'ls pscale',
+    'echo pscale --force',
+  ]) {
+    assert.equal(decide(policy, command, '/workspace'), null, command);
+  }
   // The wall is the design, so a later layer cannot wave it through: the strictest decision wins
   // across layers, and an allow is the loosest there is.
   const widened = {
@@ -305,7 +348,7 @@ test('a malformed layer is ignored with a warning; the default keeps enforcing',
   assert.deepEqual(rules.map((rule) => rule.id), ['fine']);
   const emptied = loadExecPolicy({ COLONIZER_EXEC_POLICY: '{"rules": [{"decision": "deny"}]}' });
   assert.deepEqual(emptied.warnings, []);
-  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 4], ['install', 0]]);
+  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 6], ['install', 0]]);
   assert.equal(decide(emptied, 'cat .env', '/repo').rule, 'secret-paths');
 });
 
@@ -347,7 +390,7 @@ test('the question carries the rule, Allow and Deny options', () => {
   assert.match(questions[0].question, /Exec policy rule `writes-outside-repo` \(default\)/);
   assert.match(questions[0].question, /echo x > \/etc\/foo/);
   assert.deepEqual(questions[0].options.map((option) => option.label), ['Allow', 'Deny']);
-  assert.equal(defaultPolicy().rules.length, 4);
+  assert.equal(defaultPolicy().rules.length, 6);
 });
 
 test('the installed hook denies with the rule named, and logs every decision', async () => {

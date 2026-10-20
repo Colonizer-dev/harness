@@ -2200,7 +2200,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.store()
         .write_file(id, "vm/session.json", &serde_json::to_vec_pretty(&session_json)?)
         .await?;
-    app.store().write_file(id, "vm/boot.sh", boot_script().as_bytes()).await?;
+    app.store()
+        .write_file(id, "vm/boot.sh", boot_script(&plugin_names).as_bytes())
+        .await?;
 
     if memory_on && memory::uses_mem0(app).await {
         // mem0's notes are written into the session directory, which is already the colony's
@@ -2791,8 +2793,16 @@ exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --toke
 /// block. The constant keeps the network preference out of this file — it is logic with its own
 /// tests — while the marker holds its place in the ordering the assertions below pin (this block
 /// touches `/proc` and `/etc`, so it runs early, before the mesh, the path policy and agentd).
-fn boot_script() -> String {
-    BOOT_SCRIPT.replace(crate::ipv6::MARKER, crate::ipv6::SCRIPT)
+fn boot_script(plugins: &[String]) -> String {
+    let mut script = BOOT_SCRIPT.replace(crate::ipv6::MARKER, crate::ipv6::SCRIPT);
+    // Add planetscale to PATH if it's loaded.
+    if plugins.iter().any(|p| p == crate::planetscale::NAME) {
+        script = script.replace(
+            r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#,
+            r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:/opt/colonizer/plugins/planetscale/bin:$PATH""#,
+        );
+    }
+    script
 }
 
 #[cfg(test)]
@@ -3869,7 +3879,7 @@ mod tests {
     #[test]
     fn boot_script_puts_node_first() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         assert!(
             script.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#),
@@ -3882,7 +3892,7 @@ mod tests {
     #[test]
     fn boot_script_puts_the_service_cli_on_the_path() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let link = script
             .find("ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc")
@@ -3907,7 +3917,7 @@ mod tests {
     #[test]
     fn boot_script_links_colonizer_svc_and_says_so_when_it_cannot() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let start = script.find("ln -sf /opt/colonizer/bin/colonizer-agentd").unwrap();
         let end = script.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
@@ -3946,7 +3956,7 @@ mod tests {
     #[test]
     fn boot_script_enforces_the_path_policy_before_the_agent_starts() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         for kind in ["mask-file", "mask-dir", "protect"] {
             assert!(script.contains(kind), "the guest handles {kind}");
@@ -3978,7 +3988,7 @@ mod tests {
     #[test]
     fn boot_script_hardens_kernel_interfaces_before_the_agent_runs() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let mesh = script
             .find(r#"|| echo "colonizer: joining the mesh failed" >&2"#)
@@ -4010,7 +4020,7 @@ mod tests {
     #[test]
     fn boot_script_passes_seal_token_to_agentd() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let exec = script
             .find("exec /opt/colonizer/bin/colonizer-agentd")
@@ -4030,7 +4040,7 @@ mod tests {
     /// passes, because each of them only looks for text the two variants share.
     #[test]
     fn the_ipv6_block_is_spliced_in_and_not_left_as_a_marker() {
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         assert!(
             !script.contains(crate::ipv6::MARKER),

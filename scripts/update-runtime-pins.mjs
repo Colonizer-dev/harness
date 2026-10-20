@@ -40,6 +40,7 @@ const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : u
 const imagesPath = option('--images') ?? join(root, 'crates/colonizer/images.lock');
 const agentPath = option('--agent') ?? join(root, 'crates/colonizer/claude-code.lock');
 const understandAnythingPath = option('--understand-anything') ?? join(root, 'crates/colonizer/understand-anything.lock');
+const planetscalePath = option('--planetscale') ?? join(root, 'crates/colonizer/planetscale.lock');
 
 // --check names the read-only mode the default already is, so CI can say what it means; it refuses
 // to travel with --write, which asks for the opposite.
@@ -54,6 +55,12 @@ const ANTHROPIC = 'https://downloads.claude.ai/claude-code-releases';
 const UNDERSTAND_ANYTHING_REPO = 'Egonex-AI/Understand-Anything';
 const UNDERSTAND_ANYTHING_API = `https://api.github.com/repos/${UNDERSTAND_ANYTHING_REPO}`;
 const UNDERSTAND_ANYTHING_CODELOAD = `https://codeload.github.com/${UNDERSTAND_ANYTHING_REPO}/tar.gz`;
+const PLANETSCALE_CLI_REPO = 'planetscale/cli';
+const PLANETSCALE_CLI_API = `https://api.github.com/repos/${PLANETSCALE_CLI_REPO}`;
+const PLANETSCALE_SKILLS_REPO = 'planetscale/skills';
+const PLANETSCALE_SKILLS_API = `https://api.github.com/repos/${PLANETSCALE_SKILLS_REPO}`;
+const PLANETSCALE_SKILLS_CODELOAD = `https://codeload.github.com/${PLANETSCALE_SKILLS_REPO}/tar.gz`;
+const PLANETSCALE_MIN_VERSION = '0.292.0';
 const USER_AGENT = 'colonizer-runtime-pins';
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -368,6 +375,97 @@ async function proposeUnderstandAnything(lines, entries) {
   return sections;
 }
 
+async function proposePlanetscale(lines, entries) {
+  const pscaleRows = [];
+  const sections = [];
+  const [psEntries, skillsEntries] = [entries.filter((e) => e.name === 'pscale'), entries.filter((e) => e.name === 'planetscale-skills')];
+
+  // Get latest pscale version and verify minimum
+  const r = await fetch(`${PLANETSCALE_CLI_API}/releases/latest`, { headers: githubHeaders() });
+  if (!r.ok) throw new Error(`pscale latest: HTTP ${r.status}`);
+  const tag = (await r.json())?.tag_name?.slice(1);
+  if (!VERSION.test(tag)) throw new Error(`pscale version ${tag} invalid`);
+  if (compareVersions(tag, PLANETSCALE_MIN_VERSION) < 0) throw new Error(`pscale ${tag} below ${PLANETSCALE_MIN_VERSION}`);
+
+  // Get pscale checksums
+  const chkR = await fetch(`https://github.com/planetscale/cli/releases/download/v${tag}/pscale_${tag}_checksums.txt`, { headers: { 'user-agent': USER_AGENT } });
+  if (!chkR.ok) throw new Error(`pscale checksums: HTTP ${chkR.status}`);
+  const chk = new Map();
+  for (const line of (await chkR.text()).trim().split('\n')) {
+    const [sha, f] = line.trim().split(/\s+/);
+    const m = f?.match(/pscale_[^_]+_(linux)_(amd64|arm64)\.tar\.gz/) || f?.match(/pscale_[^_]+_(macOS)_(arm64)\.tar\.gz/);
+    if (m && SHA256.test(sha)) {
+      const pm = { 'linux_amd64': 'linux-x86_64', 'linux_arm64': 'linux-aarch64', 'macOS_arm64': 'darwin-aarch64' };
+      chk.set(pm[`${m[1]}_${m[2]}`], sha);
+    }
+  }
+
+  // Check pscale entries
+  for (const entry of psEntries) {
+    const pinned = { name: 'pscale', ...Object.fromEntries([entry, lines[entry.index]].slice(0, 1).map((_, i) => {
+      const [n, v, p, k, s, u] = lines[entry.index].trim().split(/\s+/);
+      return [[n, v, p, k, s, u]];
+    })[0] ?? []) };
+    if (!pinned.version) throw new Error('pscale lock invalid');
+    const url = pinned.url.replace(/pscale_[^_]+_/, `pscale_${tag}_`);
+    const res = await fetch(url, { headers: { 'user-agent': USER_AGENT } });
+    if (!res.ok) throw new Error(`pscale ${entry.platform} tarball: HTTP ${res.status}`);
+    const sha = createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex');
+    const expected = chk.get(entry.platform);
+    if (!expected) throw new Error(`pscale checksums missing ${entry.platform}`);
+    if (sha !== expected) throw new Error(`pscale ${entry.platform} checksum mismatch`);
+    if (tag === pinned.version && sha === pinned.sha) {
+      console.log(`pscale ${entry.platform}: current (${tag})`);
+      continue;
+    }
+    console.log(`pscale ${entry.platform}: ${pinned.version}/${pinned.sha.slice(0, 12)} -> ${tag}/${sha.slice(0, 12)}`);
+    applyUpdate(lines, entry, { version: tag, sha, url });
+    pscaleRows.push({ platform: entry.platform, version: tag, oldVersion: pinned.version, oldSha: pinned.sha, sha });
+  }
+
+  // Check planetscale-skills
+  let skillsRow = null;
+  if (skillsEntries.length > 0) {
+    const br = await fetch(PLANETSCALE_SKILLS_API, { headers: githubHeaders() });
+    if (!br.ok) throw new Error(`planetscale/skills: HTTP ${br.status}`);
+    const branch = (await br.json())?.default_branch;
+    const ref = await fetch(`${PLANETSCALE_SKILLS_API}/git/refs/heads/${encodeURIComponent(branch)}`, { headers: githubHeaders() });
+    if (!ref.ok) throw new Error(`planetscale/skills ref: HTTP ${ref.status}`);
+    const commit = (await ref.json())?.object?.sha;
+    if (!COMMIT.test(commit)) throw new Error(`planetscale/skills commit invalid`);
+
+    for (const entry of skillsEntries) {
+      const pinned = lines[entry.index].trim().split(/\s+/);
+      if (pinned[0] !== 'planetscale-skills') throw new Error('planetscale-skills lock invalid');
+      if (pinned[1] === commit && pinned[4] === pinned[5]?.split('/').pop()) {
+        console.log(`planetscale-skills: current (${commit})`);
+        continue;
+      }
+      const tr = await fetch(`${PLANETSCALE_SKILLS_CODELOAD}/${commit}`, { headers: { 'user-agent': USER_AGENT } });
+      if (!tr.ok) throw new Error(`planetscale-skills tarball: HTTP ${tr.status}`);
+      const sha = createHash('sha256').update(Buffer.from(await tr.arrayBuffer())).digest('hex');
+      console.log(`planetscale-skills: ${pinned[1].slice(0, 12)} -> ${commit.slice(0, 12)}`);
+      lines[entry.index] = ['planetscale-skills', commit, 'any', 'source', sha, `${PLANETSCALE_SKILLS_CODELOAD}/${commit}`].join('  ');
+      skillsRow = { commit, oldCommit: pinned[1], sha, oldSha: pinned[4] };
+    }
+  }
+
+  if (pscaleRows.length || skillsRow) {
+    let sec = '';
+    if (pscaleRows.length) {
+      const moved = pscaleRows.some((r) => r.version !== pscaleRows[0].version);
+      sec += `### \`pscale\`: ${moved ? `${pscaleRows[0].oldVersion} → [${pscaleRows[0].version}](${PLANETSCALE_CLI_API}/releases/tag/v${pscaleRows[0].version})` : `checksums moved under ${pscaleRows[0].version}`}\n\n`;
+      for (const r of pscaleRows) sec += `- \`${r.platform}\`: \`${r.oldSha.slice(0, 12)}\` → \`${r.sha.slice(0, 12)}\`\n`;
+      sec += '\n';
+    }
+    if (skillsRow) {
+      sec += `### \`planetscale-skills\`\n\ncommit \`${skillsRow.oldCommit.slice(0, 12)}\` → \`${skillsRow.commit.slice(0, 12)}\`\n\nsha256 \`${skillsRow.oldSha.slice(0, 12)}\` → \`${skillsRow.sha.slice(0, 12)}\`\n\n`;
+    }
+    sections.push(sec);
+  }
+  return sections;
+}
+
 async function main() {
   const read = (path) => {
     const text = readFileSync(path, 'utf8');
@@ -375,18 +473,19 @@ async function main() {
   };
   const images = read(imagesPath);
   const agent = read(agentPath);
-  // The skillset lock is optional until the mothership ships it: a run without it only reports the
-  // other two pins, and nothing here invents a file that does not exist yet.
+  // The skillset locks are optional until the mothership ships them: a run without them only reports the
+  // other pins, and nothing here invents a file that does not exist yet.
   const understandAnything = existsSync(understandAnythingPath) ? read(understandAnythingPath) : null;
+  const planetscale = existsSync(planetscalePath) ? read(planetscalePath) : null;
   // Everything resolves before anything writes: a failure above leaves every file untouched.
   const sections = [
     ...(await proposeImages(images.lines, images.entries.filter((entry) => entry.kind === 'image'))),
     ...(await proposeAgent(agent.lines, agent.entries.filter((entry) => entry.kind === 'agent'))),
   ];
-  // The skillset comes from GitHub's API, which answers 403 to an unauthenticated or rate-limited
-  // request and 404 to a repository that moved. That says nothing about the other two pins, so this
-  // one is reported and stepped over rather than failing the whole run — under --check it simply
-  // cannot say whether the skillset moved, and says that instead of claiming a pin is current.
+  // The skillsets come from GitHub's API, which answers 403 to an unauthenticated or rate-limited
+  // request and 404 to a repository that moved. That says nothing about the other pins, so these
+  // ones are reported and stepped over rather than failing the whole run — under --check they simply
+  // cannot say whether the skillsets moved, and say that instead of claiming a pin is current.
   let understandAnythingFailure;
   if (understandAnything) {
     try {
@@ -395,6 +494,16 @@ async function main() {
       understandAnythingFailure = error.message;
       console.warn(`warning: ${UNDERSTAND_ANYTHING_REPO}: could not check the skillset pin: ${error.message}`);
       console.warn('warning: the other runtime pins are unaffected; re-run with GITHUB_TOKEN to check the skillset too');
+    }
+  }
+  let planetscaleFailure;
+  if (planetscale) {
+    try {
+      sections.push(...(await proposePlanetscale(planetscale.lines, planetscale.entries)));
+    } catch (error) {
+      planetscaleFailure = error.message;
+      console.warn(`warning: ${PLANETSCALE_CLI_REPO}: could not check the planetscale pin: ${error.message}`);
+      console.warn('warning: the other runtime pins are unaffected');
     }
   }
 
@@ -408,6 +517,9 @@ async function main() {
       ...(understandAnything && !understandAnythingFailure
         ? [[understandAnythingPath, understandAnything, understandAnything.lines]]
         : []),
+      ...(planetscale && !planetscaleFailure
+        ? [[planetscalePath, planetscale, planetscale.lines]]
+        : []),
     ]) {
       const after = lines.join('\n');
       if (after === before.text) continue;
@@ -417,28 +529,30 @@ async function main() {
   }
   const summary = option('--summary');
   if (summary) {
-    const skipped = understandAnythingFailure
-      ? ['', `The \`understand-anything\` pin was not checked: ${understandAnythingFailure}. Re-run with \`GITHUB_TOKEN\` set, or run the script by hand.`]
-      : [];
+    const skipped = [
+      ...(understandAnythingFailure ? [`The \`understand-anything\` pin was not checked: ${understandAnythingFailure}. Re-run with \`GITHUB_TOKEN\` set, or run the script by hand.`] : []),
+      ...(planetscaleFailure ? [`The \`planetscale\` pin was not checked: ${planetscaleFailure}.`] : []),
+    ];
+    const skippedSection = skipped.length > 0 ? ['', ...skipped] : [];
     mkdirSync(dirname(summary), { recursive: true });
     writeFileSync(
       summary,
       changed
         ? [
-            'Upstream moved for these runtime pins. `crates/colonizer/images.lock`, `crates/colonizer/claude-code.lock` and `crates/colonizer/understand-anything.lock` below pin the new digests, checksums and skillset release.',
+            'Upstream moved for these runtime pins. `crates/colonizer/images.lock`, `crates/colonizer/claude-code.lock`, `crates/colonizer/understand-anything.lock` and `crates/colonizer/planetscale.lock` below pin the new digests, checksums and skillset releases.',
             '',
             'These pins are what a release runs: images.lock is compiled into the mothership (include_str! in src/presets.rs), so a digest bump is a binary change, and every colony built from the next release boots the exact bytes the new digest names. Nothing here merges on its own — read the digest-to-digest diffs before merging.',
             '',
             ...sections,
-            ...skipped,
+            ...skippedSection,
             '',
             '_Opened by `.github/workflows/runtime-pin-updates.yml`._',
           ].join('\n')
         : [
-            understandAnythingFailure
+            (understandAnythingFailure || planetscaleFailure)
               ? 'Every runtime pin this run could check is at its upstream.'
               : 'Every runtime pin is at its upstream.',
-            ...skipped,
+            ...skippedSection,
             '',
           ].join('\n'),
     );
@@ -454,4 +568,19 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     console.error(error.message);
     process.exit(1);
   });
+}
+
+// Exports for testing
+export function parsePlanetscaleLock(line) {
+  const [n, v, p, k, s, u, ...r] = String(line ?? '').trim().split(/\s+/);
+  if (r.length || !['pscale', 'planetscale-skills'].includes(n) || !SHA256.test(s)) return null;
+  if (n === 'pscale' && !/^https:\/\/github\.com\/planetscale\/cli\/releases\/download/.test(u)) return null;
+  if (n === 'planetscale-skills' && !/^https:\/\/codeload\.github\.com\/planetscale\/skills/.test(u)) return null;
+  return { name: n, version: v, platform: p, kind: k, sha: s, url: u };
+}
+export function formatPscaleLock({ version, platform, sha, url }) {
+  return ['pscale', version, platform, 'archive', sha, url].join('  ');
+}
+export function formatPlanetscaleSkillsLock({ commit, sha }) {
+  return ['planetscale-skills', commit, 'any', 'source', sha, `${PLANETSCALE_SKILLS_CODELOAD}/${commit}`].join('  ');
 }

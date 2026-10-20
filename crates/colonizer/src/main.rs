@@ -121,6 +121,7 @@ mod path_policy;
 mod path_shims;
 mod phone;
 mod placement;
+mod planetscale;
 mod playbook;
 mod plugins;
 mod prescan;

@@ -179,6 +179,8 @@ pub struct App {
     pub open_code_review: Mutex<crate::open_code_review::Status>,
     /// The Headroom bundle download, started when Headroom is switched on.
     pub headroom: Mutex<crate::headroom::Status>,
+    /// The PlanetScale skillset download (planetscale.rs), for Settings.
+    pub planetscale: Mutex<crate::graft::Status>,
     /// The last host probe (name, size, disk), cached the same 10 s as the runtime probe. `?fresh=1`
     /// bypasses it.
     pub host_cache: Mutex<Option<crate::runtime::HostCached>>,
@@ -326,6 +328,7 @@ impl App {
             understand_anything: Mutex::new(Default::default()),
             open_code_review: Mutex::new(Default::default()),
             headroom: Mutex::new(Default::default()),
+            planetscale: Mutex::new(Default::default()),
             host_cache: Mutex::new(None),
             capacity: crate::capacity::Capacity::new(),
             http_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), crate::cache_store::HTTP_MAX_BYTES),
