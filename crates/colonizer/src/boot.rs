@@ -398,6 +398,11 @@ async fn requeue_stack_hold(app: &Shared, id: &str) -> bool {
                     x.blocked_reason = Some(reason.clone());
                     format!("blocked: {reason}; no slot is held while it waits")
                 }
+                crate::blocked::ParentState::Unmet { reason, .. } => {
+                    x.status = SessionStatus::Blocked;
+                    x.blocked_reason = Some(reason.clone());
+                    format!("blocked: {reason}; no slot is held while it waits")
+                }
                 crate::blocked::ParentState::Gone(why) => {
                     crate::blocked::rebase_on_default(x);
                     x.status = SessionStatus::Queued;

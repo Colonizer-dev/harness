@@ -431,7 +431,7 @@ pub async fn fetch_issue(app: &App, repo: &str, number: u64) -> Result<Value> {
         "-R",
         repo,
         "--json",
-        "number,title,body,labels,comments,url,author",
+        "number,title,body,labels,comments,url,author,state",
     ]))
     .await?;
     Ok(serde_json::from_str(&out)?)
