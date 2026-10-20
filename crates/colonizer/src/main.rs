@@ -161,6 +161,7 @@ mod schedule;
 mod screen;
 mod secrets;
 mod sensitivity;
+mod sentinel;
 mod server;
 mod services;
 mod sessions;
