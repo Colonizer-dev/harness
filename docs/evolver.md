@@ -44,7 +44,8 @@ computes a unified diff without touching the working tree, records the harness c
 `base_commit`, then writes `<out>/<id>.md` plus the raw `<out>/<id>.diff` and prints the exact
 reproduction commands. Only constants whose names end in `_PROMPT` or `_PROMPT_APPEND` are accepted —
 that is the whole safety envelope for this stage: one string constant, in one agent module, per
-candidate. As an alternative to writing the text by hand, `draft` spawns a command of your choice
+candidate. `propose` also refuses a module file with uncommitted edits, because evaluate's fingerprint
+check rebuilds the module from `base_commit` plus the diff; drafts go through `propose`, so the same rule applies. As an alternative to writing the text by hand, `draft` spawns a command of your choice
 (typically an LLM via stdin) to generate candidates automatically; see below.
 
 **Draft** automates the text generation. It reads the class evidence and optionally colony transcripts
@@ -67,6 +68,13 @@ cost against cost, where a pass is a task that passed *and* was not hacked (an u
 counts, a hacked one never does) — plus the totals: score, cost delta in dollars and percent, and
 the token delta per category. The sums reuse bench.mjs's own `summarizeRun`, so the two tools cannot
 drift apart.
+
+Before scoring, `evaluate` reads the config fingerprint each colony recorded (see
+[bench.md](bench.md), "The confound, named") and refuses, with a one-line reason, when the baseline
+did not run on `base_commit`, when a candidate differs from the baseline in anything but the agent
+module (compared task by task), or when the candidate's module digest is not that of `base_commit`
+with the proposal's diff applied — which `evaluate` works out itself, from `git archive` and
+`git apply`. Run files without fingerprints are refused too.
 
 **Retain** stamps the verdict, and the scorecard is kept whatever it says:
 
@@ -109,8 +117,10 @@ the file, so a diff that itself contains a fence cannot break it.
 - The bench measures the tasks it has; a prompt tuned against four visible tasks can overfit them,
   so run the [held-out suite](bench.md) and the [trajectory monitor](trajectory-monitor.md) when the
   bench runs.
-- `evaluate` trusts that the candidate run really had the diff applied; the proposal records how to
-  reproduce it, and nothing checks that it was.
+- `evaluate` checks that the candidate ran `base_commit` plus the diff and nothing else, but only
+  as far as the fingerprint reaches: the harness build, the agent module's directory, the
+  skillsets, model, policy and egress. The scratch repository's state and what a provider serves
+  behind a model name are outside it.
 - No proposal has been retained yet. The first surface is prompt-only, one module (`claude-code`),
   deliberately narrow; widening to module defaults and settings waits until three retained proposals
   have reproduced on re-run.

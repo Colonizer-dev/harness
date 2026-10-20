@@ -612,6 +612,18 @@ fn catalog(app: &App) -> Vec<Item> {
                 .collect(),
         ),
     });
+    items.push(Item {
+        id: "kodus".into(),
+        label: "Kodus".into(),
+        group: "integrations",
+        // Set by the operator via generic secret path; orgs' shadow reviews send the redacted diff.
+        used_by: "Code reviews for shadow review orgs that select the Kodus backend".into(),
+        icon: "plug",
+        path: Some(dir.join("kodus")),
+        env: None,
+        editable: true,
+        colonies: Access::None,
+    });
     for secret in crate::colony_secrets::load(dir).unwrap_or_default() {
         items.push(Item {
             id: secret.id(),

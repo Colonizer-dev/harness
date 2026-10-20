@@ -15,7 +15,7 @@
 //! `ANTHROPIC_*`), pointed at the org's model or the install's cheap route, its key passed as
 //! `OCR_LLM_TOKEN` and never written to disk. The snapshot is deleted once the run ends.
 
-use crate::{App, Shared, graft::State, util::exec, util::exec_within};
+use crate::{App, Shared, graft::State, util, util::exec, util::exec_within};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,7 +34,7 @@ pub const NAME: &str = "ocr";
 const LOCK: &str = include_str!("../open-code-review.lock");
 
 /// One review's ceiling; a wedged run is killed rather than left to outlive the colony.
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const REVIEW_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// The snapshot's ceiling: it runs on the publish path, so it must not hold the publish for a
 /// colony with thousands of changed paths — one warn line and no review instead.
@@ -308,6 +308,22 @@ pub enum Mode {
     Shadow,
 }
 
+/// The reviewer backend to use for shadow reviews (issue #1280): one review per publish, two backends.
+/// Kodus is self-hosted; Colonizer never vendors or patches it, only links to upstream source and
+/// stores its URL and API token in Secrets.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reviewer {
+    /// No review (the default; `off` and `null` are the same).
+    #[default]
+    Off,
+    /// open-code-review backend (the original; this enum was named after it).
+    #[serde(rename = "open-code-review")]
+    OpenCodeReview,
+    /// Kodus backend (https://github.com/kodustech/kodus-ai, AGPL-3.0).
+    Kodus,
+}
+
 /// One ocr finding: the fields this module reads and writes back to the record. `path` and
 /// `content` are the CLI's always-present pair; the rest arrive when the model sent them.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -447,29 +463,86 @@ struct Snapshot {
     skipped_paths: usize,
 }
 
-/// One line in the colony's harness log, prefixed so the cockpit can tell these apart.
-async fn note(app: &Shared, id: &str, level: &str, message: String) {
-    app.session_log(id, level, format!("open-code-review (shadow): {message}"))
-        .await;
+/// One line in the colony's harness log, prefixed with the backend name so the cockpit can tell these apart.
+async fn note(app: &Shared, id: &str, level: &str, backend: &str, message: String) {
+    app.session_log(id, level, format!("{backend} (shadow): {message}")).await;
 }
 
 /// The shadow review (issue #1274), first thing in `publish::publish_session` — every publish path
 /// lands there, and nothing has rewritten the worktree yet. When the session's org opted in and the
 /// binary is installed, the diff is snapshotted synchronously under [`SNAPSHOT_TIMEOUT`] — the
 /// publish rewrites the worktree moments later — and the review is spawned, its findings landing in
-/// the colony log and `sessions/<id>/open-code-review.json` whenever they are ready. Every failure
-/// is one log line; nothing about the publish waits on this or changes for it.
+/// the colony log and `sessions/<id>/open-code-review.json` (ocr) or `sessions/<id>/kodus.json` (kodus)
+/// whenever they are ready. Every failure is one log line; nothing about the publish waits on this or
+/// changes for it. Issue #1280: two backends (open-code-review or kodus) share the same mode.
 pub(crate) async fn shadow_review(app: &Shared, id: &str) {
     let Some(s) = app.session(id).await else { return };
     let org = app.org_settings(&s.org);
     if crate::orgs::open_code_review_mode(&org) != Mode::Shadow {
         return;
     }
+    let reviewer = crate::orgs::reviewer(&org);
+    if reviewer == Reviewer::Off {
+        return;
+    }
+
+    let snapshot = match tokio::time::timeout(SNAPSHOT_TIMEOUT, snapshot_diff(app, &s)).await {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(e)) => {
+            return note(
+                app,
+                id,
+                "warn",
+                backend_name(reviewer),
+                format!("could not snapshot the diff: {e:#}"),
+            )
+            .await;
+        }
+        Err(_) => {
+            return note(
+                app,
+                id,
+                "warn",
+                backend_name(reviewer),
+                format!(
+                    "the diff snapshot outran its {}s budget; no review this time",
+                    SNAPSHOT_TIMEOUT.as_secs()
+                ),
+            )
+            .await;
+        }
+    };
+
+    match reviewer {
+        Reviewer::Off => unreachable!(),
+        Reviewer::OpenCodeReview => review_with_ocr(app, id, &s, &org, snapshot).await,
+        Reviewer::Kodus => review_with_kodus(app, id, snapshot).await,
+    }
+}
+
+/// The human-readable name of a reviewer backend for log messages.
+fn backend_name(reviewer: Reviewer) -> &'static str {
+    match reviewer {
+        Reviewer::Off => "off",
+        Reviewer::OpenCodeReview => "open-code-review",
+        Reviewer::Kodus => "kodus",
+    }
+}
+
+/// Review using the open-code-review backend (ocr binary).
+async fn review_with_ocr(
+    app: &Shared,
+    id: &str,
+    _s: &crate::sessions::Session,
+    org: &crate::orgs::OrgSettings,
+    snapshot: Snapshot,
+) {
     let Some(pin) = pin() else {
         return note(
             app,
             id,
             "info",
+            "open-code-review",
             "this machine's platform has no ocr binary pinned (crates/colonizer/open-code-review.lock)".into(),
         )
         .await;
@@ -479,29 +552,14 @@ pub(crate) async fn shadow_review(app: &Shared, id: &str) {
             app,
             id,
             "info",
+            "open-code-review",
             format!("ocr {} is not installed; download it in Settings", pin.release),
         )
         .await;
     };
-    let env = match model_env(app, crate::orgs::open_code_review_model(&org).as_deref()).await {
+    let env = match model_env(app, crate::orgs::open_code_review_model(org).as_deref()).await {
         Ok(env) => env,
-        Err(e) => return note(app, id, "warn", format!("{e:#}")).await,
-    };
-    let snapshot = match tokio::time::timeout(SNAPSHOT_TIMEOUT, snapshot_diff(app, &s)).await {
-        Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(e)) => return note(app, id, "warn", format!("could not snapshot the diff: {e:#}")).await,
-        Err(_) => {
-            return note(
-                app,
-                id,
-                "warn",
-                format!(
-                    "the diff snapshot outran its {}s budget; no review this time",
-                    SNAPSHOT_TIMEOUT.as_secs()
-                ),
-            )
-            .await;
-        }
+        Err(e) => return note(app, id, "warn", "open-code-review", format!("{e:#}")).await,
     };
     let skipped = snapshot.skipped_paths;
     let app = app.clone();
@@ -518,7 +576,7 @@ pub(crate) async fn shadow_review(app: &Shared, id: &str) {
                 if skipped > 0 {
                     summary.push_str(&format!(" ({skipped} more changed paths were left out over the cap)"));
                 }
-                note(&app, &id, "info", summary).await;
+                note(&app, &id, "info", "open-code-review", summary).await;
                 for finding in findings.iter().take(MAX_FINDING_LINES) {
                     app.session_log(&id, "info", finding_line(finding)).await;
                 }
@@ -528,9 +586,115 @@ pub(crate) async fn shadow_review(app: &Shared, id: &str) {
                         .await;
                 }
             }
-            Err(e) => note(&app, &id, "warn", format!("the review failed: {e:#}")).await,
+            Err(e) => note(&app, &id, "warn", "open-code-review", format!("the review failed: {e:#}")).await,
         }
     });
+}
+
+/// Parses a Kodus secret in the format `<url>:<team-key>`, splitting on the last colon.
+/// The URL must start with `http://` or `https://` and may include a port number.
+/// Examples:
+///   - `https://kodus.example.com:abc123` → `("https://kodus.example.com", "abc123")`
+///   - `http://kodus.local:3001:abc123` → `("http://kodus.local:3001", "abc123")`
+fn parse_kodus_secret(secret: &str) -> Option<(String, String)> {
+    match secret.rsplit_once(':') {
+        Some((url, key)) if (url.starts_with("http://") || url.starts_with("https://")) && !key.is_empty() => {
+            Some((url.to_string(), key.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Review using the Kodus backend (self-hosted service).
+async fn review_with_kodus(app: &Shared, id: &str, snapshot: Snapshot) {
+    let kodus_config = match util::read_secret(&app.cfg.config_dir.join("kodus")) {
+        Some(config) => config,
+        None => {
+            return note(
+                app,
+                id,
+                "info",
+                "kodus",
+                "Kodus is not configured; set the kodus secret in Secrets (URL:team-key format)".into(),
+            )
+            .await;
+        }
+    };
+
+    let (url, team_key) = match parse_kodus_secret(&kodus_config) {
+        Some((u, k)) => (u, k),
+        None => {
+            return note(
+                app,
+                id,
+                "warn",
+                "kodus",
+                "Kodus config is malformed; use format https://host:port:team-key or https://host:team-key".into(),
+            )
+            .await;
+        }
+    };
+
+    let skipped = snapshot.skipped_paths;
+    let app = app.clone();
+    let id = id.to_string();
+
+    tokio::spawn(async move {
+        let diff = match create_diff(&snapshot).await {
+            Ok(diff) => diff,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&snapshot.root).await;
+                return note(&app, &id, "warn", "kodus", format!("could not create diff: {e:#}")).await;
+            }
+        };
+
+        let findings = match crate::kodus::call_kodus(&url, &team_key, &diff).await {
+            Ok(findings) => findings,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&snapshot.root).await;
+                return note(&app, &id, "warn", "kodus", format!("Kodus request failed: {e:#}")).await;
+            }
+        };
+
+        let _ = tokio::fs::remove_dir_all(&snapshot.root).await;
+
+        // Write findings to report file (kodus.json format for now).
+        let report = serde_json::json!({
+            "findings": findings,
+            "backend": "kodus"
+        });
+        if let Ok(bytes) = serde_json::to_vec(&report) {
+            let _ = app.store().write_file(&id, "kodus.json", &bytes).await;
+        }
+
+        let mut summary = summary_line(&findings);
+        if skipped > 0 {
+            summary.push_str(&format!(" ({skipped} more changed paths were left out over the cap)"));
+        }
+        note(&app, &id, "info", "kodus", summary).await;
+        for finding in findings.iter().take(MAX_FINDING_LINES) {
+            app.session_log(&id, "info", finding_line(finding)).await;
+        }
+        if findings.len() > MAX_FINDING_LINES {
+            let more = findings.len() - MAX_FINDING_LINES;
+            app.session_log(&id, "info", format!("… and {more} more (see kodus.json)"))
+                .await;
+        }
+    });
+}
+
+/// Creates a unified diff from the snapshot's base and head commits.
+async fn create_diff(snapshot: &Snapshot) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&snapshot.repo).args(["diff", "--no-color", "base", "head"]);
+
+    let output = cmd.output().await.context("failed to run git diff")?;
+
+    if !output.status.success() {
+        bail!("git diff failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    String::from_utf8(output.stdout).context("git diff output was not valid UTF-8")
 }
 
 /// A hardened git pinned to the colony's worktree, like the publish's own: the admin dir and the
@@ -934,5 +1098,45 @@ mod tests {
             assert_eq!(head_version(&wt, link).await.unwrap(), None, "{link} is not followed");
         }
         let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn parse_kodus_secret_handles_url_with_scheme_and_port() {
+        // Test with port number: split on the last colon
+        let (url, key) = parse_kodus_secret("http://kodus.local:3001:abc123").unwrap();
+        assert_eq!(url, "http://kodus.local:3001");
+        assert_eq!(key, "abc123");
+
+        // Test HTTPS without port: split on the last colon
+        let (url, key) = parse_kodus_secret("https://kodus.example.com:kodus_abc123xyz").unwrap();
+        assert_eq!(url, "https://kodus.example.com");
+        assert_eq!(key, "kodus_abc123xyz");
+
+        // Test HTTPS with port: split on the last colon
+        let (url, key) = parse_kodus_secret("https://kodus.example.com:3001:team_secret_key").unwrap();
+        assert_eq!(url, "https://kodus.example.com:3001");
+        assert_eq!(key, "team_secret_key");
+
+        // Test with trailing slash: still valid
+        let (url, key) = parse_kodus_secret("https://kodus.example.com/:mykey").unwrap();
+        assert_eq!(url, "https://kodus.example.com/");
+        assert_eq!(key, "mykey");
+
+        // Test with just port as key (valid according to spec)
+        let (url, key) = parse_kodus_secret("http://kodus.local:3001").unwrap();
+        assert_eq!(url, "http://kodus.local");
+        assert_eq!(key, "3001");
+
+        // Test invalid cases: missing colon
+        assert!(parse_kodus_secret("https://kodus.example.com").is_none());
+
+        // Test invalid cases: no scheme
+        assert!(parse_kodus_secret("kodus.local:abc123").is_none());
+
+        // Test invalid cases: empty key
+        assert!(parse_kodus_secret("https://kodus.example.com:").is_none());
+
+        // Test invalid cases: empty URL (only colon)
+        assert!(parse_kodus_secret(":abc123").is_none());
     }
 }

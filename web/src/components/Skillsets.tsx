@@ -50,12 +50,14 @@ const DOWNLOADABLE_ABOUT: Record<string, string> = {
     "A code map of the colony's repository (graft by Nanonets): ranked answers with exact file:line, every caller of a symbol, a file's API. Each colony builds its own map on first use, offline.",
   "understand-anything":
     "A knowledge graph of the colony's repository (understand-anything, MIT, by Egonex): what a change would affect, a domain and business-flow view, guided onboarding tours. The first full analysis is a multi-agent pass, so colonies use the file-scoped commands only.",
+  planetscale:
+    "PlanetScale's `pscale` CLI (Apache-2.0) and its agent skills (MIT), plus the hosted PlanetScale MCP. Colonies sign in with a service token from Secrets; writes and --force ask you first. Off until you name it.",
 };
 
 const megabytes = (bytes: number) => `${(bytes / 1_048_576).toFixed(bytes >= 10 * 1_048_576 ? 0 : 1)} MB`;
 
 /** How big a skillset's download is, in MB, for the row before it is asked for. */
-const DOWNLOADABLE_MB: Record<string, number> = { graft: 80, "understand-anything": 3 };
+const DOWNLOADABLE_MB: Record<string, number> = { graft: 80, "understand-anything": 3, planetscale: 18 };
 
 /** One line about where a download is; null when the row's button says it all. */
 export function downloadLine(d: DownloadableSkillset): string | null {

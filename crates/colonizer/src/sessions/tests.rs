@@ -108,6 +108,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         failure_class: None,
         boot_retries: 0,
         retry_at: None,
+        config: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

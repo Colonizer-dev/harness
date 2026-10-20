@@ -5,6 +5,7 @@ import type { Api } from "./api";
 import { createMockState } from "./mockState";
 import { hostMock } from "./features/host/mock";
 import { builtWithMock } from "./features/builtWith/mock";
+import { cratefieldMock } from "./features/cratefield/mock";
 import { fleetMock } from "./features/fleet/mock";
 import { modulesMock } from "./features/modules/mock";
 import { providersMock } from "./features/providers/mock";
@@ -32,6 +33,7 @@ export function createMockApi(): Api {
     mock: true,
     ...hostMock(ms),
     ...builtWithMock(),
+    ...cratefieldMock(),
     ...fleetMock(ms),
     ...modulesMock(ms),
     ...providersMock(ms),
