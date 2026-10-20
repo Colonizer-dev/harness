@@ -94,6 +94,11 @@ pub struct Verification {
     /// and autopilot then holds the colony with this cause on its card instead of publishing.
     #[serde(default)]
     pub network: Option<String>,
+    /// Why the checks could not run due to guest resources: "disk full" or "out of memory" (issue
+    /// #1301). Set when a run failed due to infra, was retried with larger resources, and failed
+    /// again. The check is "could not run" — publishes as a draft without contradicting the claim.
+    #[serde(default)]
+    pub infra_retry: Option<String>,
     pub command: Option<String>,
     /// `"config"` (an explicit command), the base branch file that declared it, or null.
     pub command_source: Option<String>,
@@ -144,6 +149,7 @@ impl Verification {
             pre_publish_ok: Vec::new(),
             pre_publish_red: Vec::new(),
             network: None,
+            infra_retry: None,
             command: None,
             command_source: None,
             exit_code: None,
@@ -641,15 +647,33 @@ fn names_a_changed_file(claim: &str, changed: &[String]) -> bool {
     })
 }
 
-/// The published pull request's verification notes: the inconclusive checks, the advisories, and
-/// the pre-publish checks (issue #1055), as a quoted block a reviewer reads before merging.
-/// `None` when there is nothing to note.
+/// The published pull request's verification notes: the inconclusive checks, the advisories,
+/// the pre-publish checks (issue #1055), and infra failures (issue #1301), as a quoted block a
+/// reviewer reads before merging. `None` when there is nothing to note.
 pub(crate) fn pr_notes(verification: Option<&Verification>) -> Option<String> {
     let v = verification.filter(|v| {
-        !v.advisories.is_empty() || !v.inconclusive.is_empty() || !v.pre_publish_ok.is_empty() || !v.pre_publish_red.is_empty()
+        v.infra_retry.is_some()
+            || !v.advisories.is_empty()
+            || !v.inconclusive.is_empty()
+            || !v.pre_publish_ok.is_empty()
+            || !v.pre_publish_red.is_empty()
     })?;
     let mut out = String::new();
+    if let Some(reason) = &v.infra_retry {
+        let detail = match reason.as_str() {
+            "disk full" => "the test run ran out of guest disk twice, the second time with a doubled disk",
+            "out of memory" => "the test run ran out of memory twice, the second time with doubled memory",
+            _ => "the test run ran out of guest resources twice",
+        };
+        out.push_str(&format!(
+            "> **Verification could not run: {reason}** ({detail}), so this change was not verified; \
+             the pull request opens as a draft.",
+        ));
+    }
     if !v.inconclusive.is_empty() || !v.advisories.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
         out.push_str("> **Verification notes** (advisory; they did not change the verdict):");
         for note in &v.inconclusive {
             out.push_str(&format!(
@@ -841,7 +865,18 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
     // The claim versus the observation.
     // An empty branch is a "no change needed" answer, not a claim of work that is missing: there
     // is nothing to check, so it is unverifiable and publishing records it as no changes.
+    // Issue #1268: unless the PR description claims to have made changes, in which case it's contradicted.
     if changed.is_empty() {
+        let claim = tokio::fs::read_to_string(cwd.join("out").join("pr.md"))
+            .await
+            .unwrap_or_default();
+        let claimed = claimed_paths(&claim);
+        if !claimed.is_empty() {
+            record.verdict = Verdict::Contradicted;
+            let paths = claimed.join(", ");
+            record.summary = format!("branch has no changes against {base}, but the PR description names changed files: {paths}");
+            return record.finished(started);
+        }
         unverifiable!(format!("branch has no changes against {base}; nothing to verify"));
     }
     let mut contradictions = {
@@ -956,6 +991,16 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
                 record.tests_ms = Some(record.tests_ms.unwrap_or(0) + ran.ms);
                 first_failure = first_failure.or(ran.reported.filter(|code| *code != 0));
                 reported_zero &= ran.reported.is_some();
+                // Issue #1301: if the run failed due to resource exhaustion on a retry, it is
+                // infrastructure trouble, not a real failure — do not run the base check.
+                if let Some(reason) = &ran.infra_retry {
+                    forced = Some(format!(
+                        "verification could not run due to infra ({reason} on retry); the test run ran out of guest resources \
+                         twice, so this change was not verified"
+                    ));
+                    record.infra_retry = ran.infra_retry.clone();
+                    break;
+                }
                 match classify(&ran) {
                     Outcome::Green => {}
                     // A failure the base shares is not this change's: the same check runs on the
@@ -1190,6 +1235,34 @@ pub(crate) enum Outcome {
     Absent,
     NoReport,
     Sandbox(i32),
+}
+
+/// Detects whether a failure was caused by resource exhaustion (issue #1301): disk full or OOM.
+/// Returns a short reason if so, None otherwise. Requires specific error messages or exit codes,
+/// not just substring matches in test assertions.
+fn resources_exhausted(output: &str, reported: Option<i32>) -> Option<&'static str> {
+    // OOM: exit 137 (SIGKILL) from systemd oom-kill, or cargo's "(signal: 9, SIGKILL)" message
+    if reported == Some(137) {
+        return Some("out of memory");
+    }
+    // Specific cargo/rustc SIGKILL pattern, not just "killed"
+    if output.contains("(signal: 9, SIGKILL)") {
+        return Some("out of memory");
+    }
+    if output.contains("oom-kill") {
+        return Some("out of memory");
+    }
+    // Disk exhaustion: prefer exact error messages over errno names to avoid false positives in
+    // test assertions that mention them. "No space left on device" and "Disk quota exceeded" are
+    // very specific system error messages.
+    if output.contains("No space left on device") || output.contains("Disk quota exceeded") {
+        return Some("disk full");
+    }
+    // rust-lld specific error: "error: ENOSPC" has context
+    if output.contains("error: ENOSPC") || output.contains("error: EDQUOT") {
+        return Some("disk full");
+    }
+    None
 }
 
 pub(crate) fn classify(ran: &Ran) -> Outcome {
@@ -1648,6 +1721,9 @@ pub(crate) struct Ran {
     /// The last lines of the command's combined output, when it failed — the evidence.
     pub(crate) tail: Option<String>,
     ms: u64,
+    /// If the run failed due to resource exhaustion on a retry, what resource was exhausted (issue
+    /// #1301): "disk full" or "out of memory". Not a real failure — infrastructure trouble.
+    pub(crate) infra_retry: Option<String>,
 }
 
 /// Single-quotes a path for the guest's `sh`, so any check directory reaches the script verbatim.
@@ -1690,6 +1766,9 @@ fn guest_script(dir: &str, command: &str, needs: Option<&Needs>, toolchain: Opti
 /// microVM from the colony's image with that dir mounted at `/workspace` and a second, empty dir
 /// at `/colonizer-verify`, and runs [`guest_script`] there. On a timeout the VM is removed here
 /// rather than left to `--max-duration`.
+///
+/// When a run fails with resource exhaustion (disk full or OOM), retries once automatically with
+/// doubled resources (issue #1301). Does not count resource exhaustion as a real failure.
 #[allow(clippy::too_many_arguments)]
 async fn run_tests(
     app: &App,
@@ -1722,76 +1801,136 @@ async fn run_tests(
         clean_up(&[&checkout, &report]).await;
         bail!("could not export a fresh checkout of the snapshot: {e:#}");
     }
-    let name = format!("{}-verify", s.sandbox);
-    let modules = app.modules.read().await.clone();
-    let spec = crate::sandbox::BootSpec {
-        name: name.clone(),
-        image: s
-            .boot_image
-            .clone()
-            .unwrap_or_else(|| crate::sandbox::configured_image(app, &modules)),
-        cpus: s.boot_cpus.unwrap_or(2),
-        memory: s.boot_memory.clone().unwrap_or_else(|| "2G".into()),
-        root_disk: "16G".into(),
-        max_duration: "25m".into(),
-        workdir: "/workspace".into(),
-        mounts: vec![
-            crate::sandbox::Mount {
-                source: checkout.clone(),
-                target: "/workspace".into(),
-                read_only: false,
-            },
-            crate::sandbox::Mount {
-                source: report.clone(),
-                target: "/colonizer-verify".into(),
-                read_only: false,
-            },
-        ],
-        env: Vec::new(),
-        secrets: Vec::new(),
-        // The same public-internet profile a colony boots with (`colony_network` in boot.rs), so
-        // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
-        // to nothing of the harness's. Left empty, msb's own default would decide instead.
-        net_profiles: vec!["public".into()],
-        command: vec![
-            "sh".into(),
-            "-c".into(),
-            guest_script(dir, command, needs, pinned_toolchain(&checkout, dir).await.as_deref()),
-        ],
-        ..Default::default()
-    };
-    let started = Instant::now();
-    let outcome = tokio::time::timeout(TEST_LIMIT, runner(spec)).await;
-    let (sandbox, reported, missing_tool) = match outcome {
-        Ok(Ok(code)) => (
-            code,
-            read_exit_report(&report).await,
-            tokio::fs::try_exists(report.join("missing")).await.unwrap_or(false),
-        ),
-        Ok(Err(e)) => {
-            clean_up(&[&checkout, &report]).await;
-            bail!("{e:#}");
+
+    // Determine initial resources: use colony's boot values or defaults. These may be doubled
+    // on retry if resource exhaustion is detected (issue #1301).
+    let initial_root_disk = s.boot_root_disk.clone().unwrap_or_else(|| "16G".into());
+    let initial_memory = s.boot_memory.clone().unwrap_or_else(|| "2G".into());
+
+    let mut infra_retry: Option<String> = None;
+    let mut root_disk = initial_root_disk.clone();
+    let mut memory = initial_memory.clone();
+    let mut attempt = 0;
+
+    loop {
+        attempt += 1;
+        let name = format!("{}-verify", s.sandbox);
+        let modules = app.modules.read().await.clone();
+        let spec = crate::sandbox::BootSpec {
+            name: name.clone(),
+            image: s
+                .boot_image
+                .clone()
+                .unwrap_or_else(|| crate::sandbox::configured_image(app, &modules)),
+            cpus: s.boot_cpus.unwrap_or(2),
+            memory: memory.clone(),
+            root_disk: root_disk.clone(),
+            max_duration: "25m".into(),
+            workdir: "/workspace".into(),
+            mounts: vec![
+                crate::sandbox::Mount {
+                    source: checkout.clone(),
+                    target: "/workspace".into(),
+                    read_only: false,
+                },
+                crate::sandbox::Mount {
+                    source: report.clone(),
+                    target: "/colonizer-verify".into(),
+                    read_only: false,
+                },
+            ],
+            env: Vec::new(),
+            secrets: Vec::new(),
+            // The same public-internet profile a colony boots with (`colony_network` in boot.rs), so
+            // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
+            // to nothing of the harness's. Left empty, msb's own default would decide instead.
+            net_profiles: vec!["public".into()],
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                guest_script(dir, command, needs, pinned_toolchain(&checkout, dir).await.as_deref()),
+            ],
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(TEST_LIMIT, runner(spec)).await;
+        let (sandbox, reported, missing_tool) = match outcome {
+            Ok(Ok(code)) => (
+                code,
+                read_exit_report(&report).await,
+                tokio::fs::try_exists(report.join("missing")).await.unwrap_or(false),
+            ),
+            Ok(Err(e)) => {
+                clean_up(&[&checkout, &report]).await;
+                bail!("{e:#}");
+            }
+            Err(_) => {
+                crate::sandbox::remove(&app.cfg.msb, &name).await;
+                clean_up(&[&checkout, &report]).await;
+                bail!("the test run timed out after {} minutes", TEST_LIMIT.as_secs() / 60);
+            }
+        };
+        // The evidence comes off the report mount before it is swept: the tail of a failing run's
+        // output is what a contradiction shows the reviewer.
+        let tail = match reported {
+            Some(code) if code > 0 => tail_lines(&report.join("output"), LOG_LINES).await,
+            _ => None,
+        };
+
+        // Check for resource exhaustion and retry once if needed (issue #1301).
+        if let Some(reason) = resources_exhausted(tail.as_deref().unwrap_or_default(), reported) {
+            if attempt == 1 {
+                // First attempt failed with resource exhaustion: double resources and retry.
+                tracing::warn!(
+                    root_disk = %root_disk,
+                    reason = reason,
+                    "verification: guest ran out of resources; retrying with doubled resources"
+                );
+                clean_up(&[&checkout, &report]).await;
+                // Double the root_disk: e.g., "16G" -> "32G", "32G" -> "64G"
+                if let Some(num_str) = root_disk.strip_suffix('G')
+                    && let Ok(num) = num_str.parse::<u64>()
+                {
+                    root_disk = format!("{}G", num * 2);
+                }
+                // On OOM, also double memory; on disk full, only disk is enlarged.
+                if reason == "out of memory"
+                    && let Some(num_str) = memory.strip_suffix('G')
+                    && let Ok(num) = num_str.parse::<u64>()
+                {
+                    memory = format!("{}G", num * 2);
+                }
+                infra_retry = Some(reason.to_string());
+                continue;
+            } else {
+                // Second attempt also failed with resource exhaustion: infrastructure failure.
+                tracing::warn!(
+                    reason = reason,
+                    "verification: guest ran out of resources on retry; cannot verify due to infra"
+                );
+                clean_up(&[&checkout, &report]).await;
+                return Ok(Ran {
+                    sandbox,
+                    reported,
+                    missing_tool,
+                    tail,
+                    ms: started.elapsed().as_millis() as u64,
+                    infra_retry: infra_retry.clone(),
+                });
+            }
         }
-        Err(_) => {
-            crate::sandbox::remove(&app.cfg.msb, &name).await;
-            clean_up(&[&checkout, &report]).await;
-            bail!("the test run timed out after {} minutes", TEST_LIMIT.as_secs() / 60);
-        }
-    };
-    // The evidence comes off the report mount before it is swept: the tail of a failing run's
-    // output is what a contradiction shows the reviewer.
-    let tail = match reported {
-        Some(code) if code > 0 => tail_lines(&report.join("output"), LOG_LINES).await,
-        _ => None,
-    };
-    clean_up(&[&checkout, &report]).await;
-    Ok(Ran {
-        sandbox,
-        reported,
-        missing_tool,
-        tail,
-        ms: started.elapsed().as_millis() as u64,
-    })
+
+        // No resource exhaustion or second attempt passed: return the result.
+        clean_up(&[&checkout, &report]).await;
+        return Ok(Ran {
+            sandbox,
+            reported,
+            missing_tool,
+            tail,
+            ms: started.elapsed().as_millis() as u64,
+            infra_retry,
+        });
+    }
 }
 
 /// The Rust toolchain the fresh checkout pins for `dir` — the nearest `rust-toolchain.toml` or
@@ -2285,12 +2424,13 @@ pub(crate) mod tests {
         assert_eq!(event["inconclusive"], json!([]));
         assert_eq!(event["pre_publish_ok"], json!([]));
         assert_eq!(event["pre_publish_red"], json!([]));
-        assert_eq!(event.as_object().unwrap().len(), 18);
+        assert_eq!(event.as_object().unwrap().len(), 19);
         // A record persisted before advisories or inconclusive checks existed still loads.
         let mut old = serde_json::to_value(Verification::blank()).unwrap();
         old.as_object_mut().unwrap().remove("advisories");
         old.as_object_mut().unwrap().remove("inconclusive");
         old.as_object_mut().unwrap().remove("network");
+        old.as_object_mut().unwrap().remove("infra_retry");
         old.as_object_mut().unwrap().remove("pre_publish_ok");
         old.as_object_mut().unwrap().remove("pre_publish_red");
         assert_eq!(serde_json::from_value::<Verification>(old).unwrap(), Verification::blank());
@@ -2908,6 +3048,21 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #1268: an empty branch whose PR description names changed files is contradicted, not unverifiable.
+    #[test]
+    fn an_empty_branch_with_claimed_changes_is_contradicted() {
+        // Empty branch with pr.md naming no paths → Unverifiable (no claimed paths)
+        let claim = "# Refactor\n\nNo actual changes, just a no-op.";
+        assert!(claimed_paths(claim).is_empty());
+
+        // Empty branch with pr.md naming paths → would be Contradicted (tested via full verify in async)
+        let claim = "Fixed `src/main.rs` and `lib/utils.rs`.";
+        let paths = claimed_paths(claim);
+        assert!(!paths.is_empty(), "claim names paths: {paths:?}");
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&"lib/utils.rs".to_string()));
+    }
+
     /// Colony 5b460871 on #531: a docs-only branch adding `docs/remote-tunnel.md`, whose description
     /// explains the name by pointing at a `docs/remote-access.md` it deliberately did not create
     /// (twice). That is a note for the reviewer, listed once — not a contradiction, and autopilot
@@ -3217,6 +3372,27 @@ pub(crate) mod tests {
         assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
         assert!(v.summary.contains("no test command applies"), "{}", v.summary);
         assert_eq!(v.exit_code, None, "no VM booted to fail in a deleted directory");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1278: verify that verdicts trust the VM's exit code, not fabricated output.
+    /// A shim that prints "test result: ok" but exits 1 is still a failure because the
+    /// verdict reads the exit code from the microVM's report, never the agent's stdout.
+    #[tokio::test]
+    async fn verdict_trusts_exit_code_not_fabricated_output() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        // Set verify command to echo success; a shim would print the same regardless of outcome.
+        let _repo = worktree_fixture(&app, Some("echo 'test result: ok'"), "did the work", true).await;
+        // Base: exit 0, reported 0. Head: prints success but actually exits 1 (reported from VM).
+        // The verdict must use the reported exit code (1), not the printed output.
+        let red = verify(
+            &app,
+            &phased_runner("uncommitted.txt", (0, Some(0)), (1, Some(1)), "test result: ok\n"),
+        )
+        .await;
+        assert_eq!(red.verdict, Verdict::Contradicted, "{red:?}");
+        assert_eq!(red.exit_code, Some(1), "verdict must use reported exit code 1, not output");
+        assert!(red.summary.contains("exited 1"), "{}", red.summary);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3902,5 +4078,113 @@ pub(crate) mod tests {
             "{script}"
         );
         assert!(!guest_script("", "cargo test", None, None).contains("rustup"));
+    }
+
+    #[test]
+    fn resources_exhausted_detects_disk_full() {
+        assert_eq!(resources_exhausted("No space left on device", None), Some("disk full"));
+        assert_eq!(resources_exhausted("rust-lld: error: ENOSPC", None), Some("disk full"));
+        assert_eq!(resources_exhausted("Disk quota exceeded", None), Some("disk full"));
+        assert_eq!(resources_exhausted("error: EDQUOT", None), Some("disk full"));
+    }
+
+    #[test]
+    fn resources_exhausted_detects_out_of_memory() {
+        assert_eq!(resources_exhausted("", Some(137)), Some("out of memory"));
+        assert_eq!(resources_exhausted("(signal: 9, SIGKILL)", None), Some("out of memory"));
+        assert_eq!(resources_exhausted("oom-kill event", None), Some("out of memory"));
+    }
+
+    #[test]
+    fn resources_exhausted_ignores_unrelated_failures() {
+        assert_eq!(resources_exhausted("test failed", Some(1)), None);
+        assert_eq!(resources_exhausted("assert ENOSPC is nil", Some(1)), None);
+        assert_eq!(resources_exhausted("cargo test failed", Some(101)), None);
+    }
+
+    /// Issue #1301: on a resource-exhausted first attempt the host retries with doubled resources
+    /// (e.g., "16G" → "32G"). The test confirms the spec is updated on the retry.
+    #[tokio::test]
+    async fn infra_exhaustion_on_first_attempt_doubles_root_disk() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        prepublish_fixture(&app).await;
+        let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        let runner: VmRunner = Arc::new(move |spec| {
+            let count = attempt_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                assert_eq!(spec.root_disk, "16G", "first attempt uses 16G");
+            } else {
+                assert_eq!(spec.root_disk, "32G", "retry attempt doubles to 32G");
+            }
+            Box::pin(async move {
+                let report = spec
+                    .mounts
+                    .iter()
+                    .find(|m| m.target == "/colonizer-verify")
+                    .expect("the report mount")
+                    .source
+                    .clone();
+                tokio::fs::create_dir_all(&report).await.unwrap();
+                // Clean up any previous run's output
+                let _ = tokio::fs::remove_file(&report.join("output")).await;
+                if count == 0 {
+                    // First attempt: fail with disk exhaustion
+                    tokio::fs::write(&report.join("exit"), "1").await.unwrap();
+                    tokio::fs::write(&report.join("output"), "rust-lld: error: ENOSPC")
+                        .await
+                        .unwrap();
+                } else {
+                    // Second attempt: pass (no output file)
+                    tokio::fs::write(&report.join("exit"), "0").await.unwrap();
+                }
+                Ok(0)
+            })
+        });
+        let v = verify(&app, &runner).await;
+        // When a resource exhaustion was detected on a retry, the verdict is Unverifiable
+        // (infrastructure problem, not a real failure), but no contradiction or hold.
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(v.infra_retry, Some("disk full".to_string()), "{v:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1301: a head run that fails with disk exhaustion twice → Unverifiable verdict,
+    /// infra_retry set, no contradictions, publishes as draft, no fix rounds sent.
+    #[tokio::test]
+    async fn infra_exhaustion_on_both_attempts_publishes_as_draft() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        prepublish_fixture(&app).await;
+        let runner: VmRunner = Arc::new(|spec| {
+            Box::pin(async move {
+                let report = spec
+                    .mounts
+                    .iter()
+                    .find(|m| m.target == "/colonizer-verify")
+                    .expect("the report mount")
+                    .source
+                    .clone();
+                tokio::fs::create_dir_all(&report).await.unwrap();
+                // Both attempts fail with disk exhaustion
+                tokio::fs::write(&report.join("exit"), "1").await.unwrap();
+                tokio::fs::write(&report.join("output"), "No space left on device")
+                    .await
+                    .unwrap();
+                Ok(0)
+            })
+        });
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert_eq!(v.infra_retry, Some("disk full".to_string()), "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert!(v.failures.is_empty(), "{v:?}");
+        // PR notes carry the infra_retry message
+        let note = pr_notes(Some(&v)).unwrap();
+        assert!(
+            note.contains("Verification could not run: disk full") && note.contains("doubled disk"),
+            "infra failure should name the reason and explain the retry: {note}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -237,6 +237,34 @@ and blocked-publish paths were already covered. The worktree special-file case
 relies on `git add -A` ignoring non-regular files — spot-checked in the manual
 procedure.
 
+### 9. Fabricated tool output (PATH shims and hostile hooks)
+
+*Attempt.* A hostile repository plants committed `bin/cargo`, `bin/npm`, `bin/git` or similar
+shims that print "tests pass" and exit 0, or version managers (`.envrc`, `.tool-versions`,
+`mise.toml`), Makefiles with `PATH` assignments, or package.json scripts with `PATH=` clauses.
+When a colony runs tests, the shim returns success; the agent is fooled into believing tests pass.
+
+*Result / mechanism.* Verification (`crates/colonizer/src/verify.rs`) trusts the microVM's
+reported exit code (written to `/colonizer-verify/exit` by the guest kernel), never the
+agent's printed output. The guest's shell command writes its exit code to the report mount
+(`verify.rs` command templates around line 1684), `read_exit_report` reads it
+(`verify.rs:1837-1839`), and the verdict uses the reported code via `verify_claim`
+(`verify.rs:957`) and `decide` (`verify.rs:168-178`); a shim printing "test result: ok"
+while exiting non-zero produces a red verdict because the reported exit code is what matters.
+At boot, the colony ledger is flagged (`crates/colonizer/src/path_shims.rs::scan`) for any
+PATH-altering artifacts — executables in `bin/`, `.bin/`, committed `node_modules/.bin/`,
+`.envrc`, version manager hooks, Makefiles and package.json scripts setting PATH
+(`crates/colonizer/src/boot.rs:2388-2401`). The colony's own PATH is pinned by the image
+and `BOOT_SCRIPT` (`crates/colonizer/src/boot.rs::BOOT_SCRIPT` line 2631), and the
+environment agentd inherits has no repo-controlled override. The ledger entry serves as
+evidence when reviewing a suspicious run.
+
+*Verdict.* **Blocked**. Verification gates never trust colony stdout: the exit code is
+the sole input to the verdict, extracted from the microVM's own report, not parsed from
+logs. PATH is pinned by image + boot script, not by repo config. Red-team scanning is
+tested (path_shims tests with all hostile artifacts; verify tests confirming verdicts
+from exit codes). The ledger flag lets operators review whether a repo uses PATH shims.
+
 ## Open verdicts (follow-ups)
 
 None. The nearest gap sits behind the closed verdicts: agentd's plaintext bearer

@@ -72,7 +72,8 @@ issue lists mark epics from `GET …/issues`'s `epic` and leave them out of bulk
 On GitHub a launch marks its claim: the `colonizer:claimed` label, a `colonizer:host:<hostname slug>`
 label, and one comment starting
 `<!-- colonizer:claim host="<hostname> (<host_id>)" colony="<id>" issue="<n>" -->` naming the
-mothership and colony. A later claim on the issue edits the newest comment carrying that marker
+mothership and colony. The comment is created with an RFC3339 timestamp (`Updated: YYYY-MM-DD HH:MM UTC`) so
+the claimant and its age can be shown to operators. A later claim on the issue edits the newest comment carrying that marker
 (rewriting the marker to the new colony) instead of posting another, and the mothership edits it as
 the colony's status changes (at most once per issue every two minutes, final states always; issue
 #919). Release removes both labels and edits the comment to its final state, but only while the
@@ -81,10 +82,18 @@ the mark on purpose, as the record of who did the work. On boot a mothership rea
 owns — open issues whose latest claim carries its host id but whose colony is gone from its session
 list, or ended the way a release would have followed (stopped, failed or no changes without a pull
 request, or closed) — and never touches another host's mark. A release that races a successor's
-claim puts the claim label back once it sees the newer claim in the comment. So the worst case is a mothership that
-crashes leaving its marks until its next boot; one that never returns leaves them until a human
-removes the label. GitLab, Linear and Jira should follow the same claim shape when those forges
-land. Contested-claim detection after launch, and label repair, are not implemented yet.
+claim puts the claim label back once it sees the newer claim in the comment.
+
+Stale remote claims are automatically cleared (issue #1286). When a `colonizer/issue-<n>-*` branch or
+open/merged pull request is missing — a label-only claim — a fresh launch treats it as potentially
+stale: it shows the claimant's GitHub account and when the claim was created, so the operator can tell
+whose work is blocking the issue. If the claim is older than 24 hours, the launch clears the labels
+and marks the comment released, then proceeds. If it is younger, the cockpit offers a "Take over"
+button to retry the launch immediately without waiting for the age threshold. So the worst case is a
+mothership that crashes leaving its marks until its next boot, or a label-only claim that is 24 hours
+old; one that never returns leaves them until a human removes the label or a fresh launch clears them
+on staleness. GitLab, Linear and Jira should follow the same claim shape when those forges land.
+Contested-claim detection after launch, and label repair, are not implemented yet.
 
 **Superseded colony work.** When a colony's pull request merges, every other colony of the same org
 and repository whose work it covered is marked `superseded` (issue #673). One covers another when

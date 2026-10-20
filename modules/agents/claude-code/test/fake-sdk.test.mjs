@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { z } from 'zod';
 
 import { DENIAL_HINTS } from '../denials.mjs';
+import { EXEC_POLICY_TOOLS } from '../execpolicy.mjs';
 import { createFindingsServer } from '../findings.mjs';
 import { createMemoryServer } from '../memory.mjs';
 import { parsePathPolicy } from '../pathpolicy.mjs';
@@ -748,7 +749,7 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
       { type: 'local', path: ecc },
       { type: 'local', path: superpowers },
     ]);
-    assert.deepEqual(options.hooks.PreToolUse.map((entry) => entry.matcher), ['Skill', 'Bash']);
+    assert.deepEqual(options.hooks.PreToolUse.map((entry) => entry.matcher), ['Skill', EXEC_POLICY_TOOLS]);
 
     assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
   } finally {
@@ -844,7 +845,7 @@ test('rtk rewrites Bash commands through `rtk rewrite` and leaves every other ou
     assert.equal(await rtkRewrite('git status', join(root, 'missing-rtk')), null, 'rtk not installed');
     assert.equal(await rtkRewrite('slow', rtk), null, 'a slow rtk never holds a command back');
 
-    assert.deepEqual(buildOptions({}).options.hooks.PreToolUse.map((entry) => entry.matcher), ['Bash'], 'rtk off by default (only the exec policy gates Bash)');
+    assert.deepEqual(buildOptions({}).options.hooks.PreToolUse.map((entry) => entry.matcher), [EXEC_POLICY_TOOLS], 'rtk off by default (only the exec policy gates tools)');
     const { options } = buildOptions({ COLONIZER_RTK: 'true', COLONIZER_RTK_BIN: rtk, PATH: '/usr/bin' });
     assert.equal(options.env.PATH, `${root}:/usr/bin`, 'rewritten commands call rtk, so it is on the PATH');
     // rtk's hook sits after the exec policy's (both match Bash, but only rtk rewrites the input).

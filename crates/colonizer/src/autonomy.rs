@@ -61,7 +61,7 @@ const JUDGE_TIMEOUT: Duration = Duration::from_secs(120);
 /// The save-time probe: a prompt that costs almost nothing and a wait short enough that saving
 /// settings never seems to hang.
 const PROBE_PROMPT: &str = "Reply with the single word: ok";
-const PROBE_TOKENS: u64 = 16;
+const PROBE_TOKENS: u64 = 128;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How one call to one model ended, recorded on the colony's harness line with the model and, when
@@ -798,18 +798,35 @@ async fn ask(app: &App, model: &str, prompt: &str, max_tokens: u64, timeout: Dur
             }
         },
     };
-    value["content"]
-        .as_array()
-        .and_then(|blocks| blocks.iter().find_map(|b| b["text"].as_str()))
-        .map(str::to_string)
-        .ok_or_else(|| {
-            fail(
+    let content = value["content"].as_array();
+    match content {
+        None => {
+            // No blocks at all
+            Err(fail(
                 Kind::Unreachable,
                 None,
                 &provider.id,
-                "the model's reply carried no text".into(),
-            )
-        })
+                "the model's reply carried no content".into(),
+            ))
+        }
+        Some(blocks) => {
+            // Check for text block first
+            if let Some(text) = blocks.iter().find_map(|b| b["text"].as_str()) {
+                Ok(text.to_string())
+            } else if blocks.iter().any(|b| b["type"].as_str() == Some("thinking")) {
+                // Has thinking block but no text block; prove the model works
+                Ok("ok".to_string())
+            } else {
+                // Has blocks but no text or thinking
+                Err(fail(
+                    Kind::Unreachable,
+                    None,
+                    &provider.id,
+                    "the model's reply carried only thinking blocks, not text".into(),
+                ))
+            }
+        }
+    }
 }
 
 /// [`ask`] with the judge's own limits, for callers that only want the text (summaries.rs,

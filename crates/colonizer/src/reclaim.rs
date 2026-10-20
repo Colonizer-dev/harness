@@ -266,13 +266,12 @@ pub(crate) async fn reclaim_one(app: &Shared, id: &str) -> anyhow::Result<()> {
         )
         .await;
     }
-    app.session_log(
-        id,
-        "info",
+    let reclaim_reason = if s.pr_url.is_some() {
         "automatically reclaimed: its pull request holds the work, so the worktree was removed and the colony is now unresumable"
-            .into(),
-    )
-    .await;
+    } else {
+        "automatically reclaimed: it finished without a pull request, so the worktree was removed and the colony is now unresumable"
+    };
+    app.session_log(id, "info", reclaim_reason.into()).await;
     Ok(())
 }
 

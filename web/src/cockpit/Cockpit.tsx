@@ -39,7 +39,6 @@ import { LoopsView } from "./LoopsView";
 import { QueuesView } from "./QueuesView";
 import { focusTurn } from "./turnFocus";
 import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
-import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
 import { runDecisionAnswer, runPrAction } from "./DecisionCards";
@@ -118,7 +117,6 @@ export function Cockpit({
   launchRequests,
   settingsRequests,
   memoryRequests = 0,
-  secretsRequest,
   pendingMemory = 0,
   settings,
   onSessionChanged,
@@ -168,8 +166,6 @@ export function Cockpit({
   settingsRequests: number;
   /** Bumped whenever something outside the cockpit asks for memory (a colony's "memory" link). */
   memoryRequests?: number;
-  /** Bumped by `openSecrets(id)`: open the Secrets view on that row. */
-  secretsRequest?: { n: number; id?: string };
   /** Memory proposals waiting for review across every org; the rail's badge narrows it to the chosen org. */
   pendingMemory?: number;
   /** The settings body, given the way back out — the cockpit owns the view, so it owns the exit. */
@@ -308,10 +304,6 @@ export function Cockpit({
     if (memoryRequests > 0) setView("memory");
   }, [memoryRequests]);
 
-  useEffect(() => {
-    if (secretsRequest && secretsRequest.n > 0) setView("secrets");
-  }, [secretsRequest]);
-
   const toggleTheme = useCallback(() => {
     setTheme((current) => {
       // The first press flips whatever the OS is showing, so the button never looks like a no-op.
@@ -426,7 +418,7 @@ export function Cockpit({
     for (const drop of outbox.dropped) {
       if (queuedAnswers.current.has(drop.id)) {
         queuedAnswers.current.delete(drop.id);
-        toast(droppedText("answer", drop.status), "error");
+        toast(droppedText("answer", drop.status, drop.error), "error");
       }
     }
   }, [outbox.dropped, toast]);
@@ -739,8 +731,6 @@ export function Cockpit({
         return <LoopsView org={selectedOrg} orgs={orgs} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
       case "queues":
         return <QueuesView sessions={sessions} />;
-      case "secrets":
-        return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "chat":
         return (
           <Page width="full">
@@ -812,7 +802,7 @@ export function Cockpit({
             }}
             onOpenSection={(section) => {
               // A row names where its target lives: a cockpit view, or a settings section.
-              if (section === "secrets" || section === "loops" || section === "memory") setView(section);
+              if (section === "loops" || section === "memory") setView(section);
               else if (section === "redteam") setView("overview");
               else onOpenSettings(section as SectionId);
             }}
@@ -932,7 +922,7 @@ export function Cockpit({
           name: status?.github.name ?? null,
           avatarUrl: status?.github.avatar_url ?? null,
           onOpenSettings: () => onOpenSettings(),
-          onOpenSecrets: () => navigate("secrets"),
+          onOpenSecrets: () => onOpenSettings("secrets"),
         }}
         inbox={{
           sessions,

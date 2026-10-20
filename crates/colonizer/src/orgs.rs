@@ -148,6 +148,21 @@ impl MergeMethod {
     }
 }
 
+/// The context-mode module switch for an org (issue #1273).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ContextMode {
+    /// The module is off; native tools only.
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// Shadow mode: passes MCP calls through but keeps native tools.
+    #[serde(rename = "shadow")]
+    Shadow,
+    /// On: routes through the exec policy.
+    #[serde(rename = "on")]
+    On,
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -167,6 +182,11 @@ pub struct OrgSettings {
     /// `Some(true)` follows the module settings, point by point.
     #[serde(default)]
     pub jev: Option<bool>,
+    /// The context-mode module for this org (issue #1273, opt-in ELv2 MCP server): `off` disables
+    /// it (the default); `shadow` passes MCP calls through but keeps native tools; `on` routes
+    /// through the exec policy. The operator installs the pinned package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_mode: Option<ContextMode>,
     /// Whether this org's claimed issues get the `colonizer:host:<host>` label and status edits to
     /// the claim comment (issue #919). `None` or `Some(true)` means yes; `Some(false)` keeps the
     /// claim to the label and one comment, which only a release edits.
@@ -236,6 +256,11 @@ pub struct OrgSettings {
     /// default — follows the install's cheap route (issue #1274).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_code_review_model: Option<String>,
+    /// Hidden-text screening of inputs (issue #1277, `promptdecode.rs`): `shadow` records the
+    /// findings and changes nothing. `on` strips hidden text and appends a note. `None` — the
+    /// default — and `off` are the same: no screening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promptdecode: Option<crate::promptdecode::Mode>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -799,6 +824,11 @@ pub fn open_code_review_model(org: &OrgSettings) -> Option<String> {
         .map(String::from)
 }
 
+/// The org's promptdecode input-screening mode (issue #1277): off unless the operator opted in.
+pub fn promptdecode_mode(org: &OrgSettings) -> crate::promptdecode::Mode {
+    org.promptdecode.unwrap_or_default()
+}
+
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
 /// unlike cpus or memory there is no dollar figure the harness can pick for someone else's deployment,
 /// and a default that silently stopped running colonies on upgrade would be a surprise.
@@ -1155,24 +1185,56 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     // awaiting an answer, which have to be answerable. The known-orgs record is deliberately *not* a
     // source here: it is a seen-set and avatar cache that nothing is ever removed from, so reading
     // it as a list would keep an org the account has left a workspace forever.
-    let mut orgs: BTreeSet<String> = saved.keys().cloned().collect();
-    orgs.extend(sessions.iter().map(|s| s.org.clone()));
-    orgs.extend(app.repo_owners.read().await.iter().cloned());
-    orgs.extend(new_orgs.keys().cloned());
+    // Issue #1284: deduplicate orgs case-insensitively, preferring saved settings keys, then
+    // the majority casing among sessions, then other sources.
+    let mut canonical_orgs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Saved settings keys are canonical if they appear.
+    for key in saved.keys() {
+        canonical_orgs.insert(key.to_ascii_lowercase(), key.clone());
+    }
+    // Sessions map lowercased org to a casing; the majority wins, ties go lexicographically smallest.
+    let mut session_casings: std::collections::HashMap<String, std::collections::HashMap<String, usize>> =
+        std::collections::HashMap::new();
+    for s in sessions.iter() {
+        *session_casings
+            .entry(s.org.to_ascii_lowercase())
+            .or_default()
+            .entry(s.org.clone())
+            .or_insert(0) += 1;
+    }
+    for (lower, casings) in session_casings {
+        let lower_copy = lower.clone();
+        canonical_orgs.entry(lower).or_insert_with(|| {
+            casings
+                .into_iter()
+                .max_by_key(|(casing, count)| (*count, std::cmp::Reverse(casing.clone())))
+                .map(|(casing, _)| casing)
+                .unwrap_or_else(|| lower_copy.clone())
+        });
+    }
+    // Remaining new_orgs and repo_owners fill in unknowns.
+    for key in new_orgs.keys().chain(app.repo_owners.read().await.iter()) {
+        canonical_orgs.entry(key.to_ascii_lowercase()).or_insert_with(|| key.clone());
+    }
+
     let proposals = app.memory.proposals().await;
     Json(
-        orgs.into_iter()
+        canonical_orgs
+            .into_values()
             .filter(|org| valid_org(org))
             .map(|org| {
-                let live = sessions.iter().filter(|s| s.org == org && s.status.is_live()).count();
-                let total = sessions.iter().filter(|s| s.org == org).count();
-                let spending = sessions.iter().filter(|s| s.org == org);
+                let live = sessions
+                    .iter()
+                    .filter(|s| s.org.eq_ignore_ascii_case(&org) && s.status.is_live())
+                    .count();
+                let total = sessions.iter().filter(|s| s.org.eq_ignore_ascii_case(&org)).count();
+                let spending = sessions.iter().filter(|s| s.org.eq_ignore_ascii_case(&org));
                 let spend = spend::rollup_sessions(spending);
                 let pending = proposals
                     .iter()
                     .filter(|p| match p.note.scope.as_str() {
-                        "org" => p.note.key == org,
-                        "repo" => p.note.key.split('/').next() == Some(org.as_str()),
+                        "org" => p.note.key.eq_ignore_ascii_case(&org),
+                        "repo" => p.note.key.split('/').next().is_some_and(|o| o.eq_ignore_ascii_case(&org)),
                         _ => false,
                     })
                     .count();
@@ -1180,22 +1242,34 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                 // sighting that is waiting for an answer; an org that only shows up in the colony
                 // list has none, and the UI falls back to an initial.
                 let avatar = known
-                    .get(&org)
-                    .and_then(|k| k.avatar_url.clone())
-                    .or_else(|| new_orgs.get(&org).cloned().flatten());
-                let awaiting = new_orgs.contains_key(&org) && !known.contains_key(&org);
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&org))
+                    .and_then(|(_, k)| k.avatar_url.clone())
+                    .or_else(|| {
+                        new_orgs
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&org))
+                            .and_then(|(_, v)| v.clone())
+                    });
+                let awaiting = new_orgs.iter().any(|(k, _)| k.eq_ignore_ascii_case(&org))
+                    && !known.iter().any(|(k, _)| k.eq_ignore_ascii_case(&org));
+                let settings = saved
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&org))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
                 let mut entry = json!({
                     "org": org,
                     "colonies": {"live": live, "total": total},
                     "spend": spend::spend_json(&spend),
                     "pending_memory": pending,
-                    "settings": saved.get(&org).cloned().unwrap_or_default(),
+                    "settings": settings,
                 });
                 if let Some(avatar_url) = avatar {
                     entry["avatar_url"] = Value::String(avatar_url);
                 }
-                if let Some(description) = descriptions.get(&org) {
-                    entry["description"] = Value::String(description.clone());
+                if let Some(description) = descriptions.iter().find(|(k, _)| k.eq_ignore_ascii_case(&org)) {
+                    entry["description"] = Value::String(description.1.clone());
                 }
                 if awaiting {
                     entry["awaiting_decision"] = Value::Bool(true);
@@ -1232,6 +1306,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("jev") {
         incoming.jev = saved.jev;
+    }
+    if !named("context_mode") {
+        incoming.context_mode = saved.context_mode;
     }
     if !named("claim_updates") {
         incoming.claim_updates = saved.claim_updates;
@@ -1299,6 +1376,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("open_code_review_model") {
         incoming.open_code_review_model = saved.open_code_review_model.clone();
+    }
+    if !named("promptdecode") {
+        incoming.promptdecode = saved.promptdecode;
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -1662,6 +1742,51 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&long).is_err(), "41 chars is one too many");
+    }
+
+    #[test]
+    fn context_mode_round_trips_and_survives_a_save_that_does_not_name_it() {
+        // Absent field deserializes to None.
+        let body = json!({});
+        let incoming: OrgSettings = serde_json::from_value(body).unwrap();
+        assert_eq!(incoming.context_mode, None);
+
+        // Each value round-trips.
+        for mode in ["off", "shadow", "on"] {
+            let body = json!({"context_mode": mode});
+            let parsed: OrgSettings = serde_json::from_value(body).unwrap();
+            let back = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(back["context_mode"], mode);
+        }
+
+        // Invalid value is rejected.
+        let bad = json!({"context_mode": "invalid"});
+        assert!(serde_json::from_value::<OrgSettings>(bad).is_err());
+
+        // Unnamed field survives a save that does not name it.
+        let saved = OrgSettings {
+            context_mode: Some(ContextMode::Shadow),
+            ..Default::default()
+        };
+        let body = json!({"max_parallel": 2});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.context_mode, Some(ContextMode::Shadow));
+
+        // Named value wins.
+        let body = json!({"context_mode": "on"});
+        let mut incoming: OrgSettings = serde_json::from_value(body.clone()).unwrap();
+        keep_unnamed_fields(&mut incoming, &saved, Some(&body));
+        assert_eq!(incoming.context_mode, Some(ContextMode::On));
+
+        // Validation accepts all valid modes.
+        for mode in [ContextMode::Off, ContextMode::Shadow, ContextMode::On] {
+            let org = OrgSettings {
+                context_mode: Some(mode),
+                ..Default::default()
+            };
+            assert!(validate(&org).is_ok());
+        }
     }
 
     #[test]
