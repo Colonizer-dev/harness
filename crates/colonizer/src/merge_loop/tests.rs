@@ -286,6 +286,8 @@ fn reading(n: u64, mergeability: Mergeability, ci: CiState, behind: u64) -> Read
                 head_ref_name: Some(format!("colonizer/issue-{n}")),
                 head_ref_oid: Some(format!("head{n}")),
                 base_ref_name: Some("main".into()),
+                green_checks: Vec::new(),
+                red_checks: Vec::new(),
             },
             commits: vec![PrCommit {
                 authors: vec![(

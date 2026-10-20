@@ -353,6 +353,72 @@ fn forbidden_message<'a>(commits: &'a [PrCommit], forbidden: &'a [String]) -> Op
 
 /// Decides what the train does with one pull request this tick. Pure, so the whole table is
 /// tested; the caller has already read everything this needs.
+/// Whether a draft opened due to base-shared pre_publish_red checks should be promoted (issue #1364).
+/// Returns the promotion decision: promote with covering check names, wait with reason, or keep draft.
+fn draft_promotion_decision(
+    pre_publish_red: &[String],
+    ci: CiState,
+    green_checks: &[String],
+    red_checks: &[String],
+) -> DraftPromotion {
+    // Checks are matched case-insensitively: a red name is covered when some green check name contains it
+    // (substring match, case-insensitive). This allows mapping e.g. "fmt" to "cargo-fmt" or "clippy" to
+    // "clippy-x86_64-unknown-linux-gnu".
+    let covers = |red_name: &str| green_checks.iter().any(|g| g.contains(&red_name.to_lowercase()));
+
+    match ci {
+        CiState::Success => {
+            // All checks passed; check if the green checks cover every red pre_publish name.
+            let uncovered: Vec<_> = pre_publish_red.iter().filter(|r| !covers(r)).collect();
+            if uncovered.is_empty() {
+                // All base-shared failures are now covered by green checks: promote.
+                let covering: Vec<String> = pre_publish_red
+                    .iter()
+                    .filter_map(|r| green_checks.iter().find(|g| g.contains(&r.to_lowercase())).cloned())
+                    .collect();
+                DraftPromotion::Promote(covering)
+            } else {
+                // Green CI but some red names not covered: something changed between runs or naming differs.
+                DraftPromotion::Wait(format!(
+                    "draft — CI passed but checks don't cover all base failures: {} ({})",
+                    uncovered.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                    green_checks.join(", ")
+                ))
+            }
+        }
+        CiState::Pending => {
+            DraftPromotion::Wait("draft — waiting for CI to confirm base-shared failures have been fixed".to_string())
+        }
+        CiState::Failure => {
+            // Some checks still failing; report which pre_publish names are still failing.
+            let still_failing: Vec<_> = pre_publish_red
+                .iter()
+                .filter(|r| red_checks.iter().any(|g| g.contains(&r.to_lowercase())))
+                .collect();
+            if still_failing.is_empty() {
+                // Red CI but not the pre_publish checks; something else broke.
+                DraftPromotion::Keep(format!(
+                    "draft — CI has failures not in pre_publish_red: {}",
+                    red_checks.join(", ")
+                ))
+            } else {
+                DraftPromotion::Keep(format!(
+                    "draft — {} still failing on base and in CI",
+                    still_failing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ))
+            }
+        }
+        CiState::NoChecks => DraftPromotion::Wait("draft — waiting for CI to run".to_string()),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum DraftPromotion {
+    Promote(Vec<String>), // promote with these covering check names
+    Wait(String),         // keep draft, waiting for reason
+    Keep(String),         // keep draft for reason
+}
+
 pub(crate) fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
     let info = &facts.info;
     if info.state != PrState::Open {
@@ -695,7 +761,96 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
                 // squash a second copy of it in. Held until the operator keeps it.
                 let mut decision = match superseded_hold(s) {
                     Some(reason) => Decision::Skipped(reason),
-                    None => decide(f, guards),
+                    None => {
+                        // Issue #1364: attempt to promote a draft that was opened solely due to base-shared
+                        // pre_publish_red checks. If the PR is a draft with that flag and CI is green and
+                        // covers the red checks, mark it ready and proceed to merge decision.
+                        if f.info.is_draft && s.pr_draft_base_red {
+                            if let Some(pre_publish_red) = s.verification.as_ref().and_then(|v| {
+                                if !v.pre_publish_red.is_empty() {
+                                    Some(&v.pre_publish_red)
+                                } else {
+                                    None
+                                }
+                            }) {
+                                match draft_promotion_decision(
+                                    pre_publish_red,
+                                    f.info.ci,
+                                    &f.info.green_checks,
+                                    &f.info.red_checks,
+                                ) {
+                                    DraftPromotion::Promote(covering) => {
+                                        // Mark the PR ready and clear the flag inline (not spawned) to ensure
+                                        // atomicity and avoid duplicate promotions on the next tick.
+                                        let url = s.pr_url.as_deref().unwrap_or_default().to_string();
+                                        let covering_names = covering.join(", ");
+                                        let comment = format!(
+                                            "Marked ready by the merge train: {} failed on the base commit as well when this was published, and passed in CI on this head ({}). Marking ready for merge.",
+                                            pre_publish_red.join(", "),
+                                            covering_names
+                                        );
+                                        tracing::info!(
+                                            session_id = %s.id,
+                                            pr_url = %url,
+                                            covering_checks = %covering_names,
+                                            "draft promotion: marking PR ready"
+                                        );
+                                        // Mark the PR ready. If this fails, keep the draft and wait for a retry.
+                                        match crate::util::exec(&mut app.gh(["pr", "ready", url.as_str()])).await {
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    session_id = %s.id,
+                                                    pr_url = %url,
+                                                    error = %e,
+                                                    "draft promotion: could not mark PR ready"
+                                                );
+                                                Decision::Waiting(format!("draft promotion failed: could not mark PR ready: {e}"))
+                                            }
+                                            Ok(_) => {
+                                                // Post a comment (informational; don't block on comment failure).
+                                                if let Err(e) = crate::util::exec(&mut app.gh([
+                                                    "pr",
+                                                    "comment",
+                                                    url.as_str(),
+                                                    "--body",
+                                                    comment.as_str(),
+                                                ]))
+                                                .await
+                                                {
+                                                    tracing::warn!(
+                                                        session_id = %s.id,
+                                                        pr_url = %url,
+                                                        error = %e,
+                                                        "draft promotion: could not post comment"
+                                                    );
+                                                }
+                                                // Clear the flag now that the PR is ready.
+                                                app.update_session(&s.id, |x| {
+                                                    x.pr_draft_base_red = false;
+                                                })
+                                                .await;
+                                                tracing::info!(
+                                                    session_id = %s.id,
+                                                    pr_url = %url,
+                                                    "draft promotion: PR marked ready and flag cleared"
+                                                );
+                                                // The PR is now ready; next tick will see it as not-draft.
+                                                Decision::Waiting("draft — marked ready, waiting for GitHub to process; will merge next tick if checks remain green".to_string())
+                                            }
+                                        }
+                                    }
+                                    DraftPromotion::Wait(reason) => Decision::Waiting(reason),
+                                    DraftPromotion::Keep(reason) => Decision::Skipped(reason),
+                                }
+                            } else {
+                                // Flag set but no pre_publish_red; treat as a normal draft.
+                                Decision::Skipped("the pull request is a draft".to_string())
+                            }
+                        } else {
+                            // Normal draft or not a draft at all.
+                            decide(f, guards)
+                        }
+                    }
                 };
                 if decision == Decision::Merge {
                     if let Some(first) = first.clone() {
@@ -1045,6 +1200,8 @@ mod tests {
                 head_ref_name: Some("colonizer/issue-1".to_string()),
                 head_ref_oid: Some("abc123".to_string()),
                 base_ref_name: Some("main".to_string()),
+                green_checks: Vec::new(),
+                red_checks: Vec::new(),
             },
             commits: vec![commit("colonizer-settlers", "do the thing")],
             behind_base: Some(0),
@@ -1353,5 +1510,63 @@ mod tests {
         assert!(reason.contains("pull/9") && reason.contains("Keep"), "{reason}");
         s.superseded.as_mut().unwrap().kept = true;
         assert_eq!(superseded_hold(&s), None, "kept: back in the train");
+    }
+
+    /// Issue #1364: draft promotion when base-shared pre_publish_red checks are fixed in CI.
+    #[test]
+    fn draft_promotion_decides_based_on_ci_coverage() {
+        let red = vec!["fmt".to_string(), "clippy".to_string()];
+
+        // Green CI with covering checks: promote.
+        let result = draft_promotion_decision(
+            &red,
+            CiState::Success,
+            &["cargo-fmt".to_string(), "clippy-x86_64".to_string()],
+            &[],
+        );
+        assert!(
+            matches!(result, DraftPromotion::Promote(_)),
+            "green CI covering red names promotes"
+        );
+        if let DraftPromotion::Promote(covering) = result {
+            assert_eq!(covering.len(), 2);
+            assert!(covering.contains(&"cargo-fmt".to_string()));
+            assert!(covering.contains(&"clippy-x86_64".to_string()));
+        }
+
+        // Green CI but uncovered red names: wait.
+        let result = draft_promotion_decision(&red, CiState::Success, &["some-other-check".to_string()], &[]);
+        assert!(matches!(result, DraftPromotion::Wait(_)), "green but not covering: wait");
+        if let DraftPromotion::Wait(reason) = result {
+            assert!(reason.contains("don't cover"), "{reason}");
+        }
+
+        // Pending CI: wait.
+        let result = draft_promotion_decision(&red, CiState::Pending, &[], &[]);
+        assert!(matches!(result, DraftPromotion::Wait(_)), "pending: wait");
+
+        // Red CI with base-shared failures: keep draft.
+        let result = draft_promotion_decision(&red, CiState::Failure, &[], &["cargo-fmt-fail".to_string()]);
+        assert!(
+            matches!(result, DraftPromotion::Keep(_)),
+            "red CI covering base failures: keep"
+        );
+        if let DraftPromotion::Keep(reason) = result {
+            assert!(reason.contains("still failing"), "{reason}");
+        }
+
+        // Red CI but not base-shared failures: keep.
+        let result = draft_promotion_decision(&red, CiState::Failure, &[], &["unrelated-check".to_string()]);
+        assert!(
+            matches!(result, DraftPromotion::Keep(_)),
+            "red CI but not base failures: keep"
+        );
+        if let DraftPromotion::Keep(reason) = result {
+            assert!(reason.contains("failures not in pre_publish_red"), "{reason}");
+        }
+
+        // No checks yet: wait.
+        let result = draft_promotion_decision(&red, CiState::NoChecks, &[], &[]);
+        assert!(matches!(result, DraftPromotion::Wait(_)), "no checks: wait");
     }
 }

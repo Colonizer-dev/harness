@@ -37,7 +37,11 @@ Each run follows the rules an operator would follow by hand:
    secondary-rate-limit answer **stops the run** there and then, and nothing is retried — the rest
    waits for the next run.
 4. **Eligibility.** Only colony pull requests (`colonizer/*` branches the mothership published);
-   never drafts, never a HOLD, WIP or do-not-merge label or title, never a colony held with
+   drafts are normally skipped, unless the mothership opened the draft solely because a pre-publish check
+   failed on the base branch — in that case, when the PR head's CI is green and all the base-shared
+   red checks pass, the train automatically marks it ready and proceeds to merge (operator-initiated
+   drafts are never auto-promoted);
+   never a HOLD, WIP or do-not-merge label or title, never a colony held with
    `loop merge-train hold`, never a colony superseded by its redo or by a newer pull request on the
    same issue; and the train's own author and attribution guards apply.
 5. **Rebase only when mechanical.** A conflicted (DIRTY) pull request gets the host's mechanical

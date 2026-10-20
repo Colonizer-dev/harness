@@ -549,6 +549,14 @@ pub struct Session {
     /// existed gain it from the startup backfill, best effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<DateTime<Utc>>,
+    /// Whether this pull request was opened as a draft solely because `verification.pre_publish_red`
+    /// was non-empty (issue #1364): not because the operator's `draft` setting was on, and not
+    /// because `infra_retry` was set. Used by the merge train to auto-promote the draft once CI
+    /// passes and covers the base-shared red checks. Set true only when draft is true AND
+    /// pre_publish_red is non-empty AND operator draft is off AND infra_retry is None. Cleared when
+    /// the draft is promoted (marked ready) or when the operator re-drafts the PR by hand.
+    #[serde(default)]
+    pub pr_draft_base_red: bool,
     /// When the pull request was opened, as GitHub reports it (`createdAt`); set by the PR watcher
     /// and, for colonies merged before it existed, by the startup backfill. With `merged_at` it
     /// gives the PR cycle time.
@@ -924,6 +932,7 @@ impl Default for Session {
             fix_for: None,
             pr_url: None,
             merged_at: None,
+            pr_draft_base_red: false,
             pr_opened_at: None,
             changed_paths: Vec::new(),
             ci_state: None,
