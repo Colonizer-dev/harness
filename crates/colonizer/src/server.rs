@@ -23,6 +23,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use std::{path::Path as FsPath, sync::Arc};
+use tower::ServiceBuilder;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -349,8 +350,9 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
             Router::new()
                 .nest_service(
                     "/assets/fonts",
-                    ServeDir::new(assets_dir.join("fonts"))
-                        .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, fonts_cache)),
+                    ServiceBuilder::new()
+                        .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, fonts_cache))
+                        .service(ServeDir::new(assets_dir.join("fonts"))),
                 )
                 .nest_service("/assets", ServeDir::new(&assets_dir))
                 .fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))))
