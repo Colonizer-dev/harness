@@ -178,6 +178,12 @@ pub struct Entry {
     /// One line of context: a failure's reason, the loop a colony came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The model routing tier for outcome entries (low/medium/high), from the session's model_routing (issue #1366).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// The model the colony ran on for outcome entries, from the session's model_routing (issue #1366).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Entry {
@@ -373,6 +379,15 @@ pub(crate) fn outcome_entry(before: SessionStatus, after: &Session) -> Option<En
     let mut entry = Entry::new(kind, "colony").colony(after);
     if after.status == SessionStatus::Failed || after.status == SessionStatus::Stopped {
         entry.detail = after.error.clone().filter(|e| !e.trim().is_empty());
+    }
+    // Add tier and model from model_routing (issue #1366).
+    if let Some(routing) = &after.model_routing {
+        if let Some(tier) = routing.get("tier").and_then(|t| t.as_str()) {
+            entry.tier = Some(tier.to_string());
+        }
+        if let Some(model) = routing.get("model").and_then(|m| m.as_str()) {
+            entry.model = Some(model.to_string());
+        }
     }
     Some(entry)
 }
@@ -1223,6 +1238,29 @@ mod tests {
         assert_eq!((asked.kind.as_str(), asked.actor.as_str()), ("outcome.question", "colony"));
         assert_eq!(asked.repo.as_deref(), Some("acme/web"));
         assert_eq!(asked.title.as_deref(), Some("Fix the checkout"));
+    }
+
+    #[test]
+    fn outcome_entry_captures_tier_and_model_from_model_routing() {
+        use serde_json::json;
+
+        let mut merged = colony("a", SessionStatus::Merged);
+        merged.model_routing = Some(json!({
+            "tier": "medium",
+            "model": "claude-opus-5-5",
+            "rule": "medium",
+            "source": "rule",
+        }));
+        let entry = outcome_entry(SessionStatus::Publishing, &merged).unwrap();
+        assert_eq!(entry.kind, "outcome.merged");
+        assert_eq!(entry.tier.as_deref(), Some("medium"));
+        assert_eq!(entry.model.as_deref(), Some("claude-opus-5-5"));
+
+        // Without model_routing, tier and model are None.
+        let no_routing = colony("b", SessionStatus::Merged);
+        let entry = outcome_entry(SessionStatus::Publishing, &no_routing).unwrap();
+        assert!(entry.tier.is_none());
+        assert!(entry.model.is_none());
     }
 
     /// The History page's duplicates: a sweep that rewrites terminal colonies (a reclaim flipping

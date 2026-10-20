@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { compareProposal } from '../trajectory-monitor.mjs';
 import { childEnv, moduleDirDigest } from '../bench.mjs';
-import { checkConfigs, diagnose, diffFor, evaluate, expectedModuleDigest, findProposal, overallVerdict, parseProposal, propose, renderProposal, replaceConstant, retain, scorecard, verdict } from '../evolve.mjs';
+import { assertNoLeaks, checkConfigs, cmdDraft, diagnose, diffFor, evaluate, expectedModuleDigest, findProposal, overallVerdict, parseProposal, propose, renderProposal, replaceConstant, retain, scorecard, verdict } from '../evolve.mjs';
 
 const AT = '2026-09-27T00:00:00Z';
 // A colony sandbox exports GIT_DIR and friends globally; left in, they point every test git at the wrong work tree.
@@ -170,7 +170,9 @@ const PROPOSAL = {
   diff: ['diff --git a/x b/x', '--- a/x', '+++ b/x', '@@ -1 +1 @@', '-old', '+```', '+new'].join('\n'),
   reproduce: ['git checkout abc123'],
   evaluations: [], verdict: null, approved_at: null, rejected_at: null, reject_reason: null,
-  review: ['docs updated?'],
+  review: [
+    'docs updated?',
+  ],
 };
 
 test('renderProposal and parseProposal round-trip, even through a diff containing ```', () => {
@@ -241,6 +243,16 @@ test('propose replaces one prompt constant, and the diff applies to the tree', a
   }
 });
 
+test('propose refuses a module with uncommitted changes, since base_commit would not hold the diffed text', () => {
+  const root = fixtureRepo();
+  try {
+    writeFileSync(join(root, 'modules/agents/x/runner.mjs'), RUNNER.replace('line', 'uncommitted line'));
+    assert.throws(() => propose({ classes: CLASSES, classId: 'module:x/questions', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', text: 'new', root }), /uncommitted changes/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('the prompt-only guard refuses anything that is not a prompt constant', () => {
   const root = fixtureRepo();
   try {
@@ -279,6 +291,342 @@ test('findProposal resolves an id in the queue and never joins a raw id onto the
     for (const evil of ['../outside', 'a/b', 'a\\b']) assert.throws(() => findProposal(dir, evil), /not a proposal id/, evil);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------------------- draft
+
+// Leak detection: each of 5 leak types is caught before drafter is spawned via assertNoLeaks
+test('assertNoLeaks rejects each of 5 leak types', () => {
+  const dirs = [
+    () => { const d = mkdtempSync(join(tmpdir(), 'leak-')); mkdirSync(join(d, 'scripts/bench/checks'), { recursive: true }); writeFileSync(join(d, 'scripts/bench/checks/x'), 'ok'); return d; },
+    () => { const d = mkdtempSync(join(tmpdir(), 'leak-')); writeFileSync(join(d, 'f.txt'), 'scripts/bench/reference/x'); return d; },
+    () => { const d = mkdtempSync(join(tmpdir(), 'leak-')); writeFileSync(join(d, 'f.txt'), '/home/user/heldout'); return d; },
+    () => { const d = mkdtempSync(join(tmpdir(), 'leak-')); writeFileSync(join(d, 'f.txt'), 'secret-xyz'); return d; },
+    () => { const d = mkdtempSync(join(tmpdir(), 'leak-')); mkdirSync(join(d, 'heldout'), { recursive: true }); writeFileSync(join(d, 'heldout/heldout.json'), JSON.stringify({ version: 1, checks: [{ id: 'cid-abc', file: 'x.txt' }] })); writeFileSync(join(d, 'f.txt'), 'cid-abc'); return d; },
+  ];
+  const config = [null, null, '/home/user/heldout', ['secret-xyz'], { heldout: '/tmp/heldout' }];
+  for (let i = 0; i < dirs.length; i++) {
+    const dir = dirs[i]();
+    try {
+      const opts = config[i];
+      if (i === 4) {
+        // Companion id test: set up heldout manifest
+        const heldoutDir = mkdtempSync(join(tmpdir(), 'h-'));
+        writeFileSync(join(heldoutDir, 'heldout.json'), JSON.stringify({ version: 1, checks: [{ id: 'cid-abc', file: 'x.txt' }] }));
+        assert.throws(() => assertNoLeaks(dir, { heldout: heldoutDir }), /contains leaks/);
+        rmSync(heldoutDir, { recursive: true, force: true });
+      } else if (typeof opts === 'object' && Array.isArray(opts)) {
+        assert.throws(() => assertNoLeaks(dir, { markers: opts }), /contains leaks/);
+      } else {
+        assert.throws(() => assertNoLeaks(dir, { heldout: opts }), /contains leaks/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('assertNoLeaks passes for clean evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'clean-'));
+  try {
+    mkdirSync(join(dir, 'harness'), { recursive: true });
+    writeFileSync(join(dir, 'class.json'), '{"id":"test"}');
+    writeFileSync(join(dir, 'harness/CONST.txt'), 'content');
+    assert.doesNotThrow(() => assertNoLeaks(dir, { heldout: '/other', markers: ['MARKER'] }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------------------- draft end-to-end
+
+/** Shared fixture: fixture repo, fake drafter, scenario file, call log. */
+function setupDraftTest() {
+  const root = fixtureRepo();
+  const tmpDir = mkdtempSync(join(tmpdir(), 'draft-'));
+  const scenarioPath = join(tmpDir, 'scenario.json');
+  const statePath = join(tmpDir, 'state.json');
+  const callLogPath = join(tmpDir, 'calls.jsonl');
+
+  // Fake drafter reads scenario JSON and logs calls, tracks state across attempts
+  const drafterPath = join(tmpDir, 'drafter.js');
+  writeFileSync(drafterPath, `
+const fs = require('fs');
+const path = require('path');
+const lens = process.env.EVOLVER_LENS || '';
+const evDir = process.env.EVOLVER_EVIDENCE || '';
+let stdin = '';
+process.stdin.on('data', c => { stdin += c; });
+process.stdin.on('end', () => {
+  fs.appendFileSync('${callLogPath}', JSON.stringify({lens, cwd: process.cwd(), stdin}) + '\\n');
+  const s = JSON.parse(fs.existsSync('${scenarioPath}') ? fs.readFileSync('${scenarioPath}', 'utf8') : '{}');
+  const r = s.responses?.[lens] || { text: 'KEEP_BASE default' };
+  const stateFile = '${statePath}';
+  let state = {};
+  if (fs.existsSync(stateFile)) state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const att = (state[lens] || 0) + 1;
+  state[lens] = att;
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+
+  if (r.scenario === 'same-then-valid') {
+    const f = path.join(evDir, 'harness/SYSTEM_PROMPT_APPEND.txt');
+    const prev = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : 'fallback';
+    if (att === 1) { console.log('CITES:\\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — first\\nTEXT:\\n' + prev); }
+    else { console.log(r.text); }
+  } else if (r.scenario === 'always-same') {
+    const f = path.join(evDir, 'harness/SYSTEM_PROMPT_APPEND.txt');
+    const prev = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : 'fallback';
+    console.log('CITES:\\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — same\\nTEXT:\\n' + prev);
+  } else { console.log(r.text); }
+});
+process.stdin.resume();
+`);
+
+  const cmd = `node ${drafterPath}`;
+  const cleanup = () => { rmSync(root, { recursive: true, force: true }); rmSync(tmpDir, { recursive: true, force: true }); };
+  return { root, tmpDir, cmd, scenarioPath, statePath, callLogPath, cleanup };
+}
+
+function createFakeDrafterInDir(tmpDir, callLogPath, stateFilePath, scenarioFilePath) {
+  // Create the Node.js helper module
+  const helperPath = join(tmpDir, 'drafter-helper.js');
+  const helperCode = `
+const fs = require('fs');
+const path = require('path');
+
+function logCall(stdin) {
+  try {
+    const logDir = path.dirname('${callLogPath}');
+    fs.mkdirSync(logDir, { recursive: true });
+
+    const lens = process.env.EVOLVER_LENS || 'unknown';
+    const evidenceDir = process.env.EVOLVER_EVIDENCE || '';
+
+    const logEntry = JSON.stringify({
+      lens,
+      evidenceDir,
+      cwd: process.cwd(),
+      stdin_length: stdin.length,
+      has_evidence: fs.existsSync(evidenceDir),
+    });
+    fs.appendFileSync('${callLogPath}', logEntry + '\\n');
+  } catch (e) {
+    console.error('Failed to log call:', e.message);
+  }
+}
+
+let stdin = '';
+process.stdin.on('data', (chunk) => { stdin += chunk; });
+process.stdin.on('end', () => {
+  logCall(stdin);
+
+  try {
+    const lens = process.env.EVOLVER_LENS || 'unknown';
+    const evidenceDir = process.env.EVOLVER_EVIDENCE || '';
+
+    const scenarioFile = process.env.DRAFT_SCENARIO_FILE || '${scenarioFilePath}';
+    if (!scenarioFile || !fs.existsSync(scenarioFile)) {
+      console.log('KEEP_BASE default response');
+      process.exit(0);
+    }
+
+    const scenario = JSON.parse(fs.readFileSync(scenarioFile, 'utf8'));
+    const response = scenario.responses?.[lens];
+    if (!response) {
+      console.log('KEEP_BASE no scenario configured');
+      process.exit(0);
+    }
+
+    const stateFile = process.env.DRAFT_STATE_FILE || '${stateFilePath}';
+    let attempts = {};
+    if (stateFile && fs.existsSync(stateFile)) {
+      attempts = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    }
+    attempts[lens] = (attempts[lens] || 0) + 1;
+    if (stateFile) fs.writeFileSync(stateFile, JSON.stringify(attempts));
+
+    if (response.scenario === 'same-then-valid') {
+      if (attempts[lens] === 1) {
+        const constantFile = path.join(evidenceDir, 'harness/SYSTEM_PROMPT_APPEND.txt');
+        if (fs.existsSync(constantFile)) {
+          const constantText = fs.readFileSync(constantFile, 'utf8');
+          console.log('CITES:\\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — initial state\\nTEXT:\\n' + constantText);
+        } else {
+          console.log('CITES:\\n- harness/README.md:1 — fallback\\nTEXT:\\nfallback');
+        }
+      } else {
+        console.log(response.text);
+      }
+      process.exit(0);
+    }
+
+    if (response.scenario === 'always-same') {
+      const constantFile = path.join(evidenceDir, 'harness/SYSTEM_PROMPT_APPEND.txt');
+      if (fs.existsSync(constantFile)) {
+        const constantText = fs.readFileSync(constantFile, 'utf8');
+        console.log('CITES:\\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — analysis\\nTEXT:\\n' + constantText);
+      } else {
+        console.log('CITES:\\n- harness/README.md:1 — fallback\\nTEXT:\\nfallback');
+      }
+      process.exit(0);
+    }
+
+    console.log(response.text);
+  } catch (e) {
+    console.error('Error in helper:', e.message);
+    process.exit(1);
+  }
+});
+
+process.stdin.resume();
+`;
+  writeFileSync(helperPath, helperCode);
+
+  // Return command to invoke the helper with env vars
+  // Note: env vars are interpolated by bash when cmd is executed via sh -c
+  return `node ${helperPath}`;
+}
+
+/** Helper to set up a test: fixture repo, drafter, classes. */
+function draftTestHelper() {
+  const root = fixtureRepo();
+  const tmpDir = mkdtempSync(join(tmpdir(), 'colonizer-evolve-draft-'));
+  const callLogPath = join(tmpDir, 'calls.jsonl');
+  const stateFilePath = join(tmpDir, 'state.json');
+  const scenarioFilePath = join(tmpDir, 'scenario.json');
+
+  const baseCmd = createFakeDrafterInDir(tmpDir, callLogPath, stateFilePath, scenarioFilePath);
+
+  const cleanup = () => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+  };
+
+  return { root, baseCmd, callLogPath, stateFilePath, scenarioFilePath, tmpDir, cleanup };
+}
+
+// Compact draft tests using shared helper
+test('cmdDraft: procedure=valid, knowledge=keep_base writes one proposal, drafter cwd is evidence dir', async () => {
+  const { root, tmpDir, cmd, scenarioPath, callLogPath, cleanup } = setupDraftTest();
+  try {
+    const outDir = join(root, 'out');
+    mkdirSync(outDir, { recursive: true });
+    const classesPath = join(root, 'c.json');
+    writeFileSync(classesPath, JSON.stringify({ repo: 'r', heldout_version: 1, classes: [{ id: 'module:x/q', surface: 'module:x', kind: 'q', count: 1, evidence: [] }] }));
+    writeFileSync(scenarioPath, JSON.stringify({ responses: { procedure: { scenario: 'valid', text: 'CITES:\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — why\nTEXT:\nnew' }, knowledge: { text: 'KEEP_BASE ok' } } }));
+    await cmdDraft({ class: 'module:x/q', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', lenses: 'procedure,knowledge', classes: classesPath, cmd, out: outDir, root });
+    const proposals = readdirSync(outDir).filter(f => f.endsWith('.md'));
+    assert.equal(proposals.length, 1);
+    const draftJson = JSON.parse(readFileSync(join(outDir, 'module-x-q/draft.json'), 'utf8'));
+    assert.ok(draftJson.lenses.some(l => l.lens === 'procedure' && l.outcome === 'proposed'));
+    assert.ok(draftJson.lenses.some(l => l.lens === 'knowledge' && l.outcome === 'keep_base'));
+    const calls = readFileSync(callLogPath, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    // realpath: on macOS tmpdir() sits behind the /var -> /private/var symlink, and the child reports the resolved cwd.
+    assert.ok(calls.some(c => c.cwd === realpathSync(draftJson.evidence)), 'drafter cwd should equal evidence directory');
+  } finally { cleanup(); }
+});
+
+test('cmdDraft: records outcome with attempts and errors', async () => {
+  const { root, tmpDir, cmd, scenarioPath, cleanup } = setupDraftTest();
+  try {
+    const outDirExt = mkdtempSync(join(tmpdir(), 'out-'));
+    const classesPath = join(outDirExt, 'c.json');
+    writeFileSync(classesPath, JSON.stringify({ repo: 'r', heldout_version: 1, classes: [{ id: 'module:x/q', surface: 'module:x', kind: 'q', count: 1, evidence: [] }] }));
+    writeFileSync(scenarioPath, JSON.stringify({ responses: { procedure: { text: 'invalid\nno cites or text' } } }));
+    await cmdDraft({ class: 'module:x/q', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', lenses: 'procedure', classes: classesPath, cmd, out: outDirExt, root });
+    const draftJson = JSON.parse(readFileSync(join(outDirExt, 'module-x-q/draft.json'), 'utf8'));
+    const proc = draftJson.lenses.find(l => l.lens === 'procedure');
+    assert.ok(proc.attempts >= 1);
+    assert.ok(['failed', 'keep_base', 'proposed'].includes(proc.outcome));
+    rmSync(outDirExt, { recursive: true, force: true });
+  } finally { cleanup(); }
+});
+
+
+test('cmdDraft: git status clean after run', async () => {
+  const { root, tmpDir, cmd, scenarioPath, cleanup } = setupDraftTest();
+  try {
+    const outDirExt = mkdtempSync(join(tmpdir(), 'out-'));
+    const classesPathExt = join(outDirExt, 'c.json');
+    writeFileSync(classesPathExt, JSON.stringify({ repo: 'r', heldout_version: 1, classes: [{ id: 'module:x/q', surface: 'module:x', kind: 'q', count: 1, evidence: [] }] }));
+    writeFileSync(scenarioPath, JSON.stringify({ responses: { procedure: { scenario: 'valid', text: 'CITES:\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — z\nTEXT:\nnew' } } }));
+    await cmdDraft({ class: 'module:x/q', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', lenses: 'procedure', classes: classesPathExt, cmd, out: outDirExt, root });
+    const status = git(['status', '--porcelain'], root);
+    assert.equal(status, '');
+    rmSync(outDirExt, { recursive: true, force: true });
+  } finally { cleanup(); }
+});
+
+test('draft retries on invalid reply and records attempts', async () => {
+  const { root, tmpDir, cmd, scenarioPath, callLogPath, cleanup } = setupDraftTest();
+  try {
+    const outDir = join(root, 'out');
+    mkdirSync(outDir, { recursive: true });
+    const classesPath = join(root, 'c.json');
+    writeFileSync(classesPath, JSON.stringify({ repo: 'r', heldout_version: 1, classes: [{ id: 'module:x/q', surface: 'module:x', kind: 'q', count: 1, evidence: [] }] }));
+    writeFileSync(scenarioPath, JSON.stringify({ responses: { procedure: { scenario: 'valid', text: 'CITES:\n- harness/SYSTEM_PROMPT_APPEND.txt:1 — why\nTEXT:\nnew-text' } } }));
+    await cmdDraft({ class: 'module:x/q', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', lenses: 'procedure', classes: classesPath, cmd, out: outDir, root });
+    const draftJson = JSON.parse(readFileSync(join(outDir, 'module-x-q/draft.json'), 'utf8'));
+    const proc = draftJson.lenses.find(l => l.lens === 'procedure');
+    assert.equal(proc.outcome, 'proposed');
+    assert.equal(proc.attempts, 1);
+    const calls = readFileSync(callLogPath, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    const procCalls = calls.filter(c => c.lens === 'procedure');
+    assert.equal(procCalls.length, 1, 'drafter called once');
+  } finally { cleanup(); }
+});
+
+test('draft records invalid and failed outcomes', async () => {
+  const { root, tmpDir, cmd, scenarioPath, callLogPath, cleanup } = setupDraftTest();
+  try {
+    const outDir = join(root, 'out');
+    mkdirSync(outDir, { recursive: true });
+    const classesPath = join(root, 'c.json');
+    writeFileSync(classesPath, JSON.stringify({ repo: 'r', heldout_version: 1, classes: [{ id: 'module:x/q', surface: 'module:x', kind: 'q', count: 1, evidence: [] }] }));
+    writeFileSync(scenarioPath, JSON.stringify({ responses: { procedure: { text: 'invalid reply' } } }));
+    await cmdDraft({ class: 'module:x/q', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', lenses: 'procedure', classes: classesPath, cmd, out: outDir, root });
+    const draftJson = JSON.parse(readFileSync(join(outDir, 'module-x-q/draft.json'), 'utf8'));
+    const proc = draftJson.lenses.find(l => l.lens === 'procedure');
+    assert.equal(proc.outcome, 'failed', 'invalid reply should fail');
+    assert.equal(proc.attempts, 2, 'should retry once');
+    assert.equal(proc.errors.length, 2, 'should record both errors');
+  } finally { cleanup(); }
+});
+
+test('draft refuses leaked evidence before spawning', async () => {
+  const markerValue = ['s', 'e', 'c', 'r', 'e', 't', '-', 'marker'].slice(0, 6).join('') + '-' + 'marker';
+  const leakScenarios = [
+    { name: 'scripts/bench/checks', setup: (classes) => { classes.classes[0].leak = 'found scripts/bench/checks/test'; } },
+    { name: 'scripts/bench/reference', setup: (classes) => { classes.classes[0].leak = 'scripts/bench/reference/baseline'; } },
+    { name: 'heldout path', heldout: true, setup: (classes, heldoutDir) => { classes.classes[0].leak = heldoutDir; } },
+    { name: 'marker', setup: (classes) => { classes.classes[0].secret = markerValue; }, markers: markerValue },
+    { name: 'companion id', heldout: true, setup: (classes) => { classes.classes[0].id_ref = 'companion-abc-123'; } },
+  ];
+  for (const scenario of leakScenarios) {
+    const { root, tmpDir, cmd, callLogPath, cleanup } = setupDraftTest();
+    try {
+      const outDir = join(root, 'out');
+      mkdirSync(outDir, { recursive: true });
+      const classesPath = join(root, 'c.json');
+      const classes = { repo: 'r', heldout_version: 1, classes: [{ id: 'module:x/q', surface: 'module:x', kind: 'q', count: 1, evidence: [] }] };
+      let heldoutDir = null;
+      if (scenario.heldout) {
+        heldoutDir = mkdtempSync(join(tmpdir(), 'heldout-'));
+        writeFileSync(join(heldoutDir, 'heldout.json'), JSON.stringify({ version: 1, checks: [{ id: 'companion-abc-123', file: 'x.txt' }] }));
+      }
+      scenario.setup(classes, heldoutDir);
+      writeFileSync(classesPath, JSON.stringify(classes));
+      const draftArgs = { class: 'module:x/q', module: 'x', constant: 'SYSTEM_PROMPT_APPEND', classes: classesPath, cmd, out: outDir, root };
+      if (heldoutDir) draftArgs.heldout = heldoutDir;
+      if (scenario.markers) draftArgs.markers = scenario.markers;
+      await assert.rejects(() => cmdDraft(draftArgs), /contains leaks/, `should reject ${scenario.name} leak`);
+      const callLogExists = existsSync(callLogPath);
+      assert.equal(callLogExists, false, `drafter should not be called for ${scenario.name} leak`);
+      const proposals = readdirSync(outDir).filter(f => f.endsWith('.md'));
+      assert.equal(proposals.length, 0, `no proposals for ${scenario.name} leak`);
+      if (heldoutDir) rmSync(heldoutDir, { recursive: true, force: true });
+    } finally { cleanup(); }
   }
 });
 

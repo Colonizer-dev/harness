@@ -89,6 +89,10 @@ pub struct Verification {
     /// request that would open red opens as a draft instead, naming these.
     #[serde(default)]
     pub pre_publish_red: Vec<String>,
+    /// The last lines of output (redacted) for pre-publish checks that fail on the base too: the head
+    /// run's tail, capped and stored for audit (issue #1363). Maps from the short check name to its tail.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pre_publish_red_tails: std::collections::BTreeMap<String, String>,
     /// Why the checks never got to run, when the network is why and the retries ran out (issue
     /// #1117): "rustup toolchain download, connection reset". Set only on an unverifiable verdict,
     /// and autopilot then holds the colony with this cause on its card instead of publishing.
@@ -148,6 +152,7 @@ impl Verification {
             inconclusive: Vec::new(),
             pre_publish_ok: Vec::new(),
             pre_publish_red: Vec::new(),
+            pre_publish_red_tails: std::collections::BTreeMap::new(),
             network: None,
             infra_retry: None,
             command: None,
@@ -700,6 +705,20 @@ pub(crate) fn pr_notes(verification: Option<&Verification>) -> Option<String> {
                 v.pre_publish_red.join(", "),
                 if v.pre_publish_red.len() == 1 { "fails" } else { "fail" }
             ));
+            // Show a sample of the failing output for each pre-publish red check (issue #1363)
+            for check_name in &v.pre_publish_red {
+                if let Some(tail) = v.pre_publish_red_tails.get(check_name)
+                    && !tail.trim().is_empty()
+                {
+                    let lines: Vec<&str> = tail.lines().take(3).collect();
+                    let sample = lines.join("\n");
+                    out.push_str(&format!(
+                        "\n> - `{check_name}`: {}\n>   ````\n>   {}\n>   ````",
+                        if lines.len() >= 3 { "(first 3 lines)" } else { "" },
+                        sample.replace('\n', "\n>   ")
+                    ));
+                }
+            }
         }
     }
     Some(out)
@@ -1226,6 +1245,7 @@ async fn verify_claim(app: &Shared, s: &Session, runner: &VmRunner, delays: &[Du
 /// What one fresh-checkout run said — the same reading for the head and the base: the guest's own
 /// report decides, and everything but a green or red command is the image's or the sandbox's
 /// trouble, not the colony's.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Green,
     Failed(i32),
@@ -1272,8 +1292,22 @@ pub(crate) fn classify(ran: &Ran) -> Outcome {
         Some(127) => Outcome::Absent,
         Some(0) if ran.sandbox == 0 => Outcome::Green,
         Some(0) => Outcome::Sandbox(ran.sandbox),
+        Some(1) if is_rustup_component_missing(&ran.tail) => {
+            // Issue #1363: a pinned toolchain without rustfmt/clippy components exits 1 with
+            // a rustup proxy message. Treat as infra like exit 127 does.
+            Outcome::MissingTool
+        }
         Some(code) => Outcome::Failed(code),
     }
+}
+
+/// Whether the tail shows a rustup proxy error about a missing component.
+fn is_rustup_component_missing(tail: &Option<String>) -> bool {
+    let Some(text) = tail else { return false };
+    // The rustup proxy error message: "'cargo-fmt' is not installed for the toolchain"
+    // (the primary signal), or an error message with a hint about rustup component add
+    // (to avoid false positives from unrelated output).
+    text.contains("is not installed for the toolchain") || (text.contains("error:") && text.contains("rustup component add"))
 }
 
 /// What the same check answered on the merge-base commit, separating a failure this change
@@ -1713,14 +1747,14 @@ async fn tail_lines(path: &Path, lines: usize) -> Option<String> {
 /// What one fresh-checkout run answered.
 pub(crate) struct Ran {
     /// The sandbox's own exit code: corroboration only.
-    sandbox: i32,
+    pub(crate) sandbox: i32,
     /// The number the guest reported, the one the verdict trusts.
-    reported: Option<i32>,
+    pub(crate) reported: Option<i32>,
     /// The guest found the tool the command needs missing, and ran nothing.
-    missing_tool: bool,
+    pub(crate) missing_tool: bool,
     /// The last lines of the command's combined output, when it failed — the evidence.
     pub(crate) tail: Option<String>,
-    ms: u64,
+    pub(crate) ms: u64,
     /// If the run failed due to resource exhaustion on a retry, what resource was exhausted (issue
     /// #1301): "disk full" or "out of memory". Not a real failure — infrastructure trouble.
     pub(crate) infra_retry: Option<String>,
@@ -1729,6 +1763,30 @@ pub(crate) struct Ran {
 /// Single-quotes a path for the guest's `sh`, so any check directory reaches the script verbatim.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The rustup component name needed for a cargo command, if it is a format or lint check.
+/// Returns the component name (e.g. "rustfmt" or "clippy") when the command invokes one.
+fn cargo_component(command: &str) -> Option<&'static str> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    for i in 0..words.len() {
+        if words[i] == "cargo" && i + 1 < words.len() {
+            let next = words[i + 1];
+            let target = if next.starts_with('+') && i + 2 < words.len() {
+                // cargo +VERSION fmt/clippy
+                words[i + 2]
+            } else {
+                // cargo fmt/clippy
+                next
+            };
+            return match target {
+                "fmt" => Some("rustfmt"),
+                "clippy" => Some("clippy"),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 /// The guest's script: into the fresh checkout (the check's own subdirectory when it has one),
@@ -1749,6 +1807,13 @@ fn guest_script(dir: &str, command: &str, needs: Option<&Needs>, toolchain: Opti
              awk -v c={channel} '$1 == c || index($1, c \"-\") == 1 {{ print $1; exit }}'); \
              if [ -n \"$t\" ]; then export RUSTUP_TOOLCHAIN=\"$t\"; fi; fi",
             channel = shell_quote(channel)
+        ));
+    }
+    // Issue #1363: ensure cargo fmt and clippy components are installed when the toolchain is pinned.
+    // This is a best-effort; it never fails the script, so it doesn't change the check's exit status.
+    if let Some(component) = cargo_component(command) {
+        cd.push_str(&format!(
+            " && command -v rustup >/dev/null 2>&1 && rustup component add {component} >/dev/null 2>&1"
         ));
     }
     match needs {
@@ -2436,6 +2501,17 @@ pub(crate) mod tests {
         assert_eq!(serde_json::from_value::<Verification>(old).unwrap(), Verification::blank());
     }
 
+    /// A Verification JSON without the `pre_publish_red_tails` field (added in issue #1363)
+    /// still deserializes correctly with an empty tails map.
+    #[test]
+    fn verification_json_without_pre_publish_red_tails_deserializes() {
+        let mut v = serde_json::to_value(Verification::blank()).unwrap();
+        v.as_object_mut().unwrap().remove("pre_publish_red_tails");
+        let deserialized = serde_json::from_value::<Verification>(v).unwrap();
+        assert_eq!(deserialized.pre_publish_red_tails.len(), 0);
+        assert_eq!(deserialized, Verification::blank());
+    }
+
     /// A runner that must never be asked anything: this verdict must not boot a VM.
     fn panicking_runner() -> VmRunner {
         Arc::new(|_| Box::pin(async { panic!("the VM must not boot for this verdict") }))
@@ -2760,6 +2836,118 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cargo_fmt_and_clippy_are_detected_for_component_installation() {
+        // Issue #1363: detect cargo fmt and clippy to install rustfmt and clippy components
+        assert_eq!(cargo_component("cargo fmt --all --check"), Some("rustfmt"));
+        assert_eq!(cargo_component("cargo clippy --all-targets -- -D warnings"), Some("clippy"));
+        assert_eq!(cargo_component("cargo +1.98.1 fmt --all"), Some("rustfmt"));
+        assert_eq!(cargo_component("cargo test"), None);
+        assert_eq!(cargo_component("npm run lint"), None);
+        assert_eq!(cargo_component(""), None);
+    }
+
+    #[test]
+    fn guest_script_adds_component_for_fmt_and_clippy() {
+        // Issue #1363: guest script adds rustup component add for fmt/clippy
+        let script = guest_script("", "cargo fmt --all --check", None, Some("1.98.1"));
+        assert!(
+            script.contains("rustup component add rustfmt"),
+            "script missing rustfmt component add: {script}"
+        );
+        assert!(
+            script.contains(">/dev/null 2>&1"),
+            "component add should not fail the script: {script}"
+        );
+
+        let script = guest_script("", "cargo clippy -- -D warnings", None, Some("stable"));
+        assert!(
+            script.contains("rustup component add clippy"),
+            "script missing clippy component add: {script}"
+        );
+
+        let script = guest_script("", "cargo test", None, None);
+        assert!(
+            !script.contains("rustup component add"),
+            "test command should not add components: {script}"
+        );
+    }
+
+    #[test]
+    fn rustup_component_missing_is_detected_in_the_tail() {
+        // Issue #1363: classify detects rustup proxy messages about missing components
+        let missing_component =
+            Some("error: 'cargo-fmt' is not installed for the toolchain 'stable-x86_64-unknown-linux-gnu'".to_string());
+        let with_hint =
+            Some("error: 'cargo-clippy' is not installed\n\nTo install, run `rustup component add clippy`".to_string());
+        let regular_error = Some("some other error".to_string());
+
+        assert!(is_rustup_component_missing(&missing_component));
+        assert!(is_rustup_component_missing(&with_hint));
+        assert!(!is_rustup_component_missing(&regular_error));
+        assert!(!is_rustup_component_missing(&None));
+    }
+
+    /// Issue #1363: classify correctly identifies rustup component missing (exit 1) vs regular
+    /// failures, and the rule that non-zero, non-127 exits must match a specific rustup pattern.
+    #[test]
+    fn classify_rustup_component_missing_vs_regular_failure() {
+        // Regular exit 1 failure without rustup message -> Failed(1)
+        let regular_fail = Ran {
+            sandbox: 0,
+            reported: Some(1),
+            missing_tool: false,
+            tail: Some("some compilation error".to_string()),
+            ms: 100,
+            infra_retry: None,
+        };
+        assert_eq!(classify(&regular_fail), Outcome::Failed(1));
+
+        // Exit 1 with rustup component missing message -> MissingTool (treated as infra)
+        let rustup_missing = Ran {
+            sandbox: 0,
+            reported: Some(1),
+            missing_tool: false,
+            tail: Some("error: 'cargo-fmt' is not installed for the toolchain 'stable-x86_64-unknown-linux-gnu'".to_string()),
+            ms: 100,
+            infra_retry: None,
+        };
+        assert_eq!(classify(&rustup_missing), Outcome::MissingTool);
+
+        // Exit 0 (green)
+        let green = Ran {
+            sandbox: 0,
+            reported: Some(0),
+            missing_tool: false,
+            tail: None,
+            ms: 100,
+            infra_retry: None,
+        };
+        assert_eq!(classify(&green), Outcome::Green);
+
+        // Exit 127 (absolute tool missing)
+        let tool_missing = Ran {
+            sandbox: 0,
+            reported: Some(127),
+            missing_tool: false,
+            tail: None,
+            ms: 100,
+            infra_retry: None,
+        };
+        assert_eq!(classify(&tool_missing), Outcome::Absent);
+
+        // Exit 2 (another failure code, not 1 or 127, no rustup pattern)
+        let other_code = Ran {
+            sandbox: 0,
+            reported: Some(2),
+            missing_tool: false,
+            tail: Some("error message".to_string()),
+            ms: 100,
+            infra_retry: None,
+        };
+        assert_eq!(classify(&other_code), Outcome::Failed(2));
+    }
+
+    #[test]
     fn claimed_paths_are_backticked_path_like_tokens() {
         let claim = "Changed `src/lib.rs` and `web/src/a.tsx:42`, kept `docs/guide.md:12-30` in sync, \
                      touched `./scripts/run.py`; not `README.md`, `a b/c`, `src/*.rs` or `https://x/y.md`.";
@@ -2873,6 +3061,35 @@ pub(crate) mod tests {
         let note = pr_notes(Some(&v)).unwrap();
         assert!(note.starts_with("> **Verification notes**"), "{note}");
         assert!(note.contains("**Checks run before publishing:**"), "{note}");
+    }
+
+    /// Issue #1363: pr_notes renders pre-publish red checks with their tails (first 3 lines),
+    /// showing redacted output for audit. Secrets are redacted the same way as publish_checks does.
+    #[test]
+    fn pr_notes_shows_pre_publish_red_check_tails_redacted() {
+        let mut v = Verification::blank();
+        v.pre_publish_red = vec!["clippy".into()];
+        // Simulate what publish_checks does: store the last 5 lines of redacted output
+        let token = concat!("gh", "p_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
+        let unredacted_tail = format!(
+            "warning: unused variable\n  --> src/lib.rs:42:5\nerror: GH={}\nmore output",
+            token
+        );
+        let redacted = colonizer_redact::redact_text(&unredacted_tail);
+        let lines: Vec<&str> = redacted.lines().collect();
+        let capped = lines[lines.len().saturating_sub(5)..].join("\n");
+        v.pre_publish_red_tails.insert("clippy".into(), capped);
+
+        let note = pr_notes(Some(&v)).unwrap();
+        // Verify the note includes the check name and a code block
+        assert!(note.contains("`clippy`"), "check name should appear: {note}");
+        assert!(
+            note.contains("````"),
+            "should use 4-backtick fence for markdown safety: {note}"
+        );
+        // Verify the secret is redacted
+        assert!(!note.contains(token), "github token should be redacted: {note}");
+        assert!(note.contains("[REDACTED:"), "redaction mark should appear: {note}");
     }
 
     /// Runs `git` synchronously against a fixture repo — setup and inspection, not the code

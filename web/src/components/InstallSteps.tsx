@@ -5,6 +5,7 @@
 import { useState, type ReactElement } from "react";
 
 import type { InstallPlatform } from "../cockpitAddress";
+import { copyText, manualCopyHint } from "../copy";
 import { Button } from "./ui";
 
 /** Safari's share glyph, drawn inline for the "tap Share" step. */
@@ -39,13 +40,11 @@ export function InstallSteps({
   installAvailable?: boolean;
 }): ReactElement | null {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(address);
-      setCopied(true);
-    } catch {
-      /* nothing to copy into; the address is on screen anyway */
-    }
+    const ok = await copyText(address);
+    setCopied(ok);
+    setCopyFailed(!ok);
   };
   const note = "rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted";
 
@@ -96,6 +95,9 @@ export function InstallSteps({
             <Button size="sm" className="min-h-11" onClick={() => void copy()}>
               {copied ? "Copied" : "Copy link"}
             </Button>
+            {copyFailed && (
+              <span role="status" className="text-small-lg text-muted">{manualCopyHint()}</span>
+            )}
             {!safari && <span className="text-small-lg text-muted">then paste it into Safari</span>}
           </div>
         )}
@@ -134,6 +136,9 @@ export function InstallSteps({
             <Button size="sm" className="min-h-11" onClick={() => void copy()}>
               {copied ? "Copied" : "Copy address"}
             </Button>
+            {copyFailed && (
+              <span role="status" className="text-small-lg text-muted">{manualCopyHint()}</span>
+            )}
           </div>
         )}
       </div>

@@ -6,6 +6,7 @@
 
 use crate::providers;
 use serde::Serialize;
+use serde_json::Map;
 use std::collections::BTreeSet;
 
 /// Labels that mark a task as small: each match takes two points off the score. Matched
@@ -521,6 +522,88 @@ fn directory_of(path: &str) -> &str {
     }
 }
 
+/// Validate tier inversion settings: refuses saving agent settings where model_high is cheaper
+/// than model, or model_low is more expensive than model, unless allow_inverted_tiers is true.
+/// Returns the refusal message (to be wrapped in a 400 error) or None when the settings are valid.
+pub fn tier_inversion_refusal(settings: &Map<String, serde_json::Value>, price: impl Fn(&str) -> Option<f64>) -> Option<String> {
+    let allow_inverted = settings
+        .get("allow_inverted_tiers")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    if allow_inverted {
+        return None;
+    }
+
+    let model = settings.get("model").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let model_low = settings
+        .get("model_low")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let model_high = settings
+        .get("model_high")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+
+    let inversions = tier_inversions(model, model_low, model_high, price);
+    if !inversions.is_empty() {
+        Some(format!(
+            "{}; set allow_inverted_tiers to skip this check",
+            inversions.join("; ")
+        ))
+    } else {
+        None
+    }
+}
+
+/// Pricing inversions: when a higher tier's model is cheaper than a lower tier's, or when the
+/// medium (orchestrator) model is more expensive than the high-tier model. Returns human-readable
+/// messages naming both models and their blended prices (input + output per million tokens), or an
+/// empty vec when pricing is sensible or unknown.
+///
+/// Blended price: (input_per_mtok + output_per_mtok) / 2. Unknown price for either model → no
+/// verdict on that pair, so no message.
+pub fn tier_inversions(model: &str, low: &str, high: &str, price: impl Fn(&str) -> Option<f64>) -> Vec<String> {
+    let mut inversions = Vec::new();
+
+    // Blank/empty model IDs: no message (model is required; low and high are optional)
+    let model = model.trim();
+    let low = low.trim();
+    let high = high.trim();
+
+    if model.is_empty() {
+        return inversions;
+    }
+
+    // Compute blended price: (input + output) / 2
+    let blend = |m: &str| price(m);
+
+    if let (Some(medium_price), Some(high_price)) = (blend(model), blend(high))
+        && high_price < medium_price
+    {
+        inversions.push(format!(
+            "model_high `{high}` (${high_price:.2}/Mtok) is cheaper than model `{model}` \
+             (${medium_price:.2}/Mtok): tasks routed high would run on a weaker model than medium ones",
+            high_price = high_price,
+            medium_price = medium_price
+        ));
+    }
+
+    if !low.is_empty()
+        && let (Some(low_price), Some(medium_price)) = (blend(low), blend(model))
+        && low_price > medium_price
+    {
+        inversions.push(format!(
+            "model_low `{low}` (${low_price:.2}/Mtok) is more expensive than model `{model}` \
+             (${medium_price:.2}/Mtok): tasks routed low would run on a stronger model than medium ones",
+            low_price = low_price,
+            medium_price = medium_price
+        ));
+    }
+
+    inversions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,6 +1022,29 @@ mod tests {
         assert_eq!(Tier::parse(""), None);
     }
 
+    #[test]
+    fn tier_inversions_detects_pricing_problems() {
+        let price_fn = |m: &str| match m {
+            "cheap-high" => Some(2.0),
+            "medium" => Some(10.0),
+            "expensive-low" => Some(20.0),
+            "unknown" => None,
+            _ => None,
+        };
+        // High cheaper than medium
+        let high_cheap = tier_inversions("medium", "", "cheap-high", price_fn);
+        assert_eq!(high_cheap.len(), 1);
+        assert!(high_cheap[0].contains("model_high"));
+        // Low more expensive than medium
+        let low_expensive = tier_inversions("medium", "expensive-low", "", price_fn);
+        assert_eq!(low_expensive.len(), 1);
+        assert!(low_expensive[0].contains("model_low"));
+        // Empty medium: no message
+        assert!(tier_inversions("", "", "any", price_fn).is_empty());
+        // Unknown price: no verdict
+        assert!(tier_inversions("medium", "", "unknown", price_fn).is_empty());
+    }
+
     fn jev(tier: Tier) -> JevOpinion {
         JevOpinion {
             tier,
@@ -1317,5 +1423,30 @@ mod tests {
             !estimate.worth_routing(),
             "a tie keeps the colony on its own model: only strictly cheaper routes"
         );
+    }
+
+    #[test]
+    fn tier_inversion_refusal_validates_and_allows_with_flag() {
+        let price = |m: &str| match m {
+            "cheap-high" => Some(2.0),
+            "medium" => Some(10.0),
+            "expensive-low" => Some(20.0),
+            "cheap-low" => Some(1.0),
+            _ => None,
+        };
+        // Detects inversion: high cheaper than medium
+        let mut bad = Map::new();
+        bad.insert("model".into(), "medium".into());
+        bad.insert("model_high".into(), "cheap-high".into());
+        assert!(tier_inversion_refusal(&bad, price).is_some());
+        // Skips check when allow_inverted_tiers is true
+        bad.insert("allow_inverted_tiers".into(), true.into());
+        assert!(tier_inversion_refusal(&bad, price).is_none());
+        // Allows correctly ordered tiers: low < medium < high
+        let mut good = Map::new();
+        good.insert("model_low".into(), "cheap-low".into());
+        good.insert("model".into(), "medium".into());
+        good.insert("model_high".into(), "expensive-low".into());
+        assert!(tier_inversion_refusal(&good, price).is_none());
     }
 }

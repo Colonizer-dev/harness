@@ -737,6 +737,7 @@ pub async fn create(
         fix_for: None,
         pr_url: None,
         merged_at: None,
+        pr_draft_base_red: false,
         pr_opened_at: None,
         changed_paths: Vec::new(),
         ci_state: None,

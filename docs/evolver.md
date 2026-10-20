@@ -44,7 +44,22 @@ computes a unified diff without touching the working tree, records the harness c
 `base_commit`, then writes `<out>/<id>.md` plus the raw `<out>/<id>.diff` and prints the exact
 reproduction commands. Only constants whose names end in `_PROMPT` or `_PROMPT_APPEND` are accepted —
 that is the whole safety envelope for this stage: one string constant, in one agent module, per
-candidate.
+candidate. `propose` also refuses a module file with uncommitted edits, because evaluate's fingerprint
+check rebuilds the module from `base_commit` plus the diff; drafts go through `propose`, so the same rule applies. As an alternative to writing the text by hand, `draft` spawns a command of your choice
+(typically an LLM via stdin) to generate candidates automatically; see below.
+
+**Draft** automates the text generation. It reads the class evidence and optionally colony transcripts
+into an evidence directory, runs a configurable command (`--cmd` or `COLONIZER_EVOLVER_DRAFT_CMD`) once
+per lens (`procedure,knowledge` by default), and turns valid replies into proposals. The command
+receives a brief on stdin, sees `EVOLVER_LENS` and `EVOLVER_EVIDENCE` in the environment, and must
+output either `KEEP_BASE <reason>` or `CITES: …` and `TEXT: …` sections. Each cite is `- <path>:<line> —
+<why>`, paths are relative to the evidence dir, and the text is the full replacement. The command gets
+one retry if its first reply fails validation (bad format, uncited changes, or missing evidence files).
+A `KEEP_BASE` outcome records the reason but creates no proposal; a valid text creates one via
+`propose`, with origin `draft/<lens>` and the cites. Before spawning anything, `draft` checks the
+evidence directory for leaks (paths or content containing `scripts/bench/checks/`, `scripts/bench/reference/`,
+the held-out directory path, configured markers, or companion ids from a heldout manifest), and refuses
+to run the command if any are found, leaving the evidence for inspection.
 
 **Evaluate** also runs nothing: you check out `base_commit`, run the baseline, `git apply` the diff,
 run the candidate, and hand both run files over. The candidate must cover exactly the baseline's

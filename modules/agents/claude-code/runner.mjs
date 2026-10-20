@@ -420,7 +420,8 @@ const CREW_PACK_DIR = fileURLToPath(new URL('./crew/', import.meta.url));
 export function antRegistry(packs) {
   const ants = new Map();
   let queen = null;
-  const warnings = [];
+  // Group unparseable files by pack for collapsed warnings
+  const unparseable = new Map(); // packName -> [ { file, error }, ... ]
   for (const { packName, dir } of packs) {
     let files;
     try {
@@ -428,12 +429,13 @@ export function antRegistry(packs) {
     } catch {
       continue; // no agents/ directory: the pack carries no ants
     }
+    const packErrors = [];
     for (const file of files) {
       let agent;
       try {
         agent = parseAgentMd(readFileSync(join(dir, 'agents', file), 'utf8'), `${packName}/agents/${file}`);
       } catch (err) {
-        warnings.push(`skipping an agent file that does not parse: ${err.message}`);
+        packErrors.push({ file, error: err.message });
         continue;
       }
       if (ants.has(agent.name)) continue;
@@ -448,6 +450,23 @@ export function antRegistry(packs) {
       ants.set(agent.name, entry);
       if (!queen && agent.ant?.caste === 'queen') queen = entry;
     }
+    if (packErrors.length > 0) {
+      unparseable.set(packName, packErrors);
+    }
+  }
+  // Collapse unparseable files into one line per pack
+  const warnings = [];
+  for (const [packName, errors] of unparseable) {
+    const MAX_LISTED = 5;
+    const listed = errors.slice(0, MAX_LISTED).map(({ file, error }) => {
+      // Extract just the reason from the full error message which has format "packName/agents/file: reason"
+      const reason = error.split(': ').slice(1).join(': ');
+      return `${file} (${reason})`;
+    });
+    if (errors.length > MAX_LISTED) {
+      listed.push('…');
+    }
+    warnings.push(`${packName}: ${errors.length} agent file${errors.length === 1 ? '' : 's'} skipped: ${listed.join(', ')}`);
   }
   return { ants, queen, warnings };
 }
