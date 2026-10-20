@@ -190,11 +190,7 @@ pub async fn catalog() -> Json<CatalogueResponse> {
     }
 
     let live_cat = fetch_catalogue().await;
-    let live_reg = if live_cat.is_ok() {
-        fetch_registry().await.ok()
-    } else {
-        None
-    };
+    let live_reg = if live_cat.is_ok() { fetch_registry().await.ok() } else { None };
     let (cached_cat, cached_reg) = if live_cat.is_err() {
         load_disk_cache().await
     } else {
