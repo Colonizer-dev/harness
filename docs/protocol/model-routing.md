@@ -97,6 +97,7 @@ model call, no network, no new dependency: the same shape as the other pure deci
 | `route_per_task` | true | Off: every colony without its own `model_tier` runs on `model` |
 | `model_low` | none | Model for the `low` tier: a Claude alias or ID, or `<provider>/<model>`, in the same forms as `model` |
 | `model_high` | none | Model for the `high` tier, in the same forms as `model` |
+| `allow_inverted_tiers` | false | Allow `model_high` cheaper than `model` or `model_low` more expensive than `model` (issue #1366). When inverted, tasks routed to higher tiers would run on weaker models. The mothership checks pricing and refuses saves unless this is `true`; boot warns when inversions are found |
 | `route_cost_gate` | true | Price routing down against running the task on `model` directly (below), and keep the colony on `model` when routing down would not actually come out cheaper. Only the rule's own `low` pick is gated; an operator's `model_tier` is an instruction, never second-guessed |
 | `route_cost_context_tokens` | 0 | Estimated context tokens (X) the cheaper tier has to reload for a routed subtask; 0 leaves it unknown |
 | `route_cost_output_tokens` | 0 | Estimated output tokens (Y) a routed subtask produces |

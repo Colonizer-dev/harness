@@ -241,7 +241,7 @@ by a background task every 5 s when they changed and once more at shutdown, so a
 of the tally and a restart carries on where it left off; `DELETE /api/providers/{id}` also removes the
 provider's tally.
 
-`used_by` names the model settings (`model`, `subagent_model`, `background_model`, and per-task
+`used_by` names the model settings (`model`, `subagent_model`, `background_model`, `small_model`, and per-task
 routing's `model_low`/`model_high`, whose env vars a colony's environment never sees) whose resolved value
 (schema default, global setting or org override) routes to this provider as `<provider>/<model>`, across
 the global agent env and every org override, e.g. `["subagent_model"]`. Empty means the provider is

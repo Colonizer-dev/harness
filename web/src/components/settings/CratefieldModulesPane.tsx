@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
+import { copyText, manualCopyHint } from "../../copy";
 import type { CratefieldCatalog, CratefieldModule } from "../../types";
 import { IconExternal } from "../icons";
 import { Badge, Button, Spinner, inputClass, type Tone } from "../ui";
@@ -56,10 +57,10 @@ function ModuleCard({ module }: { module: CratefieldModule }) {
   const copyUseLine = useCallback(() => {
     const needs = module.needs.length > 0 ? `; it needs ${module.needs.join(", ")}.` : ".";
     const line = `Use the Cratefield module "${module.name}" (crate ${module.crate_name} ${version})${needs}`;
-    navigator.clipboard?.writeText(line).then(
-      () => toast("Copied to clipboard"),
-      (e) => toast(`Failed to copy: ${errorMessage(e)}`, "error"),
-    );
+    void copyText(line).then((ok) => {
+      if (ok) toast("Copied to clipboard");
+      else toast(manualCopyHint(), "error");
+    });
   }, [module, version, toast]);
 
   return (

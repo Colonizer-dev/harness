@@ -3,6 +3,7 @@
 import { isValidElement, memo, useEffect, useState, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { useToast } from "../../context";
+import { copyText, manualCopyHint } from "../../copy";
 import { IconCheck, IconCopy, IconExternal } from "../../components/icons";
 import { cx } from "../../components/ui";
 import { loadHighlighter } from "./highlight";
@@ -25,13 +26,14 @@ export function CopyButton({ text, label = "Copy", className }: { text: string; 
       aria-label={label}
       title={label}
       onClick={() => {
-        void navigator.clipboard?.writeText(text).then(
-          () => {
-            setDone(true);
-            setTimeout(() => setDone(false), 1400);
-          },
-          () => toast("Could not copy", "error"),
-        );
+        void copyText(text).then((ok) => {
+          if (!ok) {
+            toast(manualCopyHint(), "error");
+            return;
+          }
+          setDone(true);
+          setTimeout(() => setDone(false), 1400);
+        });
       }}
       className={cx("inline-flex cursor-pointer items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-0.5 text-meta-lg text-faint hover:bg-panel-2 hover:text-text", className)}
     >

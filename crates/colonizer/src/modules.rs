@@ -1058,6 +1058,26 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
             .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
     }
 
+    // Tier inversion check (issue #1366): when model_high is cheaper than model or model_low is
+    // more expensive than model, tasks routed to a higher tier would run on a weaker model.
+    // Refuse unless allow_inverted_tiers is explicitly set. Unlike expensive validation checks,
+    // this is not skipped by save_anyway, which is reserved for skipping external service calls.
+    if kind == "agent" {
+        let mut effective = stored.clone();
+        for (key, value) in settings.iter() {
+            effective.insert(key.clone(), value.clone());
+        }
+        let price_fn = |m: &str| {
+            let providers = app.providers();
+            let feed = app.price_feed.entries();
+            crate::providers::pricing_for(&providers, m, Some(feed.as_ref()))
+                .map(|p| (p.input_per_mtok + p.output_per_mtok) / 2.0)
+        };
+        if let Some(refusal_msg) = crate::routing::tier_inversion_refusal(&effective, price_fn) {
+            return Err(client_error(StatusCode::BAD_REQUEST, &refusal_msg));
+        }
+    }
+
     let mut modules = app.modules.write().await;
     let choice = modules
         .get_mut(&kind)

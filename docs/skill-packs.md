@@ -111,7 +111,7 @@ the boot checker judges Colonizer's own.
 | :--- | :--- |
 | `name` | Required, a plain name: it is the subagent type the orchestrator addresses. |
 | `description` | Required, non-empty: what the orchestrator sees when deciding to delegate. |
-| `tools`, `disallowedTools` | Optional inline arrays of Claude Code tool names. |
+| `tools`, `disallowedTools` | Optional arrays or comma-separated strings of Claude Code tool names (e.g., `tools: [Read, Grep]` or `tools: Read, Grep, Glob`). |
 | `model`, `effort` | Optional strings; `effort` is `low`, `medium` or `high`. `model` stays unset unless the file names one, so the subagent model setting keeps deciding it. |
 | `skillsets` | Optional inline array of pack names: the packs whose skills this ant draws on. |
 | `ant` | Optional nested block with the ant's identity, below. |

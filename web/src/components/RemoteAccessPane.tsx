@@ -9,6 +9,7 @@ import { useEffect, useRef, useState, type ReactElement } from "react";
 import { encode } from "uqr";
 
 import { errorMessage, useApi, useToast } from "../context";
+import { copyText, manualCopyHint } from "../copy";
 import type { LinkDevices, LinkInvite, RemotePairing, RemoteStatus } from "../types";
 import { Pane, Row } from "./SettingsDialog";
 import { Button, Spinner, Switch, cx } from "./ui";
@@ -276,16 +277,8 @@ export function RemoteAccessPane({
   };
 
   const copyLink = async (link: string) => {
-    if (!navigator.clipboard) {
-      toast("This browser has no clipboard to copy into", "error");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(link);
-      toast("Link copied");
-    } catch {
-      toast("Couldn't copy the link", "error");
-    }
+    if (await copyText(link)) toast("Link copied");
+    else toast(manualCopyHint(), "error");
   };
 
   const resetLink = async () => {
