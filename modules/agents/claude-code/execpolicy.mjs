@@ -119,6 +119,18 @@ export function defaultPolicy() {
         writes_git: true,
       },
       {
+        id: 'pscale-write-role',
+        decision: 'ask',
+        reason: 'the pscale command would write to the database with admin, writer, or readwriter role',
+        command: ['(^|[;|&]\\s*)(\\S*/)?pscale\\s[^;|&]*--role\\s+(admin|writer|readwriter)', '(^|[;|&]\\s*)(\\S*/)?pscale\\s[^;|&]*--role=(admin|writer|readwriter)'],
+      },
+      {
+        id: 'pscale-force',
+        decision: 'ask',
+        reason: 'the pscale command runs with --force, which can delete or drop data',
+        command: '(^|[;|&]\\s*)(\\S*/)?pscale\\s[^;|&]*--force',
+      },
+      {
         id: 'writes-outside-repo',
         decision: 'ask',
         reason: 'the command writes to a host-backed path outside the repository',

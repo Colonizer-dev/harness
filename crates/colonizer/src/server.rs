@@ -410,6 +410,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::graft::routes())
         .merge(crate::understand_anything::routes())
         .merge(crate::headroom::routes())
+        .merge(crate::planetscale::routes())
         .merge(crate::hunters::routes())
         .merge(crate::img_proxy::routes())
         .merge(crate::lifecycle::routes())

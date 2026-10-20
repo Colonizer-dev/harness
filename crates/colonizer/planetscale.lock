@@ -1,0 +1,8 @@
+# PlanetScale CLI and skillset: the pscale binary (Apache-2.0) and skills repository (MIT).
+# Compiled into the mothership. Same six columns as graft.lock and understand-anything.lock:
+# name, version, platform, kind, sha256, url. The pscale CLI is pinned per architecture (Linux only,
+# no bundle); the skills repository is source and platforms match graft's, pinned by commit.
+pscale  0.347.0  linux-x86_64    archive  1cce03cab62986c18a93a1a8e62454c85f6ce155c5a16ec71791e7a656ee4abb  https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_linux_amd64.tar.gz
+pscale  0.347.0  linux-aarch64   archive  607d47b794be2d1e2822b3c43945be385e1ea03d6c3c120789dc9433517ac36a  https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_linux_arm64.tar.gz
+pscale  0.347.0  darwin-aarch64  archive  7f4dc8dbda90b5a7591c9ec07c0914e7eac378b0f352d7c661c71b2154edec5d  https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_macOS_arm64.tar.gz
+planetscale-skills  999045cfbad79222f38a99599eb96bc736feabee  any  source  5320505eb2ad610aa8de806d428f82992a4a09855c36f2a4ffcd5aef2e82739b  https://codeload.github.com/planetscale/skills/tar.gz/999045cfbad79222f38a99599eb96bc736feabee

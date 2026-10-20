@@ -512,6 +512,9 @@ const CORPUS_PREFIXES: &[Prefix] = &[
     p("tskey-", alnum_dash, 20, "tailscale_key"),
     p("vault:v1:", base64ish, 20, "vault_token"),
     p("hvs.", alnum_dash_us, 24, "vault_token"),
+    p("pscale_tkn_", alnum_dash_us, 20, "pscale_service_token"),
+    p("pscale_pw_", alnum_dash_us_dot, 20, "pscale_password"),
+    p("pscale_oauth_", alnum_dash_us, 20, "pscale_oauth_token"),
 ];
 
 fn prefixed(s: &[u8], rules: &[Prefix], spans: &mut Vec<Span>) {
@@ -1222,6 +1225,21 @@ mod tests {
                 "xoxb-123456789012-1234567890123-AbCdEfGhIjKl",
                 "slack_token",
             ),
+            (
+                "PLANETSCALE_SERVICE_TOKEN=pscale_tkn_abc123def456ghi789jkl012",
+                "pscale_tkn_abc123def456ghi789jkl012",
+                "pscale_service_token",
+            ),
+            (
+                "database password pscale_pw_DaBcDeFg_HiJkLmNo123",
+                "pscale_pw_DaBcDeFg_HiJkLmNo123",
+                "pscale_password",
+            ),
+            (
+                "oauth: pscale_oauth_abcDEF123_ghiJKL456",
+                "pscale_oauth_abcDEF123_ghiJKL456",
+                "pscale_oauth_token",
+            ),
         ]);
     }
 
@@ -1333,6 +1351,16 @@ mod tests {
             ("private_key = \"notreally\"", "notreally", "private_key"),
             ("GET /cb?code=1&token=abcd1234efgh HTTP/1.1", "abcd1234efgh", "token"),
             ("secret := \"gopherPass9\"", "gopherPass9", "secret"),
+            (
+                "PLANETSCALE_SERVICE_TOKEN=pscale_tkn_abc123def456",
+                "pscale_tkn_abc123def456",
+                "pscale_service_token",
+            ),
+            (
+                r#"{"PLANETSCALE_SERVICE_TOKEN": "pscale_tkn_xyz789uvw456"}"#,
+                "pscale_tkn_xyz789uvw456",
+                "pscale_service_token",
+            ),
         ]);
         let mut v = json!({"user": "nick", "password": "hunter", "nested": {"apiKey": "k-123-abc"}, "tokens": 12});
         assert!(redact_value(&mut v));
