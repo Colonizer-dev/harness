@@ -790,12 +790,12 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
 }
 
 /// The mirror's fetch, with the repair ladder behind it (`mirror_health`): a fetch whose stderr
-/// names a corrupt object first gets its corrupt loose objects cleaned and is retried, then, still
-/// corrupt, a full re-clone of the mirror and a third try. Any other failure — and a corruption
-/// both rungs could not fix — comes back unchanged for the boot-retry machinery above to count.
-/// A rung that lands announces one `mirror_repaired` line for the repository and re-queues the
-/// colonies the corruption had already failed; a ladder that runs out — a failed re-clone
-/// included — announces `mirror_needs_attention`.
+/// names a corrupt object first gets its corrupt loose objects cleaned and is retried, then, if
+/// still failing (for any reason), a full re-clone of the mirror and a third try. Any other failure
+/// — and any failure the ladder could not fix — comes back unchanged for the boot-retry machinery
+/// above to count. A rung that lands announces one `mirror_repaired` line for the repository and
+/// re-queues the colonies the corruption had already failed; a ladder that runs out — a failed
+/// re-clone included — announces `mirror_needs_attention`.
 async fn fetch_with_mirror_repair(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger) -> Result<()> {
     async fn fetch(app: &App, bare: &FsPath) -> Result<String> {
         exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await
@@ -814,22 +814,20 @@ async fn fetch_with_mirror_repair(app: &App, repo: &str, bare: &FsPath, log: &Se
                 None
             }
         };
-        if let Err(err) = fetch(app, bare).await {
-            if !crate::mirror_health::is_corruption_error(&err.to_string()) {
-                return Err(err);
-            }
-            log.warn("fetching origin still fails on corruption; re-cloning the mirror")
+        // If fetch still fails after cleanup, regardless of error type, proceed to reclone the mirror
+        if let Err(_err) = fetch(app, bare).await {
+            log.warn("fetching origin still fails after cleanup; re-cloning the mirror")
                 .await;
             let old = match crate::mirror_health::reclone_mirror(app, repo, bare, log).await {
                 Ok(old) => old,
                 Err(err) => {
                     crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
-                    return Err(err);
+                    return Err(err).context("repo cache corruption detected but unrecoverable: re-clone failed");
                 }
             };
             if let Err(err) = fetch(app, bare).await {
                 crate::mirror_health::needs_attention(app, repo, &err.to_string()).await;
-                return Err(err);
+                return Err(err).context("repo cache corruption detected but unrecoverable: fetch failed even after re-clone");
             }
             crate::mirror_health::repaired_by_recloning(app, repo, &old).await;
         } else {
@@ -1041,6 +1039,19 @@ pub(crate) const PLACEHOLDER_NOTE: &str = "Empty dotfiles such as .env and .netr
      git status and managed by the harness, they need no `ls` or `git check-ignore` — don't \
      inspect, gitignore or edit them.";
 
+/// The brief's line about nested checkouts (issue #1320): a git checkout inside the workspace
+/// has its `.git/config` and `.git/hooks/` mounted read-only, so attempts to clone into the
+/// workspace fail with "Read-only file system" or "Device or resource busy". The agent must
+/// keep nested repos' git dirs outside the workspace using `--separate-git-dir` or clone outside
+/// the workspace entirely.
+pub(crate) const NESTED_CHECKOUT_NOTE: &str = "A git checkout nested inside the workspace has its `.git/config` and `.git/hooks/` mounted \
+     read-only, so a `git clone` into the workspace (by you or by the repo's own build) fails with \
+     \"Read-only file system\" or \"Device or resource busy\". That is the sandbox's path policy, \
+     not a bug: never unmount, remount or otherwise get around those mounts — the watchdog holds \
+     the colony for it. When a nested clone is needed, keep its git dir outside the workspace: \
+     `git clone --separate-git-dir=/tmp/<name>.git <url> <path>`, or clone outside the workspace \
+     and point the build at it.";
+
 pub fn build_prompt(
     s: &Session,
     issue: Option<&Value>,
@@ -1083,6 +1094,9 @@ pub fn build_prompt(
     // agent can still stumble on them with `ls -a`; unprompted it gitignores or inspects them, and
     // the exec policy refuses that as an attempt to reach a secret (issue #1169).
     let _ = writeln!(p, "{PLACEHOLDER_NOTE}\n");
+    // Nested checkouts with read-only `.git` dirs need special handling (issue #1320): cloning
+    // into the workspace fails; the agent must use `--separate-git-dir` or clone outside.
+    let _ = writeln!(p, "{NESTED_CHECKOUT_NOTE}\n");
     if resumed {
         let _ = writeln!(
             p,
@@ -2508,7 +2522,14 @@ impl PublishOps for GitPublishOps<'_> {
                 .s
                 .verification
                 .as_ref()
-                .is_some_and(|v| !v.pre_publish_red.is_empty());
+                .is_some_and(|v| !v.pre_publish_red.is_empty())
+            // Issue #1301: verification could not run due to resource exhaustion — open as draft
+            // so the change is not merged without verification.
+            || self
+                .s
+                .verification
+                .as_ref()
+                .is_some_and(|v| v.infra_retry.is_some());
         let mut create = self.app.gh([
             "pr",
             "create",
@@ -3731,6 +3752,30 @@ mod tests {
                     "Empty dotfiles such as .env and .netrc are harness placeholders that mask secrets: hidden from \
                      git status and managed by the harness, they need no `ls` or `git check-ignore` — don't inspect, \
                      gitignore or edit them."
+                ),
+                "{prompt}"
+            );
+        }
+    }
+
+    /// Issue #1320: nested checkouts have read-only `.git` dirs, so cloning into the workspace
+    /// fails; the prompt explains this and names the supported route (`--separate-git-dir` outside
+    /// the workspace, or cloning outside the workspace altogether).
+    #[test]
+    fn the_prompt_warns_about_nested_checkouts_with_readonly_git_dirs() {
+        let me = sibling("mine", None, "Ship the thing", SessionStatus::Starting);
+        for resumed in [false, true] {
+            let prompt = build_prompt(&me, None, "main", resumed, &[], None, None);
+            assert!(
+                prompt.contains(
+                    "A git checkout nested inside the workspace has its `.git/config` and `.git/hooks/` mounted read-only"
+                ),
+                "{prompt}"
+            );
+            assert!(prompt.contains("--separate-git-dir=/tmp/"), "{prompt}");
+            assert!(
+                prompt.contains(
+                    "never unmount, remount or otherwise get around those mounts — the watchdog holds the colony for it"
                 ),
                 "{prompt}"
             );

@@ -18,6 +18,7 @@ import {
   tokensFromText,
 } from '../instructions.mjs';
 import { AsyncQueue, buildOptions, runAgent } from '../runner.mjs';
+import { EXEC_POLICY_TOOLS } from '../execpolicy.mjs';
 
 const edit = (file_path, agent_id) => ({ tool_name: 'Edit', tool_input: { file_path }, ...(agent_id ? { agent_id } : {}) });
 
@@ -331,16 +332,16 @@ test('buildOptions registers the hooks behind the gates, and nothing without a t
   const root = makeRepo();
   try {
     const bare = buildOptions({ COLONIZER_DELEGATE: 'off' }).options;
-    // Only the exec policy's Bash hook (#471), which every colony gets; no instruction hooks.
-    assert.deepEqual(bare.hooks.PreToolUse.map((e) => e.matcher), ['Bash']);
+    // Only the exec policy hook (#471), which every colony gets; no instruction hooks.
+    assert.deepEqual(bare.hooks.PreToolUse.map((e) => e.matcher), [EXEC_POLICY_TOOLS]);
     assert.equal(bare.hooks.UserPromptSubmit, undefined);
     assert.equal(bare.hooks.SessionStart, undefined);
 
     const instructions = new ConditionalInstructions({ workspace: root });
     const { options } = buildOptions({ COLONIZER_DELEGATE: 'enforce' }, { instructions });
-    // Delegation gate first, then the exec policy's Bash hook (#471), then the instructions hook last.
+    // Delegation gate first, then the exec policy hook (#471), then the instructions hook last.
     assert.equal(options.hooks.PreToolUse.length, 3, 'the delegation gate stays first');
-    assert.equal(options.hooks.PreToolUse[1].matcher, 'Bash');
+    assert.equal(options.hooks.PreToolUse[1].matcher, EXEC_POLICY_TOOLS);
     assert.equal(options.hooks.PreToolUse.at(-1).matcher, PATH_TOOLS_MATCHER);
     assert.ok(options.hooks.UserPromptSubmit.length >= 1);
     assert.ok(options.hooks.SessionStart.length >= 1);

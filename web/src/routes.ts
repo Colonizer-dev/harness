@@ -45,7 +45,6 @@ export const VIEW_PATHS: Partial<Record<CockpitView, string>> = {
   loops: "/loops",
   memory: "/memory",
   host: "/host",
-  secrets: "/secrets",
   settings: "/settings",
 };
 
@@ -87,13 +86,15 @@ export function parseRoute(pathname: string, search = "", base = "/"): Route | n
     if (tab !== undefined && !COLONY_TABS.includes(tab)) return null;
     return { view: "colony", colony: id, colonyTab: tab, org };
   }
-  if (parts[0] === "settings" && parts[1] === "secrets" && parts.length === 2) return { view: "secrets", org };
   if (parts[0] === "settings" && parts.length > 1) {
+    // Older links: `/settings/secrets` with no group names the Secrets section.
+    if (parts.length === 2 && parts[1] === "secrets") return { view: "settings", section: "secrets", org };
     if (parts.length !== 3) return null;
     const section = sectionFromSettingsPath(path);
-    // Secrets is a view of its own, whichever group's address it is reached by.
-    return section === "secrets" ? { view: "secrets", org } : { view: "settings", section, org };
+    return { view: "settings", section, org };
   }
+  // Older links: `/secrets` names the Secrets section at its canonical settings path.
+  if (path === "/secrets") return { view: "settings", section: "secrets", org };
   const view = PATH_VIEWS.get(path);
   return view ? (view === "settings" ? { view, section: null, org } : { view, org }) : null;
 }

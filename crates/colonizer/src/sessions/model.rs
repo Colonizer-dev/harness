@@ -256,6 +256,23 @@ impl Session {
         }
         Some(lines.join("\n"))
     }
+
+    /// The operator notes queued while the colony was not live (issue #1287), as the section its
+    /// first turn carries, or `None` when there are none.
+    pub fn pending_notes_prompt(&self) -> Option<String> {
+        if self.pending_notes.is_empty() {
+            return None;
+        }
+        let bullets = self
+            .pending_notes
+            .iter()
+            .map(|n| format!("- {}", n.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!(
+            "## Operator notes\n\nThe operator left these notes while the colony was not running:\n\n{bullets}"
+        ))
+    }
 }
 
 /// How far the last publish got, persisted on the session so a retry continues from there instead of
@@ -293,6 +310,15 @@ pub struct FixFor {
 /// publish held its slot back then, and a row of unknown origin must not silently free one.
 fn publishing_holds_slot_legacy() -> bool {
     true
+}
+
+/// An operator note queued for a future resumption (issue #1287): the note text and the client id
+/// for idempotency. When the colony resumes, the note is delivered as part of the first prompt,
+/// then cleared and persisted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingNote {
+    pub text: String,
+    pub id: String,
 }
 
 /// Why a colony was suspended, in its [`Suspension`] record and in the log line: the only reason
@@ -753,6 +779,11 @@ pub struct Session {
     /// cleared — like `pending_answer` but with no suspension behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_note: Option<String>,
+    /// Operator notes queued while the colony is not live (issue #1287): notes from messages posted
+    /// while `queued`, `stopped`, `parked`, `blocked` or `failed`, accumulated until the next resume
+    /// and then delivered as the first turn prompt(s), cleared and persisted. Deduped by client id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_notes: Vec<PendingNote>,
     /// Questions the operator has already answered (issue #1247), oldest last and capped at
     /// [`KEPT_ANSWERS`]: the record a resumed brief reads its "Decisions already made" section
     /// from and a re-asked question is answered from, so a colony that parks or restarts never
@@ -820,6 +851,9 @@ pub struct Session {
     /// existed, which fall back to the configured image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_image: Option<String>,
+    /// The root disk this colony's microVM booted with, for verification runs (issue #1301).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_root_disk: Option<String>,
     /// The app directory this colony's mounts came from. An update keeps that
     /// directory until no live colony still names it (`update::sweep_slots`).
     pub app_slot: Option<String>,
@@ -934,6 +968,7 @@ impl Default for Session {
             pending_answer: None,
             switch_note: None,
             resume_note: None,
+            pending_notes: Vec::new(),
             answered_questions: Vec::new(),
             secret_fix_rounds: 0,
             push_conflict_rounds: 0,
@@ -948,6 +983,7 @@ impl Default for Session {
             boot_cpus: None,
             boot_memory: None,
             boot_image: None,
+            boot_root_disk: None,
             app_slot: None,
             boot_attempt_started_at: None,
             failure_class: None,
@@ -1328,5 +1364,26 @@ mod tests {
                 "as_str drifted from serde for {status:?}"
             );
         }
+    }
+
+    /// Operator notes queued while the colony was not live (issue #1287): None when empty, bullets
+    /// for each note when there are any.
+    #[test]
+    fn pending_notes_prompt_formats_notes_or_returns_none() {
+        let mut s = colony("acme", SessionStatus::Running);
+        assert_eq!(s.pending_notes_prompt(), None, "no prompt when notes are empty");
+
+        s.pending_notes.push(PendingNote {
+            text: "check the output".into(),
+            id: "note-1".into(),
+        });
+        s.pending_notes.push(PendingNote {
+            text: "rerun with --verbose".into(),
+            id: "note-2".into(),
+        });
+        let prompt = s.pending_notes_prompt().expect("prompt with notes");
+        assert!(prompt.contains("## Operator notes"), "{prompt}");
+        assert!(prompt.contains("- check the output"), "{prompt}");
+        assert!(prompt.contains("- rerun with --verbose"), "{prompt}");
     }
 }

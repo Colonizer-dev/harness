@@ -1,0 +1,12 @@
+{
+  "name": "context-mode",
+  "version": "1.0.169",
+  "tarball": "https://registry.npmjs.org/context-mode/-/context-mode-1.0.169.tgz",
+  "integrity": "sha512-94JIaFuLjF9SO2BsGTrbGtyT44K95+9OC8BdbaL/UT76xOkanJLfUR5CzmNw+GELXZQqH4nBrKg9wjBnSFkVnQ==",
+  "sha256": "09c41e4cf77b21566c76b8ea2fdbd7f3d823055fee2f02c2166fd5bb575daf2c",
+  "license": "Elastic-2.0",
+  "licenseUrl": "https://github.com/mksglu/context-mode/blob/main/LICENSE",
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

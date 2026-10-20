@@ -87,11 +87,16 @@ pub(crate) fn refuses_push(text: &str) -> bool {
 /// One decided answer and when it was given. [`Verdict::Unknown`] is never stored, so only the
 /// two decided variants appear here.
 type Answer = (DateTime<Utc>, Verdict);
+/// A cached canonical name and when it was fetched, for the same TTL as push-access answers.
+type CanonicalEntry = (DateTime<Utc>, String);
 
 /// A short-lived memory of push-access answers, per `(GitHub identity, repository)`.
 pub(crate) struct AccessCache {
     ttl: chrono::Duration,
     seen: StdMutex<HashMap<(String, String), Answer>>,
+    /// Cache of GitHub `full_name` by lowercased repo, for canonicalizing repository names (issue #1284).
+    /// Shared across identities, same TTL as push-access answers.
+    canonical: StdMutex<HashMap<String, CanonicalEntry>>,
 }
 
 impl AccessCache {
@@ -100,6 +105,7 @@ impl AccessCache {
         Self {
             ttl: chrono::Duration::seconds(ttl_secs),
             seen: StdMutex::new(HashMap::new()),
+            canonical: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -127,6 +133,20 @@ impl AccessCache {
             (identity.to_ascii_lowercase(), repo.to_ascii_lowercase()),
             (now, verdict.clone()),
         );
+    }
+
+    /// A cached canonical name for `repo`, if there is one and it has not expired.
+    fn get_canonical(&self, repo: &str, now: DateTime<Utc>) -> Option<String> {
+        let canonical_map = self.canonical.lock().unwrap_or_else(|e| e.into_inner());
+        let (at, name) = canonical_map.get(&repo.to_ascii_lowercase())?;
+        (now - *at < self.ttl).then(|| name.clone())
+    }
+
+    /// Remember a canonical name for `repo`, sweeping what has expired.
+    fn put_canonical(&self, repo: &str, now: DateTime<Utc>, canonical: String) {
+        let mut canonical_map = self.canonical.lock().unwrap_or_else(|e| e.into_inner());
+        canonical_map.retain(|_, (at, _)| now - *at < self.ttl);
+        canonical_map.insert(repo.to_ascii_lowercase(), (now, canonical));
     }
 }
 
@@ -173,7 +193,38 @@ pub(crate) async fn check(app: &App, repo: &str) -> Verdict {
         }
     };
     CACHE.put(&identity, repo, now, &verdict);
+    // Issue #1284: cache the canonical repo name from GitHub's response, so `canonical_repo_name`
+    // normally gets a cache hit instead of making a second request.
+    if let Some(full_name) = repo_json.get("full_name").and_then(|v| v.as_str())
+        && crate::util::valid_repo(full_name)
+        && full_name.eq_ignore_ascii_case(repo)
+    {
+        CACHE.put_canonical(repo, now, full_name.to_string());
+    }
     verdict
+}
+
+/// The canonical `full_name` for a repository (issue #1284), or `None` if the breaker is open,
+/// no token is available, or GitHub could not be reached. Caches the result for the push-access TTL.
+/// Accepts `full_name` only if it passes `valid_repo` and matches the input case-insensitively
+/// (a redirect keeps the input, e.g. a transfer).
+pub(crate) async fn canonical_repo_name(app: &App, repo: &str) -> Option<String> {
+    let now = Utc::now();
+    if let Some(cached) = CACHE.get_canonical(repo, now) {
+        return Some(cached);
+    }
+    if crate::github_breaker::paused(app).is_some() {
+        return None;
+    }
+    let path = format!("repos/{repo}");
+    let repo_json = crate::github::gh_get_json(app, &path).await.ok()?;
+    let full_name = repo_json.get("full_name")?.as_str()?;
+    if !crate::util::valid_repo(full_name) || !full_name.eq_ignore_ascii_case(repo) {
+        return None;
+    }
+    let canonical = full_name.to_string();
+    CACHE.put_canonical(repo, now, canonical.clone());
+    Some(canonical)
 }
 
 #[cfg(test)]

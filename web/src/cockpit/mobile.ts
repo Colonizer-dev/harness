@@ -28,7 +28,7 @@ export const MOBILE_TABS: readonly MobileTab[] = [
 /**
  * Which tab a view lights up. The four primary views are themselves; an open colony reads as Nest
  * (that is where colonies are reached from); everything else — overview, launch, history, loops,
- * memory, host, secrets, settings — belongs to the "More" sheet.
+ * memory, host, settings — belongs to the "More" sheet.
  */
 export function mobileTabFor(view: CockpitView): MobileTabId {
   if (view === "home" || view === "colony") return "nest";
@@ -55,7 +55,6 @@ export function mobileMoreViews(): MobileMoreItem[] {
     { view: "loops", label: "Loops", glyph: "loops" },
     { view: "memory", label: "Memory", glyph: "memory" },
     { view: "host", label: "Host", glyph: "host" },
-    { view: "secrets", label: "Secrets", glyph: "secrets" },
     { view: "settings", label: "Settings", glyph: "settings" },
   ];
 }

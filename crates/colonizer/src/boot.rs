@@ -429,6 +429,9 @@ async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
         return true;
     }
     let mut attention = None;
+    // Check if the failure is due to mirror corruption that couldn't be recovered
+    let is_unrecoverable_mirror_corruption = message.contains("repo cache corruption detected but unrecoverable")
+        || (message.contains("mirror") && message.contains("corrupt") && message.contains("needs attention"));
     app.update_session(id, |s| {
         s.status = SessionStatus::Failed;
         s.error = Some(truncate(message, 2000));
@@ -438,7 +441,13 @@ async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
         // A warm-up this failed boot was still carrying dies with it; a held answer stays for a
         // manual resume to deliver.
         s.prewarm = None;
-        attention = s.clear_attention();
+        // For unrecoverable mirror corruption, set attention so the session doesn't hold a slot silently.
+        if is_unrecoverable_mirror_corruption {
+            s.attention = Some(json!({"reason": "repo_cache_corruption_unrecoverable", "since": Utc::now()}));
+            attention = None;
+        } else {
+            attention = s.clear_attention();
+        }
     })
     .await;
     app.note_cleared_attention(id, attention).await;
@@ -954,6 +963,14 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         other => other,
     };
+    // Screen the issue for hidden input text (issue #1277).
+    let issue = match issue {
+        Some(mut issue) => {
+            crate::promptdecode::screen_launch(app, &s.id, &app.org_settings(&s.org), &mut issue).await;
+            Some(issue)
+        }
+        other => other,
+    };
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked
@@ -1181,6 +1198,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
     let org_policy = orgs::org_exec_policy(&org_settings).map(|policy| (s.org.as_str(), policy));
     apply_exec_policy(&agent, &modules.agent, org_policy, &app.agents, &wt, &mut runner_env)?;
+    // The context-mode module (issue #1273): pass to guest only when not off.
+    if let Some(mode) = org_settings.context_mode
+        && mode != orgs::ContextMode::Off
+    {
+        let mode_str = match mode {
+            orgs::ContextMode::Off => "off",
+            orgs::ContextMode::Shadow => "shadow",
+            orgs::ContextMode::On => "on",
+        };
+        runner_env.insert("COLONIZER_CONTEXT_MODE".into(), Value::String(mode_str.into()));
+    }
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.
@@ -2047,7 +2075,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // colony without a session id to resume gets the answer appended, so the answer never rides on
     // the resume working. A pre-warm boot (issue #701) says nothing at all: an empty prompt starts
     // no turn, and the answer is delivered as a user message once it arrives.
-    let initial_prompt = if s.prewarming() {
+    let mut initial_prompt = if s.prewarming() {
         String::new()
     } else if let Some(note) = &s.switch_note {
         // A mid-task agent switch (issue #737): the converted transcript carries the task brief, so
@@ -2066,6 +2094,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
             (None, _) => prompt,
         }
+    };
+    // Operator notes while the colony was not live (issue #1287): inject them as the first section.
+    let delivered_notes: Vec<String> = if s.prewarming() {
+        Vec::new()
+    } else if let Some(notes) = s.pending_notes_prompt() {
+        if initial_prompt.is_empty() {
+            initial_prompt = notes;
+        } else {
+            initial_prompt = format!("{initial_prompt}\n\n{notes}");
+        }
+        s.pending_notes.iter().map(|n| n.id.clone()).collect()
+    } else {
+        Vec::new()
     };
     // What a resume brings back (issue #700): the manifest's declared services plus the records
     // the previous run registered, scrubbed of the colony's secret values before any of it reaches
@@ -2395,6 +2436,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
         app.session_log(id, "warn", note).await;
     }
+    // Scan for PATH-altering artifacts (issue #1278): executable shims, direnv, version managers,
+    // Makefiles and scripts that change PATH. Log each finding in the colony ledger.
+    let shims = crate::path_shims::scan(&wt);
+    if !shims.is_empty() {
+        let mut msg = String::from("PATH: this repository would change the colony's PATH (");
+        for (i, finding) in shims.iter().enumerate() {
+            if i > 0 {
+                msg.push_str("; ");
+            }
+            msg.push_str(&finding.message());
+        }
+        msg.push_str("). The colony's PATH stays pinned by the image; harness verification does not use it.");
+        app.session_log(id, "warn", msg).await;
+    }
     // The guest's exec policy (modules/agents/*/execpolicy.mjs, issue #877) reads this to tell a
     // write into the microVM's discardable root filesystem from one into a host-backed path: only
     // the writable mounts below survive the VM, so only they can still be the host's to protect.
@@ -2431,6 +2486,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         x.boot_cpus = Some(spec.cpus);
         x.boot_memory = Some(spec.memory.clone());
         x.boot_image = Some(spec.image.clone());
+        x.boot_root_disk = Some(spec.root_disk.clone());
     })
     .await;
     mark_phase(app, id, &mut timing, "mesh-start").await;
@@ -2548,15 +2604,19 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
     // only then take it off the record. A boot that failed above never reaches this, and the answer
     // stays for the next resume; a stop cleared it under its own claim. A resume note (issue #876)
-    // is spent the same way, for the same reason.
+    // is spent the same way, for the same reason. Pending notes (issue #1287) are spent the same
+    // way — only the ones this boot's prompt carried.
     let delivered = app
         .update_session(id, |x| {
             let answer = x.pending_answer.take().is_some();
             let note = x.resume_note.take().is_some();
-            (answer, note)
+            let before = x.pending_notes.len();
+            x.pending_notes.retain(|n| !delivered_notes.contains(&n.id));
+            let pending_note_count = before - x.pending_notes.len();
+            (answer, note, pending_note_count)
         })
         .await;
-    if let Some((s, (answered, noted))) = delivered {
+    if let Some((s, (answered, noted, pending_note_count))) = delivered {
         if answered {
             app.session_log(
                 id,
@@ -2568,6 +2628,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         if noted {
             app.session_log(id, "info", "resume note delivered to the agent".into()).await;
+        }
+        if pending_note_count > 0 {
+            app.session_log(
+                id,
+                "info",
+                format!(
+                    "{pending_note_count} operator {} delivered",
+                    if pending_note_count == 1 { "note" } else { "notes" }
+                ),
+            )
+            .await;
         }
     }
     // A switch note is consumed the same way (issue #737): the runner is up, so its first turn

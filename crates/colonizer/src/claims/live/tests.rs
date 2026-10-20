@@ -375,6 +375,65 @@ async fn an_org_that_opted_out_gets_no_host_label_and_no_status_edits() {
 }
 
 #[tokio::test]
+async fn clear_stale_with_edits_the_stale_comment_and_removes_labels() {
+    let gh = FakeGh::default();
+    let mut live = Live::default();
+    // Start with a stale claim comment
+    gh.comments.lock().unwrap().push((
+        100,
+        "<!-- colonizer:claim host=\"stale-host\" colony=\"stale-abc\" issue=\"7\" -->\nColonizer claim".to_string(),
+    ));
+    gh.labels.lock().unwrap().push(CLAIM_LABEL.to_string());
+    gh.labels.lock().unwrap().push("colonizer:host:stale-host".to_string());
+
+    clear_stale_with(&gh, &mut live, "acme/app", 7, "stale-abc", "our-colony", &host(), t0()).await;
+
+    // Should have removed both labels
+    assert_eq!(gh.count("remove colonizer:claimed"), 1);
+    assert_eq!(gh.count("remove colonizer:host:"), 1);
+    // Should have edited the comment to mark it released/stale
+    assert_eq!(gh.count("edit 100"), 1);
+    let updated = gh.body();
+    assert!(updated.contains("released (stale"));
+    assert!(updated.contains("our-colony"));
+}
+
+#[tokio::test]
+async fn clear_stale_with_tolerates_missing_labels() {
+    let gh = FakeGh::default();
+    let mut live = Live::default();
+    // Only a comment, no labels yet
+    gh.comments.lock().unwrap().push((
+        100,
+        "<!-- colonizer:claim host=\"stale\" colony=\"stale-abc\" issue=\"7\" -->\nClaim".to_string(),
+    ));
+
+    clear_stale_with(&gh, &mut live, "acme/app", 7, "stale-abc", "our", &host(), t0()).await;
+
+    // Should have tried to remove labels even if they don't exist (remove 404 is not an error)
+    assert_eq!(gh.count("remove"), 2);
+    assert_eq!(gh.count("edit 100"), 1);
+}
+
+#[tokio::test]
+async fn clear_stale_with_protects_other_colonies_claims() {
+    let gh = FakeGh::default();
+    let mut live = Live::default();
+    // A claim from a different colony
+    gh.comments.lock().unwrap().push((
+        100,
+        "<!-- colonizer:claim host=\"other\" colony=\"other-colony\" issue=\"7\" -->\nClaim".to_string(),
+    ));
+
+    clear_stale_with(&gh, &mut live, "acme/app", 7, "stale-abc", "our", &host(), t0()).await;
+
+    // Should have detected the claim names a different colony and left it alone
+    assert_eq!(gh.count("remove"), 0);
+    assert_eq!(gh.count("edit"), 0);
+    assert!(live.issues.is_empty());
+}
+
+#[tokio::test]
 async fn the_kill_switch_stops_claims_entirely() {
     let root = crate::tests::temp_root();
     let app = crate::tests::test_app(&root);

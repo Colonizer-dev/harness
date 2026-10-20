@@ -392,6 +392,8 @@ export interface Session {
     at: string;
     kept: boolean;
   } | null;
+  /** Operator notes queued while the colony was not live (issue #1287), for delivery when it resumes. */
+  pending_notes?: { text: string; id: string }[];
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
@@ -579,4 +581,10 @@ export interface DuplicateHolder {
   /** The held work in words: `#7`, `lodash / ghsa-1`. */
   what: string;
   queueable: boolean;
+  /** For a remote claim, the GitHub login of the account that created the claim comment. */
+  claimed_by?: string;
+  /** For a remote claim, when the claim was created (RFC3339 format), for displaying relative time. */
+  claimed_at?: string;
+  /** For a label-only remote claim, whether it looks stale (older than 24h with no branch or PR). */
+  stale_hint?: boolean;
 }

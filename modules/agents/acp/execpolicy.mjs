@@ -18,6 +18,16 @@ import { basename, join, normalize, posix } from 'node:path';
 
 export const EXEC_POLICY_DECISIONS = ['deny', 'ask', 'allow'];
 export const EXEC_POLICY_REPO_FILE = join('.colonizer', 'exec-policy.json');
+/** Tools that are subject to exec-policy evaluation alongside Bash: a pipe-separated string for the hook matcher. */
+export const EXEC_POLICY_TOOLS = 'Bash|mcp__context-mode__ctx_execute|mcp__context-mode__ctx_execute_file|mcp__context-mode__ctx_batch_execute|mcp__context-mode__ctx_upgrade';
+/** Same tools as a frozen array, for defence-in-depth checking in the hook callback. */
+export const EXEC_POLICY_TOOL_NAMES = Object.freeze([
+  'Bash',
+  'mcp__context-mode__ctx_execute',
+  'mcp__context-mode__ctx_execute_file',
+  'mcp__context-mode__ctx_batch_execute',
+  'mcp__context-mode__ctx_upgrade',
+]);
 /** Where the boot mounts the writable-bind list (boot.rs writes `vm_dir/host-mounts`, exposed at
  * guest `/colonizer`, alongside `path-policy`). */
 export const HOST_MOUNTS_FILE = '/colonizer/host-mounts';
@@ -289,6 +299,87 @@ function isTrackedScript(path, text, cwd, tracked) {
 }
 
 /**
+ * The targets an exec-policy-subject tool call presents for evaluation: Bash commands, context-mode
+ * code/files, and batch commands. Each target is { command?, cwd?, scriptBody? }. Fails closed:
+ * malformed input (missing/non-string code, unknown language) yields one target with command
+ * "deny:malformed-input" so the policy can reject it; ctx_upgrade is denied by name.
+ * @param {string} toolName           the tool name (Bash, mcp__context-mode__ctx_*)
+ * @param {object} toolInput          the tool's input object
+ * @returns {Array<{command?: string, cwd?: string, scriptBody?: string}>}
+ */
+export function execPolicyTargets(toolName, toolInput) {
+  const targets = [];
+  if (toolName === 'Bash') {
+    const command = toolInput?.command;
+    if (typeof command === 'string' && command) targets.push({ command });
+  } else if (toolName === 'mcp__context-mode__ctx_execute') {
+    const { code, language, cwd } = toolInput ?? {};
+    if (typeof code !== 'string' || !code) {
+      targets.push({ forcedDecision: 'deny', reason: 'the context-mode call is malformed (missing code)' });
+    } else if (language === 'shell') {
+      // Shell code is the command itself, for exact parity with Bash (command = code, NO scriptBody).
+      // This ensures `curl https://x` via ctx_execute('shell') is evaluated exactly like the Bash command.
+      const target = { command: code };
+      if (cwd) target.cwd = cwd;
+      targets.push(target);
+    } else if (language && typeof language === 'string') {
+      // For non-shell languages, treat code as a script body (e.g., python code, js code).
+      // Map language to command prefix to match INTERPRETERS logic.
+      const cmdPrefixes = {
+        python: 'python3', typescript: 'node', javascript: 'node', ruby: 'ruby',
+        perl: 'perl', go: 'go', rust: 'rustc', php: 'php', r: 'R', elixir: 'elixir', csharp: 'csc',
+      };
+      const prefix = cmdPrefixes[language];
+      if (!prefix) {
+        targets.push({ forcedDecision: 'deny', reason: `context-mode language "${language}" is not supported` });
+      } else {
+        const target = { command: `${prefix} <inline>`, scriptBody: code };
+        if (cwd) target.cwd = cwd;
+        targets.push(target);
+      }
+    } else {
+      targets.push({ forcedDecision: 'deny', reason: 'the context-mode call is malformed (missing language)' });
+    }
+  } else if (toolName === 'mcp__context-mode__ctx_execute_file') {
+    const { path: filePath, code, cwd } = toolInput ?? {};
+    if (typeof filePath !== 'string' || !filePath) {
+      targets.push({ forcedDecision: 'deny', reason: 'the context-mode call is malformed (missing path)' });
+    } else if (filePath.includes('..')) {
+      // Reject `..` traversals that could escape the repository.
+      targets.push({ forcedDecision: 'deny', reason: 'the context-mode file path must not contain ..' });
+    } else {
+      // Evaluate path as a read (like `cat <path>`).
+      const pathTarget = { command: `cat "${filePath}"` };
+      if (cwd) pathTarget.cwd = cwd;
+      targets.push(pathTarget);
+      // Also evaluate code as a script body if present.
+      if (typeof code === 'string' && code) {
+        const codeTarget = { command: `<file-code> <inline>`, scriptBody: code };
+        if (cwd) codeTarget.cwd = cwd;
+        targets.push(codeTarget);
+      }
+    }
+  } else if (toolName === 'mcp__context-mode__ctx_batch_execute') {
+    const { commands, cwd } = toolInput ?? {};
+    if (Array.isArray(commands)) {
+      for (const cmd of commands) {
+        const cmdStr = cmd?.command;
+        if (typeof cmdStr === 'string' && cmdStr) {
+          const target = { command: cmdStr };
+          if (cwd) target.cwd = cwd;
+          targets.push(target);
+        } else {
+          targets.push({ forcedDecision: 'deny', reason: 'the context-mode call contains a malformed command' });
+        }
+      }
+    }
+  } else if (toolName === 'mcp__context-mode__ctx_upgrade') {
+    targets.push({ forcedDecision: 'deny', reason: 'context-mode upgrade is not supported; the installed version is pinned' });
+  }
+  return targets;
+}
+
+/**
  * The decision for one Bash command, or null when no rule matches. Within a layer the first
  * matching rule wins; across layers the strictest decision wins, and on a tie the earlier layer's
  * rule is the one reported (the default names itself first, which is the one an operator reads).
@@ -300,7 +391,7 @@ function isTrackedScript(path, text, cwd, tracked) {
  */
 export function evaluateExecPolicy(policy, command, opts = {}) {
   if (!policy || typeof command !== 'string' || !command) return null;
-  const ctx = buildContext(command, opts, policy.hostMounts ?? null, policy.trackedScripts ?? null);
+  const ctx = buildContext(command, opts, policy.hostMounts ?? null, policy.trackedScripts ?? null, opts.scriptBody);
   let best = null;
   for (const layer of policy.layers) {
     for (const rule of layer.rules) {
@@ -840,7 +931,7 @@ function nameOnlyFiltered(command, segments, cwd) {
  * of those plus a write into the microVM's own root filesystem. Each carries the reason for the
  * write it matched; a VM-local write has no reason of its own, so a strict rule names it.
  */
-function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null, tracked = null) {
+function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null, tracked = null, inlineScript = null) {
   const segments = splitCommands(command);
   const scripts = [];
   const seen = new Set();
@@ -852,6 +943,11 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     seen.add(path);
     const text = readFile(path);
     if (text) scripts.push({ path, text, tracked: isTrackedScript(path, text, cwd, tracked) });
+  }
+  // If provided, an inline script (code from ctx_execute, ctx_execute_file code body) is
+  // treated as a script the command runs, with path "" to indicate it's synthetic.
+  if (inlineScript && typeof inlineScript === 'string') {
+    scripts.push({ path: '', text: inlineScript, tracked: false });
   }
   const tokens = new Set();
   const spelled = new Map(); // token -> the word as the command spelled it (`~/.ssh`, not /root/.ssh)
