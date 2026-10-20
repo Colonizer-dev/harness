@@ -817,6 +817,7 @@ pub async fn create(
         failure_class: None,
         boot_retries: 0,
         retry_at: None,
+        config: None,
         created_at: now,
         updated_at: now,
     };

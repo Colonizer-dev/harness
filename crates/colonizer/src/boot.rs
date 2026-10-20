@@ -1942,6 +1942,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     }
     let mut pack_hosts: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut plugins_with_pins: Vec<(String, Option<String>)> = Vec::new();
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         let mut resolved = Vec::new();
@@ -1950,6 +1951,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
             resolved.push((name.as_str(), source.clone()));
+            // Capture the plugin version as the pin for the fingerprint
+            let pin = crate::plugins::manifest_version(&source);
+            plugins_with_pins.push((name.clone(), pin));
             if let Some(vendored) = crate::plugins::shadowed_vendored(&app.cfg, name) {
                 log.info(format!(
                     "skillset {name:?}: the local copy at {} shadows the vendored one at {}",
@@ -2494,11 +2498,50 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // shows the microVM `msb run` was handed even when a later phase fails and the boot never
     // completes. Spec values are the only per-colony numbers about the VM — agentd exposes no guest
     // CPU% or RSS — so they are captured here, at source.
+    // The config fingerprint (#1352): taken here, with the model, plugins, policy and egress all resolved.
+    let build = crate::version::build();
+    // The final model the runner will use, after all routing and policy layers (null when absent).
+    let final_model = runner_env.get("COLONIZER_MODEL").and_then(Value::as_str);
+    // Autonomy value: enabled flag + settings if present
+    let autonomy_value = match modules.autonomy.as_ref() {
+        Some(choice) => json!({
+            "enabled": choice.enabled,
+            "settings": choice.settings
+        }),
+        None => json!(false),
+    };
+    // Exec policy three layers: install (from module settings), org (env var), repo (file)
+    let exec_policy_install = crate::sessions::install_exec_policy(&modules.agent);
+    let exec_policy_org = org_policy.as_ref().map(|(_, policy)| &policy[..]);
+    let repo_policy_text = std::fs::read_to_string(wt.join(".colonizer/exec-policy.json")).ok();
+    let egress_resolved_value = serde_json::to_value(&resolved_egress.policy).unwrap_or(Value::Null);
+    let config_fp = match crate::config_fingerprint::compute(&crate::config_fingerprint::Inputs {
+        harness_version: &build.version,
+        harness_commit: build.commit.as_deref(),
+        agent_id: &agent.id,
+        agent_module_dir: &agent.dir,
+        plugins: &plugins_with_pins,
+        model_tier: Some(tier_decision.tier.as_str()),
+        model_name: final_model,
+        model_override: s.model_override.as_deref(),
+        autonomy: &autonomy_value,
+        exec_policy_install: exec_policy_install.as_deref(),
+        exec_policy_org,
+        exec_policy_repo: repo_policy_text.as_deref(),
+        egress_resolved: &egress_resolved_value,
+    }) {
+        Ok(fp) => Some(fp),
+        Err(e) => {
+            tracing::warn!(session = %id, error = %e, "config fingerprint");
+            None
+        }
+    };
     app.update_session(id, |x| {
         x.boot_cpus = Some(spec.cpus);
         x.boot_memory = Some(spec.memory.clone());
         x.boot_image = Some(spec.image.clone());
         x.boot_root_disk = Some(spec.root_disk.clone());
+        x.config = config_fp;
     })
     .await;
     mark_phase(app, id, &mut timing, "mesh-start").await;
