@@ -84,7 +84,8 @@ test('an unparseable agent file is skipped with a warning, its pack’s other an
   withPacks(({ pack }) => {
     const { ants, queen, warnings } = antRegistry([{ packName: 'broken-pack', dir: pack('broken-pack') }]);
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /broken-pack\/agents\/bad\.md/);
+    assert.match(warnings[0], /broken-pack: 1 agent file skipped/);
+    assert.match(warnings[0], /bad\.md/);
     assert.match(warnings[0], /effort/);
     assert.ok(ants.has('dex'));
     assert.ok(!ants.has('nox'));
@@ -198,10 +199,28 @@ test('a broken pack surfaces its warning through buildOptions without failing th
   withPacks(({ pack }) => {
     const { warnings } = buildOptions({ COLONIZER_PLUGIN_DIRS: pack('broken-pack') });
     assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /broken-pack\/agents\/bad\.md/);
+    assert.match(warnings[0], /broken-pack: 1 agent file skipped/);
+    assert.match(warnings[0], /bad\.md/);
   });
 });
 
 test('with no packs mounted there is no Skill gate at all', () => {
   assert.ok(!buildOptions({}).options.hooks.PreToolUse.some((entry) => entry.matcher === 'Skill'));
+});
+test('antRegistry collapses unparseable files into one warning line per pack', () => {
+  const root = mkdtempSync(join(tmpdir(), 'colonizer-ants-'));
+  const pack = (name) => join(root, name);
+  try {
+    mkdirSync(join(pack('multi-bad'), 'agents'), { recursive: true });
+    writeFileSync(join(pack('multi-bad'), 'agents', 'bad1.md'), '---\nname: a\ndescription: d\neffort: extreme\n---\nBody.\n');
+    writeFileSync(join(pack('multi-bad'), 'agents', 'bad2.md'), '---\nname: b\ndescription: d\nmodel: \n---\nBody.\n');
+    writeFileSync(join(pack('multi-bad'), 'agents', 'ok.md'), '---\nname: ok\ndescription: d\n---\nBody.\n');
+    const { warnings } = antRegistry([{ packName: 'multi-bad', dir: pack('multi-bad') }]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /multi-bad: 2 agent files skipped/);
+    assert.match(warnings[0], /bad1\.md/);
+    assert.match(warnings[0], /bad2\.md/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

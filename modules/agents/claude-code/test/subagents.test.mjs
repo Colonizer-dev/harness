@@ -109,6 +109,37 @@ test('parseAgentMd leaves what a file does not set unset', () => {
   assert.deepEqual(agent, { file: 'a.md', name: 'a', description: 'b', body: 'Body.' });
 });
 
+test('parseAgentMd accepts comma-separated string form for tools', () => {
+  const agent = parseAgentMd('---\nname: a\ndescription: b\ntools: Read, Grep, Glob\n---\nBody.\n', 'a.md');
+  assert.deepEqual(agent.tools, ['Read', 'Grep', 'Glob']);
+});
+
+test('parseAgentMd accepts comma-separated string form for disallowedTools', () => {
+  const agent = parseAgentMd('---\nname: a\ndescription: b\ndisallowedTools: Write, Edit\n---\nBody.\n', 'a.md');
+  assert.deepEqual(agent.disallowedTools, ['Write', 'Edit']);
+});
+
+test('parseAgentMd handles parenthesized tool specifiers with commas inside', () => {
+  const agent = parseAgentMd('---\nname: a\ndescription: b\ntools: Bash(git add:*, git commit:*), Read\n---\nBody.\n', 'a.md');
+  assert.deepEqual(agent.tools, ['Bash(git add:*, git commit:*)', 'Read']);
+});
+
+test('parseAgentMd trims whitespace from comma-separated tool strings', () => {
+  const agent = parseAgentMd('---\nname: a\ndescription: b\ntools:  Read , Grep , Glob  \n---\nBody.\n', 'a.md');
+  assert.deepEqual(agent.tools, ['Read', 'Grep', 'Glob']);
+});
+
+test('parseAgentMd rejects empty tools and disallowedTools', () => {
+  const bad = (text, file = 'broken.md') => () => parseAgentMd(text, file);
+  assert.throws(bad('---\nname: a\ndescription: d\ntools:\n---\nBody.\n'), /`tools` must have at least one item/);
+  assert.throws(bad('---\nname: a\ndescription: d\ndisallowedTools:\n---\nBody.\n'), /`disallowedTools` must have at least one item/);
+});
+
+test('parseAgentMd rejects comma string for skillsets (array only)', () => {
+  const bad = () => parseAgentMd('---\nname: a\ndescription: b\nskillsets: plugin1, plugin2\n---\nBody.\n', 'a.md');
+  assert.throws(bad, /`skillsets` must be an inline array/);
+});
+
 test('a bare scalar keeps embedded quotes, and the body starts under the closing line', () => {
   const agent = parseAgentMd('---\nname: a\ndescription: say "hello" loudly\n---\nfirst\n\nsecond\n', 'a.md');
   assert.equal(agent.description, 'say "hello" loudly');
