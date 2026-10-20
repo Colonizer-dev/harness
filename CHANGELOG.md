@@ -18,6 +18,20 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.20] - 2026-10-20
+
+### Added
+
+- **Default guest agents for code exploration and adversarial review, configurable per organization.** Colonizer ships with two new optional guest agents that run on each colony: `explore` (a read-only code locator on Haiku that answers "where is X defined" quickly and cheaply) and `judge` (an adversarial reviewer on Opus that finds issues before the expensive verify step). Both are on by default and configurable per organization via on/off switches and model overrides; `judge` integrates into the verify flow to catch defects early and save on downstream verification costs. Each colony tracks token usage and costs for every guest agent, and both agents fall back gracefully when provider quotas are exceeded. ([#1321])
+
+### Fixed
+
+- **The observability exporter stops re-413-ing a backend that has shrunk its request limit, and the health snapshot says how many records each signal dropped.** After a `413`, the exporter now remembers the smaller request size for that signal and builds its later batches within it, instead of rebuilding every batch at full size and being refused again on each tick (the refused batch itself is still bisected down to the offending record as before). The per-signal entries of `status.json` also gained `records_dropped` and `gaps`, so how many records each signal dropped and the holes in what could be read are visible per signal. ([#849])
+- **Release notes no longer have broken links.** When `release-prep.mjs prep` copies changelog fragments into `docs/release-notes/vX.Y.Z.md`, relative Markdown links are now rebased from the repository root to the notes file's directory, preserving fragments, query strings, and titles. Absolute URLs, protocol-relative links, root-absolute paths, and pure anchors are left unchanged. The release notes are validated with `check-doc-links` before the release PR is opened, so broken links fail the prep step instead of CI. ([#1381])
+- **The fix-colony review no longer merges pull requests whose non-required checks are failing.** The fix-colony review merged pull requests whose non-required checks were failing by using `gh pr merge --auto`, which waits only for required checks. It no longer arms GitHub auto-merge, and merges directly with `--match-head-commit`, pinning to the exact head read, only once every check on that head has passed — required or not. Both the merge train and fix-colony respect a new per-repo publish setting `merge_advisory_checks` (`owner/repo=check|check`) for checks allowed to fail, and both record the evaluated check set in their decision records. Note the behaviour change: fix pull requests whose checks are still running are left open for the merge train, not queued with auto-merge. ([#1384])
+- **Loop cards' "Runs on" picker works inside drawer modals.** The Popover component that backs the repository and org picker in loop card settings now portals into the nearest open modal dialog instead of always into `document.body`, so the picker appears above the modal's backdrop and can be used. The fix applies to the Docs & README, Merge train, Dependencies & supply chain, and TypeScript loop cards, and to the organization settings picker. When repositories fail to load, the picker now shows the error reason instead of an empty list, and retries automatically on the next open. ([#1389])
+- **Install-wide role rows are now editable from org scope.** The summary_model, small_model, model_low, and model_high role rows in the org scope model selector were previously greyed out with "install-wide only" text, preventing operators from fixing out-of-quota provider issues without manually switching to install scope. They now show "install-wide · Enter to change for the whole install" and are clickable; selecting one navigates to the install scope model chooser for that role, and after saving the selection, the cockpit automatically returns to org scope with a confirmation toast. This lets operators fix provider quota issues directly from org scope without context switching. ([#1402])
+
 ## [v0.2.19] - 2026-10-20
 
 ### Added
@@ -3585,6 +3599,7 @@ Macs. ([#74])
 [#1301]: https://github.com/Colonizer-dev/harness/issues/1301
 [#1319]: https://github.com/Colonizer-dev/harness/issues/1319
 [#1320]: https://github.com/Colonizer-dev/harness/issues/1320
+[#1321]: https://github.com/Colonizer-dev/harness/issues/1321
 [#1323]: https://github.com/Colonizer-dev/harness/issues/1323
 [#1324]: https://github.com/Colonizer-dev/harness/issues/1324
 [#1331]: https://github.com/Colonizer-dev/harness/issues/1331
@@ -3599,7 +3614,12 @@ Macs. ([#74])
 [#1366]: https://github.com/Colonizer-dev/harness/issues/1366
 [#1367]: https://github.com/Colonizer-dev/harness/issues/1367
 [#1374]: https://github.com/Colonizer-dev/harness/issues/1374
+[#1381]: https://github.com/Colonizer-dev/harness/issues/1381
+[#1384]: https://github.com/Colonizer-dev/harness/issues/1384
+[#1389]: https://github.com/Colonizer-dev/harness/issues/1389
 [#1396]: https://github.com/Colonizer-dev/harness/issues/1396
+[#1402]: https://github.com/Colonizer-dev/harness/issues/1402
+[v0.2.20]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.20
 [v0.2.19]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.19
 [v0.2.18]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.18
 [v0.2.17]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.17
