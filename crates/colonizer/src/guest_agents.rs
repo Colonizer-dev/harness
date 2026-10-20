@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Top-level configuration for guest agents.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GuestAgents {
     #[serde(default)]
     pub explore: ExploreConfig,
@@ -71,15 +71,6 @@ fn default_severity() -> String {
     "warning".to_string()
 }
 
-impl Default for GuestAgents {
-    fn default() -> Self {
-        Self {
-            explore: ExploreConfig::default(),
-            judge: JudgeConfig::default(),
-        }
-    }
-}
-
 impl Default for ExploreConfig {
     fn default() -> Self {
         Self {
@@ -102,7 +93,7 @@ impl Default for JudgeConfig {
 /// but is registered as a feature for consistency with other configurable modules.
 pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
     name: "guest_agents",
-    routes: routes,
+    routes,
     token_scope: None,
     activity: &[],
     kinds: &[],

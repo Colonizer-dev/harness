@@ -2059,19 +2059,18 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
 
     // Invoke judge before verify if enabled for this org
     let org_settings = app.org_settings(&s.org);
-    if let Some(guest_agents_config) = &org_settings.guest_agents {
-        if guest_agents_config.judge.enabled.unwrap_or(false) {
-            match crate::guest_agents::invoke_judge(&app, &s, None, None).await {
-                Ok(judge_findings) => {
-                    if !judge_findings.is_empty() {
-                        let msg = crate::guest_agents::judge_findings_message(&judge_findings);
-                        crate::recovery::send_user_message(&rt, "judge", &msg);
-                    }
+    if let Some(guest_agents_config) = &org_settings.guest_agents
+        && guest_agents_config.judge.enabled.unwrap_or(false)
+    {
+        match crate::guest_agents::invoke_judge(&app, &s, None, None).await {
+            Ok(judge_findings) => {
+                if !judge_findings.is_empty() {
+                    let msg = crate::guest_agents::judge_findings_message(&judge_findings);
+                    crate::recovery::send_user_message(&rt, "judge", &msg);
                 }
-                Err(e) => {
-                    app.session_log(&id, "warn", format!("judge invocation failed: {e:#}"))
-                        .await;
-                }
+            }
+            Err(e) => {
+                app.session_log(&id, "warn", format!("judge invocation failed: {e:#}")).await;
             }
         }
     }
