@@ -79,6 +79,7 @@ mod gateway_audit;
 mod github;
 mod github_breaker;
 mod graft;
+mod guest_agents;
 mod handoff;
 mod headroom;
 mod history;

@@ -819,10 +819,13 @@ mod tests {
         );
         assert_eq!(r["est_saving_usd"], Value::Null);
         assert_eq!(r["account_near_limit"], false);
-        assert_eq!(
-            r["ts"].as_str().map(|t| t.len()),
-            Some(30),
-            "an RFC 3339 stamp with nanoseconds"
+        // chrono writes as many fractional digits as the clock has: nanoseconds on Linux, whole
+        // microseconds on macOS (27 chars), so the length is platform-dependent and not asserted.
+        assert!(
+            r["ts"]
+                .as_str()
+                .is_some_and(|t| t.contains('.') && DateTime::parse_from_rfc3339(t).is_ok()),
+            "an RFC 3339 stamp with a fractional second"
         );
         let _ = std::fs::remove_dir_all(root);
     }
