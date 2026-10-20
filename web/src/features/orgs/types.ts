@@ -52,6 +52,8 @@ export interface OrgSettings {
   verify_locally_when_ci_blocked?: boolean | null;
   /** The host-side open-code-review pass (issue #1274): `shadow` records the findings in the colony log and the session's open-code-review.json, changing nothing; absent, null and `off` are no review. */
   open_code_review?: "off" | "shadow" | null;
+  /** The review backend to use (issue #1280): off, open-code-review, or kodus; null inherits the default (open-code-review). */
+  reviewer?: "off" | "open-code-review" | "kodus" | null;
   /** The model that org's reviews run on, a `provider/model` string (issue #1274); absent or null follows the install's cheap summary route. */
   open_code_review_model?: string | null;
   /** The hidden-text screening pass (issue #1277): `shadow` records the findings in the colony log and the session's promptdecode.json, changing nothing; `on` removes hidden text and appends a note; absent, null and `off` are no screening. */

@@ -89,6 +89,7 @@ mod img_proxy;
 mod ipv6;
 mod jev;
 mod jev_ladder;
+mod kodus;
 mod ledger;
 mod lifecycle;
 mod living_brain;
