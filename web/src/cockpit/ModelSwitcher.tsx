@@ -387,6 +387,8 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
   const [judgeStatus, setJudgeStatus] = useState<AutonomyStatus | null>(props.judge ?? null);
   const [judgeSaving, setJudgeSaving] = useState(false);
   const [judgeError, setJudgeError] = useState<{ message: string; model: string } | null>(null);
+  const [editingFromOrgScope, setEditingFromOrgScope] = useState<string | null>(null);
+  const [navigateToView, setNavigateToView] = useState<ModelView | null>(null);
   const chip = useRef<HTMLButtonElement>(null);
 
   useEffect(() => setJudgeStatus(props.judge ?? null), [props.judge]);
@@ -466,6 +468,20 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
     });
   };
 
+  const onEditInstallWide = useCallback(
+    (role: string) => {
+      if (scope.kind === "org") {
+        setEditingFromOrgScope(scope.org);
+        setScope(INSTALL_SCOPE);
+        setDraft(EMPTY_DRAFT);
+        setStage({ step: "edit" });
+        setError(null);
+        setNavigateToView({ kind: "role", role });
+      }
+    },
+    [scope],
+  );
+
   const run = async (body: ModelSwitchRequest) => {
     if (!assignments) return;
     const before = scopeView(assignments, scope).rows.find((r) => r.role === "model")?.value ?? "";
@@ -475,12 +491,40 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
       const reply = await api.switchModels(body);
       const now = body.roles.model;
       remember(now ? [before, now] : [before]);
-      toast({ title: "Models switched", body: switchSummary(reply), kind: reply.failed.length ? "error" : "success" });
+
+      // Build the toast message: use switchSummary, and add confirmation if editing install-wide from org scope
+      let toastBody = switchSummary(reply);
+      if (editingFromOrgScope) {
+        const changedRoles = Object.entries(body.roles).filter(([_, v]) => v !== undefined);
+        if (changedRoles.length > 0) {
+          const draftLines = changedRoles
+            .map(([role, value]) => {
+              const row = assignments.install.roles.find((r) => r.role === role);
+              if (!row || value === undefined) return null;
+              return `${row.title} → ${value === null ? "inherited" : shortModelName(value as string, assignments.models)}`;
+            })
+            .filter(Boolean);
+          if (draftLines.length > 0) {
+            toastBody = `${draftLines.join(", ")} for the whole install`;
+          }
+        }
+      }
+
+      toast({ title: "Models switched", body: toastBody, kind: reply.failed.length ? "error" : "success" });
       // The Claude names the switch left in overrides stay on screen until cleared or dismissed.
       setLeftovers(hasLeftovers(reply.leftover_claude) ? reply.leftover_claude : null);
       setDraft(EMPTY_DRAFT);
       setStage({ step: "edit" });
+      setNavigateToView(null);
       load();
+
+      // If we were editing an install-wide role from org scope, return to that org scope
+      if (editingFromOrgScope) {
+        setTimeout(() => {
+          setScope({ kind: "org", org: editingFromOrgScope });
+          setEditingFromOrgScope(null);
+        }, 0);
+      }
     } catch (e) {
       setError(errorMessage(e));
       setStage({ step: "edit" });
@@ -546,6 +590,7 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
         <ModelSwitcherPanel
           anchor={chip}
           initialView={props.initialView}
+          navigateToView={navigateToView}
           assignments={assignments}
           scope={scope}
           draft={draft}
@@ -556,18 +601,19 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onScope={(s) => {
             setScope(s);
             setDraft(EMPTY_DRAFT);
-            setStage({ step: "edit" });
+            setStage({ step: “edit” });
             setError(null);
           }}
           onDraft={(d) => {
             setDraft(d);
-            setStage({ step: "edit" });
+            setStage({ step: “edit” });
           }}
           onApplyMode={setApply}
           onApply={() => void onApply()}
-          onConfirm={() => void run(switchRequest(scope, draft, "running"))}
-          onCancel={() => setStage({ step: "edit" })}
-          onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, "new"))}
+          onConfirm={() => void run(switchRequest(scope, draft, “running”))}
+          onCancel={() => setStage({ step: “edit” })}
+          onRecent={(id) => void run(switchRequest(scope, { roles: { model: id } }, “new”))}
+          onEditInstallWide={onEditInstallWide}
           judge={{
             module: autonomy,
             providers,
@@ -590,8 +636,8 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
           onUseProfile={(profile) => {
             const loaded = profileDraft(assignments, scope, draft, profile);
             setDraft(loaded.draft);
-            setStage({ step: "edit" });
-            setProfileMessage({ text: profileNote(profile.name, loaded.applied.length, loaded.skipped), tone: "info" });
+            setStage({ step: “edit” });
+            setProfileMessage({ text: profileNote(profile.name, loaded.applied.length, loaded.skipped), tone: “info” });
           }}
           onSaveProfile={(name) =>
             profileAction(async () => {
