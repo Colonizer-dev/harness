@@ -7,6 +7,7 @@
 //
 //   node scripts/evolve.mjs diagnose --bench bench-after.json --findings <data>/sessions/<id>/findings.jsonl --out diagnosis.json
 //   node scripts/evolve.mjs propose --classes diagnosis.json --class module:claude-code/questions --module claude-code --constant SYSTEM_PROMPT_APPEND --text new-prompt.txt
+//   node scripts/evolve.mjs draft --class module:claude-code/questions --module claude-code --constant SYSTEM_PROMPT_APPEND [--data <dir>] [--lenses procedure,knowledge] [--cmd "..."] [--heldout <dir>] [--markers a,b]
 //   node scripts/evolve.mjs evaluate --proposal <out>/<id>.md --baseline bench-before.json --candidate bench-after.json
 //   node scripts/evolve.mjs retain --proposal <out>/<id>.md
 //   node scripts/evolve.mjs list
@@ -15,16 +16,16 @@
 //
 // Proposals are prompt-only: propose replaces the value of one exported `*_PROMPT`/`*_PROMPT_APPEND`
 // string constant in `modules/agents/<module>/` and nothing else; the replacement text itself is the
-// operator's to write (or a model they run's) — diagnose's classes are its brief, not its output.
+// operator's to write (or a model they run via draft) — diagnose's classes are its brief, not its output.
 // Nothing merges by machine: retain only stamps a verdict, and an approved proposal becomes a pull
 // request by hand. Default output directory is `<data dir>/evolver/proposals`.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { TOKEN_CATEGORIES, analyze, loadColonies, readJsonLines, totalCost } from './colony-report.mjs';
+import { TOKEN_CATEGORIES, analyze, formatTranscript, loadColonies, readJsonLines, totalCost } from './colony-report.mjs';
 import { childEnv, summarizeRun } from './bench.mjs';
 import { compareProposal } from './trajectory-monitor.mjs';
 
@@ -377,8 +378,8 @@ export function retain(proposal, { maxCostIncrease = 0.10 } = {}) {
 // ----------------------------------------------------------------------------------------------- command
 
 export function parseArgs(argv) {
-  const args = { command: argv[0] ?? null, findings: [], bench: [], candidate: [], ids: [], out: null, data: null, classes: null, class: null, module: null, constant: null, text: null, root: null, proposal: null, baseline: null, reason: null, maxCostIncrease: 0.10 };
-  const one = { '--data': 'data', '--out': 'out', '--classes': 'classes', '--class': 'class', '--module': 'module', '--constant': 'constant', '--text': 'text', '--root': 'root', '--proposal': 'proposal', '--baseline': 'baseline', '--reason': 'reason' };
+  const args = { command: argv[0] ?? null, findings: [], bench: [], candidate: [], ids: [], out: null, data: null, classes: null, class: null, module: null, constant: null, text: null, root: null, proposal: null, baseline: null, reason: null, maxCostIncrease: 0.10, lenses: null, cmd: null, heldout: null, markers: null };
+  const one = { '--data': 'data', '--out': 'out', '--classes': 'classes', '--class': 'class', '--module': 'module', '--constant': 'constant', '--text': 'text', '--root': 'root', '--proposal': 'proposal', '--baseline': 'baseline', '--reason': 'reason', '--lenses': 'lenses', '--cmd': 'cmd', '--heldout': 'heldout', '--markers': 'markers' };
   const many = { '--findings': 'findings', '--bench': 'bench', '--candidate': 'candidate' };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
@@ -490,6 +491,233 @@ function cmdRetain(args) {
   if (updated.verdict.verdict === 'retained') console.log(`approve with: node scripts/evolve.mjs approve ${updated.id} --out ${dirname(path)}`);
 }
 
+/** Walks the evidence directory and throws if any path or file content contains suspicious strings. */
+export function assertNoLeaks(dir, { heldout = null, markers = [] } = {}) {
+  const issues = [];
+
+  // Load companion ids from heldout manifest if provided
+  const companionIds = [];
+  if (heldout && existsSync(heldout)) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(heldout, 'heldout.json'), 'utf8'));
+      if (Array.isArray(manifest.checks)) {
+        companionIds.push(...manifest.checks.map((c) => c.id).filter(Boolean));
+      }
+    } catch (e) {
+      // If heldout.json doesn't exist or is malformed, just skip it
+    }
+  }
+
+  const walk = (d, prefix = '') => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      const rel = prefix ? join(prefix, e.name) : e.name;
+      // Check path for prohibited patterns
+      if (/scripts[/\\]bench[/\\]checks/.test(rel) || /scripts[/\\]bench[/\\]reference/.test(rel)) {
+        issues.push(`${rel}: contains scripts/bench/checks/ or scripts/bench/reference/ path`);
+      }
+      if (heldout && rel.includes(heldout)) {
+        issues.push(`${rel}: contains held-out directory path`);
+      }
+      for (const m of markers) {
+        if (rel.includes(m)) {
+          issues.push(`${rel}: contains configured marker "${m}"`);
+        }
+      }
+      for (const cid of companionIds) {
+        if (rel.includes(cid)) {
+          issues.push(`${rel}: contains companion id "${cid}"`);
+        }
+      }
+      if (e.isDirectory()) {
+        walk(p, rel);
+      } else {
+        const content = readFileSync(p, 'utf8');
+        if (/scripts[/\\]bench[/\\]checks/.test(content) || /scripts[/\\]bench[/\\]reference/.test(content)) {
+          issues.push(`${rel}: content contains scripts/bench/checks/ or scripts/bench/reference/ path`);
+        }
+        if (heldout && content.includes(heldout)) {
+          issues.push(`${rel}: content contains held-out directory path`);
+        }
+        for (const m of markers) {
+          if (content.includes(m)) {
+            issues.push(`${rel}: content contains configured marker "${m}"`);
+          }
+        }
+        for (const cid of companionIds) {
+          if (content.includes(cid)) {
+            issues.push(`${rel}: content contains companion id "${cid}"`);
+          }
+        }
+      }
+    }
+  };
+  walk(dir);
+  if (issues.length) {
+    throw new Error(`evidence directory contains leaks:\n${issues.map((i) => `  ${i}`).join('\n')}\nevidence left at ${dir} for inspection`);
+  }
+}
+
+/** Brief for the drafting command. */
+const briefFor = (constant) =>
+  `Evidence is in the current directory. Read every transcript to understand failures, then cite the path:line moment behind every change. Uncited changes are speculation.
+
+Reply KEEP_BASE <reason> if the evidence doesn't argue for a change, or:
+CITES:
+- evidence/transcripts/s1.md:45 — why this matters
+TEXT:
+<full replacement text for ${constant}>`;
+
+/** Parse draft reply into {outcome, cites, text, reason}. Returns {outcome: 'keep_base'|'valid'|'invalid', ...}. */
+function parseDraftReply(reply) {
+  const s = reply.trim();
+  if (s.startsWith('KEEP_BASE')) return { outcome: 'keep_base', reason: s.slice(9).trim() || 'no change needed', cites: [], text: null };
+  const cm = /^CITES:\s*([\s\S]*?)(?=^TEXT:|$)/m.exec(s);
+  const tm = /^TEXT:\s*([\s\S]*?)$/m.exec(s);
+  if (!cm || !tm) return { outcome: 'invalid', cites: [], text: null, reason: 'must start with KEEP_BASE or have CITES: and TEXT:' };
+  const cites = [];
+  for (const line of cm[1].split('\n').map(l => l.trim()).filter(Boolean)) {
+    const m = /^-\s*(\S+:\d+)\s+—\s+(.+)/.exec(line);
+    if (m) cites.push({ path: m[1], why: m[2] });
+  }
+  return { outcome: cites.length ? 'valid' : 'invalid', cites, text: tm[1].trim(), reason: cites.length ? null : 'no cites found' };
+}
+
+/** Run a drafter command via spawn, writing brief to stdin and returning stdout. */
+async function runDrafter(cmd, brief, evidenceDir, lens) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-c', cmd], {
+      cwd: evidenceDir, env: { ...childEnv(), EVOLVER_LENS: lens, EVOLVER_EVIDENCE: evidenceDir }, stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (code) => {
+      if (code !== 0) reject(new Error(stderr.slice(-500) || `exit code ${code}`));
+      else resolve(stdout);
+    });
+    child.stdin.end(brief);
+  });
+}
+
+export async function cmdDraft(args) {
+  for (const [flag, v] of [['--class', args.class], ['--module', args.module], ['--constant', args.constant]]) {
+    if (!v) throw new Error(`draft needs ${flag}`);
+  }
+  if (!args.cmd && !process.env.COLONIZER_EVOLVER_DRAFT_CMD) throw new Error('draft needs --cmd or COLONIZER_EVOLVER_DRAFT_CMD');
+  const cmd = args.cmd || process.env.COLONIZER_EVOLVER_DRAFT_CMD;
+  const lenses = (args.lenses || 'procedure,knowledge').split(',').map(s => s.trim());
+  const markers = [...(args.markers ? args.markers.split(',').map(s => s.trim()) : []), ...(process.env.COLONIZER_EVOLVER_LEAK_MARKERS ? process.env.COLONIZER_EVOLVER_LEAK_MARKERS.split(',').map(s => s.trim()) : [])];
+  const heldout = args.heldout || process.env.COLONIZER_EVOLVER_HELDOUT || null;
+  const root = args.root ? resolve(args.root) : ROOT;
+  const moduleDir = join(root, 'modules/agents', args.module);
+  const outDir = outDirOf(args);
+  const draftId = slug(args.class);
+  const evidenceDir = join(outDir, 'drafts', draftId, 'evidence');
+  mkdirSync(evidenceDir, { recursive: true });
+
+  if (!existsSync(moduleDir)) throw new Error(`no agent module at ${moduleDir}`);
+  const hits = filesDeclaring(moduleDir, args.constant);
+  if (hits.length !== 1) throw new Error(hits.length === 0 ? `no export const ${args.constant} in ${moduleDir}` : `${args.constant} declared in ${hits.length} files`);
+
+  // Write evidence: class, constant, readme, transcripts.
+  if (args.classes) {
+    const classes = JSON.parse(readFileSync(args.classes, 'utf8'));
+    const cls = classes.classes?.find(c => c.id === args.class);
+    if (!cls) throw new Error(`${args.class} not in classes`);
+    writeFileSync(join(evidenceDir, 'class.json'), JSON.stringify(cls, null, 2) + '\n');
+  }
+  const before = readFileSync(hits[0], 'utf8');
+  const match = new RegExp(`^export const ${args.constant}\\s*=\\s*`, 'm').exec(before);
+  if (!match) throw new Error(`${args.constant} not found`);
+  const constantExpr = before.slice(match.index + match[0].length).split(';')[0].trim();
+  // Extract plain text from array-of-strings form: [... ].join('\n') → join the strings
+  let constantText = constantExpr;
+  const arrayMatch = /^\[\s*([\s\S]*?)\s*\]\.join\s*\(\s*['"`]\\n['"`]\s*\)$/.exec(constantExpr);
+  if (arrayMatch) {
+    const lines = [];
+    for (const m of arrayMatch[1].matchAll(/'([^'\\]*(\\.[^'\\]*)*)'/g)) {
+      // Unescape the string
+      lines.push(m[1].replace(/\\n/g, '\n').replace(/\\'/g, "'").replace(/\\\\/g, '\\'));
+    }
+    if (lines.length > 0) constantText = lines.join('\n');
+  }
+  mkdirSync(join(evidenceDir, 'harness'), { recursive: true });
+  writeFileSync(join(evidenceDir, `harness/${args.constant}.txt`), constantText);
+  const readme = join(moduleDir, 'README.md');
+  if (existsSync(readme)) writeFileSync(join(evidenceDir, 'harness/README.md'), readFileSync(readme, 'utf8'));
+
+  if (args.data && existsSync(args.data)) {
+    mkdirSync(join(evidenceDir, 'transcripts'), { recursive: true });
+    for (const colony of loadColonies(args.data)) {
+      const a = analyze(colony);
+      const transcript = formatTranscript(colony).split('\n').map((line, i) => `${String(i + 1).padStart(4)}\t${line}`).join('\n');
+      writeFileSync(join(evidenceDir, `transcripts/${a.id}.md`), transcript);
+    }
+  }
+
+  // Check for leaks before spawning.
+  try {
+    assertNoLeaks(evidenceDir, { heldout, markers });
+  } catch (e) {
+    throw new Error(`${e.message}\nevidence left at ${evidenceDir}`);
+  }
+
+  // Run each lens concurrently.
+  const outcomes = await Promise.all(lenses.map(async (lens) => {
+    const outcome = { lens, outcome: 'failed', attempts: 0, errors: [], reason: null, proposal: null };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      outcome.attempts = attempt;
+      let brief = briefFor(args.constant);
+      if (attempt === 2 && outcome.errors[0]) brief += `\n\nPrevious reply rejected:\n${outcome.errors[0]}`;
+      try {
+        const reply = await runDrafter(cmd, brief, evidenceDir, lens);
+        const parsed = parseDraftReply(reply);
+        if (parsed.outcome === 'invalid') {
+          outcome.errors[attempt - 1] = parsed.reason;
+          if (attempt === 1) continue;
+          throw new Error(parsed.reason);
+        }
+        if (parsed.outcome === 'keep_base') {
+          outcome.outcome = 'keep_base';
+          outcome.reason = parsed.reason;
+          break;
+        }
+        try {
+          const classes = args.classes ? JSON.parse(readFileSync(args.classes, 'utf8')) : { repo: null, heldout_version: null };
+          const p = propose({ classes, classId: args.class, module: args.module, constant: args.constant, text: parsed.text, root });
+          p.origin = `draft/${lens}`;
+          p.cites = parsed.cites;
+          writeProposal(join(outDir, `${p.id}.md`), p);
+          writeFileSync(join(outDir, `${p.id}.diff`), p.diff + '\n');
+          outcome.outcome = 'proposed';
+          outcome.proposal = p.id;
+          break;
+        } catch (e) {
+          outcome.errors[attempt - 1] = String(e.message).slice(-500);
+          if (attempt === 1) continue;
+          throw new Error(outcome.errors[attempt - 1]);
+        }
+      } catch (e) {
+        outcome.errors[attempt - 1] = String(e.message).slice(-500);
+        if (attempt === 2) outcome.outcome = 'failed';
+      }
+    }
+    return outcome;
+  }));
+
+  // Write draft.json and print summary.
+  const draftJsonPath = join(outDir, `${draftId}/draft.json`);
+  mkdirSync(dirname(draftJsonPath), { recursive: true });
+  writeFileSync(draftJsonPath, JSON.stringify({ id: draftId, class: args.class, module: args.module, constant: args.constant, evidence: evidenceDir, lenses: outcomes }, null, 2) + '\n');
+  for (const o of outcomes) {
+    let status = o.outcome.toUpperCase();
+    if (o.outcome === 'proposed') status += ` → ${o.proposal}`;
+    else if (o.outcome === 'keep_base') status += ` (${o.reason})`;
+    console.log(`${args.class} / ${o.lens}: ${status}`);
+  }
+}
+
 function cmdList(args) {
   const dir = outDirOf(args);
   if (!existsSync(dir)) throw new Error(`no proposals directory at ${dir}`);
@@ -527,12 +755,12 @@ function cmdReject(args) {
   console.log(`rejected ${proposal.id}${args.reason ? `: ${args.reason}` : ''}`);
 }
 
-const COMMANDS = { diagnose: cmdDiagnose, propose: cmdPropose, evaluate: cmdEvaluate, retain: cmdRetain, list: cmdList, approve: cmdApprove, reject: cmdReject };
+const COMMANDS = { diagnose: cmdDiagnose, propose: cmdPropose, draft: cmdDraft, evaluate: cmdEvaluate, retain: cmdRetain, list: cmdList, approve: cmdApprove, reject: cmdReject };
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = COMMANDS[args.command];
-  if (!cmd) throw new Error('use diagnose, propose, evaluate, retain, list, approve or reject (see the header of scripts/evolve.mjs)');
+  if (!cmd) throw new Error('use diagnose, propose, draft, evaluate, retain, list, approve or reject (see the header of scripts/evolve.mjs)');
   return cmd(args);
 }
 
