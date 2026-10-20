@@ -1354,6 +1354,12 @@ pub struct PrInfo {
     pub head_ref_oid: Option<String>,
     /// The branch the pull request targets, as GitHub sees it right now.
     pub base_ref_name: Option<String>,
+    /// Check names that passed on the PR head (issue #1364): used by the merge train to decide if a
+    /// base-shared-red draft should be promoted. Extracted from `statusCheckRollup`.
+    pub green_checks: Vec<String>,
+    /// Check names that failed on the PR head (issue #1364): used by the merge train to decide if a
+    /// base-shared-red draft should be kept. Extracted from `statusCheckRollup`.
+    pub red_checks: Vec<String>,
 }
 
 /// A pull request's checks in one word, from `gh pr view`'s `statusCheckRollup`: any failed check
@@ -1405,6 +1411,47 @@ pub fn ci_verdict(rollup: Option<&Value>) -> CiState {
         }
     }
     if pending { CiState::Pending } else { CiState::Success }
+}
+
+/// Extract check names and their outcomes from a `statusCheckRollup` array (issue #1364).
+/// Returns (green_names, red_names): check names that **confirmed** success (SUCCESS only) and those that failed.
+/// NEUTRAL, SKIPPED, and STALE checks are ignored (neither green nor red) because they don't confirm anything.
+/// Each check name is lowercased for case-insensitive matching against pre_publish_red names.
+pub fn check_names_from_rollup(rollup: Option<&Value>) -> (Vec<String>, Vec<String>) {
+    let Some(items) = rollup.and_then(Value::as_array) else {
+        return (Vec::new(), Vec::new());
+    };
+    let word = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().trim().to_ascii_uppercase();
+    let mut green = Vec::new();
+    let mut red = Vec::new();
+    for item in items {
+        let conclusion = word(item, "conclusion");
+        let state = word(item, "state");
+        let status = word(item, "status");
+        let verdict = if !conclusion.is_empty() {
+            conclusion
+        } else if !state.is_empty() {
+            state
+        } else if !status.is_empty() && status != "COMPLETED" {
+            "PENDING".to_string()
+        } else {
+            continue;
+        };
+        let name = item["name"].as_str().unwrap_or("").to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        match verdict.as_str() {
+            "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => {
+                red.push(name);
+            }
+            "SUCCESS" => {
+                green.push(name);
+            }
+            _ => {} // NEUTRAL, SKIPPED, STALE, PENDING, or unknown states are ignored here
+        }
+    }
+    (green, red)
 }
 
 /// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
@@ -1585,6 +1632,7 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         .unwrap_or("UNKNOWN")
         .trim()
         .to_ascii_uppercase();
+    let (green_checks, red_checks) = check_names_from_rollup(view.status_check_rollup.as_ref());
     Ok(PrInfo {
         state,
         mergeability: mergeability_from(view.mergeable.as_deref(), Some(&merge_state_status)),
@@ -1599,6 +1647,8 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         head_ref_name: view.head_ref_name,
         head_ref_oid: view.head_ref_oid,
         base_ref_name: view.base_ref_name,
+        green_checks,
+        red_checks,
     })
 }
 
@@ -2579,6 +2629,34 @@ impl PublishOps for GitPublishOps<'_> {
             self.s.branch.clone(),
         );
         let _ = crate::provenance_ledger::record(self.app, entry).await;
+        // Track whether this draft was opened solely due to base-shared pre_publish_red (issue #1364).
+        let operator_draft = self
+            .app
+            .modules
+            .read()
+            .await
+            .publish
+            .settings
+            .get("draft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let pr_draft_base_red = if let Some(verification) = self.s.verification.as_ref() {
+            draft
+                && draft_only_for_base_red(
+                    operator_draft,
+                    &verification.pre_publish_red,
+                    verification.infra_retry.is_some(),
+                )
+        } else {
+            false
+        };
+        if pr_draft_base_red {
+            self.app
+                .update_session(&self.s.id, |x| {
+                    x.pr_draft_base_red = true;
+                })
+                .await;
+        }
         Ok(url)
     }
 
@@ -2670,6 +2748,13 @@ impl PublishOps for GitPublishOps<'_> {
     async fn note(&self, message: String) {
         self.log.info(message).await;
     }
+}
+
+/// Determines whether a draft PR should be marked with the `pr_draft_base_red` flag:
+/// true if the operator did not explicitly request draft mode, there are pre_publish_red checks
+/// that failed on the base, and there is no infra retry mechanism.
+fn draft_only_for_base_red(operator_draft: bool, pre_publish_red: &[String], infra_retry: bool) -> bool {
+    !operator_draft && !pre_publish_red.is_empty() && !infra_retry
 }
 
 /// How many commits `origin/<base>` carries that `branch` does not: the "N commit(s) behind" of
@@ -3474,6 +3559,19 @@ mod tests {
         assert_eq!(super::pr_file_paths("a/b.rs\n\n  c.md \n"), vec!["a/b.rs", "c.md"]);
         let many: String = (0..600).map(|i| format!("f{i}\n")).collect();
         assert_eq!(super::pr_file_paths(&many).len(), crate::sessions::CHANGED_PATHS_CAP);
+    }
+
+    #[test]
+    fn draft_only_for_base_red_identifies_when_flag_should_be_set() {
+        use super::draft_only_for_base_red;
+        // operator draft on → false
+        assert!(!draft_only_for_base_red(true, &["check1".to_string()], false));
+        // pre_publish_red non-empty, operator off, no infra_retry → true
+        assert!(draft_only_for_base_red(false, &["check1".to_string()], false));
+        // infra_retry set → false
+        assert!(!draft_only_for_base_red(false, &["check1".to_string()], true));
+        // empty pre_publish_red → false
+        assert!(!draft_only_for_base_red(false, &[], false));
     }
 
     #[test]
@@ -4432,6 +4530,8 @@ mod tests {
                 head_ref_name: None,
                 head_ref_oid: None,
                 base_ref_name: None,
+                green_checks: Vec::new(),
+                red_checks: Vec::new(),
             }
         );
         assert_eq!(
@@ -4450,6 +4550,8 @@ mod tests {
                 head_ref_name: None,
                 head_ref_oid: None,
                 base_ref_name: None,
+                green_checks: Vec::new(),
+                red_checks: Vec::new(),
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -4469,6 +4571,8 @@ mod tests {
                 head_ref_name: None,
                 head_ref_oid: None,
                 base_ref_name: None,
+                green_checks: Vec::new(),
+                red_checks: Vec::new(),
             }
         );
         // `baseRefOid` rides along when GitHub reports one, for the auto-rebase backoff (issue
@@ -6496,5 +6600,32 @@ mod tests {
             "the files are left on disk for the operator"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn check_names_from_rollup_only_counts_success_as_green() {
+        use serde_json::json;
+        let rollup = json!([
+            {"name": "Test A", "conclusion": "SUCCESS"},
+            {"name": "Test B", "conclusion": "FAILURE"},
+            {"name": "Test C", "conclusion": "SKIPPED"},
+            {"name": "Test D", "conclusion": "NEUTRAL"},
+            {"name": "Test E", "conclusion": "STALE"},
+            {"name": "Test F", "state": "SUCCESS"},
+            {"name": "Test G", "state": "FAILURE"},
+        ]);
+        let (green, red) = super::check_names_from_rollup(Some(&rollup));
+        assert_eq!(green, vec!["test a", "test f"], "only SUCCESS counts as green");
+        assert_eq!(red, vec!["test b", "test g"], "FAILURE is red");
+        // SKIPPED, NEUTRAL, STALE are neither green nor red, so they don't appear in either list
+        assert!(
+            !green
+                .iter()
+                .any(|g| g.contains("test c") || g.contains("test d") || g.contains("test e"))
+        );
+        assert!(
+            !red.iter()
+                .any(|r| r.contains("test c") || r.contains("test d") || r.contains("test e"))
+        );
     }
 }
