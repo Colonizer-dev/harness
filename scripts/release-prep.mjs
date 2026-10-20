@@ -30,15 +30,97 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { FRAGMENT_DIR, REPO_URL, check, main as changelog, readFragments, releases } from './changelog.mjs';
+import { check as checkDocLinks } from './check-doc-links.mjs';
 
 // The crates that carry the release version, by directory under crates/. colonizer-billing and
 // repo-contracts are versioned on their own.
 export const RELEASE_CRATES = ['colonizer', 'colonizer-agentd', 'colonizer-observability', 'colonizer-redact'];
 export const SKIP_MARKER = /release-train:\s*skip\b/i;
+
+/**
+ * Rebase relative Markdown links and image paths from the repository root to a target directory.
+ * Inline links `[t](p)`, images `![a](p)`, and reference definitions `[id]: p` are rebased.
+ * Absolute URLs (with scheme), protocol-relative `//`, root-absolute `/`, and pure anchors `#`
+ * are left alone. Fragments `#`, query strings `?`, and optional titles are preserved.
+ * Code inside fenced code blocks is not processed. Inline code spans are also protected.
+ */
+export function rebaseLinks(markdown, root, notesPath) {
+  const notesDir = dirname(notesPath);
+
+  // Check whether a path part should be rebased: not empty, not absolute, not external.
+  const shouldRebase = (pathPart) =>
+    !!pathPart && !/^[a-z][a-z0-9+.-]*:/i.test(pathPart) && !pathPart.startsWith('//') && !pathPart.startsWith('/');
+
+  // Extract path, fragment, and query from a target.
+  const splitTarget = (target) => {
+    const end = target.search(/[?#]/);
+    const cut = end === -1 ? target.length : end;
+    return { pathPart: target.slice(0, cut), fragAndQuery: target.slice(cut) };
+  };
+
+  // Rebase a relative path from root to notes directory (always using `/` separators).
+  const rebasePath = (pathPart) => {
+    const absolute = resolve(root, pathPart);
+    const absolutePosix = absolute.split('\\').join('/');
+    const notesDirPosix = notesDir.split('\\').join('/');
+    return posix.relative(notesDirPosix, absolutePosix);
+  };
+
+  const out = [];
+  let fence = null;
+
+  for (const line of markdown.split('\n')) {
+    // Track fenced code blocks.
+    const open = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      const close = line.match(/^\s{0,3}(`{3,}|~{3,})\s*$/);
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+      out.push(line);
+      continue;
+    }
+    if (open) {
+      fence = open[1];
+      out.push(line);
+      continue;
+    }
+
+    // Protect inline code spans, rebase links, restore.
+    const codePlaceholders = [];
+    let processed = line
+      .replace(/(`+)[\s\S]*?\1/g, (m) => {
+        codePlaceholders.push(m);
+        return '\0' + (codePlaceholders.length - 1) + '\0';
+      })
+      // Rebase inline links/images.
+      .replace(
+        /(!?\[(?:[^\]\\]|\\.)*\])\(\s*(<[^>]*>|[^)\s]+)((?:\s+(?:"[^"]*"|'[^']*'))?)\s*\)/g,
+        (match, linkPart, linkTarget, titlePart) => {
+          // Don't rebase angle-bracket targets.
+          if (linkTarget.startsWith('<')) return match;
+          const { pathPart, fragAndQuery } = splitTarget(linkTarget);
+          if (!shouldRebase(pathPart)) return match;
+          return linkPart + '(' + rebasePath(pathPart) + fragAndQuery + (titlePart ?? '') + ')';
+        }
+      )
+      // Rebase reference definitions.
+      .replace(
+        /^\s{0,3}\[[^\]]+\]:\s+(\S+)/,
+        (match, refTarget) => {
+          const { pathPart, fragAndQuery } = splitTarget(refTarget);
+          if (!shouldRebase(pathPart)) return match;
+          return match.replace(refTarget, rebasePath(pathPart) + fragAndQuery);
+        }
+      )
+      // Restore inline code spans.
+      .replace(/\0(\d+)\0/g, (_, i) => codePlaceholders[i]);
+    out.push(processed);
+  }
+  return out.join('\n');
+}
 
 const SEMVER = /^v(\d+)\.(\d+)\.(\d+)$/;
 const parse = (v) => SEMVER.exec(v)?.slice(1).map(Number) ?? null;
@@ -194,7 +276,20 @@ export function prep(root, { version, date, lock = true, dryRun = false } = {}) 
     if (r.status !== 0) throw new Error(`cargo update -w failed (${r.status ?? r.error})`);
   }
   const notes = join(root, 'docs', 'release-notes', `${version}.md`);
-  if (!existsSync(notes)) writeFileSync(notes, releaseNotesStub(version, p.fragments));
+  if (!existsSync(notes)) {
+    let stub = releaseNotesStub(version, p.fragments);
+    stub = rebaseLinks(stub, root, notes);
+    writeFileSync(notes, stub);
+  }
+
+  // Validate that the release notes have no broken links.
+  const docLinksProblems = checkDocLinks(relative(root, notes), { root });
+  if (docLinksProblems.length) {
+    throw new Error(
+      `release notes have broken links:\n${docLinksProblems.join('\n')}`
+    );
+  }
+
   return { changed: true, version, pending: p.pending, crates };
 }
 
