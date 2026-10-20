@@ -39,7 +39,21 @@ export default defineConfig(({ mode }) => ({
   base: mode === "demo" ? "/demo/" : "/",
   plugins: [react(), tailwindcss(), ...(mode === "demo" ? [demoDropManifest()] : [swBuild()])],
   // The main chunk is React + assistant-ui + markdown (~700 kB); xterm loads separately.
-  build: { outDir: mode === "demo" ? "dist-demo" : "dist", emptyOutDir: true, chunkSizeWarningLimit: 900 },
+  build: {
+    outDir: mode === "demo" ? "dist-demo" : "dist",
+    emptyOutDir: true,
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        assetFileNames: (assetInfo) => {
+          if (assetInfo.name?.endsWith('.woff2')) {
+            return 'assets/fonts/[name]-[hash][extname]';
+          }
+          return 'assets/[name]-[hash][extname]';
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": { target: "http://127.0.0.1:7878", ws: true, changeOrigin: false },

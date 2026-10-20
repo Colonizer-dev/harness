@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { compareProposal } from '../trajectory-monitor.mjs';
-import { childEnv } from '../bench.mjs';
-import { diagnose, evaluate, findProposal, overallVerdict, parseProposal, propose, renderProposal, replaceConstant, retain, scorecard, verdict } from '../evolve.mjs';
+import { childEnv, moduleDirDigest } from '../bench.mjs';
+import { checkConfigs, diagnose, diffFor, evaluate, expectedModuleDigest, findProposal, overallVerdict, parseProposal, propose, renderProposal, replaceConstant, retain, scorecard, verdict } from '../evolve.mjs';
 
 const AT = '2026-09-27T00:00:00Z';
 // A colony sandbox exports GIT_DIR and friends globally; left in, they point every test git at the wrong work tree.
-const git = (args, cwd) => execFileSync('git', ['-c', 'user.email=e@test', '-c', 'user.name=evolve test', ...args], { cwd, encoding: 'utf8', env: childEnv() });
+const git = (args, cwd) => execFileSync('git', ['-c', 'user.email=e@test', '-c', 'user.name=evolve test', ...args], { cwd, encoding: 'utf8', env: childEnv() }).trim();
 
 // --------------------------------------------------------------------------------------- fixtures
 
@@ -281,3 +281,203 @@ test('findProposal resolves an id in the queue and never joins a raw id onto the
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --------------------------------- config checking tests
+
+const cfg = (overComps = {}) => ({
+  digest: 'test',
+  components: {
+    harness: { digest: 'h1', value: { commit: 'abc123' } },
+    agent: { digest: 'a1', value: { id: 'claude-code', module_digest: 'sha256:expected' } },
+    model: { digest: 'm1' },
+    ...overComps,
+  },
+});
+
+// 1. Baseline result must have config.
+test('checkConfigs refuses when baseline result lacks config fingerprint', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { label: 'before', results: [{ id: 't1' }] }; // no config
+  const candidates = [];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'baseline before: task t1 carries no config fingerprint');
+});
+
+test('checkConfigs uses "run" as label when baseline has no label', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { results: [{ id: 't1' }] }; // no label, no config
+  const candidates = [];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'baseline run: task t1 carries no config fingerprint');
+});
+
+// 2. Baseline result harness commit must match proposal.base_commit.
+test('checkConfigs refuses when baseline harness commit mismatches proposal', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = {
+    label: 'before',
+    results: [{ id: 't1', config: cfg({ harness: { digest: 'h1', value: { commit: 'wrong789' } } }) }],
+  };
+  const candidates = [];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'baseline ran on harness wrong789, the proposal is based on abc123');
+});
+
+// 3. Every candidate result must have config.
+test('checkConfigs refuses when candidate result lacks config fingerprint', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { results: [{ id: 't1', config: cfg() }] };
+  const candidates = [{ name: 'after.json', results: [{ id: 't1' }] }]; // no config
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'candidate after.json: task t1 carries no config fingerprint');
+});
+
+test('checkConfigs refuses when any candidate result lacks config', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { results: [{ id: 't1', config: cfg() }, { id: 't2', config: cfg() }] };
+  const candidates = [{ name: 'after.json', results: [{ id: 't1', config: cfg() }, { id: 't2' }] }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'candidate after.json: task t2 carries no config fingerprint');
+});
+
+// 4. Candidate agent.value.id must match proposal.module.
+test('checkConfigs refuses when candidate agent id mismatches proposal module', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { results: [{ id: 't1', config: cfg() }] };
+  const candidates = [{
+    name: 'after.json',
+    results: [{ id: 't1', config: cfg({ agent: { digest: 'a2', value: { id: 'other-agent', module_digest: 'sha256:expected' } } }) }],
+  }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'candidate after.json ran agent other-agent, the proposal changes claude-code');
+});
+
+// 5. Non-agent component digests must match between candidate and baseline (per task id).
+test('checkConfigs refuses when candidate differs from baseline in non-agent component', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { results: [{ id: 't1', config: cfg({ model: { digest: 'm1' } }) }] };
+  const candidates = [{
+    name: 'after.json',
+    results: [{ id: 't1', config: cfg({ model: { digest: 'm2' } }) }],
+  }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, 'candidate after.json differs from the baseline in model (task t1)');
+});
+
+test('checkConfigs allows per-task model variation between baseline and candidate if they match per task', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = {
+    results: [
+      { id: 't1', config: cfg({ model: { digest: 'm1' } }) },
+      { id: 't2', config: cfg({ model: { digest: 'm2' } }) },
+    ],
+  };
+  const candidates = [{
+    name: 'after.json',
+    results: [
+      { id: 't1', config: cfg({ model: { digest: 'm1' } }) },
+      { id: 't2', config: cfg({ model: { digest: 'm2' } }) },
+    ],
+  }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, null);
+});
+
+test('checkConfigs matches candidate and baseline results by task id, falls back to first baseline result', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = {
+    results: [
+      { id: 't1', config: cfg({ model: { digest: 'm1' } }) },
+      { id: 't2', config: cfg({ model: { digest: 'm2' } }) },
+    ],
+  };
+  const candidates = [{
+    name: 'after.json',
+    // t3 from candidate has no match in baseline, falls back to baseline[0] (t1)
+    results: [
+      { id: 't1', config: cfg({ model: { digest: 'm1' } }) },
+      { id: 't3', config: cfg({ model: { digest: 'm1' } }) }, // must match baseline[0] (t1 with m1)
+    ],
+  }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, null);
+});
+
+// 6. Candidate agent module_digest must match expectedModuleDigest.
+test('checkConfigs refuses when candidate module digest mismatches expected', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = { results: [{ id: 't1', config: cfg() }] };
+  const candidates = [{
+    name: 'after.json',
+    results: [{ id: 't1', config: cfg({ agent: { digest: 'a2', value: { id: 'claude-code', module_digest: 'sha256:wrong' } } }) }],
+  }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.match(err, /candidate after.json's claude-code module is not abc123 with the proposal's diff applied/);
+});
+
+// Passing case.
+test('checkConfigs passes when all checks succeed', () => {
+  const proposal = { base_commit: 'abc123', module: 'claude-code' };
+  const baseline = {
+    label: 'before',
+    results: [{ id: 't1', config: cfg() }],
+  };
+  const candidates = [{
+    name: 'after.json',
+    results: [{ id: 't1', config: cfg() }],
+  }];
+  const err = checkConfigs(proposal, baseline, candidates, 'sha256:expected');
+  assert.equal(err, null);
+});
+
+// ---------------------- expectedModuleDigest
+
+test('expectedModuleDigest applies a diff and computes the correct digest', () => {
+  const root = fixtureRepo();
+  try {
+    const commit = git(['rev-parse', 'HEAD'], root);
+    // Get the unpatched digest first.
+    const unpatched = moduleDirDigest(join(root, 'modules/agents/x'));
+    // Build a diff that changes the prompt.
+    const oldContent = readFileSync(join(root, 'modules/agents/x/runner.mjs'), 'utf8');
+    const newContent = replaceConstant(oldContent, 'SYSTEM_PROMPT_APPEND', 'new line');
+    const diff = diffFor('modules/agents/x/runner.mjs', oldContent, newContent);
+    // expectedModuleDigest should apply the diff and return the patched digest.
+    const expected = expectedModuleDigest({ root, commit, moduleDir: 'modules/agents/x', diff });
+    // Verify it differs from the unpatched digest.
+    assert.notEqual(expected, unpatched, 'patched digest should differ from unpatched');
+    // Verify it matches a manually patched copy.
+    const manualDir = mkdtempSync(join(tmpdir(), 'colonizer-evolve-manual-'));
+    try {
+      cpSync(join(root, 'modules/agents/x'), manualDir, { recursive: true });
+      writeFileSync(join(manualDir, 'runner.mjs'), newContent);
+      const manual = moduleDirDigest(manualDir);
+      assert.equal(expected, manual, 'expectedModuleDigest should match manually patched copy');
+    } finally {
+      rmSync(manualDir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('expectedModuleDigest throws when diff context does not match', () => {
+  const root = fixtureRepo();
+  try {
+    const commit = git(['rev-parse', 'HEAD'], root);
+    // Create a diff with a bad context that will not apply.
+    const badDiff = `diff --git a/modules/agents/x/runner.mjs b/modules/agents/x/runner.mjs
+--- a/modules/agents/x/runner.mjs
++++ b/modules/agents/x/runner.mjs
+@@ -1,5 +1,5 @@
+// A stand-in runner with its prompt constants in module style.
+-// WRONG CONTEXT LINE THAT DOES NOT MATCH
++// This is the wrong line and will not apply
+export const SYSTEM_PROMPT_APPEND = [
+`;
+    assert.throws(() => expectedModuleDigest({ root, commit, moduleDir: 'modules/agents/x', diff: badDiff }), /patch does not apply|error: patch failed|error: corrupt patch/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+

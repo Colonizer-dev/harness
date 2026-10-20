@@ -392,6 +392,8 @@ export interface Session {
     at: string;
     kept: boolean;
   } | null;
+  /** Operator notes queued while the colony was not live (issue #1287), for delivery when it resumes. */
+  pending_notes?: { text: string; id: string }[];
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */

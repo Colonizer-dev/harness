@@ -121,7 +121,7 @@ export function ChatPanel({
     const gone = new Set<string>([...delivered, ...dropped.map((drop) => drop.id)]);
     for (const drop of dropped) {
       const entry = queuedRef.current.find((queued) => queued.id === drop.id);
-      if (entry) toast(droppedText(entry.kind, drop.status), "error");
+      if (entry) toast(droppedText(entry.kind, drop.status, drop.error), "error");
     }
     const next = queuedRef.current.filter((entry) => !gone.has(entry.id));
     if (next.length !== queuedRef.current.length) {
@@ -289,6 +289,11 @@ export function ChatPanel({
               {queued.map((entry) => (entry.kind === "message" ? <QueuedMessage key={entry.id} text={entry.text ?? ""} /> : <QueuedAnswerNote key={entry.id} />))}
             </div>
           </ThreadPrimitive.Viewport>
+          {state.session?.pending_notes && state.session.pending_notes.length > 0 && (
+            <div role="status" className="flex items-center gap-2 border-b border-border bg-accent-soft px-4 py-1.5 text-small-lg text-accent" title="Delivered as the first message when the colony starts">
+              {state.session.pending_notes.length} {state.session.pending_notes.length === 1 ? "note" : "notes"} waiting
+            </div>
+          )}
           <Composer
             isRunning={isRunning}
             live={live}

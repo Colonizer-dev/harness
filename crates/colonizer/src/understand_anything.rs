@@ -314,7 +314,7 @@ fn top_level(unpack: &Path) -> Result<PathBuf> {
 }
 
 /// `archive`'s sha256 in lowercase hex, read back off disk rather than from the stream that wrote it.
-async fn archive_sha256(archive: &Path) -> Result<String> {
+pub(crate) async fn archive_sha256(archive: &Path) -> Result<String> {
     use tokio::io::AsyncReadExt;
     let mut file = tokio::fs::File::open(archive).await?;
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);

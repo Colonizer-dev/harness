@@ -5,7 +5,7 @@
 
 import { execFile } from 'node:child_process';
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -14,11 +14,14 @@ import { createAskRefusals, denialBoundary, execPolicyBoundary } from './boundar
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
 import {
   EXEC_POLICY_QUESTION_KIND,
+  EXEC_POLICY_TOOLS,
+  EXEC_POLICY_TOOL_NAMES,
   createExecAllowCache,
   evaluateExecPolicy,
   execPolicyLogLine,
   execPolicyQuestion,
   execPolicyReason,
+  execPolicyTargets,
   loadExecPolicy,
 } from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
@@ -955,6 +958,47 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   // CLAUDE_CODE_ENABLE_FUNCTION_HOOKS from the input env, so the flag below is the only way it is set.
   const jevDir = env.COLONIZER_JEV_COMPACTION === 'true' ? env.COLONIZER_JEV_COMPACTION_DIR || JEV_COMPACTION_DIR : null;
   if (jevDir) claudeEnv.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS = '1';
+  // Context-mode MCP server (issue #1273): execute code in the colony. Off by default; on when
+  // COLONIZER_CONTEXT_MODE is "on" and the installed package matches the pin. Shadow mode is
+  // accepted but not yet implemented.
+  const contextModePin = JSON.parse(readFileSync(new URL('./context-mode.json', import.meta.url), 'utf8'));
+  const contextModeMode = ['on', 'shadow'].includes(env.COLONIZER_CONTEXT_MODE) ? env.COLONIZER_CONTEXT_MODE : 'off';
+  let contextModeServer = null;
+  if (contextModeMode === 'on') {
+    const contextModeDir = env.COLONIZER_CONTEXT_MODE_DIR;
+    if (contextModeDir) {
+      const pkgJson = readText(join(contextModeDir, 'package.json'));
+      if (pkgJson) {
+        try {
+          const pkg = JSON.parse(pkgJson);
+          if (pkg.name === contextModePin.name && pkg.version === contextModePin.version) {
+            // Colony's guest microVM has its own home; keep context-mode's data in ~/.colonizer, apart from shared ~/.claude config
+            const stateDir = join(homedir(), '.colonizer', 'context-mode');
+            contextModeServer = {
+              type: 'stdio',
+              command: process.execPath,
+              args: [join(contextModeDir, 'cli.bundle.mjs')],
+              env: {
+                ...process.env,
+                CLAUDE_CONFIG_DIR: stateDir,
+                CONTEXT_MODE_PROJECT_DIR: process.cwd(),
+              },
+            };
+          } else {
+            warnings.push(`context-mode: installed version ${pkg.version || '?'} at ${contextModeDir} does not match pinned ${contextModePin.version}; mode stays off`);
+          }
+        } catch {
+          warnings.push(`context-mode: failed to parse package.json at ${contextModeDir}; mode stays off`);
+        }
+      } else {
+        warnings.push(`context-mode: package.json not found at ${contextModeDir}; mode stays off`);
+      }
+    } else {
+      warnings.push(`context-mode: COLONIZER_CONTEXT_MODE_DIR not set; mode stays off`);
+    }
+  } else if (contextModeMode === 'shadow') {
+    warnings.push('context-mode: shadow mode (measurement) is not implemented yet; mode stays off');
+  }
 
   const options = {
     cwd: process.cwd(),
@@ -988,6 +1032,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (github) mcpServers[GITHUB_SERVER] = githubServer;
   if (brain) mcpServers[LIVINGBRAIN_SERVER] = brain;
+  if (contextModeServer) mcpServers['context-mode'] = contextModeServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
   const preToolUse = [];
   if (delegate === 'enforce') {
@@ -1127,29 +1172,59 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
       ],
     });
   }
-  // Exec policy (issue #471): every Bash command meets the layered rules in execpolicy.mjs — a
-  // deny is refused with the rule named, an ask surfaces as a colony question through canUseTool.
-  // Loaded once here (the repo layer's file is read at start, so the agent rewriting it mid-run
-  // cannot widen anything); the same object rides along to runAgent for the ask path.
+  // Exec policy (issue #471): every Bash command and context-mode exec tool call meets the layered
+  // rules in execpolicy.mjs — a deny is refused with the rule named, an ask surfaces as a colony
+  // question through canUseTool. Loaded once here (the repo layer's file is read at start, so the
+  // agent rewriting it mid-run cannot widen anything); the same object rides along to runAgent for
+  // the ask path.
   const policy = execPolicy ?? loadExecPolicy(env);
   for (const warning of policy.warnings) warnings.push(warning);
   preToolUse.push({
-    matcher: 'Bash',
+    matcher: EXEC_POLICY_TOOLS,
     hooks: [
       async (input) => {
-        const command = input.tool_input?.command;
-        if (typeof command !== 'string' || !command) return { continue: true };
-        const hit = evaluateExecPolicy(policy, command, { cwd: process.cwd() });
-        if (!hit) return { continue: true };
+        // Defence in depth: only process tools in the allowed set
+        if (!EXEC_POLICY_TOOL_NAMES.includes(input.tool_name)) return { continue: true };
+        const targets = execPolicyTargets(input.tool_name, input.tool_input);
+        if (!targets.length) return { continue: true };
+        let best = null;
+        for (const target of targets) {
+          // Handle forced decisions (for malformed input, unsupported operations, etc.)
+          if (target.forcedDecision) {
+            // Extract rule ID from reason string if present
+            let ruleId = 'context-mode-validation';
+            if (target.reason.includes('malformed')) ruleId = 'malformed-input';
+            else if (target.reason.includes('unknown')) ruleId = 'unknown-language';
+            else if (target.reason.includes('upgrade')) ruleId = 'upgrade-pinned';
+            const forcedHit = { decision: target.forcedDecision, rule: ruleId, reason: target.reason, layer: 'context-mode' };
+            const rank = { deny: 3, ask: 2, allow: 1 };
+            if (!best || rank[target.forcedDecision] > rank[best.decision]) {
+              best = forcedHit;
+            }
+            continue;
+          }
+          const hit = evaluateExecPolicy(policy, target.command, {
+            cwd: target.cwd ? (target.cwd.startsWith('/') ? target.cwd : join(process.cwd(), target.cwd)) : process.cwd(),
+            scriptBody: target.scriptBody,
+          });
+          if (!hit) continue;
+          // Strictest decision wins (deny > ask > allow).
+          const rank = { deny: 3, ask: 2, allow: 1 };
+          if (!best || rank[hit.decision] > rank[best.decision]) {
+            best = hit;
+          }
+        }
+        if (!best) return { continue: true };
         // One harness-log line per decision (agentd turns stderr lines into `log` events).
-        process.stderr.write(`${execPolicyLogLine(hit, command)}\n`);
-        if (hit.decision === 'allow') return { continue: true };
+        const command = targets[0].command || targets[0].forcedDecision; // Use first target for logging; all are from same call.
+        if (typeof command === 'string') process.stderr.write(`${execPolicyLogLine(best, command)}\n`);
+        if (best.decision === 'allow') return { continue: true };
         // A deny is a control refusing something: reported as a `boundary` event for the
         // watchdog's control-defeat signature (issue #609). An ask is reported once answered.
-        if (hit.decision === 'deny') onBoundary?.(execPolicyBoundary(hit, command));
+        if (best.decision === 'deny' && typeof command === 'string') onBoundary?.(execPolicyBoundary(best, command));
         return {
           continue: true,
-          hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: hit.decision, permissionDecisionReason: execPolicyReason(hit) },
+          hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: best.decision, permissionDecisionReason: execPolicyReason(best) },
         };
       },
     ],
@@ -1284,6 +1359,10 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
     warnings.push(`ignoring COLONIZER_SUBAGENT_EFFORT=${env.COLONIZER_SUBAGENT_EFFORT}; expected one of ${[...EFFORT_LEVELS].join(', ')}`);
   }
   options.agents = subagentDefinitions(EFFORT_LEVELS.has(env.COLONIZER_SUBAGENT_EFFORT) ? env.COLONIZER_SUBAGENT_EFFORT : undefined);
+  // Write warnings to stderr so the operator sees them
+  for (const warning of warnings) {
+    process.stderr.write(`warning: ${warning}\n`);
+  }
   return { options, warnings };
 }
 

@@ -11,6 +11,8 @@ import { Cockpit } from "./cockpit/Cockpit";
 import { DemoBanner } from "./components/DemoBanner";
 import { DEMO } from "./demo";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
+import { go } from "./router";
+import { settingsPath } from "./components/settings/nav";
 import {
   NOTIFICATIONS_KEY,
   applyAppBadge,
@@ -81,6 +83,7 @@ export function App() {
   const [interfaces, setInterfaces] = useState<InterfaceFlags>({ chat: true, terminal: true });
   const [autopilotDefault, setAutopilotDefault] = useState(true);
   const [settingsSection, setSettingsSection] = useState<SectionId | undefined>(undefined);
+  const [settingsFocusSecretId, setSettingsFocusSecretId] = useState<string | undefined>(undefined);
   const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
   const [dismissed, setDismissed] = useState<string[]>([]);
   const [usage, setUsage] = useState<UsageStatus | null>(null);
@@ -111,7 +114,6 @@ export function App() {
   const [launchRequests, setLaunchRequests] = useState(0);
   const [settingsRequests, setSettingsRequests] = useState(0);
   const [memoryRequests, setMemoryRequests] = useState(0);
-  const [secretsRequest, setSecretsRequest] = useState<{ n: number; id?: string }>({ n: 0 });
   // Whether the cockpit is showing its inspector; the fixed card column steps left of it.
   const [inspectorShown, setInspectorShown] = useState(false);
   const [modules, setModules] = useState<ModuleInfo[]>([]);
@@ -421,6 +423,7 @@ export function App() {
    */
   const openSettings = useCallback((section?: SectionId) => {
     setSettingsSection(section);
+    setSettingsFocusSecretId(undefined);
     setSettingsRequests((n) => n + 1);
   }, []);
 
@@ -553,7 +556,11 @@ export function App() {
 
   // The deep link into Secrets (secretsNav.ts): any pane can ask for a key to be set.
   const openSecrets = useCallback((id?: string) => {
-    setSecretsRequest((r) => ({ n: r.n + 1, id }));
+    setSettingsFocusSecretId(id);
+    setSettingsSection("secrets");
+    setSettingsRequests((n) => n + 1);
+    // Navigate too: the settings body only follows initialSection when the address names no settings page, and a "Set key" link is often clicked from one.
+    go(settingsPath("secrets"));
   }, []);
 
   // The one newly-appeared org to ask about now, if any; several pending are asked one at a time.
@@ -668,6 +675,7 @@ export function App() {
       remote={remote}
       onRemoteChanged={setRemote}
       initialSection={settingsSection}
+      initialFocusSecretId={settingsFocusSecretId}
       setup={setup}
       pull={pull}
       onLaunch={openLauncher}
@@ -731,7 +739,6 @@ export function App() {
             launchRequests={launchRequests}
             settingsRequests={settingsRequests}
             memoryRequests={memoryRequests}
-            secretsRequest={secretsRequest}
             pendingMemory={pendingMemory}
             settings={settingsPane}
             onSessionChanged={upsertSession}

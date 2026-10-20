@@ -18,10 +18,11 @@ describe("parseRoute", () => {
       ["/loops", "loops"],
       ["/memory", "memory"],
       ["/host", "host"],
-      ["/secrets", "secrets"],
       ["/settings", "settings"],
     ];
     for (const [path, view] of table) expect(parseRoute(path)?.view, path).toBe(view);
+    // /secrets is a legacy path that maps to the settings secrets section
+    expect(parseRoute("/secrets")).toEqual({ view: "settings", section: "secrets", org: undefined });
   });
 
   it("reads a colony and its tab", () => {
@@ -38,13 +39,13 @@ describe("parseRoute", () => {
     expect(parseRoute("/nest", "?mock=1")?.org).toBeUndefined();
   });
 
-  it("reads a settings page, and Secrets under /settings as the Secrets view", () => {
+  it("reads a settings page, including Secrets at its canonical and legacy paths", () => {
     expect(parseRoute("/settings/models/providers")).toEqual({ view: "settings", section: "providers", org: undefined });
     expect(parseRoute("/settings/runtime/module-source")?.section).toBe("module:source");
     expect(parseRoute("/settings/workspaces/org-acme")?.section).toBe("org:acme");
     expect(parseRoute("/settings/models/not-a-page")).toEqual({ view: "settings", section: null, org: undefined });
-    expect(parseRoute("/settings/secrets")?.view).toBe("secrets");
-    expect(parseRoute("/settings/connections/secrets")?.view).toBe("secrets");
+    expect(parseRoute("/settings/secrets")).toEqual({ view: "settings", section: "secrets", org: undefined });
+    expect(parseRoute("/settings/connections/secrets")).toEqual({ view: "settings", section: "secrets", org: undefined });
     expect(parseRoute("/settings/a/b/c")).toBeNull();
   });
 
@@ -69,7 +70,6 @@ describe("formatRoute", () => {
     "/loops",
     "/memory",
     "/host",
-    "/secrets",
     "/settings",
     "/colonies/abc123",
     "/colonies/abc123/terminal",
@@ -77,6 +77,7 @@ describe("formatRoute", () => {
     "/settings/general/cockpit",
     "/settings/models/providers",
     "/settings/runtime/module-source",
+    "/settings/connections/secrets",
     "/settings/workspaces/org-acme",
   ];
 
@@ -122,8 +123,7 @@ describe("settings paths", () => {
   it("round-trips every fixed page, and every module and workspace page", () => {
     for (const page of FIXED_PAGES) {
       const path = settingsPath(page.id);
-      if (page.view) expect(path).toBe(`/${page.view}`);
-      else expect(sectionFromSettingsPath(path), path).toBe(page.id);
+      expect(sectionFromSettingsPath(path), path).toBe(page.id);
     }
     for (const id of ["module:source", "module:burn_down", "org:Colonizer-dev", "org:a b"] as const) {
       expect(sectionFromSettingsPath(settingsPath(id)), id).toBe(id);

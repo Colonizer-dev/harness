@@ -40,10 +40,11 @@
 // `run` needs a mothership on COLONIZER_URL (default http://127.0.0.1:7878) with GitHub and an agent
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
 // and opens real pull requests on that repository, and on nothing else.
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { analyze, loadColonies, readJsonLines, TOKEN_CATEGORIES, totalCost } from './colony-report.mjs';
@@ -89,6 +90,41 @@ export async function api(path, init) {
   }
   if (!res.ok) throw new Error(`${path}: ${res.status} ${body?.error ?? text}`);
   return body;
+}
+
+// ------------------------------------------------------------------------------------------------ config
+
+// Module directory digest and config fingerprints: hashes every regular file recursively, skips
+// .DS_Store, __pycache__, node_modules, .git. Matches crates/colonizer/src/config_fingerprint.rs.
+export function moduleDirDigest(dir) {
+  const SKIP = new Set(['.DS_Store', '__pycache__', 'node_modules', '.git']);
+  const files = [];
+  function walk(base) {
+    const entries = readdirSync(base, { withFileTypes: true });
+    for (const entry of entries) {
+      if (SKIP.has(entry.name)) continue;
+      const path = join(base, entry.name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        walk(path);
+      } else if (stat.isFile()) {
+        files.push(path);
+      }
+    }
+  }
+  walk(dir);
+  const relPaths = files.map((f) => ({ path: f, rel: relative(dir, f).replace(/\\/g, '/') })).sort((a, b) => Buffer.compare(Buffer.from(a.rel), Buffer.from(b.rel)));
+  const hasher = createHash('sha256');
+  for (const { path: f, rel } of relPaths) {
+    const buf = readFileSync(f);
+    hasher.update(rel);
+    hasher.update('\0');
+    hasher.update(String(buf.length));
+    hasher.update('\0');
+    hasher.update(buf);
+  }
+  return `sha256:${hasher.digest('hex')}`;
 }
 
 // ------------------------------------------------------------------------------------------------- seed
@@ -352,6 +388,7 @@ export function scoreTask({ task, session, answers, timed_out, branchScore, colo
     outside: branchScore?.outside ?? [],
     answers,
     session_id: session.id,
+    config: session.config ?? null,
   };
 }
 
@@ -406,6 +443,48 @@ const delta = (after, before, digits = 2) => {
   return `${d >= 0 ? '+' : ''}${d.toFixed(digits)}`;
 };
 
+// Per-task model routing is by design, so `model` is compared task by task and never counts as
+// having changed within a run.
+const PER_TASK = new Set(['model']);
+
+/** A run's config summary (#1352): the fingerprints seen, the components that took more than
+ *  one value, and how many results carry none. */
+export function configSummary(results) {
+  const digests = new Set();
+  const seen = {};
+  let missing = 0;
+  for (const r of results) {
+    if (!r.config?.digest) { missing += 1; continue; }
+    digests.add(r.config.digest);
+    for (const [name, c] of Object.entries(r.config.components ?? {})) (seen[name] ??= new Set()).add(c?.digest);
+  }
+  const varied = Object.keys(seen).filter((n) => !PER_TASK.has(n) && seen[n].size > 1).sort();
+  return { digests: [...digests].sort(), varied, missing, seen };
+}
+
+/** The "Differs in:" line, and a "Not comparable" one when a component changed within either run. */
+export function configLines(before, after) {
+  const runs = [before, after].map((run) => ({ run, ...configSummary(run.results) }));
+  const missing = runs.filter((s) => s.missing > 0);
+  const lines = missing.length
+    ? [`Differs in: unknown — ${missing.map((s) => `${s.run.label} (${s.missing} of ${s.run.results.length} tasks)`).join(' and ')} carr${missing.length === 1 ? 'ies' : 'y'} no config fingerprint.`]
+    : [`Differs in: ${differingComponents(before.results, after.results, runs[0].seen, runs[1].seen).join(', ') || 'nothing'}.`];
+  for (const s of runs) if (s.varied.length) lines.push(`**Not comparable:** ${s.varied.join(', ')} changed within ${s.run.label}.`);
+  return lines;
+}
+
+// A component differs when the two runs saw different sets of its digests; a per-task one, when a
+// task both runs share got a different digest.
+function differingComponents(before, after, seenBefore, seenAfter) {
+  const key = (set) => [...(set ?? [])].sort().join();
+  const digest = (r, name) => r.config?.components?.[name]?.digest;
+  return [...new Set([...Object.keys(seenBefore), ...Object.keys(seenAfter)])].sort().filter((name) => {
+    if (!PER_TASK.has(name)) return key(seenBefore[name]) !== key(seenAfter[name]);
+    const was = new Map(before.map((r) => [r.id, digest(r, name)]));
+    return after.some((r) => was.has(r.id) && was.get(r.id) !== digest(r, name));
+  });
+}
+
 export function formatComparison(before, after) {
   const ids = [...new Set([...before.results.map((r) => r.id), ...after.results.map((r) => r.id)])];
   // Which harness ran the task and on what model, when the run recorded it (issue #296). Joined by
@@ -457,6 +536,7 @@ export function formatComparison(before, after) {
     `Passed ${bs.passed}/${bs.tasks} → ${as.passed}/${as.tasks}. Cost $${bs.total_cost_usd.toFixed(2)} → $${as.total_cost_usd.toFixed(2)} (routed $${bs.routed_cost_usd.toFixed(2)} → $${as.routed_cost_usd.toFixed(2)}). Questions ${bs.questions} → ${as.questions}.${cleanLine}`,
     ...(heldoutLine ? ['', heldoutLine] : []),
     ...(tokenLine ? ['', tokenLine] : []),
+    ...configLines(before, after).flatMap((l) => ['', l]),
     '',
     line(head),
     line(head.map(() => '---')),
@@ -1281,7 +1361,8 @@ async function main() {
     gapReport = formatGaps(gaps, { version: scoredVersion, nextVersion: heldout.next_version, maxGap: args.maxGap });
   }
 
-  const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: status.modules?.agent ?? null, heldout, results };
+  const { seen, ...config } = configSummary(results);
+  const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: status.modules?.agent ?? null, heldout, config, results };
   const file = `bench-${args.label}.json`;
   writeFileSync(file, JSON.stringify(run, null, 2));
   if (heldout) {

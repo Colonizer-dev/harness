@@ -134,7 +134,7 @@ pub(crate) use crate::duplicates::{holds_issue, issue_held_by};
 pub(crate) fn overlap_holder(sessions: &[Session], repo: &str) -> Option<String> {
     sessions
         .iter()
-        .filter(|s| s.repo == repo && s.status.is_live() && s.git_admin_dir.is_some())
+        .filter(|s| s.repo.eq_ignore_ascii_case(repo) && s.status.is_live() && s.git_admin_dir.is_some())
         .min_by_key(|s| s.created_at)
         .map(|s| s.id.clone())
 }
@@ -148,7 +148,7 @@ async fn overlap_queue_target(sessions: &[Session], repo: &str) -> Option<String
     let holder = overlap_holder(sessions, repo)?;
     let siblings: Vec<(String, String)> = sessions
         .iter()
-        .filter(|s| s.repo == repo && s.status.is_live() && s.git_admin_dir.is_some())
+        .filter(|s| s.repo.eq_ignore_ascii_case(repo) && s.status.is_live() && s.git_admin_dir.is_some())
         .map(|s| (s.worktree.clone(), s.base.clone().unwrap_or_else(|| "main".to_string())))
         .collect();
     let mut live_files = Vec::new();
@@ -388,7 +388,7 @@ pub async fn create(
     {
         // The same key on a different repository is not a retry, it is a second colony that would
         // have been silently swallowed by the first: say so rather than answer with the wrong one.
-        if existing.repo != repo {
+        if !existing.repo.eq_ignore_ascii_case(&repo) {
             return Err(client_error(
                 StatusCode::CONFLICT,
                 &format!(
@@ -428,6 +428,32 @@ pub async fn create(
             &crate::push_access::refusal(&login, &repo),
         ));
     }
+
+    // Issue #1284: canonicalize the repository name to handle case-insensitive repos. Try GitHub
+    // first; fall back to existing sessions' casing; then saved org settings; else keep input.
+    let repo = if let Some(canonical) = crate::push_access::canonical_repo_name(&app, &repo).await {
+        canonical
+    } else {
+        let sessions = app.sessions.read().await;
+        if let Some(s) = sessions.iter().find(|s| s.repo.eq_ignore_ascii_case(&repo)) {
+            s.repo.clone()
+        } else {
+            let saved_orgs = app.all_org_settings();
+            let input_owner = repo.split('/').next().unwrap_or_default();
+            if let Some((saved_key, _)) = saved_orgs.iter().find(|(key, _)| key.eq_ignore_ascii_case(input_owner)) {
+                if let Some((_, saved_name)) = repo.split_once('/') {
+                    format!("{}/{}", saved_key, saved_name)
+                } else {
+                    repo.clone()
+                }
+            } else {
+                repo.clone()
+            }
+        }
+    };
+    // Re-extract the owner from the canonical repo.
+    let owner = repo.split('/').next().unwrap_or_default();
+
     let modules = app.modules.read().await.clone();
     // Which agent module the colony launches on: this org's pick, else the install's (issue #201).
     // Recorded on the session, so boot re-resolves from that and a later change moves new colonies only.
@@ -547,7 +573,7 @@ pub async fn create(
                     // A stacked colony builds on its parent's branch, and a branch belongs to one
                     // repository: refused here, like every other un-stackable parent, rather than
                     // let the boot die later inside `create_worktree` with a raw git error.
-                    if source.repo != repo {
+                    if !source.repo.eq_ignore_ascii_case(&repo) {
                         return Err(client_error(
                             StatusCode::CONFLICT,
                             &format!(
@@ -769,6 +795,7 @@ pub async fn create(
         pending_answer: None,
         switch_note: None,
         resume_note: None,
+        pending_notes: Vec::new(),
         answered_questions: Vec::new(),
         secret_fix_rounds: 0,
         push_conflict_rounds: 0,
@@ -784,11 +811,13 @@ pub async fn create(
         boot_cpus: None,
         boot_memory: None,
         boot_image: None,
+        boot_root_disk: None,
         app_slot: None,
         boot_attempt_started_at: None,
         failure_class: None,
         boot_retries: 0,
         retry_at: None,
+        config: None,
         created_at: now,
         updated_at: now,
     };

@@ -696,6 +696,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // held, and a successful result for it is the deny-then-reach signature.
     if matches!(event["type"].as_str(), Some("tool_call" | "tool_result")) {
         crate::boundary::observe_tool(app, id, rt, &event).await;
+        // Sentinel shadow-mode verdict (issue #1323): risky tool calls are classified and logged
+        // without enforcement, never blocking—exec_policy and path_policy remain the hard boundary.
+        crate::sentinel::observe(app, id, &event).await;
     }
     // The shape of the turn, read off the raw line for the watchdog's turn-end recovery (issue
     // #878): a tool call in flight, or a final answer whose turn_end never came.

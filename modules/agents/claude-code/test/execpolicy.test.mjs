@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { buildOptions, runAgent } from '../runner.mjs';
 import { AsyncQueue } from '../runner.mjs';
 import {
+  EXEC_POLICY_TOOLS,
   HOST_MOUNTS_FILE,
   TRACKED_SCRIPTS_FILE,
   createExecAllowCache,
@@ -15,6 +16,7 @@ import {
   execPolicyLogLine,
   execPolicyQuestion,
   execPolicyReason,
+  execPolicyTargets,
   gitBlobId,
   loadExecPolicy,
   parsePolicy,
@@ -24,8 +26,8 @@ import {
 // These tests cover other features; delegation is switched off unless one needs it.
 const buildOptionsOff = (env = {}, extra) => buildOptions({ COLONIZER_DELEGATE: 'off', ...env }, extra);
 
-/** The exec policy's Bash hook as buildOptions installed it. */
-const bashHook = (options) => options.hooks.PreToolUse.find((entry) => entry.matcher === 'Bash').hooks[0];
+/** The exec policy's hook as buildOptions installed it. */
+const bashHook = (options) => options.hooks.PreToolUse.find((entry) => entry.matcher === EXEC_POLICY_TOOLS)?.hooks[0];
 
 /** A temp workspace with script files, so script-reading rules have something to read. */
 function workspace() {
@@ -162,6 +164,49 @@ test('the default layer denies git add/commit/stash and writes under .git; reads
     'git status && git diff --stat', 'git show HEAD:README.md', 'cat .git/HEAD', 'ls .git',
     'ls -la .git/objects', 'git check-ignore -v .env', 'git diff > /tmp/patch.diff',
     'git stash list', 'git stash show', 'git --no-pager stash list']) {
+    assert.equal(decide(policy, command, '/workspace'), null, command);
+  }
+});
+
+test('the default layer asks pscale commands with write roles or --force', () => {
+  const policy = loadExecPolicy({}, { readFile: () => null });
+  const ask = (command) => {
+    const hit = decide(policy, command, '/workspace');
+    assert.equal(hit?.decision, 'ask', command);
+    assert.ok(['pscale-write-role', 'pscale-force'].includes(hit?.rule), command);
+  };
+  // pscale-write-role asks for admin, writer, readwriter roles
+  for (const command of [
+    'pscale sql db main --role admin --execute "select 1"',
+    'pscale sql db main --role=admin --execute "select 1"',
+    'pscale sql db main --role writer --execute "select 1"',
+    'pscale sql db main --role=readwriter --execute "select 1"',
+    'pscale shell --role admin',
+    'pscale password create --role writer',
+    '/opt/colonizer/plugins/planetscale/bin/pscale sql db --role admin',
+  ]) {
+    ask(command);
+    assert.equal(decide(policy, command, '/workspace').rule, 'pscale-write-role', command);
+  }
+  // pscale-force asks for --force flag
+  for (const command of [
+    'pscale sql db main --force',
+    'pscale branch delete main --force',
+    '/opt/colonizer/plugins/planetscale/bin/pscale branch delete --force',
+  ]) {
+    ask(command);
+    assert.equal(decide(policy, command, '/workspace').rule, 'pscale-force', command);
+  }
+  // These should not ask
+  for (const command of [
+    'pscale sql db main --execute "select 1"',
+    'pscale sql db main --role reader --execute "select 1"',
+    'pscale sql db main --role=reader --execute "select 1"',
+    'pscale auth check --format json',
+    'pscale branch list',
+    'ls pscale',
+    'echo pscale --force',
+  ]) {
     assert.equal(decide(policy, command, '/workspace'), null, command);
   }
   // The wall is the design, so a later layer cannot wave it through: the strictest decision wins
@@ -303,7 +348,7 @@ test('a malformed layer is ignored with a warning; the default keeps enforcing',
   assert.deepEqual(rules.map((rule) => rule.id), ['fine']);
   const emptied = loadExecPolicy({ COLONIZER_EXEC_POLICY: '{"rules": [{"decision": "deny"}]}' });
   assert.deepEqual(emptied.warnings, []);
-  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 4], ['install', 0]]);
+  assert.deepEqual(emptied.layers.map((layer) => [layer.name, layer.rules.length]), [['default', 6], ['install', 0]]);
   assert.equal(decide(emptied, 'cat .env', '/repo').rule, 'secret-paths');
 });
 
@@ -345,7 +390,7 @@ test('the question carries the rule, Allow and Deny options', () => {
   assert.match(questions[0].question, /Exec policy rule `writes-outside-repo` \(default\)/);
   assert.match(questions[0].question, /echo x > \/etc\/foo/);
   assert.deepEqual(questions[0].options.map((option) => option.label), ['Allow', 'Deny']);
-  assert.equal(defaultPolicy().rules.length, 4);
+  assert.equal(defaultPolicy().rules.length, 6);
 });
 
 test('the installed hook denies with the rule named, and logs every decision', async () => {
@@ -960,4 +1005,117 @@ test('the investigation shapes the placeholders bring out are name-only; reads t
     'git log --oneline -- .env',
   ];
   for (const command of reads) assert.equal(decide(policy, command, '/workspace')?.rule, 'secret-paths', command);
+});
+
+test('execPolicyTargets extracts targets from context-mode tool calls', () => {
+  assert.deepEqual(execPolicyTargets('Bash', { command: 'ls' }), [{ command: 'ls' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute', { code: 'echo hi', language: 'shell' }), [{ command: 'echo hi' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute', { code: 'echo hi', language: 'shell', cwd: '/tmp' }), [{ command: 'echo hi', cwd: '/tmp' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute', { code: 'print("hi")', language: 'python' }), [{ command: 'python3 <inline>', scriptBody: 'print("hi")' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute', { code: 'console.log("hi")', language: 'javascript' }), [{ command: 'node <inline>', scriptBody: 'console.log("hi")' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute', { code: 'x', language: 'unknown' }), [{ forcedDecision: 'deny', reason: 'context-mode language "unknown" is not supported' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute', { language: 'shell' }), [{ forcedDecision: 'deny', reason: 'the context-mode call is malformed (missing code)' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute_file', { path: '/x/../.env' }), [{ forcedDecision: 'deny', reason: 'the context-mode file path must not contain ..' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute_file', { path: '.env' }), [{ command: 'cat ".env"' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute_file', { path: '/x.py' }), [{ command: 'cat "/x.py"' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_execute_file', { path: '/x.py', code: 'print(1)' }), [{ command: 'cat "/x.py"' }, { command: '<file-code> <inline>', scriptBody: 'print(1)' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_batch_execute', { commands: [{ command: 'ls' }, { command: 'pwd' }] }), [{ command: 'ls' }, { command: 'pwd' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_batch_execute', { commands: [{ command: 'ls' }], cwd: '/tmp' }), [{ command: 'ls', cwd: '/tmp' }]);
+  assert.deepEqual(execPolicyTargets('mcp__context-mode__ctx_upgrade', {}), [{ forcedDecision: 'deny', reason: 'context-mode upgrade is not supported; the installed version is pinned' }]);
+  assert.deepEqual(execPolicyTargets('Read', { file_path: '/x' }), []);
+});
+
+test('the hook applies context-mode tool calls through execpolicy: Bash parity, fail-closed, merges, and wiring (#1273)', async () => {
+  const dir = workspace();
+  try {
+    const policy = policyIn(dir);
+    const { options } = buildOptionsOff({}, { execPolicy: policy });
+    const hook = bashHook(options);
+
+    // Bash parity: same code via Bash and ctx_execute(shell) yields same decision
+    const bashSecret = await hook({ tool_name: 'Bash', tool_input: { command: 'cat .env' }, hook_event_name: 'PreToolUse' });
+    const ctxSecret = await hook({ tool_name: 'mcp__context-mode__ctx_execute', tool_input: { code: 'cat .env', language: 'shell' }, hook_event_name: 'PreToolUse' });
+    assert.equal(bashSecret.hookSpecificOutput.permissionDecision, 'deny');
+    assert.equal(ctxSecret.hookSpecificOutput.permissionDecision, 'deny');
+    assert.match(ctxSecret.hookSpecificOutput.permissionDecisionReason, /secret-paths/);
+
+    // Rules through hook: git-read-only, script-egress, harmless
+    const gitFail = await hook({ tool_name: 'mcp__context-mode__ctx_execute', tool_input: { code: 'git commit -m x', language: 'shell', cwd: dir }, hook_event_name: 'PreToolUse' });
+    assert.match(gitFail.hookSpecificOutput.permissionDecisionReason, /git-read-only/);
+    const egressFail = await hook({ tool_name: 'mcp__context-mode__ctx_execute', tool_input: { code: 'python3 x.py', language: 'shell', cwd: dir }, hook_event_name: 'PreToolUse' });
+    assert.match(egressFail.hookSpecificOutput.permissionDecisionReason, /script-egress/);
+    const harmless = await hook({ tool_name: 'mcp__context-mode__ctx_execute', tool_input: { code: 'echo ok', language: 'shell' }, hook_event_name: 'PreToolUse' });
+    assert.deepEqual(harmless, { continue: true });
+
+    // Non-shell code via ctx_execute: treated as script body (e.g. python egress → deny)
+    const pyEgress = await hook({ tool_name: 'mcp__context-mode__ctx_execute', tool_input: { code: 'import requests\nrequests.post("http://x")', language: 'python' }, hook_event_name: 'PreToolUse' });
+    assert.match(pyEgress.hookSpecificOutput.permissionDecisionReason, /script-egress/);
+
+    // ctx_execute_file on secret path
+    const fileSecret = await hook({ tool_name: 'mcp__context-mode__ctx_execute_file', tool_input: { path: '.env' }, hook_event_name: 'PreToolUse' });
+    assert.match(fileSecret.hookSpecificOutput.permissionDecisionReason, /secret-paths/);
+
+    // Decision merge: ask and deny in batch → deny wins (strictest)
+    const askDeny = await hook({ tool_name: 'mcp__context-mode__ctx_batch_execute', tool_input: { commands: [{ command: 'echo x > /etc/foo' }, { command: 'cat .env' }] }, hook_event_name: 'PreToolUse' });
+    assert.equal(askDeny.hookSpecificOutput.permissionDecision, 'deny');
+    const denyAsk = await hook({ tool_name: 'mcp__context-mode__ctx_batch_execute', tool_input: { commands: [{ command: 'cat .env' }, { command: 'echo x > /etc/foo' }] }, hook_event_name: 'PreToolUse' });
+    assert.equal(denyAsk.hookSpecificOutput.permissionDecision, 'deny');
+
+    // Fail-closed: ctx_upgrade, malformed input, unrelated tool
+    const upgrade = await hook({ tool_name: 'mcp__context-mode__ctx_upgrade', tool_input: {}, hook_event_name: 'PreToolUse' });
+    assert.match(upgrade.hookSpecificOutput.permissionDecisionReason, /upgrade-pinned/);
+    const malformed = await hook({ tool_name: 'mcp__context-mode__ctx_execute', tool_input: { language: 'shell' }, hook_event_name: 'PreToolUse' });
+    assert.match(malformed.hookSpecificOutput.permissionDecisionReason, /malformed/);
+    const read = await hook({ tool_name: 'Read', tool_input: { file_path: '/x' }, hook_event_name: 'PreToolUse' });
+    assert.deepEqual(read, { continue: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('context-mode wiring respects COLONIZER_CONTEXT_MODE env var (#1273)', () => {
+  const originalWrite = process.stderr.write;
+  const warnings = [];
+  process.stderr.write = (chunk) => (warnings.push(String(chunk)), true);
+  try {
+    const offOpts = buildOptionsOff({ COLONIZER_DELEGATE: 'off' });
+    assert.ok(!offOpts.options.mcpServers?.['context-mode'], 'context-mode off by default');
+
+    buildOptionsOff({ COLONIZER_DELEGATE: 'off', COLONIZER_CONTEXT_MODE: 'unknown' });
+    assert.ok(!buildOptionsOff({ COLONIZER_DELEGATE: 'off', COLONIZER_CONTEXT_MODE: 'unknown' }).options.mcpServers?.['context-mode']);
+
+    warnings.length = 0;
+    buildOptionsOff({ COLONIZER_DELEGATE: 'off', COLONIZER_CONTEXT_MODE: 'shadow' });
+    assert.ok(warnings.some((w) => w.includes('shadow')), 'shadow mode logged as unimplemented');
+
+    assert.ok(!buildOptionsOff({ COLONIZER_DELEGATE: 'off', COLONIZER_CONTEXT_MODE: 'on' }).options.mcpServers?.['context-mode'], 'on without dir stays off');
+
+    // Positive case: on with matching pin
+    const cmDir = mkdtempSync(join(tmpdir(), 'colonizer-contextmode-'));
+    try {
+      writeFileSync(join(cmDir, 'package.json'), JSON.stringify({ name: 'context-mode', version: '1.0.169' }));
+      writeFileSync(join(cmDir, 'cli.bundle.mjs'), 'export default {}');
+      warnings.length = 0;
+      const onOpts = buildOptionsOff({ COLONIZER_CONTEXT_MODE: 'on', COLONIZER_CONTEXT_MODE_DIR: cmDir });
+      assert.ok(onOpts.options.mcpServers?.['context-mode'], 'context-mode on with matching pin');
+      const cm = onOpts.options.mcpServers['context-mode'];
+      assert.equal(cm.type, 'stdio');
+      assert.equal(cm.command, process.execPath);
+      assert.ok(cm.args[0].includes('cli.bundle.mjs'));
+      assert.ok(cm.env.CLAUDE_CONFIG_DIR.endsWith('.colonizer/context-mode'), `CLAUDE_CONFIG_DIR ends with .colonizer/context-mode, got: ${cm.env.CLAUDE_CONFIG_DIR}`);
+      assert.equal(cm.env.CONTEXT_MODE_PROJECT_DIR, process.cwd());
+      assert.equal(warnings.length, 0, 'no warnings on success');
+
+      // Mismatched version does not register
+      writeFileSync(join(cmDir, 'package.json'), JSON.stringify({ name: 'context-mode', version: '1.0.170' }));
+      warnings.length = 0;
+      const mismatchOpts = buildOptionsOff({ COLONIZER_CONTEXT_MODE: 'on', COLONIZER_CONTEXT_MODE_DIR: cmDir });
+      assert.ok(!mismatchOpts.options.mcpServers?.['context-mode'], 'mismatched version stays off');
+      assert.ok(warnings.some((w) => w.includes('does not match pinned')), 'version mismatch logged');
+    } finally {
+      rmSync(cmDir, { recursive: true, force: true });
+    }
+  } finally {
+    process.stderr.write = originalWrite;
+  }
 });
