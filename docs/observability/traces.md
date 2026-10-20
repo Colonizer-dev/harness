@@ -23,9 +23,12 @@ invoke_agent acme/widgets                 the colony (root)
 └── host_step verification                one host-chain verdict
 ```
 
+Every span carries `colonizer.colony.id` (the colony id), so a TraceQL filter on it finds one
+colony's turns, tools and questions without a structural operator.
+
 | Span | Starts | Ends | Attributes |
 | :--- | :--- | :--- | :--- |
-| `invoke_agent <repo>` | the colony's creation | its final outcome | `gen_ai.operation.name` = `invoke_agent`, `gen_ai.agent.id` and `colonizer.colony.id` (the colony id), `gen_ai.agent.name` (the agent module, `claude_code`), `colonizer.repo`, `colonizer.org`, `colonizer.origin` (`user`, `burn_down`, …), `colonizer.outcome`, `colonizer.pr.url`, `gen_ai.response.model`, total `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens` and `colonizer.cost_usd`; events `colonizer.suspended`, `colonizer.restored`, `colonizer.stopped` |
+| `invoke_agent <repo>` | the colony's creation | its final outcome | `gen_ai.operation.name` = `invoke_agent`, `gen_ai.agent.id` (the colony id), `gen_ai.agent.name` (the agent module, `claude_code`), `colonizer.repo`, `colonizer.org`, `colonizer.origin` (`user`, `burn_down`, …), `colonizer.outcome`, `colonizer.pr.url`, `gen_ai.response.model`, total `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens` and `colonizer.cost_usd`; events `colonizer.suspended`, `colonizer.restored`, `colonizer.stopped` |
 | `turn <n>` | the message that starts it (or its first event) | its `turn_end` | `colonizer.origin` (`user`, `watchdog`, `autonomy`, …), `gen_ai.response.model`, and this turn's own tokens and `colonizer.cost_usd` (the change since the previous turn, not the running total); `error.type` = `turn_error` when the turn failed |
 | `execute_tool <tool>` | the `tool_call` | its `tool_result` | `gen_ai.operation.name` = `execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `colonizer.tool.output_bytes` (a size, never the output), `colonizer.denial.class` (`egress`, `read_only`, …) when the sandbox refused it; `error.type` = `tool_error` when it failed |
 | `subagent <type>` | its Task call | the Task's result, or its `subagent_end` when it ran in the background | `gen_ai.operation.name` = `invoke_agent`, `gen_ai.agent.id` (the Task call's id), `gen_ai.agent.name` (the subagent type); `error.type` = `subagent_failed` |
