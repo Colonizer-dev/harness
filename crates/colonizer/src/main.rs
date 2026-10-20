@@ -130,6 +130,7 @@ mod price_feed;
 mod promptdecode;
 mod protocol;
 mod provenance;
+mod provenance_ledger;
 mod provider_history;
 mod provider_quota;
 mod providers;
