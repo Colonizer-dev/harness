@@ -228,6 +228,10 @@ pub struct OrgSettings {
     /// the findings and changes nothing. `None` — the default — and `off` are the same: no review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_code_review: Option<crate::open_code_review::Mode>,
+    /// The review backend to use (issue #1280): off, open-code-review, or kodus. `None` — the default
+    /// — means open-code-review (backward compatible: orgs in shadow keep their ocr review).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<crate::open_code_review::Reviewer>,
     /// The model a review of this org's colonies runs on, a `provider/model` string. `None` — the
     /// default — follows the install's cheap route (issue #1274).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -780,6 +784,11 @@ pub fn open_code_review_mode(org: &OrgSettings) -> crate::open_code_review::Mode
     org.open_code_review.unwrap_or_default()
 }
 
+/// The org's review backend (issue #1280): defaults to open-code-review for backward compatibility.
+pub fn reviewer(org: &OrgSettings) -> crate::open_code_review::Reviewer {
+    org.reviewer.unwrap_or(crate::open_code_review::Reviewer::OpenCodeReview)
+}
+
 /// The org's own model for open-code-review (issue #1274), a `provider/model`; `None` follows the
 /// install's cheap route. A blank string is no model at all, like a blank exec policy.
 pub fn open_code_review_model(org: &OrgSettings) -> Option<String> {
@@ -1284,6 +1293,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("open_code_review") {
         incoming.open_code_review = saved.open_code_review;
+    }
+    if !named("reviewer") {
+        incoming.reviewer = saved.reviewer;
     }
     if !named("open_code_review_model") {
         incoming.open_code_review_model = saved.open_code_review_model.clone();
@@ -3383,5 +3395,40 @@ mod tests {
             parse_org_line(r#"{"login":"acme","avatar_url":"https://a.png","description":"hi"}"#),
             Some(("acme".to_string(), Some("https://a.png".to_string())))
         );
+    }
+
+    #[test]
+    fn reviewer_setting_backward_compatibility_and_round_trip() {
+        // Old org settings without the reviewer field default to OpenCodeReview.
+        let old_json = json!({"name": "old-org"});
+        let org: OrgSettings = serde_json::from_value(old_json).unwrap();
+        assert_eq!(reviewer(&org), crate::open_code_review::Reviewer::OpenCodeReview);
+        assert_eq!(org.reviewer, None, "field is absent");
+
+        // "off" deserializes and re-serializes with the reviewer key present.
+        let off_json = json!({"reviewer": "off"});
+        let org: OrgSettings = serde_json::from_value(off_json).unwrap();
+        assert_eq!(reviewer(&org), crate::open_code_review::Reviewer::Off);
+        let back = serde_json::to_value(&org).unwrap();
+        assert_eq!(back.get("reviewer").and_then(|v| v.as_str()), Some("off"));
+
+        // "open-code-review" deserializes and re-serializes with the reviewer key present.
+        let ocr_json = json!({"reviewer": "open-code-review"});
+        let org: OrgSettings = serde_json::from_value(ocr_json).unwrap();
+        assert_eq!(reviewer(&org), crate::open_code_review::Reviewer::OpenCodeReview);
+        let back = serde_json::to_value(&org).unwrap();
+        assert_eq!(back.get("reviewer").and_then(|v| v.as_str()), Some("open-code-review"));
+
+        // "kodus" deserializes and re-serializes with the reviewer key present.
+        let kodus_json = json!({"reviewer": "kodus"});
+        let org: OrgSettings = serde_json::from_value(kodus_json).unwrap();
+        assert_eq!(reviewer(&org), crate::open_code_review::Reviewer::Kodus);
+        let back = serde_json::to_value(&org).unwrap();
+        assert_eq!(back.get("reviewer").and_then(|v| v.as_str()), Some("kodus"));
+
+        // Null is treated as absent (defaults to OpenCodeReview).
+        let null_json = json!({"reviewer": null});
+        let org: OrgSettings = serde_json::from_value(null_json).unwrap();
+        assert_eq!(reviewer(&org), crate::open_code_review::Reviewer::OpenCodeReview);
     }
 }
