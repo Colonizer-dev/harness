@@ -59,6 +59,14 @@ export function Popover({
     setPos(top ? { bottom: vh - a.top + 6, left, maxHeight: Math.min(480, above) } : { top: a.bottom + 6, left, maxHeight: Math.min(480, below) });
   }, [anchor, placement, width]);
 
+  // Find the portal target: nearest open modal dialog (for inside modals), or document.body.
+  // This ensures popovers render above modal backdrops instead of behind them.
+  const portalTarget = useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const dialog = anchor.current?.closest("dialog[open]");
+    return (dialog as HTMLDialogElement | undefined) ?? document.body;
+  }, [anchor, open]);
+
   useLayoutEffect(() => {
     if (!open) return;
     place();
@@ -79,6 +87,7 @@ export function Popover({
     };
     const key = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
         e.stopPropagation();
         onClose();
         anchor.current?.focus();
@@ -92,7 +101,7 @@ export function Popover({
     };
   }, [open, onClose, anchor]);
 
-  if (!open || !pos) return null;
+  if (!open || !pos || !portalTarget) return null;
   return createPortal(
     <div
       ref={panel}
@@ -103,7 +112,7 @@ export function Popover({
     >
       {children}
     </div>,
-    document.body,
+    portalTarget,
   );
 }
 
