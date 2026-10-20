@@ -42,6 +42,7 @@ mod colonize;
 mod colony_secrets;
 mod commit_links;
 mod config;
+mod config_fingerprint;
 #[doc(hidden)]
 pub mod contract;
 mod coordination;
