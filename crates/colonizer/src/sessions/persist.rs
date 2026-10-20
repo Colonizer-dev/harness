@@ -1,6 +1,8 @@
 //! Reading and writing the colony list: `App::session`, `update_session` and the save to
 //! `sessions.json`, the per-colony directories and logs.
 
+use std::collections::HashMap;
+
 use super::*;
 
 /// Whether two session records hold the same content, ignoring `updated_at`. Compared through
@@ -187,6 +189,121 @@ impl App {
         // that the disk is taking writes again after a failure.
         self.storage_succeeded().await;
         Ok(())
+    }
+
+    /// Issue #1284: pure function computing canonical casings for sessions (testable).
+    /// Prefers saved org settings keys; unknown orgs use majority casing among sessions.
+    /// Repo = "{org}/{name}" where both are canonical. Name casings unified per
+    /// lowercased owner/name (majority, ties lexicographically smallest).
+    /// Safety: skips sessions with empty org or repo owner ≠ org (case-insensitive).
+    /// Returns the count of sessions changed.
+    pub fn canonicalise_casing(sessions: &mut [Session], saved_orgs: &[String]) -> usize {
+        // Compute canonical org casings: saved keys first, then majority from sessions.
+        // Skip empty orgs when counting.
+        let mut canonical_orgs: HashMap<String, String> = HashMap::new();
+        for key in saved_orgs {
+            canonical_orgs.insert(key.to_ascii_lowercase(), key.clone());
+        }
+        let mut org_casings: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        for s in sessions.iter() {
+            if s.org.is_empty() {
+                continue;
+            }
+            let lower = s.org.to_ascii_lowercase();
+            if !canonical_orgs.contains_key(&lower) {
+                *org_casings.entry(lower).or_default().entry(s.org.clone()).or_insert(0) += 1;
+            }
+        }
+        for (lower, casings) in org_casings {
+            let lower_copy = lower.clone();
+            canonical_orgs.entry(lower).or_insert_with(|| {
+                casings
+                    .into_iter()
+                    .max_by(|(a, ca), (b, cb)| ca.cmp(cb).then_with(|| b.cmp(a)))
+                    .map(|(casing, _)| casing)
+                    .unwrap_or_else(|| lower_copy.clone())
+            });
+        }
+
+        // Pre-compute canonical name casings per lowercase owner/name to avoid duplication.
+        let mut name_winners: HashMap<String, String> = HashMap::new();
+        {
+            let mut name_casings: HashMap<String, HashMap<String, usize>> = HashMap::new();
+            for s in sessions.iter() {
+                if let Some((owner, name)) = s.repo.split_once('/') {
+                    let key = format!("{}/{}", owner.to_ascii_lowercase(), name.to_ascii_lowercase());
+                    *name_casings.entry(key).or_default().entry(name.to_string()).or_insert(0) += 1;
+                }
+            }
+            for (key, casings) in name_casings {
+                let key_copy = key.clone();
+                name_winners.insert(
+                    key,
+                    casings
+                        .into_iter()
+                        .max_by(|(a, ca), (b, cb)| ca.cmp(cb).then_with(|| b.cmp(a)))
+                        .map(|(n, _)| n)
+                        .unwrap_or_else(|| key_copy.split('/').nth(1).unwrap_or("").to_string()),
+                );
+            }
+        }
+
+        // Apply canonicalization: org and repo owner/name where both are canonical.
+        // Safety: skip sessions with empty org or repo owner ≠ org (case-insensitive).
+        let mut count_changed = 0;
+        for session in sessions.iter_mut() {
+            if session.org.is_empty() {
+                continue;
+            }
+
+            let old_org = session.org.clone();
+            let old_repo = session.repo.clone();
+            let lower_org = old_org.to_ascii_lowercase();
+
+            // Canonicalize org.
+            if let Some(canonical) = canonical_orgs.get(&lower_org) {
+                session.org = canonical.clone();
+            }
+
+            // Canonicalize repo: only if owner matches org (case-insensitive) and repo has '/'.
+            if let Some((owner, name)) = old_repo.split_once('/')
+                && owner.eq_ignore_ascii_case(&old_org)
+            {
+                let key = format!("{}/{}", lower_org, name.to_ascii_lowercase());
+                let canonical_name = name_winners.get(&key).cloned().unwrap_or_else(|| name.to_string());
+                session.repo = format!("{}/{}", session.org, canonical_name);
+            }
+
+            if session.org != old_org || session.repo != old_repo {
+                count_changed += 1;
+            }
+        }
+
+        count_changed
+    }
+
+    /// Issue #1284: migrate session casings to canonical forms. Calls `canonicalise_casing()`
+    /// and persists only if anything changed.
+    pub(crate) async fn migrate_session_casings(&self) -> usize {
+        let saved_orgs: Vec<String> = self.all_org_settings().keys().cloned().collect();
+        let mut sessions = self.sessions.write().await;
+        let count_changed = Self::canonicalise_casing(&mut sessions, &saved_orgs);
+        drop(sessions);
+
+        // Persist and log if anything changed.
+        if count_changed > 0 {
+            if let Err(e) = self.persist_sessions().await {
+                tracing::warn!(changed = count_changed, error = %e, "migrate_session_casings: could not persist: {e:#}");
+            } else {
+                tracing::info!(
+                    changed = count_changed,
+                    "migrated {} sessions to canonical casings",
+                    count_changed
+                );
+            }
+        }
+
+        count_changed
     }
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {
@@ -438,5 +555,145 @@ mod tests {
             "an unchanged measurement must not rewrite sessions.json"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1284: canonicalise_casing prefers saved org keys. Invariant:
+    /// every session's repo owner = org (case-equal), and case-equal orgs/names unified.
+    /// Safety: sessions with empty org or mismatched repo owner are skipped.
+    #[test]
+    fn canonicalise_casing_prefers_saved_org_key() {
+        let mut sessions = [
+            {
+                let mut s = colony("acme", SessionStatus::Running);
+                s.repo = "acme/myapp".to_string();
+                s
+            },
+            {
+                let mut s = colony("ACME", SessionStatus::Running);
+                s.repo = "ACME/myapp".to_string();
+                s.id = "s2".to_string();
+                s
+            },
+            {
+                // Safety: empty org, repo should not be rewritten
+                let mut s = colony("", SessionStatus::Running);
+                s.repo = "other/app".to_string();
+                s.id = "s3".to_string();
+                s
+            },
+            {
+                // Safety: repo owner ≠ org (case-insensitive), repo should not be rewritten
+                let mut s = colony("acme", SessionStatus::Running);
+                s.repo = "OTHER/app".to_string();
+                s.id = "s4".to_string();
+                s
+            },
+        ];
+        let saved_orgs = vec!["Acme".to_string()];
+        let changed = App::canonicalise_casing(&mut sessions, &saved_orgs);
+        assert_eq!(
+            changed, 3,
+            "s0, s1, s3 changed (orgs canonicalized); s2 and s4 repos skipped for safety"
+        );
+        // Saved key "Acme" wins over any majority; both org and repo owner unified to "Acme".
+        assert_eq!(sessions[0].org, "Acme");
+        assert_eq!(sessions[1].org, "Acme");
+        assert_eq!(sessions[0].repo, "Acme/myapp");
+        assert_eq!(sessions[1].repo, "Acme/myapp");
+        // Safety: sessions with empty org or mismatched owner skip repo rewriting but org still canonicalized.
+        assert_eq!(sessions[2].org, "", "empty org unchanged (skipped entirely)");
+        assert_eq!(sessions[2].repo, "other/app", "repo with empty org untouched");
+        assert_eq!(sessions[3].org, "Acme", "org canonicalized even when repo owner mismatches");
+        assert_eq!(
+            sessions[3].repo, "OTHER/app",
+            "repo untouched when owner ≠ org (case-insensitive)"
+        );
+        // Verify invariant for safe sessions: repo owner equals org.
+        for s in &sessions[..2] {
+            assert_eq!(s.repo.split('/').next(), Some(s.org.as_str()), "{} invariant", s.id);
+        }
+    }
+
+    /// Issue #1284: canonicalise_casing uses majority for unknown orgs/names, with
+    /// tie-break (lexicographically smallest). Invariant: repo owner = org exactly.
+    #[test]
+    fn canonicalise_casing_uses_majority_for_unknown_orgs() {
+        let mut sessions = [
+            {
+                let mut s = colony("acme", SessionStatus::Running);
+                s.repo = "acme/app".to_string();
+                s
+            },
+            {
+                let mut s = colony("ACME", SessionStatus::Running);
+                s.repo = "acme/app".to_string();
+                s.id = "s2".to_string();
+                s
+            },
+            {
+                let mut s = colony("ACME", SessionStatus::Running);
+                s.repo = "acme/App".to_string();
+                s.id = "s3".to_string();
+                s
+            },
+            {
+                let mut s = colony("ACME", SessionStatus::Running);
+                s.repo = "acme/other".to_string();
+                s.id = "s4".to_string();
+                s
+            },
+            {
+                let mut s = colony("ACME", SessionStatus::Running);
+                s.repo = "acme/Other".to_string();
+                s.id = "s5".to_string();
+                s
+            },
+        ];
+        let saved_orgs = vec![];
+        let changed = App::canonicalise_casing(&mut sessions, &saved_orgs);
+        // org majority: acme 1x, ACME 4x -> ACME.
+        // name "app" majority: "app" 2x, "App" 1x -> "app".
+        // name "other" tie: "other" 1x, "Other" 1x -> "Other" (lexicographically smallest).
+        assert_eq!(changed, 5, "all 5 sessions changed (org/repo canonicalized)");
+        for s in &sessions {
+            assert_eq!(s.org, "ACME", "{}: org should be ACME", s.id);
+            assert!(s.repo.starts_with("ACME/"), "{}: repo owner should be ACME", s.id);
+            assert_eq!(s.repo.split('/').next(), Some(s.org.as_str()), "{}: invariant", s.id);
+        }
+        // Verify name canonicalizations.
+        assert_eq!(sessions[0].repo, "ACME/app", "s1 name 'app' wins (majority)");
+        assert_eq!(sessions[1].repo, "ACME/app");
+        assert_eq!(sessions[2].repo, "ACME/app");
+        assert_eq!(sessions[3].repo, "ACME/Other", "s4/s5 name 'Other' wins (tie-break)");
+        assert_eq!(sessions[4].repo, "ACME/Other");
+    }
+
+    /// Issue #1284: canonicalise_casing returns 0 and changes nothing when already canonical.
+    #[test]
+    fn canonicalise_casing_noop_when_canonical() {
+        let mut sessions = [
+            {
+                let mut s = colony("Acme", SessionStatus::Running);
+                s.repo = "Acme/app".to_string();
+                s
+            },
+            {
+                let mut s = colony("Acme", SessionStatus::Running);
+                s.repo = "Acme/app".to_string();
+                s.id = "s2".to_string();
+                s
+            },
+        ];
+        let saved_orgs = vec!["Acme".to_string()];
+        let changed = App::canonicalise_casing(&mut sessions, &saved_orgs);
+        assert_eq!(changed, 0, "no changes when already canonical");
+        assert_eq!(sessions[0].org, "Acme");
+        assert_eq!(sessions[1].org, "Acme");
+        assert_eq!(sessions[0].repo, "Acme/app");
+        assert_eq!(sessions[1].repo, "Acme/app");
+        // Verify invariant.
+        for s in &sessions {
+            assert_eq!(s.repo.split('/').next(), Some(s.org.as_str()), "{} invariant", s.id);
+        }
     }
 }

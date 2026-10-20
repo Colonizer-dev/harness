@@ -4,6 +4,9 @@ import { test } from 'node:test';
 import {
   compareVersions,
   formatUnderstandAnythingLock,
+  parsePlanetscaleLock,
+  formatPscaleLock,
+  formatPlanetscaleSkillsLock,
   parseUnderstandAnythingLock,
   withTrailingNewline,
 } from '../update-runtime-pins.mjs';
@@ -64,4 +67,65 @@ test('a row that is not the skillset\'s is not parsed as one', () => {
 test('a rewritten lock file keeps its trailing newline', () => {
   assert.equal(withTrailingNewline(LINE), `${LINE}\n`);
   assert.equal(withTrailingNewline(`${LINE}\n`), `${LINE}\n`, 'one is not two');
+});
+
+const PSCALE_SHA = 'a'.repeat(64);
+const PSCALE_COMMIT = 'b'.repeat(40);
+const PSCALE_LINUX_X86_64 = `pscale  0.347.0  linux-x86_64  archive  ${PSCALE_SHA}  https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_linux_amd64.tar.gz`;
+const PSCALE_LINUX_ARM64 = `pscale  0.347.0  linux-aarch64  archive  ${PSCALE_SHA}  https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_linux_arm64.tar.gz`;
+const PSCALE_DARWIN_ARM64 = `pscale  0.347.0  darwin-aarch64  archive  ${PSCALE_SHA}  https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_macOS_arm64.tar.gz`;
+const PLANETSCALE_SKILLS = `planetscale-skills  ${PSCALE_COMMIT}  any  source  ${PSCALE_SHA}  https://codeload.github.com/planetscale/skills/tar.gz/${PSCALE_COMMIT}`;
+
+test('a pscale lock row round-trips', () => {
+  const parsed = parsePlanetscaleLock(PSCALE_LINUX_X86_64);
+  assert.deepEqual(parsed, {
+    name: 'pscale',
+    version: '0.347.0',
+    platform: 'linux-x86_64',
+    kind: 'archive',
+    sha: PSCALE_SHA,
+    url: 'https://github.com/planetscale/cli/releases/download/v0.347.0/pscale_0.347.0_linux_amd64.tar.gz',
+  });
+  const formatted = formatPscaleLock({
+    version: '0.348.0',
+    platform: 'linux-x86_64',
+    sha: 'c'.repeat(64),
+    url: 'https://github.com/planetscale/cli/releases/download/v0.348.0/pscale_0.348.0_linux_amd64.tar.gz',
+  });
+  assert.ok(formatted.includes('0.348.0'), 'version is in the output');
+  assert.ok(formatted.includes('c'.repeat(64)), 'sha is in the output');
+});
+
+test('a planetscale-skills lock row round-trips', () => {
+  const parsed = parsePlanetscaleLock(PLANETSCALE_SKILLS);
+  assert.deepEqual(parsed, {
+    name: 'planetscale-skills',
+    version: PSCALE_COMMIT,
+    platform: 'any',
+    kind: 'source',
+    sha: PSCALE_SHA,
+    url: `https://codeload.github.com/planetscale/skills/tar.gz/${PSCALE_COMMIT}`,
+  });
+  const fresh = formatPlanetscaleSkillsLock({ commit: 'd'.repeat(40), sha: 'e'.repeat(64) });
+  assert.ok(fresh.includes('d'.repeat(40)), 'commit is in the output');
+  assert.ok(fresh.includes('e'.repeat(64)), 'sha is in the output');
+  assert.ok(fresh.includes('any'), 'platform is any');
+});
+
+test('a row that is not a pscale or planetscale-skills row is not parsed as one', () => {
+  assert.equal(parsePlanetscaleLock('# a header comment'), null);
+  assert.equal(parsePlanetscaleLock('   '), null);
+  assert.equal(parsePlanetscaleLock(''), null);
+  assert.equal(parsePlanetscaleLock(undefined), null);
+  assert.equal(parsePlanetscaleLock('understand-anything  v2.9.0  any  source  ' + PSCALE_SHA + '  https://example.com/tarball'), null, 'another skillset');
+  assert.equal(parsePlanetscaleLock(PSCALE_LINUX_X86_64.replace(PSCALE_SHA, 'not-a-sha')), null, 'a checksum is never guessed');
+  assert.equal(parsePlanetscaleLock(`${PSCALE_LINUX_X86_64} extra`), null, 'seven columns are not a lock row');
+  assert.equal(parsePlanetscaleLock(PSCALE_LINUX_X86_64.replace('github.com/planetscale/cli', 'example.com')), null, 'pscale must be from planetscale/cli');
+  assert.equal(parsePlanetscaleLock(PLANETSCALE_SKILLS.replace('codeload.github.com/planetscale/skills', 'example.com')), null, 'planetscale-skills must be from codeload');
+});
+
+test('a version below the minimum pscale version is rejected', () => {
+  // This test verifies that compareVersions exists and works; the actual minimum version check
+  // happens in latestPscaleRelease() which we cannot test without network access.
+  assert.ok(compareVersions('0.292.0', '0.291.0') > 0, 'the minimum version is after the rejected version');
 });

@@ -484,8 +484,17 @@ branch diffs measured, and what reviewers flagged.
 **The confound, named.** The `plugins` setting is install-wide: it is one value for the whole
 mothership, not per colony. The two arms are therefore **serial** — they cannot overlap, and any
 colony that runs while an arm is in flight is on whatever configuration the setting currently
-holds. Run the bench on a mothership nothing else is using, close the arms back to back, and record
-the window; a comparison taken across a setting that moved underneath it is not a comparison.
+holds. Run the bench on a mothership nothing else is using and close the arms back to back. What
+used to rest on the operator's word is now checked: every colony records the configuration it
+booted under (`config` on the session — a digest per component: `harness` version and commit,
+the `agent` module and a digest of its directory, `plugins` with their pins, `model`, `policy`
+for autonomy and the exec-policy layers, and the resolved `egress`), `run` copies it into each
+result and writes a run-level `config` summary, and `compare` prints `Differs in:` with the
+components that changed between the two runs. A component that changed *within* one run —
+`plugins` flipped mid-arm — makes `compare` print **Not comparable** and name it. `model` is
+left out of that check, because tasks are routed to different tiers by design, and is compared
+task by task instead. Runs written before the fingerprint existed still compare, with
+`Differs in: unknown`.
 
 **The sample-size caveat, which the rest of this page already insists on.** Four hand-written tasks
 at one run each is **one sample per task**. A pass-rate move on four tasks is noise until it

@@ -483,6 +483,16 @@ is the operator's. In a colony the full-repository pass and the two skills that 
 writable plugin root are refused, so colonies use the file-scoped commands only.
 [docs/understand-anything.md](understand-anything.md) has the API, the pin and the cost guard.
 
+### planetscale
+
+[PlanetScale](https://planetscale.com) is the MySQL-compatible serverless database platform. The
+**planetscale** skillset ships the `pscale` CLI (Apache-2.0, v0.347.0), a collection of verified
+workflows (MIT), and integration with the hosted PlanetScale MCP. Off by default; switched on like
+any skillset. `crates/colonizer/planetscale.lock` pins `pscale` per architecture (Linux only for
+colonies) and the `planetscale-skills` repository. [docs/planetscale.md](planetscale.md) has the
+API, pins, how to authenticate with service tokens (OAuth login does not work in colonies), and the
+approval gates for write commands.
+
 ## Reference migration: superpowers
 
 superpowers ([obra/superpowers](https://github.com/obra/superpowers), v6.4.2, MIT) is the

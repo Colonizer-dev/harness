@@ -174,10 +174,11 @@ const MAX_NAME: usize = 120;
 
 impl ScopedToken {
     /// Whether this token's org/repo limits leave a colony of this org and repo within them. Both
-    /// limits are conjunctions, and each empty list means no limit of that kind.
+    /// limits are conjunctions, and each empty list means no limit of that kind. Comparisons are
+    /// case-insensitive (issue #1284).
     pub(crate) fn covers(&self, org: &str, repo: &str) -> bool {
-        (self.orgs.is_empty() || self.orgs.iter().any(|o| o == org))
-            && (self.repos.is_empty() || self.repos.iter().any(|r| r == repo))
+        (self.orgs.is_empty() || self.orgs.iter().any(|o| o.eq_ignore_ascii_case(org)))
+            && (self.repos.is_empty() || self.repos.iter().any(|r| r.eq_ignore_ascii_case(repo)))
     }
 }
 
@@ -1887,5 +1888,24 @@ mod tests {
         assert_eq!(l.ended_reason.as_deref(), Some("its API token was revoked"));
         assert_eq!(l.runs, 1, "nothing launched after the revocation");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1284: ScopedToken::covers() matches orgs and repos case-insensitively.
+    #[test]
+    fn scoped_token_covers_matches_case_insensitively() {
+        let token = ScopedToken {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            scope: Scope::Launch,
+            orgs: vec!["Acme".to_string()],
+            repos: vec!["Acme/App".to_string()],
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        };
+        assert!(token.covers("acme", "acme/app"), "lowercase matches");
+        assert!(token.covers("ACME", "ACME/APP"), "uppercase matches");
+        assert!(token.covers("acme", "ACME/app"), "mixed case matches");
+        assert!(!token.covers("other", "acme/app"), "wrong org does not match");
+        assert!(!token.covers("acme", "acme/other"), "wrong repo does not match");
     }
 }

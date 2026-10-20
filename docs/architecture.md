@@ -387,7 +387,10 @@ stateDiagram-v2
    — the `publish` module's setting or the colony's own — still replaces the whole selection, and
    `none` means unverifiable by declaration. Autopilot publishes on `confirmed`, `inconclusive` and
    `unverifiable` exactly as before; on `contradicted` it holds the colony the same way an errored
-   turn does. The mesh node is deleted.
+   turn does. On large repositories the guest disk may fill during a test run; when a run fails with
+   resource exhaustion (disk full or out of memory), the host retries automatically once with doubled
+   guest resources. If the retry still runs out, the check is unverifiable rather than contradicted
+   (no fix rounds), and the branch is published as a draft PR noting verify could not run. The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
    a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM

@@ -158,7 +158,7 @@ describe("the Ask panel", () => {
       </AskProvider>,
     );
   it("has a button on every view except Chat", () => {
-    for (const view of ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code"] as const) {
+    for (const view of ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "code"] as const) {
       const html = withProvider(view);
       expect(html, view).toContain("data-ask-button");
       expect(html).toContain('title="Ask Colonizer · ');

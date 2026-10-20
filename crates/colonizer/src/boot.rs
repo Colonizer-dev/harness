@@ -429,6 +429,9 @@ async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
         return true;
     }
     let mut attention = None;
+    // Check if the failure is due to mirror corruption that couldn't be recovered
+    let is_unrecoverable_mirror_corruption = message.contains("repo cache corruption detected but unrecoverable")
+        || (message.contains("mirror") && message.contains("corrupt") && message.contains("needs attention"));
     app.update_session(id, |s| {
         s.status = SessionStatus::Failed;
         s.error = Some(truncate(message, 2000));
@@ -438,7 +441,13 @@ async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
         // A warm-up this failed boot was still carrying dies with it; a held answer stays for a
         // manual resume to deliver.
         s.prewarm = None;
-        attention = s.clear_attention();
+        // For unrecoverable mirror corruption, set attention so the session doesn't hold a slot silently.
+        if is_unrecoverable_mirror_corruption {
+            s.attention = Some(json!({"reason": "repo_cache_corruption_unrecoverable", "since": Utc::now()}));
+            attention = None;
+        } else {
+            attention = s.clear_attention();
+        }
     })
     .await;
     app.note_cleared_attention(id, attention).await;
@@ -1057,6 +1066,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         )
         .await?
     };
+    // Record provenance after successful worktree creation, verifying it exists.
+    let entry = crate::provenance_ledger::worktree_entry(
+        &wt,
+        format!("{}/{}", s.org, s.repo.split('/').next_back().unwrap_or(&s.repo)),
+        s.id.clone(),
+        s.issue,
+        s.issue_title.clone(),
+    );
+    let _ = crate::provenance_ledger::record(app, entry).await;
+
     // A stacked child branched from `origin/<base>` just now; record the sha before later prunes
     // delete the parent's ref, so the publish-time restack knows which commits are the child's own.
     // Best effort: without it the restack falls back to the merge-base while the ref survives.
@@ -1189,6 +1208,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
     let org_policy = orgs::org_exec_policy(&org_settings).map(|policy| (s.org.as_str(), policy));
     apply_exec_policy(&agent, &modules.agent, org_policy, &app.agents, &wt, &mut runner_env)?;
+    // The context-mode module (issue #1273): pass to guest only when not off.
+    if let Some(mode) = org_settings.context_mode
+        && mode != orgs::ContextMode::Off
+    {
+        let mode_str = match mode {
+            orgs::ContextMode::Off => "off",
+            orgs::ContextMode::Shadow => "shadow",
+            orgs::ContextMode::On => "on",
+        };
+        runner_env.insert("COLONIZER_CONTEXT_MODE".into(), Value::String(mode_str.into()));
+    }
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.
@@ -1912,6 +1942,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .await;
     }
     let mut pack_hosts: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut plugins_with_pins: Vec<(String, Option<String>)> = Vec::new();
     if !plugin_names.is_empty() {
         let mut targets = Vec::new();
         let mut resolved = Vec::new();
@@ -1920,6 +1951,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             // skillset list in Settings shows (plugins.rs).
             let source = crate::plugins::resolve(&app.cfg, name)?;
             resolved.push((name.as_str(), source.clone()));
+            // Capture the plugin version as the pin for the fingerprint
+            let pin = crate::plugins::manifest_version(&source);
+            plugins_with_pins.push((name.clone(), pin));
             if let Some(vendored) = crate::plugins::shadowed_vendored(&app.cfg, name) {
                 log.info(format!(
                     "skillset {name:?}: the local copy at {} shadows the vendored one at {}",
@@ -2170,7 +2204,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.store()
         .write_file(id, "vm/session.json", &serde_json::to_vec_pretty(&session_json)?)
         .await?;
-    app.store().write_file(id, "vm/boot.sh", boot_script().as_bytes()).await?;
+    app.store()
+        .write_file(id, "vm/boot.sh", boot_script(&plugin_names).as_bytes())
+        .await?;
 
     if memory_on && memory::uses_mem0(app).await {
         // mem0's notes are written into the session directory, which is already the colony's
@@ -2462,10 +2498,50 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // shows the microVM `msb run` was handed even when a later phase fails and the boot never
     // completes. Spec values are the only per-colony numbers about the VM — agentd exposes no guest
     // CPU% or RSS — so they are captured here, at source.
+    // The config fingerprint (#1352): taken here, with the model, plugins, policy and egress all resolved.
+    let build = crate::version::build();
+    // The final model the runner will use, after all routing and policy layers (null when absent).
+    let final_model = runner_env.get("COLONIZER_MODEL").and_then(Value::as_str);
+    // Autonomy value: enabled flag + settings if present
+    let autonomy_value = match modules.autonomy.as_ref() {
+        Some(choice) => json!({
+            "enabled": choice.enabled,
+            "settings": choice.settings
+        }),
+        None => json!(false),
+    };
+    // Exec policy three layers: install (from module settings), org (env var), repo (file)
+    let exec_policy_install = crate::sessions::install_exec_policy(&modules.agent);
+    let exec_policy_org = org_policy.as_ref().map(|(_, policy)| &policy[..]);
+    let repo_policy_text = std::fs::read_to_string(wt.join(".colonizer/exec-policy.json")).ok();
+    let egress_resolved_value = serde_json::to_value(&resolved_egress.policy).unwrap_or(Value::Null);
+    let config_fp = match crate::config_fingerprint::compute(&crate::config_fingerprint::Inputs {
+        harness_version: &build.version,
+        harness_commit: build.commit.as_deref(),
+        agent_id: &agent.id,
+        agent_module_dir: &agent.dir,
+        plugins: &plugins_with_pins,
+        model_tier: Some(tier_decision.tier.as_str()),
+        model_name: final_model,
+        model_override: s.model_override.as_deref(),
+        autonomy: &autonomy_value,
+        exec_policy_install: exec_policy_install.as_deref(),
+        exec_policy_org,
+        exec_policy_repo: repo_policy_text.as_deref(),
+        egress_resolved: &egress_resolved_value,
+    }) {
+        Ok(fp) => Some(fp),
+        Err(e) => {
+            tracing::warn!(session = %id, error = %e, "config fingerprint");
+            None
+        }
+    };
     app.update_session(id, |x| {
         x.boot_cpus = Some(spec.cpus);
         x.boot_memory = Some(spec.memory.clone());
         x.boot_image = Some(spec.image.clone());
+        x.boot_root_disk = Some(spec.root_disk.clone());
+        x.config = config_fp;
     })
     .await;
     mark_phase(app, id, &mut timing, "mesh-start").await;
@@ -2760,8 +2836,16 @@ exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --toke
 /// block. The constant keeps the network preference out of this file — it is logic with its own
 /// tests — while the marker holds its place in the ordering the assertions below pin (this block
 /// touches `/proc` and `/etc`, so it runs early, before the mesh, the path policy and agentd).
-fn boot_script() -> String {
-    BOOT_SCRIPT.replace(crate::ipv6::MARKER, crate::ipv6::SCRIPT)
+fn boot_script(plugins: &[String]) -> String {
+    let mut script = BOOT_SCRIPT.replace(crate::ipv6::MARKER, crate::ipv6::SCRIPT);
+    // Add planetscale to PATH if it's loaded.
+    if plugins.iter().any(|p| p == crate::planetscale::NAME) {
+        script = script.replace(
+            r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#,
+            r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:/opt/colonizer/plugins/planetscale/bin:$PATH""#,
+        );
+    }
+    script
 }
 
 #[cfg(test)]
@@ -3838,7 +3922,7 @@ mod tests {
     #[test]
     fn boot_script_puts_node_first() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         assert!(
             script.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#),
@@ -3851,7 +3935,7 @@ mod tests {
     #[test]
     fn boot_script_puts_the_service_cli_on_the_path() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let link = script
             .find("ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc")
@@ -3876,7 +3960,7 @@ mod tests {
     #[test]
     fn boot_script_links_colonizer_svc_and_says_so_when_it_cannot() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let start = script.find("ln -sf /opt/colonizer/bin/colonizer-agentd").unwrap();
         let end = script.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
@@ -3915,7 +3999,7 @@ mod tests {
     #[test]
     fn boot_script_enforces_the_path_policy_before_the_agent_starts() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         for kind in ["mask-file", "mask-dir", "protect"] {
             assert!(script.contains(kind), "the guest handles {kind}");
@@ -3947,7 +4031,7 @@ mod tests {
     #[test]
     fn boot_script_hardens_kernel_interfaces_before_the_agent_runs() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let mesh = script
             .find(r#"|| echo "colonizer: joining the mesh failed" >&2"#)
@@ -3979,7 +4063,7 @@ mod tests {
     #[test]
     fn boot_script_passes_seal_token_to_agentd() {
         // The script the guest runs, not the constant with its marker still in it.
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         let exec = script
             .find("exec /opt/colonizer/bin/colonizer-agentd")
@@ -3999,7 +4083,7 @@ mod tests {
     /// passes, because each of them only looks for text the two variants share.
     #[test]
     fn the_ipv6_block_is_spliced_in_and_not_left_as_a_marker() {
-        let script = boot_script();
+        let script = boot_script(&[]);
 
         assert!(
             !script.contains(crate::ipv6::MARKER),

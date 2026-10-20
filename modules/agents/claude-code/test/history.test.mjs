@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { createHistoryServer, formatHits, HISTORY_PROMPT_APPEND, HISTORY_SERVER, HISTORY_TOOL } from '../history.mjs';
 import { buildOptions } from '../runner.mjs';
+import { EXEC_POLICY_TOOLS } from '../execpolicy.mjs';
 
 const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude', COLONIZER_DELEGATE: 'off' };
 const historyEnv = { ...base, COLONIZER_HISTORY_URL: 'http://127.0.0.1:1/history', COLONIZER_HISTORY_TOKEN: 'sekrit' };
@@ -96,7 +97,7 @@ test('colony history is wired in only when both env vars are set and the server 
   assert.deepEqual(on.mcpServers, { [HISTORY_SERVER]: fakeServer });
   assert.ok(on.systemPrompt.append.includes(HISTORY_PROMPT_APPEND));
   // Read-only, so subagents may search too: no gate is registered, and no allowedTools entry shadows canUseTool.
-  assert.deepEqual((on.hooks?.PreToolUse ?? []).map((e) => e.matcher), ['Bash']);
+  assert.deepEqual((on.hooks?.PreToolUse ?? []).map((e) => e.matcher), [EXEC_POLICY_TOOLS]);
   assert.equal(on.allowedTools, undefined);
 });
 

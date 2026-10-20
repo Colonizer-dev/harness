@@ -25,7 +25,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { TOKEN_CATEGORIES, analyze, loadColonies, readJsonLines, totalCost } from './colony-report.mjs';
-import { childEnv, summarizeRun } from './bench.mjs';
+import { childEnv, moduleDirDigest, summarizeRun } from './bench.mjs';
 import { compareProposal } from './trajectory-monitor.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -157,7 +157,7 @@ function filesDeclaring(dir, name) {
 /** A unified diff of one file, computed without touching the working tree: before and after land in
  *  a temp directory, `git diff --no-index` runs there, and the header paths are rewritten to
  *  repo-relative a/ b/ paths. Index lines are dropped, so the patch applies by context alone. */
-function diffFor(rel, before, after) {
+export function diffFor(rel, before, after) {
   if (before === after) throw new Error('the replacement text equals the constant as it stands; nothing to propose');
   const dir = mkdtempSync(join(tmpdir(), 'colonizer-evolve-'));
   try {
@@ -353,6 +353,110 @@ export function verdict(card, { maxCostIncrease = 0.10 } = {}) {
 /** Reproduction: retained only when every candidate run says so; a flag is never silently kept. */
 export const overallVerdict = (verdicts) => (verdicts.every((v) => v === 'retained') ? 'retained' : verdicts.some((v) => v === 'discarded') ? 'discarded' : 'flagged');
 
+// Extract module directory at commit with a diff applied. Archive at commit to a temp directory,
+// apply diff outside the git repository, hash. Returns the sha256:hex digest matching moduleDirDigest.
+export function expectedModuleDigest({ root, commit, moduleDir, diff }) {
+  const temp = mkdtempSync(join(tmpdir(), 'evolve-module-'));
+  try {
+    // Extract the module directory at the given commit using git archive.
+    const env = childEnv();
+    const tar = execFileSync('git', ['-C', root, 'archive', '--format=tar', commit, '--', moduleDir], { env, maxBuffer: 100 * 1024 * 1024 });
+    execFileSync('tar', ['-x', '-C', temp], { input: tar });
+    // Apply the diff with -p1 to strip a/ b/ prefixes.
+    writeFileSync(join(temp, 'proposal.diff'), diff);
+    execFileSync('git', ['apply', '-p1', 'proposal.diff'], { cwd: temp, env });
+    rmSync(join(temp, 'proposal.diff'));
+    // Compute the digest of the modified module directory.
+    return moduleDirDigest(join(temp, moduleDir));
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+// Check if a proposal's candidate runs are compatible with the baseline in terms of configs.
+// Returns null if compatible, or a one-line error reason if not.
+export function checkConfigs(proposal, baseline, candidates, expectedModuleDigest) {
+  const baseCommit = proposal.base_commit;
+  const baselineLabel = baseline.label ?? 'run';
+
+  // 1. Every baseline result has config fingerprint.
+  for (const r of baseline.results ?? []) {
+    if (!r.config) {
+      return `baseline ${baselineLabel}: task ${r.id} carries no config fingerprint`;
+    }
+  }
+
+  // 2. Every baseline result's harness commit matches proposal.base_commit.
+  for (const r of baseline.results ?? []) {
+    const commit = r.config?.components?.harness?.value?.commit;
+    if (commit !== baseCommit) {
+      const actual = commit ?? 'unknown';
+      return `baseline ran on harness ${actual}, the proposal is based on ${baseCommit}`;
+    }
+  }
+
+  // 3. Every result of every candidate has config fingerprint.
+  for (const cand of candidates) {
+    const candName = cand.name ?? `candidate ${candidates.indexOf(cand) + 1}`;
+    for (const r of cand.results ?? []) {
+      if (!r.config) {
+        return `candidate ${candName}: task ${r.id} carries no config fingerprint`;
+      }
+    }
+  }
+
+  // 4. For each candidate result, agent.value.id matches proposal.module.
+  const moduleId = proposal.module;
+  for (const cand of candidates) {
+    const candName = cand.name ?? `candidate ${candidates.indexOf(cand) + 1}`;
+    for (const r of cand.results ?? []) {
+      const agentId = r.config?.components?.agent?.value?.id;
+      if (agentId !== moduleId) {
+        return `candidate ${candName} ran agent ${agentId ?? 'unknown'}, the proposal changes ${moduleId}`;
+      }
+    }
+  }
+
+  // 5. For each candidate result, find baseline result with same id (or use first);
+  // all components except 'agent' must have equal digests.
+  for (const cand of candidates) {
+    const candName = cand.name ?? `candidate ${candidates.indexOf(cand) + 1}`;
+    for (const candResult of cand.results ?? []) {
+      const baselineResult = (baseline.results ?? []).find((r) => r.id === candResult.id) ?? baseline.results?.[0];
+      if (!baselineResult) continue; // Should not happen if scorecard passed, but be safe.
+
+      const baseCandComps = baselineResult.config?.components ?? {};
+      const candComps = candResult.config?.components ?? {};
+      const allNames = new Set([...Object.keys(baseCandComps), ...Object.keys(candComps)]);
+      const diffNames = [];
+      for (const name of allNames) {
+        if (name === 'agent') continue;
+        const baseDigest = baseCandComps[name]?.digest;
+        const candDigest = candComps[name]?.digest;
+        if (baseDigest !== candDigest) {
+          diffNames.push(name);
+        }
+      }
+      if (diffNames.length > 0) {
+        return `candidate ${candName} differs from the baseline in ${diffNames.join(', ')} (task ${candResult.id})`;
+      }
+    }
+  }
+
+  // 6. For each candidate result, agent.value.module_digest matches expectedModuleDigest.
+  for (const cand of candidates) {
+    const candName = cand.name ?? `candidate ${candidates.indexOf(cand) + 1}`;
+    for (const r of cand.results ?? []) {
+      const candDigest = r.config?.components?.agent?.value?.module_digest;
+      if (candDigest !== expectedModuleDigest) {
+        return `candidate ${candName}'s ${moduleId} module is not ${baseCommit.slice(0, 12)} with the proposal's diff applied`;
+      }
+    }
+  }
+
+  return null;
+}
+
 /** Scores each candidate run against the one baseline. Pure; the caller reads and writes the file. */
 export function evaluate(proposal, baselineRun, candidateRuns) {
   if (!['proposed', 'evaluated'].includes(proposal.status)) throw new Error(`a ${proposal.status} proposal cannot be re-evaluated`);
@@ -471,8 +575,15 @@ function cmdPropose(args) {
 function cmdEvaluate(args) {
   if (!args.proposal || !args.baseline || !args.candidate.length) throw new Error('evaluate needs --proposal <file> --baseline <bench.json> --candidate <bench.json>');
   const { path, proposal } = readProposalFile(resolve(args.proposal));
+  const baseline = JSON.parse(readFileSync(args.baseline, 'utf8'));
   const candidates = args.candidate.map((f) => ({ ...JSON.parse(readFileSync(f, 'utf8')), name: basename(f) }));
-  const updated = evaluate(proposal, JSON.parse(readFileSync(args.baseline, 'utf8')), candidates);
+  // Check configs before evaluating.
+  const root = args.root ? resolve(args.root) : ROOT;
+  const moduleDir = `modules/agents/${proposal.module}`;
+  const expected = expectedModuleDigest({ root, commit: proposal.base_commit, moduleDir, diff: proposal.diff });
+  const configErr = checkConfigs(proposal, baseline, candidates, expected);
+  if (configErr) throw new Error(configErr);
+  const updated = evaluate(proposal, baseline, candidates);
   writeProposal(path, updated);
   console.log(`evaluated ${updated.id} against ${candidates.length} candidate run(s); written to ${path}`);
   for (const e of updated.evaluations) console.log(`  ${e.candidate}: score ${e.card.passed.baseline}/${e.card.tasks.length} → ${e.card.passed.candidate}/${e.card.tasks.length}, cost ${usd(e.card.totals.baseline_cost_usd)} → ${usd(e.card.totals.candidate_cost_usd)}${e.card.regressions.length ? `, regressions: ${e.card.regressions.join(', ')}` : ''}`);

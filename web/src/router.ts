@@ -51,7 +51,12 @@ export function subscribe(listener: () => void): () => void {
 
 /** The current pathname, re-rendering on every navigation. */
 export function usePath(): string {
-  return useSyncExternalStore(subscribe, () => currentLocation().pathname, () => "/");
+  return useSyncExternalStore(
+    subscribe,
+    () => currentLocation().pathname,
+    // The server snapshot reads the location too, so a static render (shell.test.tsx stubs window) sees the route's path; the cockpit is never server-rendered.
+    () => currentLocation().pathname,
+  );
 }
 
 /** The current hash (without `#`), re-rendering on navigation. */

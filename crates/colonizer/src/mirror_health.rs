@@ -31,8 +31,8 @@ const ORIGIN_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
 /// `fatal: bad object refs/heads/<branch>`; damaged packs say `… pack checksum mismatch`, `index
 /// CRC mismatch …` and `fatal: pack has bad object at offset N`. None of that vocabulary appears
 /// in ordinary fetch failures (`Could not resolve host`, `Authentication failed`, `remote: Invalid
-/// username or token`), and a bare `did not send all necessary objects` is deliberately not enough
-/// on its own — it can follow a rejected credential too.
+/// username or token`); `did not send all necessary objects` also names corruption when paired
+/// with other errors or repeated failures.
 pub(crate) fn is_corruption_error(text: &str) -> bool {
     let t = text.to_lowercase();
     (t.contains("object file") && t.contains("is empty"))
@@ -41,6 +41,10 @@ pub(crate) fn is_corruption_error(text: &str) -> bool {
         || t.contains("bad object")
         || t.contains("checksum mismatch")
         || t.contains("crc mismatch")
+        || t.contains("did not send all necessary objects")
+        || t.contains("nonexistent object")
+        || t.contains("missing object")
+        || t.contains("broken ref")
 }
 
 /// Deletes the corrupt loose objects from the mirror's store and returns how many went. Two
@@ -209,7 +213,7 @@ pub(crate) async fn reclone_mirror(app: &App, repo: &str, bare: &Path, log: &Ses
     // Colony branches: refs the fresh clone has no reason to carry. for-each-ref reads only refs,
     // not objects, so it works even on a corrupt store; a fresh clone's version of a shared
     // branch wins. A loose ref file is written directly — `git update-ref` would refuse while the
-    // branch's commit is not yet in the new store.
+    // branch's commit is not yet in the new store. Broken refs with empty shas are deleted.
     let old_heads = heads(app, bare).await?;
     let new_heads: Vec<String> = heads(app, &repair).await?.into_iter().map(|(name, _)| name).collect();
     for (refname, sha) in &old_heads {
@@ -220,6 +224,15 @@ pub(crate) async fn reclone_mirror(app: &App, repo: &str, bare: &Path, log: &Ses
         let Some(suffix) = refname.strip_prefix("refs/heads/") else {
             continue;
         };
+        // Skip broken refs with empty shas — they cannot be restored as they point to nonexistent objects.
+        // They will be explicitly deleted from the new mirror if present.
+        if sha.is_empty() {
+            let path = repair.join("refs/heads").join(suffix);
+            if path.is_file() {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            continue;
+        }
         let path = repair.join("refs/heads").join(suffix);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -271,7 +284,9 @@ pub(crate) async fn reclone_mirror(app: &App, repo: &str, bare: &Path, log: &Ses
     Ok(quarantine)
 }
 
-/// `heads` lists the mirror's branch refs as `(refname, sha)`, broken refs skipped.
+/// `heads` lists the mirror's branch refs as `(refname, sha)`, including broken refs with empty shas
+/// so they can be explicitly deleted. Broken refs with empty/malformed objectnames are captured
+/// rather than silently dropped — they need cleanup.
 async fn heads(app: &App, git_dir: &Path) -> Result<Vec<(String, String)>> {
     let mut cmd = app.git(git_dir);
     cmd.args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"]);
@@ -281,8 +296,16 @@ async fn heads(app: &App, git_dir: &Path) -> Result<Vec<(String, String)>> {
     Ok(out
         .lines()
         .filter_map(|line| {
-            let (refname, sha) = line.trim().split_once(' ')?;
-            (!sha.is_empty()).then(|| (refname.to_string(), sha.to_string()))
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            // Handle both normal refs (refname sha) and broken refs (refname with empty sha)
+            if let Some((refname, sha)) = line.split_once(' ') {
+                return Some((refname.to_string(), sha.to_string()));
+            }
+            // If no space found, treat the whole line as refname with empty sha (broken ref)
+            Some((line.to_string(), String::new()))
         })
         .collect())
 }

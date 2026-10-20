@@ -208,7 +208,10 @@ fn effective_holder(sessions: &[Session], holding: impl Fn(&Session) -> bool) ->
 
 /// The colony effectively holding `issue` in `repo`.
 pub(crate) fn issue_held_by(sessions: &[Session], repo: &str, issue: u64) -> Option<Session> {
-    effective_holder(sessions, |s| holds_issue(s) && s.repo == repo && s.issue == Some(issue)).cloned()
+    effective_holder(sessions, |s| {
+        holds_issue(s) && s.repo.eq_ignore_ascii_case(repo) && s.issue == Some(issue)
+    })
+    .cloned()
 }
 
 /// A colony's supply-chain claim: its launch target, the findings a loop dispatched it with, the
@@ -467,7 +470,7 @@ pub async fn check_launch(
         let sessions = app.sessions.read().await;
         let ours: Vec<&str> = sessions
             .iter()
-            .filter(|s| s.repo == work.repo && s.issue == Some(issue))
+            .filter(|s| s.repo.eq_ignore_ascii_case(&work.repo) && s.issue == Some(issue))
             .map(|s| s.id.as_str())
             .collect();
         return match crate::claims::claim_wait_conflict(Some(&info), issue, &ours) {

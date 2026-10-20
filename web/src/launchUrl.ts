@@ -29,7 +29,6 @@ export const COCKPIT_VIEWS: readonly CockpitView[] = [
   "settings",
   "memory",
   "host",
-  "secrets",
   "code",
   "chat",
 ];
