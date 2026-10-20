@@ -1057,6 +1057,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         )
         .await?
     };
+    // Record provenance after successful worktree creation, verifying it exists.
+    let entry = crate::provenance_ledger::worktree_entry(
+        &wt,
+        format!("{}/{}", s.org, s.repo.split('/').next_back().unwrap_or(&s.repo)),
+        s.id.clone(),
+        s.issue,
+        s.issue_title.clone(),
+    );
+    let _ = crate::provenance_ledger::record(app, entry).await;
+
     // A stacked child branched from `origin/<base>` just now; record the sha before later prunes
     // delete the parent's ref, so the publish-time restack knows which commits are the child's own.
     // Best effort: without it the restack falls back to the merge-base while the ref survives.

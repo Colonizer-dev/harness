@@ -2403,6 +2403,15 @@ impl PublishOps for GitPublishOps<'_> {
             Ok(n) => self.log.info(format!("recorded {n} commit link(s)")).await,
             Err(e) => self.log.warn(format!("could not record commit links: {e:#}")).await,
         }
+        // Record provenance for the pushed branch.
+        let entry = crate::provenance_ledger::branch_entry(
+            self.s.branch.clone(),
+            self.s.repo.clone(),
+            self.s.id.clone(),
+            self.s.issue,
+            self.s.issue_title.clone(),
+        );
+        let _ = crate::provenance_ledger::record(self.app, entry).await;
         Ok(())
     }
 
@@ -2540,12 +2549,23 @@ impl PublishOps for GitPublishOps<'_> {
                 e,
             )
         })?;
-        Ok(pr
+        let url = pr
             .lines()
             .rev()
             .find(|l| l.starts_with("https://"))
             .unwrap_or(pr.trim())
-            .to_string())
+            .to_string();
+        // Record provenance for the opened pull request.
+        let entry = crate::provenance_ledger::pull_request_entry(
+            url.clone(),
+            self.s.repo.clone(),
+            self.s.id.clone(),
+            self.s.issue,
+            self.s.issue_title.clone(),
+            self.s.branch.clone(),
+        );
+        let _ = crate::provenance_ledger::record(self.app, entry).await;
+        Ok(url)
     }
 
     /// Rebases a child onto the destination branch when its parent merged under it: the parent's
