@@ -223,7 +223,9 @@ async fn batches_retry_with_backoff_commit_on_ack_and_resume_after_a_restart() {
 
     x.backoff = x.backoff.map(|(_, d)| (Instant::now() - d, d));
     let second = x.tick().await;
-    assert!(second >= Duration::from_millis(1500), "the delay doubles: {second:?}");
+    // Each retry doubles the previous jittered delay, then jitters it ±20 %.
+    let min_second = first.saturating_mul(2).mul_f64(0.8);
+    assert!(second >= min_second, "the delay doubles: {second:?} >= {min_second:?}");
     x.backoff = x.backoff.map(|(_, d)| (Instant::now() - d, d));
     assert_eq!(x.tick().await, TICK, "accepted");
     assert_eq!(collector.seen("/v1/logs").len(), 3, "the same batch, three times");
