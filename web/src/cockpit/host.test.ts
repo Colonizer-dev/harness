@@ -178,6 +178,21 @@ describe("autoCapacityLine", () => {
     expect(autoCapacityLine({ ...auto, mode: "fixed" })).toBeNull();
     expect(autoCapacityLine(undefined)).toBeNull();
   });
+
+  it("shows detailed gate breakdown when room_for > 0 but queued colonies are held (issue #1365)", () => {
+    const queue = {
+      admissible: 0,
+      blocked_by: {
+        repo_cap: { "Colonizer-dev/harness": 56 },
+        chain: 23,
+        superseded: 1,
+      },
+    };
+    const withRoom = { ...auto, room_for: 8, waiting_reason: "repo_cap" as const };
+    expect(autoCapacityLine(withRoom, queue)).toContain("room for 8 more");
+    expect(autoCapacityLine(withRoom, queue)).toContain("every queued colony is held");
+    expect(autoCapacityLine(withRoom, queue)).toContain("per-repo cap");
+  });
 });
 
 describe("autoCeilingLabel", () => {

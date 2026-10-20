@@ -246,7 +246,7 @@ call — the host panel's key, distinct from telemetry's `install_id`, which is 
 when the live map is switched off). `checked_at` is an RFC 3339 timestamp and always present, saying
 when the measurements were taken. `microvms_live` is how many colonies currently hold a microVM
 against the parallel limit — the same "busy" count `queue::has_room` uses — and `microvms_ceiling`
-is the sandbox module's `max_parallel` — or, in automatic mode (issue #1141), the colonies running plus the ones that fit the live host right now: live against ceiling, like a resource gauge. `sandbox` carries the same picture: `mode` (`auto` or `fixed`), the computed `size` (`cpus`, `memory_gb`, `slots`, the reserve), `room_for`, `waiting_reason` (`memory`, `cpu`, `cap` or `null`), and in auto mode `free_bytes`, `load`, `cpu_cores`, `auto_max_parallel`, `committed_gb`, `overcommit` and `limited_by` (the tightest admission check: `cap`, `memory-commit`, `cpu-commit`, `free` or `load`; issue #1158).
+is the sandbox module's `max_parallel` — or, in automatic mode (issue #1141), the colonies running plus the ones that fit the live host right now: live against ceiling, like a resource gauge. `sandbox` carries the same picture: `mode` (`auto` or `fixed`), the computed `size` (`cpus`, `memory_gb`, `slots`, the reserve), `room_for`, `waiting_reason` (`memory`, `cpu`, `cap`, `repo_cap`, `org_cap`, `chain`, `held`, or `superseded`), and in auto mode `free_bytes`, `load`, `cpu_cores`, `auto_max_parallel`, `committed_gb`, `overcommit` and `limited_by` (the tightest admission check: `cap`, `memory-commit`, `cpu-commit`, `free` or `load`; issue #1158).
 
 Every other key is optional and `OMITTED` — not `null`, not `0` — when it cannot be measured. On a Mac
 the memory, load and uptime figures come from `sysctl` and `vm_stat` instead of `/proc`, and any that
@@ -260,6 +260,9 @@ Two more top-level keys round the payload out: `"version"` — this build's `CAR
 microVM slot (disjoint from `host.microvms_live`, which counts colonies that already hold one). A
 peer polling this endpoint for the fleet view (`GET /api/hosts`, below) reads everything it needs
 straight off this one response; nothing extra is asked of it.
+
+`"queue"` carries the queue gate summary: `admissible` (how many queued colonies can start) and
+`blocked_by` (how many and why the others cannot, grouped by gate kind: `repo_cap`, `org_cap`, `chain`, `held`, `superseded`, `host`).
 
 `"stall"` is `null` normally, or
 `{"idle_secs", "last_event_at", "live", "queued"}` when at least one colony is live, the queue is
