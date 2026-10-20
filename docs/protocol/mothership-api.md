@@ -9,6 +9,8 @@ Part of the [Colonizer protocol](../protocol.md).
 | `GET /api/plugins` | `{local_root, plugins: [{name, description, version, source: "vendored"\|"local", shadows_vendored, skills, agents, commands}]}`, one entry per name resolved the way a colony's boot resolves it. `local_root` is where an operator adds their own; the counts are what Claude Code discovers: `skills/<name>/SKILL.md`, `agents/*.md`, `commands/*.md` |
 | `GET /api/plugins/graft` | The downloadable graft skillset (docs/skill-packs.md, "Downloadable skillsets"): `{name, release, installed_release, state: "idle"\|"downloading"\|"unpacking"\|"installed"\|"failed"\|"unavailable"\|"local", bytes, total, started_at, finished_at, error}`. `GET /api/plugins` carries the same objects under `downloadable` |
 | `POST /api/plugins/graft/download` | Start downloading the bundle `graft.lock` pins for this architecture into `<data>/plugins/graft`, or join the running download; returns at once. `409` when nothing is pinned, or when `plugins/graft` is the operator's own directory |
+| `GET /api/plugins/planetscale` | The downloadable PlanetScale skillset (docs/skill-packs.md, "Downloadable skillsets"): `{name, release, installed_release, state: "idle"\|"downloading"\|"unpacking"\|"installed"\|"failed"\|"unavailable"\|"local", bytes, total, started_at, finished_at, error}`. `GET /api/plugins` carries the same objects under `downloadable` |
+| `POST /api/plugins/planetscale/download` | Start downloading the PlanetScale skillset (`pscale` CLI and skills) pinned in `planetscale.lock` for this architecture into `<data>/plugins/planetscale`, or join the running download; returns at once. `409` when nothing is pinned, or when `plugins/planetscale` is the operator's own directory |
 
 **Model providers** (credentials stay on the mothership, keys stored 0600):
 
@@ -22,6 +24,7 @@ Part of the [Colonizer protocol](../protocol.md).
 | `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
 | `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
+| `GET /api/model-hosts` | Every canonical model two or more configured providers serve (issue #1039): `[{model, eligible, hosts: [{provider_id, provider_name, model, input_per_mtok, output_per_mtok, cache_read_per_mtok, blended_per_mtok, last_verified_at, source, healthy, degraded, out_of_quota, quota_reset_at, tools_limited, host_sensitive}]}]`, ranked by blended price. `eligible` says whether the boot policy may auto-reroute the canonical. Informs the opt-in policy that re-pins a colony's `COLONIZER_*_MODEL` settings onto the cheapest healthy host |
 | `GET /api/models/assignments` | The header model switcher's view (issue #1051): what every model role resolves to install-wide and per org, with where it comes from; the agent modules with their roles; the models on offer with health and quota (below) |
 | `GET /api/models/plans` | `{plans: [plan], checked_at}`: what is known about each plan the model roles use, for the switcher's usage bars (below) |
 | `GET /api/models/profiles` | `{profiles: [profile]}`: the saved model profiles, then the starters this install can run (below) |
@@ -306,6 +309,25 @@ back to an initial. The same record is the seen-set behind the prompt:
 `Note` = `{id, scope, key, title, content, tags, created_at, source}`; `Proposal` adds `status`
 (`pending`). `source` = `{session_id, repo, origin}` or `{user: true}`; a colony's note gains `reviewed: true`
 when approved, or `reviewed: false` when stored with review off.
+
+**Cratefield modules.** Catalog of Cratefield modules and their status.
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/cratefield/catalog` | `{source: "live"\|"cache"\|"snapshot", fetched_at, error?, registry: "live"\|"cache"\|"snapshot", catalogue_url, modules: [{slug, name, summary, crate_name, version?, registry_version?, status: "published"\|"unreleased"\|"planned", depends_on, needs, optional, tables, links}]}`: the Cratefield module catalogue from CATALOG.json and crates.io, with disk cache and bundled snapshot fallback on network failure. One-hour TTL cache. Owner only |
+
+**Provenance ledger.** Append-only record of external resources (worktrees, branches, pull requests) created by colonies (issue #1324).
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/provenance?impact=` | `{entries: [{kind: "branch"\|"pull_request"\|"worktree", id, scope, created_at, colony, issue, tool, reason, depends_on, status: "verified"\|"unverified"\|"failed"}], worktrees: {…}, impact?: []}`: entries from the provenance ledger at `<data_dir>/provenance.jsonl` tracking resources each colony created, worktree reconciliation status, and optional impact analysis when `impact=<id>` query param is given. Owner only |
+
+**Understand-anything knowledge graph.** Analysis and knowledge graphs of the repository a colony is working in (docs/skill-packs.md, "Downloadable skillsets").
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/understand-anything/graphs/{owner}/{name}` | `{enabled, commit, built_at, building, jobs, cost_usd}`: whether the `{owner}/{name}` repository is opted in for graph building, the newest graph's commit and build time, whether a graph colony is currently building, count of graph job sessions, and their summed cost. Owner only |
+| `GET /api/understand-anything/graphs/{owner}/{name}/knowledge-graph.json` | The knowledge graph JSON for `{owner}/{name}` generated by the understand-anything skillset, served with `Content-Type: application/json`. **404** if no graph has been generated. Owner only |
 
 **Operator vault proposals.** Notes colonies proposed for the operator vault (issue #777, [memory](memory.md#the-operator-vaults-tools-issue-777)). Owner only.
 

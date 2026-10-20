@@ -164,4 +164,8 @@ Byte-for-byte proxy of agentd `/v1/pty` (same binary/text frame rules). Owner on
 be reached, gets `{"type":"error","message":"…"}` and the socket closes; **404** for an unknown
 colony.
 
+## `POST /api/sessions/{id}/retry`
+
+Create a new colony that retries a `failed` colony with the same repository, issue, settings and work (issue #1073). Owner only. **409** when the colony is not `failed`. **404** for an unknown colony. Returns the new `Session` JSON with `retry_of` naming the original colony's id.
+
 ---
