@@ -9,6 +9,7 @@ import { useEffect, useState, type ReactElement } from "react";
 
 import { bookmarkShortcut, clearBookmark, cockpitAddresses, currentAddress, networkGap, type CockpitAddress } from "../cockpitAddress";
 import { useApi, useToast } from "../context";
+import { copyText, manualCopyHint } from "../copy";
 import { useInstallPrompt } from "../installApp";
 import type { PhoneOrigin, RemoteStatus } from "../types";
 import { QrCode } from "./RemoteAccessPane";
@@ -67,16 +68,8 @@ export function YourCockpitCard({
   const gap = addresses.length > 0 ? networkGap(addresses, origins ?? []) : null;
 
   const copy = async (one: CockpitAddress) => {
-    if (!navigator.clipboard) {
-      toast("This browser has no clipboard to copy into", "error");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(one.url);
-      toast(`${one.label} address copied`);
-    } catch {
-      toast("Couldn't copy the address", "error");
-    }
+    if (await copyText(one.url)) toast(`${one.label} address copied`);
+    else toast(manualCopyHint(), "error");
   };
 
   // The card's own re-offer: forget the remembered "no", then install if the browser is offering it.
