@@ -1,0 +1,1 @@
+**One floating chat button on phones.** On a phone the cockpit showed two round accent buttons at the bottom right, search and Ask Colonizer. The Ask button now shows from the `sm` breakpoint up, and on a phone the search button opens Spotlight, whose Ask row opens the Ask panel. ⌘J is unchanged.
