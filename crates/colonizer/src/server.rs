@@ -23,7 +23,9 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use std::{path::Path as FsPath, sync::Arc};
+use tower::ServiceBuilder;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 const UI_MISSING_HTML: &str = "<!doctype html><title>Colonizer</title>\
 <body style=\"font:15px system-ui;margin:3rem\"><h1>Colonizer is running</h1>\
@@ -342,9 +344,19 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
         // Hashed build assets 404 when missing instead of falling back to the page: a tab left open
         // across an update asks for chunks the new build no longer has, and HTML served as a
         // module script fails with a MIME error the page cannot tell apart from a real bug.
-        Some(dir) => Router::new()
-            .nest_service("/assets", ServeDir::new(dir.join("assets")))
-            .fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
+        Some(dir) => {
+            let assets_dir = dir.join("assets");
+            let fonts_cache = HeaderValue::from_static("public, max-age=31536000, immutable");
+            Router::new()
+                .nest_service(
+                    "/assets/fonts",
+                    ServiceBuilder::new()
+                        .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, fonts_cache))
+                        .service(ServeDir::new(assets_dir.join("fonts"))),
+                )
+                .nest_service("/assets", ServeDir::new(&assets_dir))
+                .fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))))
+        }
         None => Router::new().fallback(|| async { Html(UI_MISSING_HTML) }),
     }
 }
