@@ -7,7 +7,8 @@
 //! - **Backoff** is 1 s doubling to 60 s, with jitter, reset by the next success.
 //! - **Bisect:** a request the backend refuses for its records (400, 413, 422) is split in half and
 //!   each half retried, down to one record, which is then dropped and counted rather than retried
-//!   forever. Nothing else is ever dropped by the transport.
+//!   forever. Nothing else is ever dropped by the transport. A **413** also halves the request-size
+//!   budget of that one signal, so the batches after it fit what the backend will still take.
 //! - **A bad credential drops nothing:** 401, 403 and 407 hold the batch and its cursors, set the
 //!   health to `auth_failed`, and retry with backoff until the key works (a fixed key reaches a
 //!   running add-on as a restart, which replays from the committed cursors).
@@ -23,13 +24,13 @@
 //! - **Never in a colony's way:** this is a separate process the mothership supervises; nothing in a
 //!   colony's path waits on it.
 
-use crate::batch::{BatchConfig, Batcher, ExportResource};
+use crate::batch::{BatchConfig, Batcher, ExportResource, Item, Record};
 use crate::contract::{self, Contract};
 use crate::cursor::Cursor;
 use crate::encode::Request;
 use crate::hashing::HashKey;
 pub use crate::health::Status;
-use crate::health::{PartialSuccess, backlog_by_signal};
+use crate::health::{Caps, PartialSuccess, backlog_by_signal};
 use crate::map::Mapper;
 use crate::metrics::Aggregates;
 use crate::policy::{AttrValue, ContentGate, Policy, PolicyConfig, RepoNames};
@@ -105,6 +106,10 @@ pub struct Exporter {
     last_metrics: Option<Instant>,
     /// The multi-source reader: fairness, rate limit, drained and deleted colonies.
     tailer: Tailer,
+    /// Per-signal request-size budgets ([`Caps`]): a 413 halves one signal's for the rest of the
+    /// process; a signal never shrunk is batched at [`crate::batch::DEFAULT_REQUEST_BYTES`], the
+    /// config's default, so a start is indistinguishable from before.
+    caps: Caps,
     /// The `export_gap` records of the last read, as the tailer produced them.
     pub(crate) last_gaps: Vec<serde_json::Value>,
     pub status: Status,
@@ -235,6 +240,15 @@ fn signal_name(request: &Request) -> &'static str {
     }
 }
 
+/// The health entry a tailed record's signal is reported under.
+fn signal_key(signal: Signal) -> &'static str {
+    match signal {
+        Signal::Logs => "logs",
+        Signal::Traces => "traces",
+        Signal::Metrics => "metrics",
+    }
+}
+
 /// A jittered next delay: the current one doubled, capped, ±20 %.
 pub(crate) fn next_backoff(current: Option<Duration>) -> Duration {
     let base = match current {
@@ -292,6 +306,7 @@ impl Exporter {
             backoff: None,
             last_metrics: None,
             tailer: Tailer::default(),
+            caps: Caps::default(),
             last_gaps: Vec::new(),
             status: Status {
                 version: env!("CARGO_PKG_VERSION"),
@@ -481,21 +496,48 @@ impl Exporter {
         };
         builder.settle(&mut traces, &caught_up, &tailed.gone, now, &mut items);
         self.last_gaps = tailed.gaps.iter().map(|g| g.line.clone()).collect();
-        let records = items.len() as u64;
-        let mut batcher = Batcher::new(
-            &self.resource,
-            BatchConfig {
-                encoding: self.transport.encoding(),
-                ..BatchConfig::default()
-            },
-        );
-        for item in items {
-            batcher.push(item);
+        // Every hole the tailer hit is one `gaps` count on the signal its gap record travels with
+        // (all of them on `logs`), and every skipped line is one `records_dropped` on its own.
+        self.status.counted_gaps("logs", tailed.gaps.len() as u64);
+        for (signal, n) in &tailed.drops_by_signal {
+            self.status.dropped_records(signal_key(*signal), *n);
         }
-        let batch = batcher.finish();
-        aggregates.drop_count("oversized", batch.oversized as u64);
+        let records = items.len() as u64;
+        let encoding = self.transport.encoding();
+        // Each signal is batched against its own request-size budget, so a 413 halves one signal's
+        // without shrinking the others'. The lanes come out in the flush order: logs, traces, metrics.
+        let mut lanes: [Vec<Item>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for item in items {
+            match item.0 {
+                Record::Log(_) => lanes[0].push(item),
+                Record::Span(_) => lanes[1].push(item),
+                Record::Metric(_) => lanes[2].push(item),
+            }
+        }
+        let mut requests = Vec::new();
+        for (signal, lane) in [("logs", 0usize), ("traces", 1), ("metrics", 2)] {
+            let lane = &mut lanes[lane];
+            if lane.is_empty() {
+                continue;
+            }
+            let mut batcher = Batcher::new(
+                &self.resource,
+                BatchConfig {
+                    max_request_bytes: self.caps.get(signal),
+                    encoding,
+                    ..BatchConfig::default()
+                },
+            );
+            for item in lane.drain(..) {
+                batcher.push(item);
+            }
+            let batch = batcher.finish();
+            aggregates.drop_count("oversized", batch.oversized as u64);
+            self.status.dropped_records(signal, batch.oversized as u64);
+            requests.extend(batch.requests);
+        }
         Outbox {
-            requests: batch.requests,
+            requests,
             records,
             cursors: tailed.cursors,
             removed: tailed.removed,
@@ -517,6 +559,7 @@ impl Exporter {
                     bytes,
                 } => {
                     outbox.aggregates.drop_count("rejected", rejected);
+                    self.status.dropped_records(signal_name(&request), rejected);
                     outbox.requests.remove(0);
                     let now = unix_now();
                     let signal = signal_name(&request);
@@ -535,8 +578,13 @@ impl Exporter {
                     let accepted = (request.len() as u64).saturating_sub(rejected);
                     self.status.success(signal, now, accepted, bytes);
                 }
-                Outcome::Refused { message, .. } => {
+                Outcome::Refused { status, message } => {
                     outbox.requests.remove(0);
+                    // A 413 is about the request's size, not one bad record: later batches for
+                    // this signal are built at half the budget. 400 and 422 keep the batch size.
+                    if status == 413 {
+                        self.caps.halve(signal_name(&request));
+                    }
                     match halves(&request) {
                         Some((a, b)) => {
                             outbox.requests.insert(0, b);
@@ -544,6 +592,7 @@ impl Exporter {
                         }
                         None => {
                             outbox.aggregates.drop_count("refused", request.len() as u64);
+                            self.status.dropped_records(signal_name(&request), request.len() as u64);
                             outbox.records = outbox.records.saturating_sub(request.len() as u64);
                         }
                     }
@@ -626,6 +675,7 @@ impl Exporter {
         let mut batcher = Batcher::new(
             &self.resource,
             BatchConfig {
+                max_request_bytes: self.caps.get("metrics"),
                 encoding: self.transport.encoding(),
                 ..BatchConfig::default()
             },
@@ -651,6 +701,7 @@ impl Exporter {
                             message,
                         });
                     }
+                    self.status.dropped_records("metrics", rejected);
                     self.status.success("metrics", now, records.saturating_sub(rejected), bytes);
                     // The push's own accounting joins the aggregates, and is committed below with
                     // them — exactly as a failure of it lands on `export_failures`.
@@ -660,6 +711,12 @@ impl Exporter {
                 Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
                     self.status.failure("metrics", "auth_failed", message, None);
+                    break;
+                }
+                Outcome::Refused { status: 413, message } => {
+                    self.aggregates.export_failures += 1;
+                    self.caps.halve("metrics");
+                    self.status.failure("metrics", "backing_off", message, None);
                     break;
                 }
                 Outcome::Retry { message, .. } | Outcome::Refused { message, .. } => {
@@ -802,5 +859,7 @@ pub async fn send_test(contract: &Contract, headers: Vec<(String, String)>) -> s
     serde_json::json!({"ok": ok, "signals": results})
 }
 
+#[cfg(test)]
+mod perf;
 #[cfg(test)]
 mod tests;
