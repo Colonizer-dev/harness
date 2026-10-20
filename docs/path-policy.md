@@ -151,9 +151,17 @@ workspace root itself is not re-watched, so a `.env` created at the top of the
 worktree mid-session is still only reported at publish. A nested checkout's
 `.git/config` and `.git/hooks/` are protected too — the host's read-only
 git-dir mount covers only the root's, so here the watcher applies the binds
-the boot never had to. Like the boot, the watcher never follows a symlink;
-unlike the boot, it is best effort: a failed mount is a warn line on the
-colony, never a stopped daemon. Two things to know. A read that races the
+the boot never had to. A `git clone` into the workspace — whether by the agent
+or by the repo's own build — fails with "Read-only file system" or "Device or
+resource busy" because of these binds. The agent prompt explains why and names
+the supported route: `git clone --separate-git-dir=/tmp/<name>.git <url>
+<path>`, whose `.git` *file* (gitdir pointer) the watcher leaves unbound, or
+clone outside the workspace entirely. An agent that tries to unmount these
+protections is held as `control_defeat` (the policy is not for circumventing);
+nested clones in gitignored directories are deliberately not exempt because
+`.gitignore` is agent-writable. Like the boot, the watcher never follows a
+symlink; unlike the boot, it is best effort: a failed mount is a warn line on
+the colony, never a stopped daemon. Two things to know. A read that races the
 watcher can still see a just-created masked file — publish still applies. And
 a bound path cannot be deleted or renamed inside the guest (the bind holds the
 inode), so the agent cannot `rm -rf` a nested checkout that contains a masked

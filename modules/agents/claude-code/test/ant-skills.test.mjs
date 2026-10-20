@@ -9,6 +9,7 @@ import { test } from 'node:test';
 
 import { antRegistry, antSkillsetDenial, buildOptions, CREW_PACK_NAME } from '../runner.mjs';
 import { EXPLORE_DISALLOWED } from '../subagents.mjs';
+import { EXEC_POLICY_TOOLS } from '../execpolicy.mjs';
 
 const SKILL = (skill, extra = {}) => ({ tool_name: 'Skill', tool_input: { skill, ...extra }, hook_event_name: 'PreToolUse' });
 
@@ -189,7 +190,7 @@ test('the gate is the second Skill hook: after the understand-anything guard, be
     // The first Skill hook refuses `understand`; the second — the ant-skillsets gate — lets it pass.
     assert.equal((await entries[skillAt].hooks[0](SKILL('understand'))).hookSpecificOutput.permissionDecision, 'deny');
     assert.deepEqual(await entries[skillAt + 1].hooks[0](SKILL('understand')), { continue: true });
-    assert.ok(entries.findIndex((entry) => entry.matcher === 'Bash') > skillAt + 1, 'the exec policy’s Bash gate comes after');
+    assert.ok(entries.findIndex((entry) => entry.matcher === EXEC_POLICY_TOOLS) > skillAt + 1, 'the exec policy gate comes after');
   });
 });
 

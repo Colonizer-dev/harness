@@ -45,6 +45,7 @@ pub(crate) struct Feature {
 pub(crate) const ALL: &[&Feature] = &[
     &crate::auto_colonize::FEATURE,
     &crate::built_with::FEATURE,
+    &crate::cratefield_catalog::FEATURE,
     &crate::cratefield_push::FEATURE,
     &crate::decisions::FEATURE,
     &crate::github_breaker::FEATURE,
@@ -58,6 +59,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::observability::FEATURE,
     &crate::open_code_review::FEATURE,
     &crate::price_feed::FEATURE,
+    &crate::provenance_ledger::FEATURE,
     &crate::provider_history::FEATURE,
     &crate::public_feed::FEATURE,
     &crate::queue_priority::FEATURE,

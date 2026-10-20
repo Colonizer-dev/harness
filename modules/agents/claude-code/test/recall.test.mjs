@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { buildOptions } from '../runner.mjs';
 import { createRecallServer, formatHits, RECALL_PROMPT_APPEND, RECALL_SERVER, RECALL_TOOL } from '../recall.mjs';
+import { EXEC_POLICY_TOOLS } from '../execpolicy.mjs';
 
 const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude', COLONIZER_DELEGATE: 'off' };
 const recallEnv = { ...base, COLONIZER_RECALL_URL: 'http://127.0.0.1:1/recall', COLONIZER_RECALL_TOKEN: 'sekrit' };
@@ -94,8 +95,8 @@ test('recall is wired in only when both env vars are set and the server exists',
   assert.deepEqual(on.mcpServers, { [RECALL_SERVER]: fakeServer });
   assert.ok(on.systemPrompt.append.includes(RECALL_PROMPT_APPEND));
   // Read-only, so subagents may recall too: no gate is registered, and no allowedTools entry shadows canUseTool.
-  // Only the exec policy's Bash hook (#471), which every colony gets; recall adds no gate of its own.
-  assert.deepEqual((on.hooks?.PreToolUse ?? []).map((e) => e.matcher), ['Bash']);
+  // Only the exec policy hook (#471), which every colony gets; recall adds no gate of its own.
+  assert.deepEqual((on.hooks?.PreToolUse ?? []).map((e) => e.matcher), [EXEC_POLICY_TOOLS]);
   assert.equal(on.allowedTools, undefined);
 });
 

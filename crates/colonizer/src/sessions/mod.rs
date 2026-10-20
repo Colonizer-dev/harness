@@ -66,6 +66,8 @@ mod runtime;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub(crate) use agentd::install_exec_policy;
+
 // Everything keeps its `crate::sessions::…` path: the split is by concern, not a new API. `persist`
 // only adds methods to `App`, so it has nothing to re-export.
 pub(crate) use agentd::*;

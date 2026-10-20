@@ -857,7 +857,8 @@ pub async fn list(State(app): State<Shared>) -> Json<Value> {
     let mut body = available(&app.cfg);
     body["downloadable"] = json!([
         crate::graft::current(&app).await,
-        crate::understand_anything::current(&app).await
+        crate::understand_anything::current(&app).await,
+        crate::planetscale::current(&app).await
     ]);
     Json(body)
 }

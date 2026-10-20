@@ -1,0 +1,289 @@
+{
+  "source": "snapshot",
+  "fetched_at": "2026-10-19T00:00:00Z",
+  "error": null,
+  "registry": "snapshot",
+  "catalogue_url": "https://github.com/Cratefield/harness/blob/main/docs/control-plane/CATALOG.json",
+  "modules": [
+    {
+      "slug": "email-signup",
+      "name": "Email signup",
+      "summary": "Collect email addresses with double opt-in, confirmation and unsubscribe.",
+      "crate_name": "cratefield-module-email-signup",
+      "version": "0.1.1",
+      "registry_version": "0.1.1",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "Mailer",
+        "Signer"
+      ],
+      "optional": [
+        "Captcha",
+        "RateLimiter"
+      ],
+      "tables": [
+        "subscribers"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-email-signup",
+        "crate": "https://crates.io/crates/cratefield-module-email-signup",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "waitlist",
+      "name": "Waitlist",
+      "summary": "A per-product waitlist with confirmation, positions and referral codes.",
+      "crate_name": "cratefield-module-waitlist",
+      "version": "0.1.1",
+      "registry_version": "0.4.4",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "Mailer",
+        "Signer"
+      ],
+      "optional": [
+        "Captcha",
+        "RateLimiter"
+      ],
+      "tables": [
+        "waitlist_entries",
+        "waitlist_send_cooldown",
+        "waitlist_position_lock"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-waitlist",
+        "crate": "https://crates.io/crates/cratefield-module-waitlist",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "cms",
+      "name": "Content",
+      "summary": "Typed, versioned content in your own database, edited through the admin.",
+      "crate_name": "cratefield-module-cms",
+      "version": "0.1.1",
+      "registry_version": "0.2.0",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database"
+      ],
+      "optional": [],
+      "tables": [
+        "cms_item",
+        "cms_revision"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-cms",
+        "crate": "https://crates.io/crates/cratefield-module-cms",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "changelog",
+      "name": "Changelog",
+      "summary": "A project's releases mirrored into your own database, served without calling upstream.",
+      "crate_name": "cratefield-module-changelog",
+      "version": "0.1.1",
+      "registry_version": "0.1.1",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "HttpClient",
+        "Clock"
+      ],
+      "optional": [
+        "KeyValue"
+      ],
+      "tables": [
+        "changelog_release",
+        "changelog_source"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-changelog",
+        "crate": "https://crates.io/crates/cratefield-module-changelog",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "notifications",
+      "name": "Notifications",
+      "summary": "Push to phones and browsers, an in-app inbox, and email \u2014 one API, per-person categories, in the recipient's own language.",
+      "crate_name": "cratefield-module-notifications",
+      "version": "0.1.1",
+      "registry_version": "0.4.0",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "Push",
+        "Clock",
+        "IdGen"
+      ],
+      "optional": [
+        "Defer",
+        "HttpClient",
+        "Realtime",
+        "Mailer",
+        "Signer"
+      ],
+      "tables": [
+        "notifications_subscriptions",
+        "notifications_preferences",
+        "notifications_outbox",
+        "notifications_dead_letters",
+        "notifications_inbox",
+        "notifications_email_targets",
+        "notifications_email_sends",
+        "notifications_locales",
+        "notifications_email_suppressed"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-notifications",
+        "crate": "https://crates.io/crates/cratefield-module-notifications",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "privacy",
+      "name": "Privacy requests",
+      "summary": "Answer a subject access or erasure request from what every other module declares it holds. Optional, and the only honest default for a deployment holding personal data.",
+      "crate_name": "cratefield-module-privacy",
+      "version": "0.1.1",
+      "registry_version": "0.2.0",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "Signer"
+      ],
+      "optional": [],
+      "tables": [],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-privacy",
+        "crate": "https://crates.io/crates/cratefield-module-privacy",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "telemetry",
+      "name": "Telemetry",
+      "summary": "Counted usage events in your own database \u2014 a closed event vocabulary, consent on by default, and no third-party analytics service.",
+      "crate_name": "cratefield-module-telemetry",
+      "version": "0.1.0",
+      "registry_version": "0.3.2",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database"
+      ],
+      "optional": [
+        "Clock",
+        "RateLimiter"
+      ],
+      "tables": [
+        "telemetry_events",
+        "telemetry_modules"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-telemetry",
+        "crate": "https://crates.io/crates/cratefield-module-telemetry",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "device-auth",
+      "name": "Device sign-in",
+      "summary": "The OAuth 2.0 device authorization grant (RFC 8628): a client with no browser shows a code, a signed-in person approves it, and your issuer mints the credential.",
+      "crate_name": "cratefield-module-device-auth",
+      "version": "0.2.0",
+      "registry_version": "0.2.0",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "RateLimiter"
+      ],
+      "optional": [
+        "Clock",
+        "Auth"
+      ],
+      "tables": [
+        "device_auth_codes"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-device-auth",
+        "crate": "https://crates.io/crates/cratefield-module-device-auth",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "orgs",
+      "name": "Organizations",
+      "summary": "Organizations, memberships, roles and email invitations: a person creates an organization and is its owner, invites people by address, and everyone who belongs holds a role the venture configured.",
+      "crate_name": "cratefield-module-orgs",
+      "version": "0.1.0",
+      "registry_version": "0.3.0",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "Auth"
+      ],
+      "optional": [
+        "Clock",
+        "IdGen",
+        "Mailer"
+      ],
+      "tables": [
+        "orgs",
+        "org_members",
+        "org_invitations",
+        "org_service_accounts",
+        "org_service_account_keys",
+        "org_grants",
+        "org_audit"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-orgs",
+        "crate": "https://crates.io/crates/cratefield-module-orgs",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    },
+    {
+      "slug": "crm",
+      "name": "CRM",
+      "summary": "Contacts, organisations and the tags that label them, filed idempotently by natural key: the same email address is one contact, and a stale write is refused rather than overwriting a newer edit.",
+      "crate_name": "cratefield-module-crm",
+      "version": "0.1.0",
+      "registry_version": "0.1.0",
+      "status": "published",
+      "depends_on": [],
+      "needs": [
+        "Database",
+        "IdGen",
+        "Clock"
+      ],
+      "optional": [
+        "Auth"
+      ],
+      "tables": [
+        "crm_contacts",
+        "crm_organisations",
+        "crm_tags",
+        "crm_taggings"
+      ],
+      "links": {
+        "docs_rs": "https://docs.rs/cratefield-module-crm",
+        "crate": "https://crates.io/crates/cratefield-module-crm",
+        "catalogue": "https://raw.githubusercontent.com/Cratefield/harness/main/docs/control-plane/CATALOG.json"
+      }
+    }
+  ]
+}

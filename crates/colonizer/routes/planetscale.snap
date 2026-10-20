@@ -1,0 +1,2 @@
+/api/plugins/planetscale                             GET    unauth=401    token=owner            activity=-
+/api/plugins/planetscale/download                    POST   unauth=401    token=owner            activity=-

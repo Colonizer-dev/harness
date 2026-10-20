@@ -512,6 +512,9 @@ const CORPUS_PREFIXES: &[Prefix] = &[
     p("tskey-", alnum_dash, 20, "tailscale_key"),
     p("vault:v1:", base64ish, 20, "vault_token"),
     p("hvs.", alnum_dash_us, 24, "vault_token"),
+    p("pscale_tkn_", alnum_dash_us, 20, "pscale_service_token"),
+    p("pscale_pw_", alnum_dash_us_dot, 20, "pscale_password"),
+    p("pscale_oauth_", alnum_dash_us, 20, "pscale_oauth_token"),
 ];
 
 fn prefixed(s: &[u8], rules: &[Prefix], spans: &mut Vec<Span>) {
@@ -1222,6 +1225,21 @@ mod tests {
                 "xoxb-123456789012-1234567890123-AbCdEfGhIjKl",
                 "slack_token",
             ),
+            (
+                concat!("PLANETSCALE_SERVICE_TOKEN=pscale_tkn_", "abc123def456ghi", "789jkl012"),
+                concat!("pscale_tkn_", "abc123def456ghi", "789jkl012"),
+                "pscale_service_token",
+            ),
+            (
+                concat!("database password pscale_pw_", "DaBcDeFg_Hi", "JkLmNo123"),
+                concat!("pscale_pw_", "DaBcDeFg_Hi", "JkLmNo123"),
+                "pscale_password",
+            ),
+            (
+                concat!("oauth: pscale_oauth_", "abcDEF123_", "ghiJKL456u"),
+                concat!("pscale_oauth_", "abcDEF123_", "ghiJKL456u"),
+                "pscale_oauth_token",
+            ),
         ]);
     }
 
@@ -1333,6 +1351,21 @@ mod tests {
             ("private_key = \"notreally\"", "notreally", "private_key"),
             ("GET /cb?code=1&token=abcd1234efgh HTTP/1.1", "abcd1234efgh", "token"),
             ("secret := \"gopherPass9\"", "gopherPass9", "secret"),
+            (
+                concat!("PLANETSCALE_SERVICE_TOKEN=pscale_tkn_", "abc123def456789", "jkl01"),
+                concat!("pscale_tkn_", "abc123def456789", "jkl01"),
+                "pscale_service_token",
+            ),
+            (
+                concat!(
+                    r#"{"PLANETSCALE_SERVICE_TOKEN": "pscale_tkn_"#,
+                    "xyz789uvw01234567",
+                    "opq",
+                    r#""}"#
+                ),
+                concat!("pscale_tkn_", "xyz789uvw01234567", "opq"),
+                "pscale_service_token",
+            ),
         ]);
         let mut v = json!({"user": "nick", "password": "hunter", "nested": {"apiKey": "k-123-abc"}, "tokens": 12});
         assert!(redact_value(&mut v));
