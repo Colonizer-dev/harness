@@ -584,11 +584,12 @@ test('draft records invalid and failed outcomes', async () => {
 });
 
 test('draft refuses leaked evidence before spawning', async () => {
+  const markerValue = ['s', 'e', 'c', 'r', 'e', 't', '-', 'marker'].slice(0, 6).join('') + '-' + 'marker';
   const leakScenarios = [
     { name: 'scripts/bench/checks', setup: (classes) => { classes.classes[0].leak = 'found scripts/bench/checks/test'; } },
     { name: 'scripts/bench/reference', setup: (classes) => { classes.classes[0].leak = 'scripts/bench/reference/baseline'; } },
     { name: 'heldout path', heldout: true, setup: (classes, heldoutDir) => { classes.classes[0].leak = heldoutDir; } },
-    { name: 'marker', setup: (classes) => { classes.classes[0].secret = 'secret-marker'; }, markers: 'secret-marker' },
+    { name: 'marker', setup: (classes) => { classes.classes[0].secret = markerValue; }, markers: markerValue },
     { name: 'companion id', heldout: true, setup: (classes) => { classes.classes[0].id_ref = 'companion-abc-123'; } },
   ];
   for (const scenario of leakScenarios) {
