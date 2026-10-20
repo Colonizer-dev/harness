@@ -35,7 +35,7 @@ pub fn applies_exec_policy(schema: &Value) -> bool {
 
 /// The install's `exec_policy` setting, when the operator named one there. Empty and whitespace-only
 /// read as unset, like every other string setting.
-fn install_exec_policy(install: &crate::config::ModuleChoice) -> Option<String> {
+pub(crate) fn install_exec_policy(install: &crate::config::ModuleChoice) -> Option<String> {
     install
         .settings
         .get("exec_policy")

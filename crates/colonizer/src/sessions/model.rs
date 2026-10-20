@@ -875,6 +875,10 @@ pub struct Session {
     /// `Queued` until this passes. `None` when no retry is pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_at: Option<DateTime<Utc>>,
+    /// The configuration fingerprint computed at boot: harness version, agent module, plugins,
+    /// model settings, policy, and egress policy. None for colonies booted before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<crate::config_fingerprint::ConfigFingerprint>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -989,6 +993,7 @@ impl Default for Session {
             failure_class: None,
             boot_retries: 0,
             retry_at: None,
+            config: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
         }

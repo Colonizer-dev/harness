@@ -29,11 +29,14 @@ off unless the operator opted in.
 
 - **`open_code_review`** — `off` (the default; absent and `null` are the same) or `shadow`. Any other
   value, `on` included, is refused at save time: `on` does not exist yet.
+- **`reviewer`** (issue #1280) — the review backend to use: `off`, `open-code-review` (the original ocr
+  binary), or `kodus` (self-hosted service). `None` — the default — means `open-code-review` (backward
+  compatible: orgs already using shadow keep their ocr review unless changed).
 - **`open_code_review_model`** — the model reviews run on, a `provider/model` string. Absent or blank
   follows the install's cheap route (below); refused at save time if it contains whitespace or exceeds
   120 characters.
 
-Both are set in the cockpit's org settings, `PUT /api/orgs/{org}`, or `orgs.json`; a save from an older
+All are set in the cockpit's org settings, `PUT /api/orgs/{org}`, or `orgs.json`; a save from an older
 build keeps them, a named `null` clears them.
 
 ## When it runs
@@ -84,11 +87,41 @@ provider that needs no key gets none. No route at all is one warn line and no re
   `sessions/<id>/open-code-review.json`. A finding too odd to parse is dropped, not fatal; a failed run
   is one warn line.
 
+## Backends: open-code-review and Kodus
+
+Two backends share the same `shadow` mode (issue #1280). `open-code-review` is the original; Kodus is
+a self-hosted alternative.
+
+### open-code-review backend
+
+The ocr binary: the setup above. When `reviewer` is `off` or `open-code-review` (the default), or when
+it is unset and the org's mode is `shadow`, the ocr path runs.
+
+### Kodus backend
+
+[Kodus](https://github.com/kodustech/kodus-ai) (AGPL-3.0) is a self-hosted AI reviewer service the
+operator installs themselves using [kodus-installer](https://github.com/kodustech/kodus-installer)
+(Docker Compose, upstream images unmodified). Colonizer stores only its URL and API team key in
+Secrets (never vendor or patch Kodus), and sends only the redacted snapshot diff to it.
+
+When `reviewer` is `kodus`, the mothership reads the Kodus URL and team key from the generic
+`kodus` secret (set via Settings → Secrets, or `POST /api/secrets/kodus`), in the format
+`<url>:<team-key>`, where the URL must start with `http://` or `https://` and may include a port.
+The split is on the last colon, so URLs with port numbers work: `http://kodus.local:3001:abc123` 
+splits to URL `http://kodus.local:3001` and key `abc123`. Examples: `https://kodus.example.com:kodus_abc123...` 
+or `http://kodus.local:3001:team_key`. The diff is created
+from the same snapshot, and Kodus's own model is configured in Kodus itself, not in Colonizer
+— the org's `open_code_review_model` is not used for Kodus reviews.
+
+Findings are written to `sessions/<id>/kodus.json`, and the mothership logs them the same way as
+ocr's: summary and clipped lines in the colony log.
+
 ## Turning it off
 
 Set the org's `open_code_review` to `off` (or `null`) and no review runs again; there is nothing else to
-undo — shadow changed nothing. To take the tool off the machine, delete `<data>/open-code-review/` — the
-installed release, and any snapshot a running review has not cleaned up.
+undo — shadow changed nothing. To take ocr off the machine, delete `<data>/open-code-review/` — the
+installed release, and any snapshot a running review has not cleaned up. Kodus is managed by the operator
+and has nothing to clean up on the mothership besides the secret.
 
 ## Not yet
 
@@ -98,3 +131,7 @@ Planned follow-ups of #1274:
   comments on the pull request.
 - **A merge-steward recheck**, so an updated branch is reviewed again rather than carrying the first
   run's findings.
+- **Routing Kodus through Colonizer's provider routing**, so the operator can choose which gateway
+  Kodus runs on.
+- **Feedback loop to shared memory**, so Kodus findings can update the org's note index.
+- **Side-by-side evaluation of both backends**, for the operator to compare their outputs and latency.

@@ -52,6 +52,8 @@ export interface OrgSettings {
   verify_locally_when_ci_blocked?: boolean | null;
   /** The host-side open-code-review pass (issue #1274): `shadow` records the findings in the colony log and the session's open-code-review.json, changing nothing; absent, null and `off` are no review. */
   open_code_review?: "off" | "shadow" | null;
+  /** The review backend to use (issue #1280): off, open-code-review, or kodus; null inherits the default (open-code-review). */
+  reviewer?: "off" | "open-code-review" | "kodus" | null;
   /** The model that org's reviews run on, a `provider/model` string (issue #1274); absent or null follows the install's cheap summary route. */
   open_code_review_model?: string | null;
   /** The hidden-text screening pass (issue #1277): `shadow` records the findings in the colony log and the session's promptdecode.json, changing nothing; `on` removes hidden text and appends a note; absent, null and `off` are no screening. */
@@ -82,6 +84,12 @@ export interface OrgSettings {
    * module settings, point by point.
    */
   jev?: boolean | null;
+  /**
+   * The context-mode module for this org (issue #1273, opt-in ELv2 MCP server): `off` disables it
+   * (the default); `shadow` passes MCP calls through but keeps native tools; `on` routes through
+   * the exec policy. The operator installs the pinned package.
+   */
+  context_mode?: "off" | "shadow" | "on" | null;
   /**
    * The org layer of the exec policy (issue #924): JSON text shaped like the install's `exec_policy`
    * module setting and a repository's `.colonizer/exec-policy.json`. It sits between the two, and

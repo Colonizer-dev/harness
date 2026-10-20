@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { actTier, briefMetrics, briefReport, focusReport, formatBriefReport, formatComparison, formatFocusReport, formatJevReport, formatRateReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, rateReport, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { actTier, briefMetrics, briefReport, focusReport, formatBriefReport, formatComparison, formatFocusReport, formatJevReport, formatRateReport, formatRoutingReport, jevReport, journalScoring, moduleDirDigest, outsideTask, parseArgs, rateReport, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun, configSummary, configLines } from '../bench.mjs';
 import { loadSpend, readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -659,4 +659,148 @@ test('rate takes run files, a data dir and --json like every other report', () =
   assert.deepEqual(args.files, ['a.json']);
   assert.equal(args.data, '/tmp/d');
   assert.equal(args.json, true);
+});
+
+// --------------------------------- config digest tests
+
+test('moduleDirDigest ignores .DS_Store, __pycache__, node_modules, .git and symlinks', (ctx) => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-module-digest-'));
+  ctx.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Create: a.txt = "hello\n", sub/b.md = "world", .DS_Store = "x" (ignored), sub/__pycache__/c.pyc = "y" (ignored)
+  writeFileSync(join(dir, 'a.txt'), 'hello\n');
+  mkdirSync(join(dir, 'sub'));
+  writeFileSync(join(dir, 'sub', 'b.md'), 'world');
+  writeFileSync(join(dir, '.DS_Store'), 'x');
+  mkdirSync(join(dir, 'sub', '__pycache__'));
+  writeFileSync(join(dir, 'sub', '__pycache__', 'c.pyc'), 'y');
+  // Expected digest: a.txt then sub/b.md (sorted), .DS_Store and __pycache__ subtree ignored.
+  const digest = moduleDirDigest(dir);
+  assert.equal(digest, 'sha256:ef29960db3e92cd0c60428da998e6cb617c4dc9f6a9b2777ac7dba134af0cc2f');
+});
+
+// --------------------------------- config summary and config lines tests
+
+const res = (id, config) => ({ id, config });
+
+test('configSummary collects fingerprints and detects varied components', () => {
+  const summary = configSummary([
+    res('a', { digest: 'd1', components: { agent: { digest: 'a1' }, harness: { digest: 'h1' } } }),
+    res('b', { digest: 'd1', components: { agent: { digest: 'a1' }, harness: { digest: 'h1' } } }),
+  ]);
+  assert.deepEqual(summary.digests, ['d1']);
+  assert.deepEqual(summary.varied, []);
+  assert.equal(summary.missing, 0);
+});
+
+test('configSummary detects components that varied within a run', () => {
+  const summary = configSummary([
+    res('a', { digest: 'd1', components: { agent: { digest: 'a1' }, harness: { digest: 'h1' } } }),
+    res('b', { digest: 'd1', components: { agent: { digest: 'a2' }, harness: { digest: 'h1' } } }),
+  ]);
+  assert.deepEqual(summary.varied, ['agent']);
+  assert.equal(summary.missing, 0);
+});
+
+test('configSummary counts missing configs', () => {
+  const summary = configSummary([res('a', { digest: 'd1', components: {} }), res('b', null)]);
+  assert.equal(summary.missing, 1);
+});
+
+test('configLines: identical runs say "nothing"', () => {
+  const before = { label: 'before', results: [res('a', { digest: 'd1', components: { agent: { digest: 'a1' } } })] };
+  const after = { label: 'after', results: [res('a', { digest: 'd1', components: { agent: { digest: 'a1' } } })] };
+  const lines = configLines(before, after);
+  assert.match(lines[0], /Differs in: nothing/);
+});
+
+test('configLines detects components that differ between runs', () => {
+  const before = { label: 'before', results: [res('a', { digest: 'd1', components: { agent: { digest: 'a1' }, plugins: { digest: 'p1' } } })] };
+  const after = { label: 'after', results: [res('a', { digest: 'd2', components: { agent: { digest: 'a1' }, plugins: { digest: 'p2' } } })] };
+  const lines = configLines(before, after);
+  assert.match(lines[0], /Differs in: plugins/);
+});
+
+test('configLines marks a run with varied components as not comparable', () => {
+  const before = { label: 'before', results: [res('a', { digest: 'd1', components: { agent: { digest: 'a1' }, plugins: { digest: 'p1' } } })] };
+  const after = {
+    label: 'after',
+    results: [
+      res('a', { digest: 'd2', components: { agent: { digest: 'a1' }, plugins: { digest: 'p1' } } }),
+      res('b', { digest: 'd2', components: { agent: { digest: 'a1' }, plugins: { digest: 'p2' } } }),
+    ],
+  };
+  const lines = configLines(before, after);
+  assert.ok(lines.some((l) => l.includes('Not comparable') && l.includes('plugins') && l.includes('after')));
+});
+
+test('configLines reports missing configs', () => {
+  const before = { label: 'before', results: [res('a', null)] };
+  const after = { label: 'after', results: [res('a', { digest: 'd1', components: {} })] };
+  const lines = configLines(before, after);
+  assert.match(lines[0], /Differs in: unknown — .*before.*carries no config fingerprint/);
+});
+
+test('configLines handles per-task model routing without marking not comparable', () => {
+  const before = {
+    label: 'before',
+    results: [
+      res('task-a', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'opus' } } }),
+      res('task-b', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'sonnet' } } }),
+    ],
+  };
+  const after = {
+    label: 'after',
+    results: [
+      res('task-a', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'opus' } } }),
+      res('task-b', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'sonnet' } } }),
+    ],
+  };
+  const lines = configLines(before, after);
+  assert.match(lines[0], /Differs in: nothing/);
+  assert.ok(!lines.some((l) => l.includes('Not comparable')));
+});
+
+test('configLines detects model changes across tasks between runs', () => {
+  const before = {
+    label: 'before',
+    results: [
+      res('task-a', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'opus' } } }),
+      res('task-b', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'sonnet' } } }),
+    ],
+  };
+  const after = {
+    label: 'after',
+    results: [
+      res('task-a', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'sonnet' } } }),
+      res('task-b', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'opus' } } }),
+    ],
+  };
+  const lines = configLines(before, after);
+  assert.match(lines[0], /Differs in: model/);
+});
+
+test('per-task model: when runs share only some task ids, a shared task model change is detected', () => {
+  const before = {
+    label: 'before',
+    results: [
+      res('task-a', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'opus' } } }),
+      res('task-b', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'sonnet' } } }),
+    ],
+  };
+  const after = {
+    label: 'after',
+    results: [
+      res('task-a', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'sonnet' } } }),
+      res('task-c', { digest: 'd1', components: { agent: { digest: 'a1' }, model: { digest: 'opus' } } }),
+    ],
+  };
+  const lines = configLines(before, after);
+  assert.match(lines[0], /Differs in: model/, 'task-a model changed across runs');
+});
+
+test('formatComparison includes the config lines', () => {
+  const before = { label: 'before', results: [res('a', { digest: 'd1', components: { agent: { digest: 'a1' } } })] };
+  const after = { label: 'after', results: [res('a', { digest: 'd1', components: { agent: { digest: 'a1' } } })] };
+  const text = formatComparison(before, after);
+  assert.match(text, /Differs in: nothing/);
 });
