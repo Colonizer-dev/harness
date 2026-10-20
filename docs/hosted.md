@@ -168,8 +168,8 @@ the findings and the gates. Hosted and outpost handling of sensitive repositorie
 until the four draft advisories (F01–F04) are fixed and re-verified — gate G1, negative tests on
 real colonies. Until then, only public, low-sensitivity repositories may target a hosted or
 outpost deployment, and that is the operator's call to make and to record per org. No `orgs.json`
-field records it today — `OrgSettings` (`crates/colonizer/src/orgs.rs`) carries budgets, quotas,
-stack, egress, memory, watchdog and notifications, nothing about deployment targets — so the
+field records it today — `OrgSettings` (`crates/colonizer/src/orgs.rs`) carries concurrency, budgets,
+quotas, stack, egress, memory, watchdog and notifications, nothing about deployment targets — so the
 follow-up adds a field there, where the other per-org decisions live.
 
 ## Billing

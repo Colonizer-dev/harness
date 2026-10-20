@@ -5,7 +5,7 @@ has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7
 colonies. The subcommands are everything else: a few run against this machine (`version`,
 `update`, `setup`, `doctor`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
-`resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `observability backfill`, `mcp`). Settings still come from the environment, never flags — every
+`resume`, `retry`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `observability backfill`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
@@ -115,6 +115,7 @@ colonizer ask abc123                                   # the question it is wait
 colonizer answer abc123 1                              # by option number, label, or free text
 colonizer stop abc123                                  # the microVM goes away; the worktree is kept
 colonizer resume abc123                                # back on the kept worktree where it was left
+colonizer retry abc123                                 # restart a failed colony from scratch with the same settings
 colonizer pr abc123                                    # the pull request URL and state
 colonizer pr abc123 --wait --timeout 30m               # wait for the checks to settle; exit 7 on failure
 colonizer map owner/repo                               # the repository's architecture map, as a text outline
