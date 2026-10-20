@@ -50,17 +50,20 @@ const PLAIN_NAME = /^(?!\.)(?!.*\.\.)[^/\\:,\0]+$/;
  * place and inherit the orchestrator's effort. */
 const BUILTIN_REDEFINITIONS = new Set(['general-purpose', 'Explore']);
 
-/** Split on `sep` at the top level only: commas inside double quotes or braces do not split. */
+/** Split on `sep` at the top level only: commas inside double quotes, braces, or parentheses do not split. */
 const splitTop = (text, sep) => {
   const parts = [];
   let current = '';
   let quoted = false;
   let braces = 0;
+  let parens = 0;
   for (const char of text) {
     if (char === '"') quoted = !quoted;
     else if (!quoted && char === '{') braces++;
     else if (!quoted && char === '}') braces--;
-    if (char === sep && !quoted && braces === 0) {
+    else if (!quoted && char === '(') parens++;
+    else if (!quoted && char === ')') parens--;
+    if (char === sep && !quoted && braces === 0 && parens === 0) {
       parts.push(current);
       current = '';
       continue;
@@ -117,6 +120,17 @@ const value = (raw) => {
 
 const nonEmptyString = (value, what) => {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`\`${what}\` must be a non-empty string`);
+};
+
+/** Convert a comma-separated string to an array, or return the array unchanged.
+ * Used for `tools` and `disallowedTools` which accept both forms. */
+const toArray = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    // Split on top-level commas, trim each item, and filter out empty items
+    return splitTop(value, ',').map((item) => item.trim()).filter((item) => item.length > 0);
+  }
+  return value;
 };
 
 /**
@@ -183,11 +197,24 @@ function parseAgentMdOrThrow(text, file) {
   if (top.effort !== undefined && !FILE_EFFORTS.has(top.effort)) {
     throw new Error(`\`effort: ${top.effort}\` is not one of ${[...FILE_EFFORTS].join(', ')}`);
   }
-  for (const key of ['tools', 'disallowedTools', 'skillsets']) {
+  // tools and disallowedTools accept both array and comma-separated string forms
+  for (const key of ['tools', 'disallowedTools']) {
     if (top[key] === undefined) continue;
-    if (!Array.isArray(top[key])) throw new Error(`\`${key}\` must be an inline array`);
-    for (const item of top[key]) {
+    const wasArray = Array.isArray(top[key]);
+    const value = toArray(top[key]);
+    if (!Array.isArray(value)) throw new Error(`\`${key}\` must be an inline array or comma-separated string`);
+    // Reject empty only if it came from a string (comma-separated form). Inline arrays can be empty (preserves HEAD behavior).
+    if (value.length === 0 && !wasArray) throw new Error(`\`${key}\` must have at least one item`);
+    for (const item of value) {
       if (typeof item !== 'string' || !item) throw new Error(`\`${key}\` has a non-string or empty item`);
+    }
+    top[key] = value;
+  }
+  // skillsets must be an inline array
+  if (top.skillsets !== undefined) {
+    if (!Array.isArray(top.skillsets)) throw new Error(`\`skillsets\` must be an inline array`);
+    for (const item of top.skillsets) {
+      if (typeof item !== 'string' || !item) throw new Error(`\`skillsets\` has a non-string or empty item`);
     }
   }
   for (const item of top.skillsets ?? []) {
