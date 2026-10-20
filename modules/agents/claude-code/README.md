@@ -174,6 +174,12 @@ it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly
              { "id": "ask-before-eject", "decision": "ask", "writes_outside": true } ] }
 ```
 
+Fetches (repo layer only): a top-level `fetches` array exempts pinned download scripts from the default `script-egress` rule, e.g.
+```json
+{"fetches": [{"script": "scripts/fetch-vendor.sh", "sources": ["vendor/vendor.lock"], "hosts": ["github.com", "codeload.github.com"], "verify": "sha256"}]}
+```
+A script matches a fetch entry when (a) all URLs in the script and each source file have hosts in the allowed list, (b) the script performs sha256 verification (sha256sum, shasum -a 256, openssl sha256, etc.), and (c) the policy file bytes match the base commit (verified through `tracked_scripts`). Fetches are honoured only from the repo layer and only when trusted; org and install layer fetches are ignored. Other rules still apply.
+
 Predicates: `command` (regex over the command), `touches` (path globs matched against the path-like
 tokens of the command and its scripts; `~` is $HOME; components at any depth, `*` never crosses
 `/`; an entry starting with `!` excludes the tokens it matches), `script` (regex over script
