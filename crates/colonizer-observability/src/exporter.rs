@@ -716,7 +716,7 @@ impl Exporter {
                 Outcome::Refused { status: 413, message } => {
                     self.aggregates.export_failures += 1;
                     self.caps.halve("metrics");
-                    self.status.failure("metrics", "backing_off", message);
+                    self.status.failure("metrics", "backing_off", message, None);
                     break;
                 }
                 Outcome::Retry { message, .. } | Outcome::Refused { message, .. } => {
