@@ -1183,6 +1183,15 @@ pub fn build_prompt(
                 if omitted == 1 { "was" } else { "were" }
             );
         }
+        // What the PromptDecode scan found hidden in the text above (issue #1485). The text is not
+        // stripped; the decoded payload is named here as untrusted data.
+        if let Some(notes) = issue["promptdecode_notes"].as_array().filter(|n| !n.is_empty()) {
+            let _ = writeln!(p, "PromptDecode found hidden text in this issue. It is shown, not removed:");
+            for note in notes {
+                let _ = writeln!(p, "- {}", text(note));
+            }
+            let _ = writeln!(p);
+        }
         let _ = writeln!(p, "</issue>\n");
         let _ = writeln!(
             p,

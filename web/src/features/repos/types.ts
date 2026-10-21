@@ -21,6 +21,26 @@ export interface Issue {
   url: string;
   /** Set by the mothership's issue list when the issue is an epic (sub-issues, an `epic` label, or a title marking it): why, and how many sub-issues. A launch on it answers 409 without `allow_epic`. */
   epic?: { reason: string; sub_issues: number } | null;
+  /** Set by the mothership's issue list (issue #1219, team approval and the PromptDecode scan in #1485): whether auto mode takes it, and why. */
+  intake?: IssueIntake | null;
+}
+
+/** An issue's intake verdict, as `auto_colonize.rs` reports it. `scan` is PromptDecode's result for the title, body and trusted comments. */
+export interface IssueIntake {
+  mode: "auto" | "review";
+  reason: string;
+  label: string;
+  approved_by?: string | null;
+  approval?: { by: string; at: string; via: "label" | "comment"; trust: string } | null;
+  scan?: IntakeScan | null;
+}
+
+export interface IntakeScan {
+  engine: string;
+  clean: boolean;
+  summary: string;
+  findings: { source: string; class: string; label: string; decoded: string | null }[];
+  more: number;
 }
 
 /** One issue Colonize drafted from free text, shown for a confirm or an edit before it is filed. */
