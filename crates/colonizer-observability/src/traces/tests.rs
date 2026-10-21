@@ -949,3 +949,19 @@ fn span_attributes_stay_under_tempos_two_kib() {
     let kept = serde_json::to_value(record.attributes[0].value.as_ref().unwrap()).unwrap();
     assert!(kept["stringValue"].as_str().unwrap().len() > 4000);
 }
+
+#[test]
+fn every_span_carries_the_colony_id() {
+    for (items, expected_id) in [(simple(), "c1a0dec0"), (subagents(), "5ab0a9e7")] {
+        let spans = spans(&items);
+        assert!(!spans.is_empty(), "expected at least one span");
+        for span in &spans {
+            assert_eq!(
+                attr(span, "colonizer.colony.id"),
+                Some(Value::from(expected_id)),
+                "span {} missing or wrong colonizer.colony.id",
+                span.name
+            );
+        }
+    }
+}

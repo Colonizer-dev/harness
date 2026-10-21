@@ -138,6 +138,28 @@ fn harness(root: &Root, message: &str) {
     append(&root.0.join("sessions/c0ffee12/harness.jsonl"), &line);
 }
 
+/// The message of [`harness_bulk`]'s line `i`: ~500 chars, so a request is bounded by its byte
+/// budget rather than its record count.
+fn bulk_message(tag: &str, i: usize) -> String {
+    format!("{tag}-{i:05}-{}", "x".repeat(500))
+}
+
+/// Appends `n` harness lines with distinct bulky messages, as one open file.
+fn harness_bulk(root: &Root, tag: &str, from: usize, n: usize) {
+    let path = root.0.join("sessions/c0ffee12/harness.jsonl");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+    for i in from..from + n {
+        let line = serde_json::json!({
+            "type": "harness_log",
+            "origin": "host",
+            "level": "info",
+            "message": bulk_message(tag, i),
+            "ts": chrono_now()
+        });
+        writeln!(f, "{line}").unwrap();
+    }
+}
+
 fn append(path: &Path, line: &serde_json::Value) {
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
     writeln!(f, "{line}").unwrap();
@@ -223,7 +245,9 @@ async fn batches_retry_with_backoff_commit_on_ack_and_resume_after_a_restart() {
 
     x.backoff = x.backoff.map(|(_, d)| (Instant::now() - d, d));
     let second = x.tick().await;
-    assert!(second >= Duration::from_millis(1500), "the delay doubles: {second:?}");
+    // Each retry doubles the previous jittered delay, then jitters it ±20 %.
+    let min_second = first.saturating_mul(2).mul_f64(0.8);
+    assert!(second >= min_second, "the delay doubles: {second:?} >= {min_second:?}");
     x.backoff = x.backoff.map(|(_, d)| (Instant::now() - d, d));
     assert_eq!(x.tick().await, TICK, "accepted");
     assert_eq!(collector.seen("/v1/logs").len(), 3, "the same batch, three times");
@@ -279,6 +303,52 @@ async fn a_refused_request_is_bisected_down_to_the_bad_record() {
         Some(size),
         "the cursor moves past the dropped record"
     );
+    assert_eq!(x.status.signals["logs"].records_dropped, 1, "counted on the signal too");
+}
+
+#[tokio::test]
+async fn a_413_halves_the_request_size_budget_for_that_signal() {
+    let root = root("cap-413");
+    // A backend that takes anything up to three quarters of the first request it sees: that one is
+    // too big whatever the record size, and everything smaller fits.
+    let limit = Arc::new(Mutex::new(0usize));
+    let set = limit.clone();
+    let collector = Collector::start(Arc::new(move |_, body: &[u8]| {
+        let mut limit = set.lock().unwrap();
+        if *limit == 0 {
+            *limit = body.len() * 3 / 4;
+        }
+        if body.len() > *limit {
+            (413, b"payload too large".to_vec())
+        } else {
+            (200, Vec::new())
+        }
+    }))
+    .await;
+    // 1100 bulky records: one request under the 1 MiB default, well over the halved budget.
+    harness_bulk(&root, "one", 0, 1100);
+    let path = contract(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK, "a 413 is bisected, not held");
+    assert_eq!(x.caps.shrunk_to("logs"), Some(crate::batch::DEFAULT_REQUEST_BYTES / 2));
+    assert_eq!(collector.seen("/v1/logs")[0].status, 413, "the whole batch went out first");
+
+    // The next read is batched within the halved budget: what one request held before now takes
+    // more than one, each within the halved cap, and every record still arrives.
+    harness_bulk(&root, "two", 0, 1100);
+    x.tick().await;
+    let logs = collector.seen("/v1/logs");
+    assert!(logs.len() > 3, "the halved budget split the batch: {} requests", logs.len());
+    for seen in &logs[1..] {
+        assert!(
+            seen.body.len() <= crate::batch::DEFAULT_REQUEST_BYTES / 2,
+            "a request after the 413 was {} bytes",
+            seen.body.len()
+        );
+    }
+    let mut expected: Vec<String> = (0..1100).map(|i| bulk_message("one", i)).collect();
+    expected.extend((0..1100).map(|i| bulk_message("two", i)));
+    assert_eq!(sorted(collector.accepted()), sorted(expected), "at least once, nothing lost");
 }
 
 #[tokio::test]
@@ -373,6 +443,34 @@ fn pushed_start_times(req: &ExportMetricsServiceRequest) -> Vec<u64> {
         }
     }
     out
+}
+
+#[tokio::test]
+async fn the_health_snapshot_counts_dropped_records_and_gaps_per_signal() {
+    let root = root("health-fields");
+    let collector = Collector::start(ok()).await;
+    append(
+        &root.0.join("sessions/c0ffee12/harness.jsonl"),
+        &serde_json::json!({"type": "harness_log", "level": "info", "message": "ancient", "ts": "2020-01-01T00:00:00Z"}),
+    );
+    harness(&root, "fresh");
+    let path = contract(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    x.write_status(true);
+    let status = std::fs::read_to_string(status_path(&root.0)).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let logs = &json["signals"]["logs"];
+    assert_eq!(
+        logs["records_dropped"].as_u64(),
+        Some(1),
+        "the line past the window: {status}"
+    );
+    assert_eq!(logs["gaps"].as_u64(), Some(1), "its one `export_gap` record: {status}");
+    assert_eq!(logs["backlog_bytes"].as_u64(), Some(0), "committed with the ack: {status}");
+    assert_eq!(json["signals"]["traces"]["records_dropped"].as_u64(), Some(0), "{status}");
+    assert_eq!(x.status.signals["logs"].records_dropped, 1);
+    assert_eq!(x.status.signals["logs"].gaps, 1);
 }
 
 #[tokio::test]
@@ -691,6 +789,10 @@ async fn a_401_keeps_every_record_and_delivers_them_after_the_key_is_fixed() {
     assert_eq!(json["endpoint"], collector.url.as_str());
     assert!(json["last_error"].as_str().unwrap().contains("401"), "{status}");
     assert!(json["backlog_bytes"].as_u64().unwrap() >= file_size(&root) - 1, "{status}");
+    assert!(
+        json["signals"]["logs"]["backlog_bytes"].as_u64().unwrap() >= file_size(&root) - 1,
+        "the per-signal share, while nothing is committed: {status}"
+    );
     assert!(!status.contains(&wrong), "the header value leaked: {status}");
 
     // The operator fixes the key: the mothership restarts the add-on (here mid-pause, without a

@@ -858,8 +858,8 @@ pub(crate) enum Plan {
     Skip(String),
 }
 
-pub(crate) fn plan_pr(facts: &PrFacts, guards: &Guards) -> Plan {
-    match merge_train::decide(facts, guards) {
+pub(crate) fn plan_pr(facts: &PrFacts, guards: &Guards, advisory: &[String]) -> Plan {
+    match merge_train::decide(facts, guards, advisory) {
         Decision::Merge => Plan::Merge,
         Decision::WaitingCi => Plan::WaitCi,
         Decision::NeedsRebase(nr) => {
@@ -1074,8 +1074,8 @@ impl<O: Ops> Paced<'_, O> {
 }
 
 impl<O: Ops> HeadOps for Paced<'_, O> {
-    async fn read_head(&self, repo: &str, sha: &str) -> Result<HeadReading, String> {
-        self.call(self.ops.read_head(repo, sha)).await
+    async fn read_head(&self, repo: &str, sha: &str, advisory: &[String]) -> Result<HeadReading, String> {
+        self.call(self.ops.read_head(repo, sha, advisory)).await
     }
     async fn merge_pinned(&self, repo: &str, number: u64, head: &str, title: &str) -> Result<Option<String>, String> {
         self.call(self.ops.merge_pinned(repo, number, head, title)).await
@@ -1431,6 +1431,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                         title: &subject,
                         delete_branch: !keep,
                         require_ci: local_why.is_none(),
+                        advisory: &[],
                     };
                     let paced = Paced {
                         ops: self.ops,
@@ -1672,11 +1673,11 @@ impl<'a, O: Ops> Engine<'a, O> {
             .as_ref()
             .filter(|_| matches!(ci, CiState::Failure | CiState::NoChecks))
         else {
-            return plan_pr(&r.facts, &self.guards);
+            return plan_pr(&r.facts, &self.guards, &[]);
         };
         let mut facts = r.facts.clone();
         facts.info.ci = CiState::Success;
-        match plan_pr(&facts, &self.guards) {
+        match plan_pr(&facts, &self.guards, &[]) {
             Plan::Merge => Plan::LocalMerge(why.clone()),
             other => other,
         }
@@ -2617,8 +2618,8 @@ impl GhOps<'_> {
 }
 
 impl HeadOps for GhOps<'_> {
-    async fn read_head(&self, repo: &str, sha: &str) -> Result<HeadReading, String> {
-        merge_head::GhHead { app: self.app }.read_head(repo, sha).await
+    async fn read_head(&self, repo: &str, sha: &str, advisory: &[String]) -> Result<HeadReading, String> {
+        merge_head::GhHead { app: self.app }.read_head(repo, sha, advisory).await
     }
     async fn merge_pinned(&self, repo: &str, number: u64, head: &str, title: &str) -> Result<Option<String>, String> {
         merge_head::GhHead { app: self.app }

@@ -43,6 +43,9 @@ export function askButtonShown(view: string): boolean {
   return view !== "chat";
 }
 
+/** Window event that opens the Ask panel with a question sent, from Spotlight's Ask row on a phone. */
+export const ASK_OPEN_EVENT = "colonizer:open-ask";
+
 /** What the panel attaches: the colony asked about, else the colony on screen, else nothing (the workspace goes along as the chat's scope). */
 export function askColony(override: Session | null | undefined, onScreen: Session | null): Session | null {
   return override === undefined ? onScreen : override;
@@ -111,6 +114,18 @@ export function AskProvider({ host, children }: { host: SpotlightHost; children:
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Spotlight's Ask row opens this panel on a phone, where the floating button is hidden.
+  const sendRef = useRef<(question: string) => Promise<void>>(async () => {});
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const text = (event as CustomEvent<{ text?: string }>).detail?.text;
+      setOpen(true);
+      if (text) void sendRef.current(text);
+    };
+    window.addEventListener(ASK_OPEN_EVENT, onOpen);
+    return () => window.removeEventListener(ASK_OPEN_EVENT, onOpen);
+  }, []);
+
   // On the Chat page the panel has nothing to add: it folds away, and comes back with its conversation.
   useEffect(() => {
     if (!askButtonShown(host.view)) setOpen(false);
@@ -160,6 +175,7 @@ export function AskProvider({ host, children }: { host: SpotlightHost; children:
     [api, override, patch, addApproval],
   );
 
+  sendRef.current = send;
   const stop = useCallback(() => abort.current?.abort(), []);
   const reset = useCallback(() => {
     abort.current?.abort();
@@ -198,7 +214,7 @@ export function AskProvider({ host, children }: { host: SpotlightHost; children:
   );
 }
 
-/** The round chat bubble that opens the panel: bottom right on a desktop, above the tab bar on a phone. */
+/** The round chat bubble that opens the panel: bottom right from `sm` up. On a phone the search button above the tab bar opens Spotlight, whose Ask row opens this panel. */
 function AskButton({ ref, open, onClick }: { ref: Ref<HTMLButtonElement>; open: boolean; onClick: () => void }): ReactElement {
   return (
     <button
@@ -212,9 +228,8 @@ function AskButton({ ref, open, onClick }: { ref: Ref<HTMLButtonElement>; open: 
       title={`Ask Colonizer · ${MOD}J`}
       data-ask-button
       className={cx(
-        "spot-fab fixed bottom-5 right-5 z-[60] grid size-12 cursor-pointer place-items-center rounded-full border-0 bg-accent text-on-accent transition-transform hover:scale-105 active:scale-95",
-        // On a phone it stacks over the search button, above the tab bar.
-        "max-sm:bottom-[calc(8.25rem+env(safe-area-inset-bottom))] max-sm:right-4",
+        // Hidden on a phone, where SpotlightFab is the one floating button.
+        "spot-fab fixed bottom-5 right-5 z-[60] hidden size-12 cursor-pointer place-items-center rounded-full border-0 bg-accent text-on-accent transition-transform hover:scale-105 active:scale-95 sm:grid",
         open && "ring-4 ring-accent/25",
       )}
     >

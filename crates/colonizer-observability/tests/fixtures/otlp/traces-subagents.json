@@ -27,6 +27,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"
@@ -72,6 +78,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
                 {
                   "key": "gen_ai.operation.name",
                   "value": {
@@ -125,6 +137,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"
@@ -171,6 +189,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -210,6 +234,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
                 {
                   "key": "gen_ai.operation.name",
                   "value": {
@@ -257,6 +287,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"
@@ -302,6 +338,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
                 {
                   "key": "colonizer.origin",
                   "value": {
@@ -367,6 +409,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"
@@ -413,6 +461,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -452,6 +506,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
                 {
                   "key": "colonizer.origin",
                   "value": {
@@ -517,6 +577,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "5ab0a9e7"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -524,12 +590,6 @@
                 },
                 {
                   "key": "gen_ai.agent.id",
-                  "value": {
-                    "stringValue": "5ab0a9e7"
-                  }
-                },
-                {
-                  "key": "colonizer.colony.id",
                   "value": {
                     "stringValue": "5ab0a9e7"
                   }

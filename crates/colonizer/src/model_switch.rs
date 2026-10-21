@@ -211,6 +211,24 @@ pub async fn hosts(State(app): State<Shared>) -> Json<Value> {
     Json(json!(crate::model_hosts::rankings(&app)))
 }
 
+/// The models enabled for `module` at `org` (`None` for the install): the saved list when the owner
+/// set one, else the models its roles are assigned to, deduplicated, empty ones dropped. The bool
+/// says whether a list was saved.
+fn enabled_for(store: &crate::enabled_models::Store, org: Option<&str>, module: &str, roles: &[Value]) -> (Vec<String>, bool) {
+    if let Some(list) = crate::enabled_models::saved_list(store, org, module) {
+        return (list.clone(), true);
+    }
+    let mut assigned: Vec<String> = Vec::new();
+    for role in roles {
+        if let Some(value) = role["value"].as_str().map(str::trim).filter(|v| !v.is_empty())
+            && !assigned.iter().any(|m| m == value)
+        {
+            assigned.push(value.to_string());
+        }
+    }
+    (assigned, false)
+}
+
 /// `GET /api/models/assignments`: the effective model per role for the install and for each org,
 /// with where each comes from; the agent modules with their roles and whether they can launch; and
 /// the models on offer with their health and quota.
@@ -219,9 +237,15 @@ pub async fn assignments(State(app): State<Shared>) -> ApiResult<Value> {
     let saved = read_orgs(&app)?;
     let schema_of = |module: &str| crate::modules::schema_for("agent", module, &app.agents);
     let install_module = modules.agent.provider.clone();
+    let enabled_store = crate::enabled_models::load(&app.cfg.config_dir)
+        .map_err(|e| config_unreadable(&crate::enabled_models::file(&app.cfg.config_dir), &e))?;
+    let install_roles = resolve_roles(&modules, None, &install_module, &schema_of(&install_module));
+    let (install_enabled, install_enabled_set) = enabled_for(&enabled_store, None, &install_module, &install_roles);
     let install = json!({
         "module": install_module,
-        "roles": resolve_roles(&modules, None, &install_module, &schema_of(&install_module)),
+        "roles": install_roles,
+        "enabled_models": install_enabled,
+        "enabled_models_set": install_enabled_set,
     });
     let mut org_rows = Vec::new();
     for org in listed_orgs(&app, &saved).await {
@@ -237,11 +261,15 @@ pub async fn assignments(State(app): State<Shared>) -> ApiResult<Value> {
         } else {
             "install"
         };
+        let roles = resolve_roles(&modules, Some(&settings), &module, &schema_of(&module));
+        let (enabled, set) = enabled_for(&enabled_store, Some(&org), &module, &roles);
         org_rows.push(json!({
             "org": org,
             "module": module,
             "module_source": module_source,
-            "roles": resolve_roles(&modules, Some(&settings), &module, &schema_of(&module)),
+            "roles": roles,
+            "enabled_models": enabled,
+            "enabled_models_set": set,
         }));
     }
     let module_rows: Vec<Value> = app
@@ -252,11 +280,16 @@ pub async fn assignments(State(app): State<Shared>) -> ApiResult<Value> {
                 .into_iter()
                 .map(|(role, title)| json!({"role": role, "title": title, "org_settable": ORG_ROLES.contains(&role.as_str())}))
                 .collect();
+            // Each module's install list, with the models its roles are assigned to as the default.
+            let assigned = resolve_roles(&modules, None, &agent.id, &schema_of(&agent.id));
+            let (enabled, set) = enabled_for(&enabled_store, None, &agent.id, &assigned);
             json!({
                 "id": agent.id,
                 "name": agent.name,
                 "roles": roles,
                 "blocked": launch_refusal(&app, &modules, agent),
+                "enabled_models": enabled,
+                "enabled_models_set": set,
             })
         })
         .collect();
@@ -294,6 +327,80 @@ pub struct SwitchRequest {
     /// (#1130). Without it the answer only reports them.
     #[serde(default)]
     clear_leftovers: bool,
+}
+
+#[derive(Deserialize)]
+pub struct EnabledRequest {
+    /// `install` or `org`.
+    scope: String,
+    /// The org, with `org` scope.
+    #[serde(default)]
+    org: Option<String>,
+    /// The agent module the list is for.
+    module: String,
+    /// The model ids the owner enabled. `null` clears a saved list: the module goes back to the
+    /// models its roles are assigned to.
+    #[serde(default)]
+    models: Option<Vec<String>>,
+}
+
+/// `PUT /api/models/enabled`: save (or clear) the models enabled for one agent module, install-wide
+/// or for one org. Answers the list now in force for that scope and module.
+pub async fn set_enabled(State(app): State<Shared>, Json(req): Json<EnabledRequest>) -> ApiResult<Value> {
+    if !app.agents.iter().any(|a| a.id == req.module) {
+        return Err(crate::sessions::unknown_agent_error(&req.module, &app.agents));
+    }
+    let org = match req.scope.as_str() {
+        "install" => None,
+        "org" => {
+            let org = req.org.as_deref().map(str::trim).unwrap_or_default();
+            if !orgs::valid_org(org) {
+                return Err(bad("an org's enabled models name a valid GitHub org"));
+            }
+            Some(org.to_string())
+        }
+        other => return Err(bad(&format!("scope {other:?} is not supported; use \"install\" or \"org\""))),
+    };
+    let models = match req.models.as_deref() {
+        Some(list) => Some(crate::enabled_models::validate(list).map_err(|e| bad(&format!("{e:#}")))?),
+        None => None,
+    };
+    let mut store = crate::enabled_models::load(&app.cfg.config_dir)
+        .map_err(|e| config_unreadable(&crate::enabled_models::file(&app.cfg.config_dir), &e))?;
+    match (&org, models) {
+        (None, Some(list)) => {
+            store.install.insert(req.module.clone(), list);
+        }
+        (None, None) => {
+            store.install.remove(&req.module);
+        }
+        (Some(org), Some(list)) => {
+            store.orgs.entry(org.clone()).or_default().insert(req.module.clone(), list);
+        }
+        (Some(org), None) => {
+            if let Some(per_module) = store.orgs.get_mut(org) {
+                per_module.remove(&req.module);
+                if per_module.is_empty() {
+                    store.orgs.remove(org);
+                }
+            }
+        }
+    }
+    crate::enabled_models::save(&app.cfg.config_dir, &store)
+        .map_err(|e| config_unreadable(&crate::enabled_models::file(&app.cfg.config_dir), &e))?;
+    // The answer is the list now in force for this scope: an org's, else the install's, else the
+    // assigned models.
+    let modules = app.modules.read().await.clone();
+    let schema = crate::modules::schema_for("agent", &req.module, &app.agents);
+    let roles = resolve_roles(&modules, None, &req.module, &schema);
+    let (enabled, set) = enabled_for(&store, org.as_deref(), &req.module, &roles);
+    Ok(Json(json!({
+        "scope": req.scope,
+        "org": org,
+        "module": req.module,
+        "enabled_models": enabled,
+        "enabled_models_set": set,
+    })))
 }
 
 fn bad(message: &str) -> crate::AppError {
@@ -777,6 +884,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/model-hosts", routing::get(hosts))
         .route("/api/models/assignments", routing::get(assignments))
+        .route("/api/models/enabled", routing::put(set_enabled))
         .route("/api/models/switch", routing::post(switch))
         .route("/api/models/plans", routing::get(plans::plans))
         .route("/api/models/profiles", routing::get(profiles::list).post(profiles::create))
@@ -804,6 +912,12 @@ const ACTIVITY: &[crate::activity::Rule] = &[
     crate::activity::rule(
         "POST",
         "/api/models/switch",
+        "settings.save",
+        crate::activity::Target::Fixed("models", "module:agent"),
+    ),
+    crate::activity::rule(
+        "PUT",
+        "/api/models/enabled",
         "settings.save",
         crate::activity::Target::Fixed("models", "module:agent"),
     ),

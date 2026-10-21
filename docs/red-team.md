@@ -103,7 +103,9 @@ audit run under that session's output — nothing carries a ledger between raids
 
 Pick it with the wizard's **Preset** choice, `"preset": "security"` on `POST /api/redteam/runs` or
 `POST /api/redteam/schedules`, or `colonizer redteam start owner/repo --preset security`
-([cli.md](cli.md#red-team-runs)). An unknown preset is a 400.
+([cli.md](cli.md#red-team-runs)). An unknown preset is a 400. The external scanners Shannon and Strix
+are security tools, so their runs are always security runs: the wizard hides the choice for them, an
+unset preset means security, and an explicit `"preset": "general"` is a 400 that says why.
 
 ### The pre-scan
 
@@ -218,8 +220,15 @@ figure) opens a three-step wizard scoped to that workspace:
 1. **Hunter.** A short "what is a red team" note, **Who hunts**, and the workspace's
    repositories (one run per repository; one that already has an active run is
    skipped). The **colony swarm** and **Shannon** can run; **Strix** appears as a
-   disabled card marked "Coming soon" (it reads "Installed · runs coming soon" once
-   its binary is installed), because no run drives its scans. A Shannon run is one
+   disabled card marked "Unavailable", with the reason its colony cannot run it under
+   the card (the probe's `colony_blocker`): its sandbox needs a Docker daemon, and colony
+   microVMs have none yet. A Strix run is one colony per repository that runs the pinned
+   PyPI wheel (`pipx install strix-agent==1.6.2`) in white-box mode on the checkout, and on
+   a declared staging URL when the owner gives one (`"staging_url"`, an https hostname
+   only; no IP, port, credentials or query). Its command caps the run at four hours and
+   $25 of model spend, and the mothership files the SARIF from the newest
+   `out/strix/strix_runs/<run>/findings.sarif`. A start is refused with that reason until
+   colonies ship a Docker daemon (`COLONY_HAS_DOCKER` in `hunters.rs`). A Shannon run is one
    colony per repository, so the swarm-size slider gives way to a note: the colony
    starts the repository's app locally inside its microVM, runs the pinned
    `npx @keygraph/shannon@3.3.0` command its brief carries, and leaves `report.sarif`
@@ -228,8 +237,8 @@ figure) opens a three-step wizard scoped to that workspace:
    hunter's, so it counts in the tally and reaches synthesis. The mothership never runs
    Shannon itself: the manifest stays a host-side stub and `hunters::scan` refuses it
    (see [security-hunters.md](security-hunters.md)). `POST /api/redteam/runs` with
-   `"hunter": "strix"` returns 400: *Strix cannot run as a red-team hunter in this
-   build yet*; an unknown hunter says to use `"swarm"` or `"shannon"`.
+   `"hunter": "strix"` returns 400 with the colony reason above; an unknown hunter says to use
+   `"swarm"`, `"shannon"` or `"strix"`.
 2. **Models.** A provider and model for the hunters and for their subagents, and the
    number of hunters per repository (1–8; hidden, and always one, for a Shannon run). They reach
    each hunter as `model_override` / `subagent_model_override` on `POST /api/sessions`.

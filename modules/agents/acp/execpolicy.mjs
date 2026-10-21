@@ -113,6 +113,7 @@ export function defaultPolicy() {
         id: 'secret-paths',
         decision: 'deny',
         reason: 'the command reaches a credential path the colony must not read',
+        guidance: 'do not read or write credential files; use the path policy to access placeholders instead, or ask the operator',
         touches: ['~/.ssh', '.env', '.env.*', '.envrc', '.npmrc', '.netrc', '.git-credentials', '.pypirc',
           '!*.example', '!*.sample', '!*.template', '!*.dist'],
       },
@@ -120,6 +121,7 @@ export function defaultPolicy() {
         id: 'script-egress',
         decision: 'deny',
         reason: 'the script this command runs talks to the network',
+        guidance: 'do not retry this command or a variant of it: use a network-free path (skip the download, use files already in the repo), leave the fetching to CI, or ask the operator; a repository can allow a pinned fetch script with a `fetches` entry in .colonizer/exec-policy.json',
         script: SCRIPT_EGRESS,
       },
       {
@@ -183,9 +185,12 @@ export function parsePolicy(input) {
     const rule = {
       id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : `rule-${i + 1}`,
       decision,
-      reason: typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason : 'the colony’s exec policy refuses this',
+      reason: typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason : 'the colony\'s exec policy refuses this',
       predicates: [],
     };
+    if (typeof raw.guidance === 'string' && raw.guidance.trim()) {
+      rule.guidance = raw.guidance.trim();
+    }
     const command = compileRegexes(raw.command);
     if (command) rule.predicates.push({ kind: 'command', res: command });
     const script = compileRegexes(raw.script);
@@ -210,7 +215,22 @@ export function parsePolicy(input) {
     // is dropped; a deliberate catch-all is `"command": "."` (or `""`).
     if (rule.predicates.length) rules.push(rule);
   }
-  return { rules };
+  const fetches = [];
+  if (Array.isArray(parsed.fetches)) {
+    for (const fetch of parsed.fetches) {
+      if (!fetch || typeof fetch !== 'object' || Array.isArray(fetch)) continue;
+      const script = fetch.script;
+      const hosts = fetch.hosts;
+      const verify = fetch.verify;
+      if (typeof script !== 'string' || !script || script.includes('..') ||
+          !Array.isArray(hosts) || !hosts.length || hosts.some((h) => typeof h !== 'string' || !h) ||
+          verify !== 'sha256') continue;
+      const sources = Array.isArray(fetch.sources) && fetch.sources.every((s) => typeof s === 'string' && s && !s.includes('..'))
+        ? fetch.sources : [];
+      fetches.push({ script, hosts: hosts.map((h) => h.toLowerCase()), sources, verify, trusted: false });
+    }
+  }
+  return { rules, fetches };
 }
 
 /**
@@ -250,10 +270,14 @@ function loadHostMounts(env, readFile) {
  * widen anything (and the layering would not let it anyway). A layer that does not parse is
  * dropped with a warning, never fatal: the default keeps enforcing. `hostMounts` (the writable
  * bind list, or null when unknown) rides on the result for [`evaluateExecPolicy`] to read.
+ * Fetches are honored only from the repo layer and only when the policy file bytes match the
+ * base commit (verified via tracked_scripts).
  */
 export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFile = readTextCapped } = {}) {
   const layers = [{ name: 'default', rules: parsePolicy({ rules: defaultPolicy().rules }).rules }];
   const warnings = [];
+  let repoFetches = [];
+  const tracked = loadTrackedScripts(env, readFile);
   const add = (name, raw) => {
     const policy = parsePolicy(raw);
     if (!policy) {
@@ -261,6 +285,15 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
       return;
     }
     layers.push({ name, rules: policy.rules });
+    // Fetches are trusted only from the repo layer, and only when the file's bytes match the base commit.
+    if (name === 'repo' && policy.fetches?.length) {
+      const repoPath = join(cwd, EXEC_POLICY_REPO_FILE);
+      if (isTrackedScript(repoPath, raw, cwd, tracked)) {
+        repoFetches = policy.fetches.map((f) => ({ ...f, trusted: true }));
+      } else if (tracked?.size) {
+        warnings.push('exec policy repo file has a fetches entry but its bytes do not match the base commit; fetches are ignored');
+      }
+    }
   };
   if (env.COLONIZER_EXEC_POLICY) add('install', env.COLONIZER_EXEC_POLICY);
   if (env.COLONIZER_EXEC_POLICY_ORG) add('org', env.COLONIZER_EXEC_POLICY_ORG);
@@ -269,8 +302,9 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
   return {
     layers,
     warnings,
+    fetches: repoFetches,
     hostMounts: loadHostMounts(env, readFile),
-    trackedScripts: loadTrackedScripts(env, readFile),
+    trackedScripts: tracked,
   };
 }
 
@@ -403,11 +437,12 @@ export function execPolicyTargets(toolName, toolInput) {
  */
 export function evaluateExecPolicy(policy, command, opts = {}) {
   if (!policy || typeof command !== 'string' || !command) return null;
-  const ctx = buildContext(command, opts, policy.hostMounts ?? null, policy.trackedScripts ?? null, opts.scriptBody);
+  const { cwd = process.cwd(), readFile = readScriptFile } = opts;
+  const ctx = buildContext(command, { ...opts, cwd, readFile }, policy.hostMounts ?? null, policy.trackedScripts ?? null, opts.scriptBody);
   let best = null;
   for (const layer of policy.layers) {
     for (const rule of layer.rules) {
-      if (!ruleMatches(rule, ctx, layer.name)) continue;
+      if (!ruleMatches(rule, ctx, layer.name, policy.fetches ?? [])) continue;
       // A `writes_outside` rule reports WHY: the specific path classification the context found (a
       // read-only mount, the checkout's .git, a host-backed mount), falling back to the rule's own
       // reason for the plain strict case (a VM-local write, which no single path names).
@@ -415,6 +450,7 @@ export function evaluateExecPolicy(policy, command, opts = {}) {
         : rule.writes === 'outside' ? ctx.writeReason ?? rule.reason
         : rule.reason;
       const hit = { decision: rule.decision, rule: rule.id, layer: layer.name, reason };
+      if (rule.guidance) hit.guidance = rule.guidance;
       // A `touches` rule names the path it matched, as the command spelled it, so the boundary event
       // reports the refused file and not the first path-looking word (`cd /workspace && cat .env`
       // refuses `.env`, not the workspace root the watchdog would then see every call reach).
@@ -427,9 +463,14 @@ export function evaluateExecPolicy(policy, command, opts = {}) {
   return best;
 }
 
-/** The reason a decision carries, naming the rule and its layer. */
+/** The reason a decision carries, naming the rule and its layer, and guidance for denies. */
 export function execPolicyReason(hit) {
-  return `exec policy rule \`${hit.rule}\` (${hit.layer}): ${hit.reason}`;
+  const base = `exec policy rule \`${hit.rule}\` (${hit.layer}): ${hit.reason}`;
+  if (hit.decision === 'deny') {
+    const guidance = hit.guidance || 'do not retry the same command or a variant; take another path or ask the operator';
+    return `${base}. ${guidance}`;
+  }
+  return base;
 }
 
 /** A command on one line, capped, for the log line and the question text. */
@@ -493,10 +534,77 @@ export function createExecAllowCache() {
   };
 }
 
+// --- fetches: exemptions from script-egress -------------------------------------------
+
+/** A URL's host, lowercased, or null if it is not a simple hostname (e.g., built from a variable). */
+function urlHost(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** URLs appearing in text as http(s) calls: curl, wget, requests.get, etc. */
+function urlsInScript(text) {
+  const urls = [];
+  // http(s) URLs, captured by standard web protocols
+  const urlPattern = /https?:\/\/[^\s;|&<>"']+/g;
+  let match;
+  while ((match = urlPattern.exec(text)) !== null) {
+    urls.push(match[0]);
+  }
+  return urls;
+}
+
+/** True when text contains a sha256 hash check (sha256sum, shasum -a 256, openssl sha256, etc.). */
+function hasSha256Check(text) {
+  // Common sha256 verification patterns: sha256sum, shasum -a 256, openssl sha256, createHash('sha256'), hashlib.sha256
+  const patterns = [
+    /\bsha256sum\b/,
+    /\bshasum\s+(?:-a\s*)?256/,
+    /\bopenssl\s+sha256/,
+    /createHash\s*\(\s*['"]sha256['"]\s*\)/,
+    /hashlib\.sha256/,
+  ];
+  return patterns.some((p) => p.test(text));
+}
+
+/** True when a fetch entry exempts a script from script-egress. */
+function isFetchExempt(script, path, cwd, fetches, readFile) {
+  if (!fetches?.length) return false;
+  // Fetch entries are repo-relative paths; resolve and compare
+  const repoRel = posix.relative(posix.normalize(cwd), path);
+  if (repoRel.startsWith('..') || repoRel.startsWith('/')) return false;
+  const fetch = fetches.find((f) => f.script === repoRel && f.trusted);
+  if (!fetch) return false;
+  // Check all URLs in the script and sources are in the allowed hosts
+  const scriptUrls = urlsInScript(script);
+  if (!scriptUrls.every((url) => {
+    const host = urlHost(url);
+    return host && fetch.hosts.includes(host.toLowerCase());
+  })) return false;
+  // Check all sources and their URLs
+  for (const source of fetch.sources) {
+    const sourcePath = source.startsWith('/') ? source : join(cwd, source);
+    const sourceText = readFile(sourcePath);
+    if (!sourceText) return false; // source not readable → cannot verify
+    const sourceUrls = urlsInScript(sourceText);
+    if (!sourceUrls.every((url) => {
+      const host = urlHost(url);
+      return host && fetch.hosts.includes(host.toLowerCase());
+    })) return false;
+  }
+  // Check sha256 verification is present
+  if (!hasSha256Check(script)) return false;
+  return true;
+}
+
 // --- matching ------------------------------------------------------------------
 
 /** One rule: every predicate present must hold. */
-function ruleMatches(rule, ctx, layer) {
+function ruleMatches(rule, ctx, layer, fetches = []) {
   for (const p of rule.predicates) {
     switch (p.kind) {
       case 'command':
@@ -508,7 +616,11 @@ function ruleMatches(rule, ctx, layer) {
         // The repository's own scripts, byte for byte as the base commit has them, are not the
         // colony's to answer for (#1239): the default layer leaves them to the VM's network
         // policy. A layer an operator or the repository adds still sees them.
-        const scripts = layer === 'default' ? ctx.scripts.filter((s) => !s.tracked) : ctx.scripts;
+        // Fetches exempt their listed scripts from script-egress in the default layer only.
+        let scripts = layer === 'default' ? ctx.scripts.filter((s) => !s.tracked) : ctx.scripts;
+        if (layer === 'default' && rule.id === 'script-egress') {
+          scripts = scripts.filter((s) => !isFetchExempt(s.text, s.path, ctx.cwd, fetches, ctx.readFile));
+        }
         if (!scripts.some((s) => p.res.some((re) => re.test(s.text)))) return false;
         break;
       }
@@ -980,6 +1092,8 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     tokens: [...tokens],
     spelled,
     scripts,
+    cwd,
+    readFile,
     writesOutside: outside !== null,
     writesOutsideAny: strict !== null,
     // A write into the checkout's `.git`, named or not: a classified target under it, or a `git

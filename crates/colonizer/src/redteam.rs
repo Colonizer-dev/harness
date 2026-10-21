@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path as FsPath, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -41,23 +41,34 @@ const DEFAULT_MODULE: &str = "general";
 /// The modules a run may name. Only the built-in one exists until module manifests land (#216); an
 /// unknown name is refused rather than run as if it were the default.
 const KNOWN_MODULES: &[&str] = &[DEFAULT_MODULE];
-/// Who hunts: the built-in swarm of colony hunters (many briefs, many colonies), or the single named
-/// external hunter Shannon (hunters.rs), whose one colony runs `npx @keygraph/shannon` in its microVM
-/// and leaves a SARIF report for the host to read back ([`ingest_shannon`]). Strix is still not driven
-/// by a run, so naming it is refused with the reason rather than quietly running the swarm instead.
+/// Who hunts: the built-in swarm of colony hunters (many briefs, many colonies), or one named external
+/// scanner (hunters.rs): Shannon, whose one colony runs `npx @keygraph/shannon` in its microVM, or
+/// Strix, whose one colony runs its pinned wheel against the checkout. Each leaves a SARIF report the
+/// host reads back ([`ingest_external`]). Strix is refused while colonies have no Docker daemon
+/// ([`hunter_gate`]), with the reason.
 const DEFAULT_HUNTER: &str = "swarm";
-/// The one external hunter a run drives today (see [`DEFAULT_HUNTER`]).
+/// The external hunter Shannon (see [`DEFAULT_HUNTER`]).
 const SHANNON: &str = "shannon";
+/// The external hunter Strix (see [`DEFAULT_HUNTER`]).
+const STRIX: &str = "strix";
+/// The external hunters: one colony each, a security scanner, so they run the security preset.
+const EXTERNAL_HUNTERS: [&str; 2] = [SHANNON, STRIX];
 /// Where a Shannon colony writes its report in the guest: `/harness/out` is the session's `out/` on
 /// the host, so the host reads `<session_dir>/out/shannon`. The report, checkout and target URL follow.
 const SHANNON_OUT: &str = "/harness/out/shannon";
 const SHANNON_REPORT: &str = "report.sarif";
 const SHANNON_REPO: &str = "/workspace";
 const SHANNON_TARGET: &str = "<local-url>";
-/// The most a Shannon report may be read into memory; a larger one is refused, not parsed.
-const SHANNON_REPORT_CAP: u64 = 8 * 1024 * 1024;
+/// Where a Strix colony runs it: `cd` into `/harness/out/strix` first, so Strix writes its run under
+/// `strix_runs/<run-name>/` there, and the host reads `<session_dir>/out/strix/strix_runs/*/`.
+const STRIX_OUT: &str = "/harness/out/strix";
+const STRIX_RUNS: &str = "strix_runs";
+/// The SARIF every Strix run writes beside its own JSON, the report the host files.
+const STRIX_REPORT: &str = "findings.sarif";
+/// The most an external report may be read into memory; a larger one is refused, not parsed.
+const EXTERNAL_REPORT_CAP: u64 = 8 * 1024 * 1024;
 /// The most results one report may ingest; each costs a host-side model call, so a huge report is cut off.
-const MAX_SHANNON_FINDINGS: usize = findings::MAX_PER_COLONY * 2;
+const MAX_EXTERNAL_FINDINGS: usize = findings::MAX_PER_COLONY * 2;
 /// The vendored security-audit skill pack (docs/skill-packs.md), off by default. When an org has
 /// switched it on, a Security preset hunter is briefed to run the skill's audit workflow on its focus
 /// instead of an open-ended hunt; the brief says so, and nothing loads the pack for the run.
@@ -314,6 +325,10 @@ pub struct RedTeamRun {
     /// Who cancelled the run (`you`, the owner) and when; `None` unless it was cancelled.
     pub cancelled_by: Option<String>,
     pub cancelled_at: Option<DateTime<Utc>>,
+    /// The staging deployment the owner declared for a Strix run, the only host besides the checkout
+    /// Strix may test; `None` for every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_url: Option<String>,
 }
 
 impl Default for RedTeamRun {
@@ -341,6 +356,7 @@ impl Default for RedTeamRun {
             prescan: None,
             cancelled_by: None,
             cancelled_at: None,
+            staging_url: None,
         }
     }
 }
@@ -649,8 +665,80 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead], securit
     })
 }
 
+/// Whether a run's hunter is one of the external scanners (one colony, a SARIF report read back).
+fn is_external(hunter: &str) -> bool {
+    EXTERNAL_HUNTERS.contains(&hunter)
+}
+
+/// The focus a run's one external colony is recorded with.
+fn external_focus(hunter: &str) -> String {
+    match hunter {
+        STRIX => "source and staging scan".to_string(),
+        _ => "web-app and API scan".to_string(),
+    }
+}
+
+/// The brief an external hunter's single colony gets, by hunter. `None` if its manifest is gone or its
+/// command will not render.
+fn external_brief(run: &RedTeamRun) -> Option<Value> {
+    match run.hunter.as_str() {
+        SHANNON => shannon_brief(run),
+        STRIX => strix_brief(run),
+        _ => None,
+    }
+}
+
+/// The brief the single Strix colony of a `hunter: "strix"` run gets: Strix runs in white-box mode on
+/// the checkout, and on the owner's declared staging URL when there is one, capped at four hours and
+/// $25 of model spend by the command itself. Its report stays under [`STRIX_OUT`] for
+/// [`ingest_external`]. The host never runs Strix: only the command is written here.
+fn strix_brief(run: &RedTeamRun) -> Option<Value> {
+    let m = crate::hunters::find(STRIX)?;
+    let scope = run.staging_url.as_deref().map(|url| format!("-t {url}")).unwrap_or_default();
+    let command = crate::hunters::colony_command(&m, &scope, SHANNON_REPO, STRIX_OUT).ok()?;
+    let scope_text = match &run.staging_url {
+        Some(url) => format!(
+            "The repository owner declared one staging deployment for this run: {url}. Strix may test it, and nothing outside the repository and that deployment."
+        ),
+        None => "There is no staging deployment for this run, so the scan is the repository alone.".to_string(),
+    };
+    let instructions = format!(
+        "You are a red-team security hunter raiding {} with Strix, an open-source AI pentesting agent.\n\
+         \n\
+         The repository is checked out at {SHANNON_REPO}. Install Strix and run it in white-box mode on that\n\
+         checkout with exactly this command line. It pins the version, writes Strix's run under {STRIX_OUT},\n\
+         and holds the whole run to four hours and $25 of model spend:\n\
+         \n\
+         {command}\n\
+         \n\
+         {scope_text}\n\
+         \n\
+         Strix exits 0 when it finds nothing and 2 when it reports vulnerabilities; both are a finished scan.\n\
+         Strix may write into {SHANNON_REPO}: do not commit, push or open anything, and before your session ends\n\
+         discard any change the scan made to the checkout. Do NOT file findings yourself: report nothing with\n\
+         the findings tool. The mothership reads {STRIX_REPORT} from {STRIX_OUT}/{STRIX_RUNS}/<run>/ after your\n\
+         session ends and files each finding, validated on its own. Attack only this repository and the staging\n\
+         deployment named above, if there is one: never a production environment, an external host or a\n\
+         third-party service, and never use real credentials.\n",
+        run.repo,
+    );
+    Some(json!({
+        "repo": run.repo,
+        "issue": null,
+        "title": format!("Red-team {} scan: {}", m.name, run.repo),
+        "instructions": instructions,
+        "autopilot": false,
+        "allow_duplicate": true,
+        "model_tier": null,
+        "model_override": run.model,
+        "subagent_model_override": run.subagent_model,
+        "after": null,
+        "origin": REDTEAM_ORIGIN,
+    }))
+}
+
 /// The brief the single hunter colony of a `hunter: "shannon"` run gets: start the repository's app
-/// locally inside the microVM, run Shannon against it, and leave the SARIF where [`ingest_shannon`]
+/// locally inside the microVM, run Shannon against it, and leave the SARIF where [`ingest_external`]
 /// reads it. `None` if the manifest is gone or its template will not render. The host never runs
 /// Shannon: only the command that fetches it is written here, never its code.
 fn shannon_brief(run: &RedTeamRun) -> Option<Value> {
@@ -904,10 +992,10 @@ async fn launch_hunter(app: Shared, brief: Value) -> Result<Session, String> {
 /// hunter and aborts, and the terminal-state guard refuses the attach write.
 pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
     let id = run.id.clone();
-    // A Shannon run launches exactly one colony whatever swarm size it was created with: Shannon is
-    // a single scanner, not a swarm of hunters.
-    let shannon = run.hunter == SHANNON;
-    let n = if shannon { 1 } else { run.swarm_size };
+    // An external run (Shannon, Strix) launches exactly one colony whatever swarm size it was created
+    // with: each is a single scanner, not a swarm of hunters.
+    let external = is_external(&run.hunter);
+    let n = if external { 1 } else { run.swarm_size };
     let flipped = app
         .redteam
         .update(&id, |r| {
@@ -938,7 +1026,7 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
     };
     // A security run's pre-scan, once, before the first hunter exists: its leads are dealt out with
     // the briefs, and it is recorded on the run (the report's pre-scan and checklist sections).
-    if run.preset == Preset::Security && run.prescan.is_none() {
+    if run.preset == Preset::Security && run.prescan.is_none() && !external {
         let providers: Vec<String> = app.providers().into_iter().map(|p| p.id).collect();
         let gitleaks = crate::prescan::host_gitleaks();
         let report = crate::prescan::run_on_mirror(&app.bare_repo(&run.repo), gitleaks.as_deref(), &providers).await;
@@ -969,11 +1057,11 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
         {
             break;
         }
-        let brief = if shannon {
-            match shannon_brief(run) {
+        let brief = if external {
+            match external_brief(run) {
                 Some(brief) => brief,
                 None => {
-                    tracing::warn!(id = %run.id, "redteam: run {}: no Shannon command renders", run.id);
+                    tracing::warn!(id = %run.id, "redteam: run {}: no {} command renders", run.id, run.hunter);
                     break;
                 }
             }
@@ -988,18 +1076,18 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
                 hunters.push(Hunter {
                     session_id: session.id,
                     title: session.issue_title,
-                    module: if shannon {
-                        SHANNON.to_string()
+                    module: if external {
+                        run.hunter.clone()
                     } else {
                         run.modules[i % run.modules.len()].clone()
                     },
-                    version: if shannon {
-                        crate::hunters::find(SHANNON).map(|m| m.pinned_version.to_string())
+                    version: if external {
+                        crate::hunters::find(&run.hunter).map(|m| m.pinned_version.to_string())
                     } else {
                         None
                     },
-                    focus: if shannon {
-                        "web-app and API scan".to_string()
+                    focus: if external {
+                        external_focus(&run.hunter)
                     } else {
                         names[i % names.len()].to_string()
                     },
@@ -1047,13 +1135,50 @@ fn is_ended(status: SessionStatus) -> bool {
     )
 }
 
-/// Reads the report each ended Shannon colony left under its out dir and files what it holds, once
+/// Where an external hunter's report sits under a colony's `out/` dir: Shannon's fixed file, or the
+/// newest Strix run's SARIF. `None` when there is no run to read.
+fn external_report(hunter: &str, out: &FsPath) -> Option<PathBuf> {
+    match hunter {
+        SHANNON => Some(out.join("shannon").join(SHANNON_REPORT)),
+        STRIX => newest_strix_report(&out.join("strix").join(STRIX_RUNS)),
+        _ => None,
+    }
+}
+
+/// The SARIF of the newest Strix run directory under `runs` (its mtime decides). Entries are read
+/// without following links, so a planted link cannot point the host at a file it should not read.
+fn newest_strix_report(runs: &FsPath) -> Option<PathBuf> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(runs).ok()?.flatten() {
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let report = entry.path().join(STRIX_REPORT);
+        let Ok(report_meta) = std::fs::symlink_metadata(&report) else {
+            continue;
+        };
+        if !report_meta.is_file() {
+            continue;
+        }
+        let modified = report_meta.modified().unwrap_or(UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(when, _)| modified > *when) {
+            best = Some((modified, report));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Reads the report each ended external colony left under its out dir and files what it holds, once
 /// per hunter: the same SARIF parser `hunters::scan` uses, then each finding through
 /// [`crate::events::file_finding`] — orchestrator validation, the per-colony cap and issue filing —
 /// so Shannon's findings land in the hunter's ledger like any the colony reported itself. Runs in the
 /// tick before the counts and the `done` transition; a report that is missing or unreadable is no
 /// findings, and either way the hunter is marked ingested so this runs once.
-async fn ingest_shannon(app: &Shared, run: &mut RedTeamRun) {
+async fn ingest_external(app: &Shared, run: &mut RedTeamRun) {
+    let kind = run.hunter.clone();
     for hunter in run.hunters.iter_mut() {
         if hunter.ingested {
             continue;
@@ -1064,15 +1189,17 @@ async fn ingest_shannon(app: &Shared, run: &mut RedTeamRun) {
         }
         hunter.ingested = true;
         let id = hunter.session_id.clone();
-        let path = app.session_dir(&id).join("out/shannon").join(SHANNON_REPORT);
+        let Some(path) = external_report(&kind, &app.session_dir(&id).join("out")) else {
+            continue;
+        };
         // Read the way `pr.md` is: one `O_NOFOLLOW` handle refusing a symlink, non-regular file or file
-        // past [`SHANNON_REPORT_CAP`], so a link in `out/shannon` cannot point the host at a host file.
-        let artifact = match crate::github::read_regular_file(&path, SHANNON_REPORT_CAP) {
+        // past [`EXTERNAL_REPORT_CAP`], so a link in the out dir cannot point the host at a host file.
+        let artifact = match crate::github::read_regular_file(&path, EXTERNAL_REPORT_CAP) {
             Ok(text) => text,
             Err(e) => {
                 let missing = e.kind() == std::io::ErrorKind::NotFound;
                 let level = if missing { "info" } else { "warn" };
-                app.session_log(&id, level, format!("shannon: no report read from {}: {e}", path.display()))
+                app.session_log(&id, level, format!("{kind}: no report read from {}: {e}", path.display()))
                     .await;
                 continue;
             }
@@ -1083,7 +1210,7 @@ async fn ingest_shannon(app: &Shared, run: &mut RedTeamRun) {
                 app.session_log(
                     &id,
                     "warn",
-                    format!("shannon: could not parse {} as SARIF: {e:#}", path.display()),
+                    format!("{kind}: could not parse {} as SARIF: {e:#}", path.display()),
                 )
                 .await;
                 continue;
@@ -1092,12 +1219,12 @@ async fn ingest_shannon(app: &Shared, run: &mut RedTeamRun) {
         // Each finding costs a host-side model call to validate: cap the batch so a report with
         // hundreds of results cannot stall the tick, and say what was dropped.
         let total = findings.len();
-        if total > MAX_SHANNON_FINDINGS {
-            let note = format!("shannon: {total} findings, {MAX_SHANNON_FINDINGS} ingested");
+        if total > MAX_EXTERNAL_FINDINGS {
+            let note = format!("{kind}: {total} findings, {MAX_EXTERNAL_FINDINGS} ingested");
             app.session_log(&id, "warn", note).await;
         }
         let rt = app.runtime(&id).await;
-        for finding in findings.into_iter().take(MAX_SHANNON_FINDINGS) {
+        for finding in findings.into_iter().take(MAX_EXTERNAL_FINDINGS) {
             // Shaped as the raw `finding` event an agentd runner emits, which `findings::parse` reads.
             let event = json!({"type": "finding", "title": finding.title, "body": finding.body, "evidence": finding.evidence});
             crate::events::file_finding(app.clone(), id.clone(), rt.clone(), event).await;
@@ -1684,8 +1811,8 @@ async fn one_step(app: &Shared, id: &str) {
         // An external hunter (Shannon) writes its report for the host to read rather than filing
         // itself: ingest it before the state machine settles and before the counts, so a run that
         // lands `done` this tick counts what was found.
-        if run.hunter == SHANNON {
-            ingest_shannon(app, &mut run).await;
+        if is_external(&run.hunter) {
+            ingest_external(app, &mut run).await;
         }
         advance_state(&mut run, &sessions);
     }
@@ -1751,36 +1878,111 @@ pub struct NewRedTeamRun {
     /// run `armed`; the tick launches it the next time the nest is empty.
     #[serde(default)]
     arm: Option<bool>,
-    /// `general` (unset) or `security`: which focus list and briefing the hunters get.
+    /// `general` (unset) or `security`: which focus list and briefing the hunters get. An external
+    /// scanner (Shannon, Strix) always runs `security`; naming `general` with one is refused.
     #[serde(default)]
     preset: Option<String>,
+    /// Strix only: the staging deployment the owner declares, the one host Strix may test besides the
+    /// checkout. An https URL with a plain hostname; see [`valid_staging_url`].
+    #[serde(default)]
+    staging_url: Option<String>,
 }
 
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -> ApiResult<RedTeamRun> {
     Ok(Json(start(&app, req, None).await?))
 }
 
-/// Which hunter a request names, checked: the swarm runs, and so does Shannon (one colony the host
-/// reads a SARIF report back from). Strix is refused with why; anything else is unknown.
+/// Which hunter a request names, checked: the swarm, and the external scanners Shannon and Strix (one
+/// colony each, a SARIF report read back). Whether a named external hunter can start here is
+/// [`hunter_gate`]'s question, not this one's; anything else is unknown.
 fn check_hunter(raw: Option<&str>) -> Result<String, String> {
     let hunter = raw.map(str::trim).filter(|h| !h.is_empty()).unwrap_or(DEFAULT_HUNTER);
-    if hunter == DEFAULT_HUNTER || hunter == SHANNON {
+    if hunter == DEFAULT_HUNTER || is_external(hunter) {
         return Ok(hunter.to_string());
     }
-    match crate::hunters::builtin().into_iter().find(|m| m.id == hunter) {
-        Some(m) => Err(format!(
-            "{} cannot run as a red-team hunter in this build yet: its scans are not driven by runs (install and probe it at /api/hunters/{}); use the swarm",
-            m.name, m.id
-        )),
-        None => Err(format!("unknown hunter {hunter:?}; use \"swarm\" or \"shannon\"")),
+    Err(format!("unknown hunter {hunter:?}; use \"swarm\", \"shannon\" or \"strix\""))
+}
+
+/// Whether a checked hunter can start in a colony now, or the reason it cannot. Strix needs a Docker
+/// daemon for its sandbox, which colonies do not have ([`crate::hunters::colony_blocker`]); the swarm
+/// and Shannon are not gated here.
+fn hunter_gate(hunter: &str) -> Result<(), String> {
+    if hunter != STRIX {
+        return Ok(());
     }
+    match crate::hunters::find(STRIX) {
+        Some(m) => crate::hunters::colony_blocker(&m).map_or(Ok(()), Err),
+        None => Err("Strix is not in this build's hunter manifests".to_string()),
+    }
+}
+
+/// The preset a run's hunter runs. The swarm keeps the operator's choice. An external scanner is a
+/// security tool, so it always runs `security` — and asking it for `general` (the bug hunt) is refused
+/// with why, rather than quietly changed. Unset means security for an external hunter.
+fn resolve_preset(hunter: &str, raw: Option<&str>) -> Result<Preset, String> {
+    let preset = Preset::parse(raw)?;
+    if !is_external(hunter) {
+        return Ok(preset);
+    }
+    if raw.map(str::trim) == Some("general") {
+        return Err(format!(
+            "{hunter} is a security scanner, so its run uses the security preset; the general bug hunt is not available with {hunter}. Send \"preset\": \"security\", or leave the preset unset"
+        ));
+    }
+    Ok(Preset::Security)
+}
+
+/// The staging URL a request declares: only Strix takes one, and a value must pass [`valid_staging_url`].
+fn staging_for(hunter: &str, raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(url) = raw.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    if hunter != STRIX {
+        return Err(format!("a staging URL is only for Strix; {hunter} takes none"));
+    }
+    valid_staging_url(url).map(Some)
+}
+
+/// The one staging URL Strix may test, the owner's declared deployment: an `https://` URL whose host
+/// is a plain lowercase hostname with a dot (no IP address, port, credentials, query or fragment), and
+/// whose path uses only unreserved characters. It is written into a shell line in the colony, so
+/// anything beyond that is refused, not escaped. The scan never reaches another host.
+fn valid_staging_url(raw: &str) -> Result<String, String> {
+    const REFUSED: &str = "the staging URL must be https://<a plain hostname with a dot>[/path] — no IP address, port, credentials, query or fragment";
+    let rest = raw.strip_prefix("https://").ok_or(REFUSED)?;
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let host = host.to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    let plain = labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        // All-numeric labels are an IPv4 address, which is a scan range rather than a declared host.
+        && !labels.iter().all(|label| label.bytes().all(|b| b.is_ascii_digit()));
+    let path_ok = path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'~' | b'-'))
+        && !path.contains("..");
+    if !plain || !path_ok {
+        return Err(REFUSED.to_string());
+    }
+    Ok(format!("https://{host}{path}"))
 }
 
 /// The one way a run starts — the handler and the scheduler both come through here, so a scheduled
 /// run gets exactly the validation and gate a manual one does.
 pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<String>) -> Result<RedTeamRun, crate::AppError> {
     let hunter = check_hunter(req.hunter.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
-    let preset = Preset::parse(req.preset.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    hunter_gate(&hunter).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    let preset = resolve_preset(&hunter, req.preset.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    let staging_url = staging_for(&hunter, req.staging_url.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
     let model = crate::sessions::launch_model(app, req.model.as_deref(), "model")?;
     let subagent_model = crate::sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
     let repo = req.repo.trim().to_string();
@@ -1855,6 +2057,7 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
             prescan: None,
             cancelled_by: None,
             cancelled_at: None,
+            staging_url,
         };
         runs.push(run.clone());
         run
@@ -2119,7 +2322,8 @@ fn schedule_from(
         }
     }
     let hunter = check_hunter(req.hunter.as_deref()).map_err(|e| bad(&e))?;
-    let preset = Preset::parse(req.preset.as_deref()).map_err(|e| bad(&e))?;
+    hunter_gate(&hunter).map_err(|e| bad(&e))?;
+    let preset = resolve_preset(&hunter, req.preset.as_deref()).map_err(|e| bad(&e))?;
     let swarm_size = req.swarm_size.unwrap_or(DEFAULT_SWARM);
     if !(1..=MAX_SWARM).contains(&swarm_size) {
         return Err(bad(&format!("swarm_size must be 1..={MAX_SWARM}, got {swarm_size}")));
@@ -2227,6 +2431,7 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
                 autofix: Some(schedule.autofix),
                 arm: Some(true),
                 preset: Some(schedule.preset.as_str().to_string()),
+                staging_url: None,
             };
             match start(app, req, Some(schedule.id.clone())).await {
                 Ok(run) => notes.push(format!("{repo}: started {}", run.id)),
@@ -2290,7 +2495,6 @@ mod tests {
     use crate::tests::test_app;
     use chrono::{Duration as ChronoDuration, TimeZone};
     use std::os::unix::fs::PermissionsExt;
-
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("colonizer-redteam-{}", short_id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
@@ -2316,6 +2520,7 @@ mod tests {
             autofix: None,
             arm: Some(arm),
             preset: None,
+            staging_url: None,
         }
     }
 
@@ -3110,6 +3315,7 @@ mod tests {
     fn the_run_serialises_under_the_fixed_contract_shape() {
         let run = RedTeamRun {
             id: "rt_ab12cd34".into(),
+            staging_url: None,
             repo: "acme/repo".into(),
             org: "acme".into(),
             state: RedTeamState::Armed,
@@ -3362,15 +3568,258 @@ mod tests {
     }
 
     #[test]
-    fn external_hunters_are_refused_with_the_reason_and_the_swarm_runs() {
+    fn the_external_hunters_are_named_and_the_swarm_runs() {
         assert_eq!(check_hunter(None).unwrap(), "swarm");
         assert_eq!(check_hunter(Some(" swarm ")).unwrap(), "swarm");
-        // Shannon runs: a run drives its colony, and the host files the SARIF it writes.
+        // The external scanners: one colony each, a SARIF report read back.
         assert_eq!(check_hunter(Some(" shannon ")).unwrap(), "shannon");
-        let strix = check_hunter(Some("strix")).unwrap_err();
-        assert!(strix.contains("Strix") && strix.contains("not driven by runs"), "{strix}");
+        assert_eq!(check_hunter(Some("strix")).unwrap(), "strix");
         let unknown = check_hunter(Some("nmap")).unwrap_err();
-        assert!(unknown.contains("unknown hunter") && unknown.contains("shannon"), "{unknown}");
+        assert!(unknown.contains("unknown hunter") && unknown.contains("strix"), "{unknown}");
+    }
+
+    #[test]
+    fn strix_is_gated_until_colonies_have_docker_and_the_gate_says_why() {
+        let why = hunter_gate("strix").unwrap_err();
+        assert!(
+            why.contains("Docker") && why.contains("colony microVMs have none yet"),
+            "{why}"
+        );
+        assert!(
+            hunter_gate("shannon").is_ok() && hunter_gate("swarm").is_ok(),
+            "the others are not gated here"
+        );
+    }
+
+    #[test]
+    fn external_hunters_run_the_security_preset_and_refuse_general() {
+        for hunter in ["shannon", "strix"] {
+            assert_eq!(
+                resolve_preset(hunter, None).unwrap(),
+                Preset::Security,
+                "unset is security for {hunter}"
+            );
+            assert_eq!(resolve_preset(hunter, Some("security")).unwrap(), Preset::Security);
+            let refused = resolve_preset(hunter, Some(" general ")).unwrap_err();
+            assert!(
+                refused.contains(hunter) && refused.contains("security preset") && refused.contains("general bug hunt"),
+                "{refused}"
+            );
+            assert!(
+                resolve_preset(hunter, Some("bugs")).is_err(),
+                "an unknown preset is still refused"
+            );
+        }
+        // The swarm keeps the operator's choice.
+        assert_eq!(resolve_preset("swarm", Some("general")).unwrap(), Preset::General);
+        assert_eq!(resolve_preset("swarm", Some("security")).unwrap(), Preset::Security);
+        assert_eq!(resolve_preset("swarm", None).unwrap(), Preset::General);
+    }
+
+    #[test]
+    fn a_declared_staging_url_is_an_https_hostname_and_only_strix_takes_one() {
+        assert_eq!(
+            valid_staging_url("https://staging.example.com/app/").unwrap(),
+            "https://staging.example.com/app/"
+        );
+        assert_eq!(
+            valid_staging_url("https://Staging.Example.com").unwrap(),
+            "https://staging.example.com"
+        );
+        for bad in [
+            "http://staging.example.com",
+            "https://user@staging.example.com",
+            "https://staging.example.com:8443",
+            "https://10.0.0.5",
+            "https://localhost",
+            "https://staging.example.com/?q=1",
+            "https://staging.example.com/a;rm -rf ~",
+            "https://staging.example.com/../etc",
+            "https://staging.example.com#x",
+            "https://-bad.example.com",
+            "https://staging.example.com/$(id)",
+        ] {
+            assert!(valid_staging_url(bad).is_err(), "{bad} must be refused");
+        }
+        assert_eq!(staging_for("strix", None).unwrap(), None);
+        assert_eq!(staging_for("strix", Some("  ")).unwrap(), None);
+        assert_eq!(
+            staging_for("strix", Some("https://staging.example.com")).unwrap().as_deref(),
+            Some("https://staging.example.com")
+        );
+        assert!(
+            staging_for("shannon", Some("https://staging.example.com"))
+                .unwrap_err()
+                .contains("only for Strix")
+        );
+    }
+
+    #[test]
+    fn the_strix_brief_scopes_the_checkout_and_the_declared_staging_host_only_and_caps_the_run() {
+        let mut run = RedTeamRun {
+            id: "rt_s".into(),
+            repo: "acme/repo".into(),
+            hunter: "strix".into(),
+            preset: Preset::Security,
+            ..Default::default()
+        };
+        let text = strix_brief(&run).expect("the strix brief renders")["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            text.contains("timeout 14400 strix -n -t /workspace --scan-mode deep --max-budget 25 --max-turns 300"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pipx install strix-agent==1.6.2") && text.contains("cd /harness/out/strix"),
+            "{text}"
+        );
+        assert!(
+            text.contains("There is no staging deployment") && !text.contains("-t http"),
+            "{text}"
+        );
+        assert!(text.contains("do not commit") && text.contains("findings tool"), "{text}");
+
+        run.staging_url = Some("https://staging.example.com".into());
+        let text = strix_brief(&run).unwrap()["instructions"].as_str().unwrap().to_string();
+        assert!(
+            text.contains(
+                "timeout 14400 strix -n -t /workspace --scan-mode deep --max-budget 25 --max-turns 300 -t https://staging.example.com"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("never a production environment"), "{text}");
+        assert!(
+            !text.contains("LLM_API_KEY") && !text.to_lowercase().contains("api_key"),
+            "no credential in a brief: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_strix_run_is_refused_with_the_reason_and_an_external_run_takes_the_security_preset() {
+        let app = test_app(&temp_root());
+        let mut req = new_run("acme/repo", None, false);
+        req.hunter = Some("strix".into());
+        let err = create(State(app.clone()), Json(req)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.to_string().contains("colony microVMs have none yet"), "{}", err.1);
+        assert!(app.redteam.runs.read().await.is_empty(), "a refused start creates nothing");
+
+        let mut req = new_run("acme/repo", None, true);
+        req.hunter = Some("shannon".into());
+        req.preset = Some("general".into());
+        let err = create(State(app.clone()), Json(req)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.to_string().contains("security preset"), "{}", err.1);
+
+        let mut req = new_run("acme/repo", None, true);
+        req.hunter = Some("shannon".into());
+        let run = create(State(app.clone()), Json(req)).await.unwrap().0;
+        assert_eq!(
+            run.preset,
+            Preset::Security,
+            "an external run is a security run, whatever it was asked"
+        );
+    }
+
+    #[test]
+    fn the_newest_strix_run_with_a_sarif_is_the_one_read_and_a_link_is_not() {
+        let root = temp_root();
+        let runs = root.join("strix_runs");
+        for (name, secs) in [("run-old", 1_000_000u64), ("run-new", 2_000_000u64)] {
+            std::fs::create_dir_all(runs.join(name)).unwrap();
+            let report = runs.join(name).join(STRIX_REPORT);
+            std::fs::write(&report, "{}").unwrap();
+            let when = UNIX_EPOCH + Duration::from_secs(secs);
+            std::fs::File::options()
+                .write(true)
+                .open(&report)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        // The newest directory has no SARIF, and a link to one is never read.
+        std::fs::create_dir_all(runs.join("run-bare")).unwrap();
+        std::fs::create_dir_all(runs.join("run-link")).unwrap();
+        std::os::unix::fs::symlink(
+            runs.join("run-new").join(STRIX_REPORT),
+            runs.join("run-link").join(STRIX_REPORT),
+        )
+        .unwrap();
+        assert_eq!(newest_strix_report(&runs), Some(runs.join("run-new").join(STRIX_REPORT)));
+        assert_eq!(
+            newest_strix_report(&root.join("missing")),
+            None,
+            "no runs directory, no report"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A Strix report with one error-level result, the shape its `findings.sarif` takes.
+    const STRIX_SARIF: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"strix","rules":[{"id":"vuln-0001"}]}},"results":[{"ruleId":"vuln-0001","level":"error","message":{"text":"RCE in login"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"app/auth.py"},"region":{"startLine":7}}}]}]}]}"#;
+
+    /// A `hunter: "strix"` run whose one colony has ended, with its SARIF in the out dir: the tick reads
+    /// the newest run's report, validates the finding through a stub model and lands the run done. The
+    /// run is written in directly, since a start is refused while colonies have no Docker.
+    #[tokio::test]
+    async fn a_strix_report_files_the_sarif_of_its_newest_run_as_a_validated_finding() {
+        let root = temp_root();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let url = stub_model(r#"{"real": true, "severity": "high", "reason": "the login query is built from raw input"}"#).await;
+        let config = serde_json::to_vec(&[json!({"id": "stub", "name": "Stub", "base_url": url, "auth": "none"})]).unwrap();
+        std::fs::write(root.join("config/providers.json"), config).unwrap();
+        let app = test_app(&root);
+        {
+            let mut modules = app.modules.write().await;
+            modules.agent.settings.insert("model".into(), json!("stub/anything"));
+        }
+        push_colony(&app, "strix-colony", SessionStatus::Merged).await;
+        let runs_dir = app.session_dir("strix-colony").join("out/strix").join(STRIX_RUNS);
+        std::fs::create_dir_all(runs_dir.join("run-1")).unwrap();
+        std::fs::write(runs_dir.join("run-1").join(STRIX_REPORT), STRIX_SARIF).unwrap();
+        let hunter = Hunter {
+            session_id: "strix-colony".into(),
+            title: "Red-team Strix scan: acme/repo".into(),
+            module: "strix".into(),
+            version: Some("1.6.2".into()),
+            focus: external_focus("strix"),
+            ingested: false,
+        };
+        let run = RedTeamRun {
+            id: "rt_strix".into(),
+            repo: "acme/repo".into(),
+            org: "acme".into(),
+            state: RedTeamState::Running,
+            swarm_size: 1,
+            modules: vec!["general".into()],
+            hunters: vec![hunter],
+            hunter: "strix".into(),
+            preset: Preset::Security,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            ..Default::default()
+        };
+        app.redteam.runs.write().await.push(run);
+
+        tick_once(&app).await;
+        let run = app
+            .redteam
+            .runs
+            .read()
+            .await
+            .iter()
+            .find(|r| r.id == "rt_strix")
+            .cloned()
+            .unwrap();
+        assert_eq!(run.state, RedTeamState::Done, "the run lands done");
+        assert!(
+            run.counts.found >= 1 && run.counts.validated >= 1,
+            "validated: {:?}",
+            run.counts
+        );
+        assert!(run.hunters[0].ingested, "the hunter is marked ingested");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A stub model provider: every request answered with `decision` as the model's text, so

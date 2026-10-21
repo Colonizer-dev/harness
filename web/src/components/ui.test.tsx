@@ -177,6 +177,7 @@ describe("parkedLabel", () => {
   it("says the park reason in human words", () => {
     expect(parkedLabel(parked())).toBe("provider quota exhausted");
     expect(parkedLabel(parked({ reason: "hold_timeout" }))).toBe("hold timed out");
+    expect(parkedLabel(parked({ reason: "exec_policy_loop" }))).toBe("blocked by exec policy — same rule refused repeatedly");
   });
 
   it("names the reset in local words when the provider gave one", () => {
@@ -290,6 +291,10 @@ describe("attentionText", () => {
     expect(attentionText(attention({ reason: "provider_quota_exhausted" }))).toBe("Provider out of quota — waiting for the plan to refill");
     expect(attentionText(attention({ reason: "waiting_for_account" }))).toBe("Its Claude account needs sign-in again — it resumes when the account works");
     expect(attentionText(attention({ reason: "turn_lost_after_subagent" }))).toBe("Its turn never resumed after a subagent — the watchdog re-drove it");
+  });
+
+  it("says exec_policy_loop when a colony hit the same exec-policy rule repeatedly (issue #1378)", () => {
+    expect(attentionText(attention({ reason: "exec_policy_loop" }))).toBe("Blocked by exec policy");
   });
 
   it("puts the hold's detail in the attention badge's tooltip beside the suspended-answer badge", () => {

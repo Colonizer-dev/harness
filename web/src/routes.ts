@@ -5,6 +5,7 @@
 //   /                          Overview          /history        History
 //   /nest                      Nest              /queues         Queues
 //   /chat                      Chat              /loops          Loops
+//   /brain                     Brain (3D map)
 //   /chat                      Chat              /memory         Memory
 //   /code                      Code              /host           Host
 //   /launch                    Launch            /secrets        Secrets (also /settings/secrets)
@@ -43,6 +44,7 @@ export const VIEW_PATHS: Partial<Record<CockpitView, string>> = {
   history: "/history",
   queues: "/queues",
   loops: "/loops",
+  brain: "/brain",
   memory: "/memory",
   host: "/host",
   settings: "/settings",

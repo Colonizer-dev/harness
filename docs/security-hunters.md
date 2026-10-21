@@ -5,11 +5,12 @@ opt-in (`COLONIZER_HUNTER_INSTALL=1`) guarding a Linux-only, race-free, checksum
 on-demand install, a capability probe, and a manifest-driven scan runner (`hunters::scan`) that
 renders the `scan` template, runs the installed binary, and parses the artifacts back into
 `Finding`s. A red-team run now drives Shannon, one colony per repository (see below); Strix is
-installed and probed but no run drives its scans yet, and colonies have no Docker daemon.
-In the cockpit's red-team wizard the swarm and Shannon are selectable cards — Shannon reads
-"Ready · runs in a colony" — and Strix stays a disabled card marked "Coming soon"; the red-team API
-accepts `"hunter": "shannon"` and refuses Strix with a 400 (see
-[red-team.md](red-team.md#operating-it)). The colony swarm with the Security preset is still the
+installed and probed, and a red-team run can drive it in one colony, but a colony has no Docker
+daemon, so the run refuses to start with that reason. In the cockpit's red-team wizard the swarm
+and Shannon are selectable cards — Shannon reads "Ready · runs in a colony" — and Strix is a
+disabled card marked "Unavailable" with the same reason; the red-team API accepts
+`"hunter": "shannon"` and `"hunter": "strix"`, and refuses Strix with a 400 until colonies have
+Docker (see [red-team.md](red-team.md#operating-it)). The colony swarm with the Security preset is still the
 way to a security-focused raid that needs no external hunter: security focus areas, a deterministic
 pre-scan and an operator checklist ([red-team.md](red-team.md#the-security-preset)).
 
@@ -115,10 +116,9 @@ breakdown [#336](https://github.com/Colonizer-dev/harness/issues/336) and its fo
 [#442](https://github.com/Colonizer-dev/harness/issues/442); none of them built the work, so it is
 still open under #933.
 
-- A red-team run driving Strix. `check_hunter` (`crates/colonizer/src/redteam.rs:1637`) answers any
-  hunter other than the swarm or Shannon with a 400 — "cannot run as a red-team hunter in this build
-  yet" — and the wizard's Strix card is disabled and reads "Coming soon"
-  (`web/src/cockpit/RedTeamWizard.tsx:239`).
+- A Strix run in a colony that can start. The run is built (manifest, pinned wheel, brief, SARIF
+  ingest, security preset, staging URL) and tested, but `COLONY_HAS_DOCKER` is false, so the start
+  is refused.
 - The Docker daemon that Strix needs. Its scan is arbitrary proof-of-concept code that wants a
   daemon inside the colony microVM, which colonies do not have, so no run starts one. The host's
   daemon is never shared; see "Docker stays out of reach" above.
@@ -140,10 +140,13 @@ still open under #933.
 
 ## Current state
 
-Strix is phase one: manifest, pinned lock, opt-in install, probe, two parsers (`parse_strix`,
+Strix is phase one: manifest, pinned lock (the release binary for the host installer, and the PyPI
+wheel's sha256 for the colony install), opt-in install, probe, two parsers (`parse_strix`,
 `parse_sarif`), and a scan runner that wires them end to end — template to argv, artifacts to
-`Finding`s, cost into the outcome. No run drives a host-side scan yet, and colonies have no Docker
-daemon, so `hunters::scan` runs nothing today. Shannon is phase two: its manifest stays
+`Finding`s, cost into the outcome. Strix's report is `findings.sarif`, which every run writes beside
+its own JSON, so the SARIF parser reads it. A red-team run now drives Strix in one colony too
+(`colony_scan`), but colonies have no Docker daemon, so that run is refused, and `hunters::scan`
+runs nothing today. Shannon is phase two: its manifest stays
 `available: false`, so host-side install and `scan` still refuse it as a manifest-only stub, but a
 `hunter: "shannon"` red-team run drives it inside a colony — the host writes the pinned, `npx`-based
 command into the colony's brief, the colony starts the app and runs Shannon against it in its

@@ -637,3 +637,45 @@ async fn model_hosts_lists_multi_provider_canonicals_ranked_by_blended_price() {
     assert_eq!(glm["hosts"][1]["blended_per_mtok"], (3.0 * 1.0 + 2.0) / 4.0);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The enabled list is what the owner saved, else the models the roles are assigned to, never every
+/// model on offer: an unset module with an empty role offers nothing, and an org's list wins for its
+/// own org only.
+#[test]
+fn enabled_models_default_to_the_assigned_roles_and_a_saved_list_wins() {
+    use crate::enabled_models::Store;
+    let roles = vec![
+        json!({"role": "model", "value": "claude-opus-5-5"}),
+        json!({"role": "subagent_model", "value": "claude-opus-5-5"}),
+        json!({"role": "background_model", "value": ""}),
+    ];
+    let unset = Store::default();
+    assert_eq!(
+        enabled_for(&unset, None, "claude-code", &roles),
+        (vec!["claude-opus-5-5".to_string()], false)
+    );
+    assert_eq!(
+        enabled_for(&unset, None, "pi", &[json!({"role": "model", "value": ""})]),
+        (Vec::<String>::new(), false)
+    );
+
+    let mut saved = Store::default();
+    saved.install.insert("pi".into(), vec!["deepseek/deepseek-chat".into()]);
+    saved
+        .orgs
+        .entry("acme".into())
+        .or_default()
+        .insert("pi".into(), vec!["claude-opus-5-5".into()]);
+    assert_eq!(
+        enabled_for(&saved, None, "pi", &[]),
+        (vec!["deepseek/deepseek-chat".to_string()], true)
+    );
+    assert_eq!(
+        enabled_for(&saved, Some("acme"), "pi", &[]),
+        (vec!["claude-opus-5-5".to_string()], true)
+    );
+    assert_eq!(
+        enabled_for(&saved, Some("other"), "pi", &[]),
+        (vec!["deepseek/deepseek-chat".to_string()], true)
+    );
+}

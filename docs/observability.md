@@ -100,7 +100,10 @@ It also carries `endpoint`, `last_error` (redacted, header values cut out), `las
 bytes behind the committed offsets), `dropped` by reason, `export_failures`,
 `last_partial_success`, and `signals`: per signal (`logs`, `traces`, `metrics`) its `state` (`ok`,
 `backing_off`, `auth_failed`, `off`), `endpoint`, `consecutive_failures`, `last_error`,
-`last_success_unix`, `records_sent` and `bytes_sent`. While a backfill
+`last_success_unix`, `records_sent`, `bytes_sent`, `backlog_bytes` (this signal's share),
+`records_dropped` (records dropped rather than sent, any reason) and `gaps` (holes in what could be
+read, one per `export_gap`). After a 413 the exporter remembers the smaller request size for that
+signal until it restarts. While a backfill
 ([Backfill](observability/backfill.md)) runs, the same route also carries its progress as
 `backfill`.
 
@@ -113,11 +116,6 @@ default install does not pull it in. `scripts/install-release.sh` and `colonizer
 beside `colonizer` whenever the release carries it; an older release without it installs the app
 alone — as do installs from a local archive or the macOS DMG, which have no SHA256SUMS row to opt
 in from; `colonizer setup`, or a re-run of the installer from a release that carries it, adds it.
-When the release publishes the add-on asset, `colonizer add observability` installs a verified copy
-of the matching version into that versioned slot from the running release and enables the module if
-its saved settings permit it. `colonizer remove observability` disables the module and removes the
-binary — with `--purge` it also drops the saved settings, the add-on's ledger offsets and the
-`observability-headers` secret — and `colonizer observability status` prints the add-on's health.
 Building it yourself with cargo and pointing `COLONIZER_OBSERVABILITY_BIN` at the result stays the
 development path:
 

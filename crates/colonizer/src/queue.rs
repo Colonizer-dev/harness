@@ -4,7 +4,7 @@
 //! Whether a colony fits is a pure function (`has_room`), so the admission rule can be tested
 //! apart from the loop that applies it.
 
-use crate::{Shared, orgs, provider_quota, providers, restack, spend, stack::Stacked};
+use crate::{Shared, config, orgs, provider_quota, providers, restack, spend, stack::Stacked};
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -363,8 +363,10 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     let parent = sessions.iter().find(|p| p.id == parent_id);
     // Issue #1140: a paused parent blocks the child without a slot, and one gone for good cuts the
     // child loose onto the default branch — neither fails it, so a stack never cascades.
+    // Issue #1362: a parent with no changes or closed unmerged but an open issue is unmet: stays blocked.
     match crate::blocked::parent_state(s, sessions) {
         crate::blocked::ParentState::Paused(reason) => return Gate::Block(reason),
+        crate::blocked::ParentState::Unmet { reason, .. } => return Gate::Block(reason),
         crate::blocked::ParentState::Gone(reason) => return Gate::Rebase(reason),
         crate::blocked::ParentState::Fine => {}
     }
@@ -1911,15 +1913,17 @@ pub(crate) async fn prewarm_expire(app: &Shared, id: &str) -> bool {
 }
 
 /// The resume scheduler's verdict for one colony at `now` (unix seconds): quota-parked, with a
-/// worktree to resume into, and due — its provider recovered, or the reset a card's "wait" scheduled
-/// it for has come ([`crate::quota_cards::park_due`]). The provider is the one the flag names (a
-/// card's wait records it), else the one the park's error names; with neither, any exhaustion
-/// anywhere holds it. Pure over `exhausted`, so the schedule is tested with a fake clock.
+/// worktree to resume into, and due — its provider recovered, the reset a card's "wait" scheduled
+/// it for has come ([`crate::quota_cards::park_due`]), or a recomputed route lands on a healthy
+/// provider (issue #1403). The provider is the one the flag names (a card's wait records it), else
+/// the one the park's error names; with neither, any exhaustion anywhere holds it. Pure over
+/// `exhausted` and `has_healthy_fallback`, so the schedule is tested with a fake clock.
 pub(crate) fn quota_resume_due(
     s: &Session,
     provider_ids: &[String],
     exhausted: &dyn Fn(&str) -> bool,
     any_exhausted: bool,
+    has_healthy_fallback: &dyn Fn(&Session) -> bool,
     now: i64,
 ) -> bool {
     let Some(attention) = s
@@ -1933,11 +1937,46 @@ pub(crate) fn quota_resume_due(
         return false;
     }
     let provider = crate::quota_cards::flagged_provider(s, provider_ids);
-    let out = match provider.as_deref() {
+    let provider_recovered = match provider.as_deref() {
         Some(pid) => exhausted(pid),
         None => any_exhausted,
     };
-    crate::quota_cards::park_due(attention, out, now)
+    // Resume if the flagged provider recovered OR if a healthier route is available (issue #1403)
+    crate::quota_cards::park_due(attention, provider_recovered, now) || has_healthy_fallback(s)
+}
+
+/// Helper: recompute the route for a quota-parked colony with current model settings
+/// and quota states. Returns (model, reason) if a healthier route exists (issue #1403).
+async fn compute_quota_fallback_route(app: &Shared, s: &Session) -> Option<(String, String)> {
+    let routing = s.model_routing.as_ref()?;
+    let tier = routing
+        .get("tier")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::routing::Tier::parse)?;
+    let agent = app.agents.iter().find(|a| a.id == s.agent)?;
+    let modules = app.modules.read().await.clone();
+    let org_settings = app.org_settings(&s.org);
+    let agent_choice = crate::orgs::effective_agent_for(&modules, &org_settings, &agent.id);
+    let model_low = config::setting_str(&agent_choice, &agent.schema, "model_low");
+    let model = config::setting_str(&agent_choice, &agent.schema, "model");
+    let model_high = config::setting_str(&agent_choice, &agent.schema, "model_high");
+    // Account fallback is only for claude-code agent
+    let account_fallback_owned: Option<(String, String)> = if agent.id == "claude-code" {
+        let fallback_model = config::setting_str(&agent_choice, &agent.schema, "account_fallback_model");
+        crate::routing::split_provider_model(&fallback_model)
+    } else {
+        None
+    };
+    let (recomputed_model, reason) = crate::routing::route_with_quota_fallback(
+        tier,
+        &model_low,
+        &model,
+        &model_high,
+        account_fallback_owned.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+        &|provider_id: &str| app.gateway.is_quota_exhausted(provider_id),
+    );
+    let parked_model = routing.get("model").and_then(serde_json::Value::as_str)?;
+    (recomputed_model != parked_model).then_some((recomputed_model, reason))
 }
 
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
@@ -1982,14 +2021,36 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         .iter()
         .any(|(id, _, _)| id != crate::gateway::ACCOUNT_QUOTA_ID);
     let now = Utc::now().timestamp();
+    // Pre-compute which parked colonies have healthy fallback routes available (issue #1403).
+    // Store the recomputed models so we can update model_routing on resume.
+    // Do this once before the loop to avoid repeated async calls.
+    let quota_fallbacks: std::collections::HashMap<String, (String, String)> = {
+        let sessions = app.sessions.read().await.clone();
+        let mut fallbacks = std::collections::HashMap::new();
+        for s in sessions
+            .iter()
+            .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked))
+            .filter(|s| {
+                s.attention
+                    .as_ref()
+                    .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+            })
+        {
+            if let Some((model, reason)) = compute_quota_fallback_route(app, s).await {
+                fallbacks.insert(s.id.clone(), (model, reason));
+            }
+        }
+        fallbacks
+    };
     // Each route re-checks this under its own lock: an operator's stop clears the quota flag, so a
     // colony stopped since the snapshot below no longer reads as quota-parked and is left alone.
     let exhausted = |pid: &str| app.gateway.is_quota_exhausted(pid);
     let recovered = |s: &Session| {
         let carried = account_parked.iter().any(|(id, carried)| *carried && *id == s.id);
         let any = if carried { others_exhausted } else { any_exhausted };
+        let has_fallback = |session: &Session| quota_fallbacks.contains_key(&session.id);
         matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked)
-            && quota_resume_due(s, &provider_ids, &exhausted, any, now)
+            && quota_resume_due(s, &provider_ids, &exhausted, any, &has_fallback, now)
     };
     let (ids, kept_ids): (Vec<String>, Vec<String>) = {
         let sessions = app.sessions.read().await;
@@ -2024,6 +2085,20 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
                     x.attention = None;
                     // The park record had its say; a requeue is a resume, so it goes (issue #213).
                     x.parked = None;
+                    // Update model_routing with the recomputed model (issue #1403)
+                    if let (Some((model, fallback_reason)), Some(routing)) =
+                        (quota_fallbacks.get(&x.id), x.model_routing.as_mut())
+                    {
+                        routing["model"] = serde_json::json!(model);
+                        // Append fallback reason to original routing reason for consistency with boot.rs
+                        let original_reason = routing["reason"].as_str().unwrap_or("");
+                        if fallback_reason.is_empty() {
+                            // No fallback reason means healthy route found, use original
+                            // (but this shouldn't happen since compute_quota_fallback_route only returns Some with a reason)
+                        } else {
+                            routing["reason"] = serde_json::json!(format!("{}; {}", original_reason, fallback_reason));
+                        }
+                    }
                     x.updated_at = Utc::now();
                 }
                 due
@@ -3464,6 +3539,78 @@ mod tests {
             !warm_log.contains("queued to resume"),
             "not the plain requeue route: {warm_log}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #1403: when a quota-parked colony's agent settings change to prefer a different (healthy)
+    /// provider, the next sweep resumes it with the new model in its routing.
+    #[tokio::test]
+    async fn quota_resume_recomputes_fallback_route_when_settings_change() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-fallback-{}", crate::util::short_id()));
+        write_providers(&root, &["zai", "minimax"]);
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![crate::modules::AgentModule::test("claude-code").schema(json!({
+                "properties": {
+                    "model_low": { "type": "string" },
+                    "model": { "type": "string" },
+                    "model_high": { "type": "string" },
+                }
+            }))],
+            |_| {},
+        );
+
+        // Initialize agent settings with model_low matching the exhausted provider
+        app.modules
+            .write()
+            .await
+            .agent
+            .settings
+            .insert("model_low".into(), json!("zai/model"));
+
+        // Create a colony parked on zai quota with model_routing showing zai
+        let mut parked = stopped_colony_with_worktree("acme", "parked-on-zai".into());
+        parked.status = SessionStatus::Stopped;
+        parked.error = Some("provider quota exhausted (zai)".into());
+        parked.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
+        parked.model_routing = Some(json!({"tier": "low", "model": "zai/model"}));
+        parked.agent = "claude-code".into();
+
+        *app.sessions.write().await = vec![parked];
+
+        // Mark zai as exhausted with reset far in future
+        app.gateway
+            .mark_quota_exhausted("zai", Some("tomorrow".into()), Some(Utc::now().timestamp() + 86400));
+
+        // First sweep: model_low still points to exhausted zai, so no fallback found, stays parked
+        resume_quota_parked(&app).await;
+        {
+            let sessions = app.sessions.read().await;
+            let s = sessions.iter().find(|s| s.id == "parked-on-zai").unwrap();
+            assert_eq!(s.status, SessionStatus::Stopped, "still parked with exhausted provider");
+            assert!(s.attention.is_some());
+        }
+
+        // Change agent module settings to prefer minimax for model_low
+        app.modules
+            .write()
+            .await
+            .agent
+            .settings
+            .insert("model_low".into(), json!("minimax/model"));
+
+        // Second sweep: minimax is healthy, so should be requeued with new model
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let s = sessions.iter().find(|s| s.id == "parked-on-zai").unwrap();
+        assert_eq!(s.status, SessionStatus::Queued, "resumed with healthy fallback provider");
+        assert!(s.attention.is_none());
+        assert_eq!(
+            s.model_routing.as_ref().and_then(|r| r["model"].as_str()),
+            Some("minimax/model"),
+            "model updated to fallback"
+        );
+        drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5356,18 +5503,18 @@ mod tests {
     #[test]
     fn a_root_that_is_gone_for_good_re_bases_the_chain_on_the_default_branch() {
         // Failed with no parent of its own, closed unmerged, no changes, cleaned up while stopped.
+        // These parents have NO issue, so they're truly gone and children rebase.
         let mut cleaned = chain(SessionStatus::Stopped, 2);
         cleaned[0].cleaned_up = true;
-        let mut closed = chain(SessionStatus::Closed, 2);
-        for s in closed.iter_mut().skip(1) {
+        cleaned[0].issue = None; // Ensure no issue
+        let mut closed_no_issue = chain(SessionStatus::Closed, 2);
+        closed_no_issue[0].issue = None; // Ensure no issue
+        for s in closed_no_issue.iter_mut().skip(1) {
             s.stack = false;
         }
-        for mut sessions in [
-            chain(SessionStatus::Failed, 2),
-            chain(SessionStatus::NoChanges, 2),
-            cleaned,
-            closed,
-        ] {
+        let mut no_changes_no_issue = chain(SessionStatus::NoChanges, 2);
+        no_changes_no_issue[0].issue = None; // Ensure no issue
+        for mut sessions in [chain(SessionStatus::Failed, 2), no_changes_no_issue, cleaned, closed_no_issue] {
             let (blocked, rebased) = settle(&mut sessions);
             assert!(
                 blocked.is_empty(),
@@ -5397,6 +5544,57 @@ mod tests {
         assert!(blocked.is_empty());
         assert_eq!(rebased, ["orphan"]);
         assert_eq!(orphan[0].status, SessionStatus::Queued);
+    }
+
+    #[test]
+    fn a_root_with_an_issue_and_no_changes_keeps_the_chain_blocked_unmet() {
+        // NoChanges or Closed parents WITH an open issue stay unmet only for merge-gated (non-stack)
+        // children: they stay blocked waiting for the issue to close or a relaunch to appear
+        // (issue #1362). The whole chain stays blocked. Stacked children are re-based since they
+        // depend on the parent's branch, not on the issue.
+
+        // Stacked children with unmet parent: re-based on default branch.
+        let mut no_changes_stacked = chain(SessionStatus::NoChanges, 2);
+        // issue is already set to 5 by chain(), stack is true by queued_child()
+        let (blocked, rebased) = settle(&mut no_changes_stacked);
+        // c1 is explicitly rebased since its parent (root) is gone. c2 (child of c1) is not in
+        // the rebased list because it's not processing as a blocked colony (it's queued but still
+        // waiting on c1). The key is that both end up Queued, not Blocked.
+        assert_eq!(rebased, ["c1"], "direct child of gone parent gets rebased");
+        assert!(blocked.is_empty(), "no children stay blocked when parent is gone");
+        // Verify both are queued after settle completes
+        assert_eq!(no_changes_stacked[1].status, SessionStatus::Queued);
+        assert_eq!(no_changes_stacked[2].status, SessionStatus::Queued);
+
+        // Non-stack children with unmet parent: stay blocked.
+        let mut no_changes = chain(SessionStatus::NoChanges, 2);
+        for s in no_changes.iter_mut().skip(1) {
+            s.stack = false;
+        }
+        // issue is already set to 5 by chain()
+        let (blocked, rebased) = settle(&mut no_changes);
+        assert_eq!(blocked, ["c1", "c2"], "non-stack chain under unmet parent stays blocked");
+        assert!(rebased.is_empty());
+        let c1 = &no_changes[1];
+        assert!(c1.parent.is_some(), "still waits on the parent");
+        assert_eq!(c1.status, SessionStatus::Blocked, "blocked, not failed");
+        assert!(c1.blocked_reason.is_some(), "has a reason");
+        let c2 = &no_changes[2];
+        assert_eq!(c2.status, SessionStatus::Blocked, "grandchild also blocked");
+
+        // Closed non-stack with issue: same behavior as NoChanges non-stack
+        let mut closed = chain(SessionStatus::Closed, 2);
+        for s in closed.iter_mut().skip(1) {
+            s.stack = false;
+        }
+        // issue is already set to 5
+        let (blocked, rebased) = settle(&mut closed);
+        assert_eq!(
+            blocked,
+            ["c1", "c2"],
+            "non-stack chain under closed parent with issue stays blocked"
+        );
+        assert!(rebased.is_empty());
     }
 
     #[tokio::test]
@@ -5449,5 +5647,38 @@ mod tests {
         assert!(!has_room(&sessions, "acme", "acme/APP", 10, None, 2));
         // With a limit of 3, there's room for one more.
         assert!(has_room(&sessions, "acme", "acme/APP", 10, None, 3));
+    }
+
+    /// Issue #1403: quota_resume_due triggers resume when has_healthy_fallback detects route change.
+    #[test]
+    fn quota_resume_respects_healthy_fallback_callback() {
+        let reset = 1_790_870_400;
+        let now = reset - 3600;
+        let ids = vec!["bailian".to_string(), "zai".to_string()];
+        let mut s = on_bailian("sess", "acme", SessionStatus::Parked);
+        s.parked = Some(crate::sessions::Park {
+            at: chrono::DateTime::from_timestamp(now, 0).unwrap(),
+            reason: provider_quota::QUOTA_EXHAUSTED_REASON.into(),
+            resets_at: Some((reset + 7200).to_string()),
+            vm_kept: false,
+            question_risk: None,
+        });
+        s.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON}));
+        s.model_routing = Some(json!({"tier": "low", "model": "bailian/qwen3.8-max"}));
+        let exhausted = |_: &str| true;
+        // Without fallback: stays parked (reset far away)
+        assert!(!quota_resume_due(&s, &ids, &exhausted, true, &|_| false, now));
+        // With fallback: resumes immediately
+        assert!(quota_resume_due(&s, &ids, &exhausted, true, &|_| true, now));
+    }
+
+    /// Helper to create a session parked on bailian.
+    fn on_bailian(id: &str, org: &str, status: SessionStatus) -> Session {
+        let mut s = colony(org, status);
+        s.id = id.into();
+        s.git_admin_dir = Some("git".into());
+        s.allowed_providers = Some(vec!["bailian".into()]);
+        s.allowed_models = Some(vec!["bailian/qwen3.8-max".into()]);
+        s
     }
 }

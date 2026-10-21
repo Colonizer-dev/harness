@@ -28,7 +28,7 @@ import { ColonizeProvider } from "./Colonize";
 import { AskProvider } from "./spotlight/Ask";
 import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
 import { Header } from "./Header";
-import { ModelSwitcher } from "./ModelSwitcher";
+import { AgentModelMenu } from "./AgentModelMenu";
 import { HostView } from "./HostView";
 import { autoCeilingLabel } from "./host";
 import { recordHost } from "./hostHistory";
@@ -36,6 +36,7 @@ import { NavRail, type CockpitView } from "./NavRail";
 import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
+import { BrainMapView } from "./BrainMapView";
 import { QueuesView } from "./QueuesView";
 import { focusTurn } from "./turnFocus";
 import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
@@ -729,6 +730,12 @@ export function Cockpit({
         );
       case "loops":
         return <LoopsView org={selectedOrg} orgs={orgs} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
+      case "brain":
+        return (
+          <Page width="full">
+            <BrainMapView sessions={sessions} onOpenColony={openColonyById} />
+          </Page>
+        );
       case "queues":
         return <QueuesView sessions={sessions} />;
       case "chat":
@@ -915,7 +922,7 @@ export function Cockpit({
         onOpenObservability={() => onOpenSettings("module:observability")}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
-        models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}
+        models={<AgentModelMenu variant="pill" onManage={() => onOpenSettings("providers")} />}
         search={<SpotlightSearch />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,

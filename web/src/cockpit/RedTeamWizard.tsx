@@ -18,7 +18,7 @@ import shannonLogo from "../assets/hunters/shannon.jpg";
 type Step = 0 | 1 | 2;
 const STEPS = ["Hunter", "Models", "Review"] as const;
 
-/** The hunters a run can name. The swarm and Shannon run today; Strix says why it cannot. */
+/** The hunters a run can name. The swarm and Shannon run today; Strix says why it cannot (its colony has no Docker). */
 const HUNTERS = [
   {
     id: "swarm",
@@ -120,7 +120,7 @@ export function WizardBody({
   /** Tests pin the preset the same way. */
   initialPreset?: RedTeamPreset;
   /** Tests pin the selected hunter the same way. */
-  initialHunter?: "swarm" | "shannon";
+  initialHunter?: "swarm" | "shannon" | "strix";
 }) {
   const api = useApi();
   const toast = useToast();
@@ -135,6 +135,9 @@ export function WizardBody({
   const [hunter, setHunter] = useState<HunterId>(initialHunter);
   const [autofix, setAutofix] = useState(false);
   const [preset, setPreset] = useState<RedTeamPreset>(initialPreset);
+  // Shannon and Strix are security scanners: their runs are security runs, so the bugs picker is hidden.
+  const external = hunter === "shannon" || hunter === "strix";
+  const effectivePreset: RedTeamPreset = external ? "security" : preset;
   const [schedule, setSchedule] = useState<ScheduleChoice>({ every: "once" });
   const [busy, setBusy] = useState(false);
   // Read once when the repositories arrive: a poll's fresh run list must not reset the picks.
@@ -169,7 +172,7 @@ export function WizardBody({
   const picked = useMemo(() => pickedRaw.filter((r) => !activeRunFor(runs, r)), [pickedRaw, runs]);
 
   // Shannon runs one colony per repository whatever the picker says, so its swarm size is always one.
-  const swarmSize = hunter === "shannon" ? 1 : swarm;
+  const swarmSize = external ? 1 : swarm;
   const estimate = useMemo(() => estimateCost(runs, sessions, swarmSize, Math.max(1, picked.length)), [runs, sessions, swarmSize, picked.length]);
   const hunters = swarmSize * picked.length;
   const canNext = step === 0 ? picked.length > 0 : true;
@@ -178,7 +181,7 @@ export function WizardBody({
     setBusy(true);
     try {
       const cadence = toUtcCadence(schedule);
-      const shared = { hunter, preset, model: model || null, subagent_model: subagentModel || null, swarm_size: swarmSize, autofix };
+      const shared = { hunter, preset: effectivePreset, model: model || null, subagent_model: subagentModel || null, swarm_size: swarmSize, autofix };
       if (cadence) {
         await api.createRedTeamSchedule({ org, repos: picked, cadence, ...shared });
         toast(`Red team scheduled for ${plural(picked.length, "repository", "repositories")} in ${org}`);
@@ -241,8 +244,10 @@ export function WizardBody({
                   const selectable = h.id === "swarm" || h.id === "shannon";
                   const probe = probes[h.id];
                   // Short pills that never wrap; what does not fit in one goes on a muted line under it.
-                  const note = selectable ? "Ready" : "Coming soon";
+                  const note = selectable ? "Ready" : "Unavailable";
                   const detail = h.id === "shannon" ? "runs in a colony" : null;
+                  // Why an unselectable hunter cannot run, from the mothership's probe; the same reason the API refuses with.
+                  const reason = selectable ? null : (probe?.colony_blocker ?? "Strix's sandbox needs a Docker daemon, and colonies have none yet");
                   return (
                     <button
                       key={h.id}
@@ -250,7 +255,7 @@ export function WizardBody({
                       aria-pressed={selectable && hunter === h.id}
                       disabled={!selectable}
                       onClick={() => selectable && setHunter(h.id)}
-                      title={selectable ? undefined : `${h.name} installs and probes, but red-team runs do not drive its scans yet${probe ? ` — ${probe.probe.detail}` : ""}`}
+                      title={reason ?? undefined}
                       className={cx(
                         "flex h-full flex-col items-start gap-1.5 rounded-xl border p-3 text-left",
                         !selectable
@@ -275,11 +280,17 @@ export function WizardBody({
                         {detail && <span className="whitespace-nowrap text-meta-lg text-muted">{detail}</span>}
                       </span>
                       <span className="text-small leading-snug text-muted">{h.blurb}</span>
+                      {reason && <span className="text-small leading-snug text-warn">{reason}</span>}
                     </button>
                   );
                 })}
               </div>
             </Field>
+            {external ? (
+              <p className="text-small-lg leading-snug text-muted">
+                {hunter === "strix" ? "Strix" : "Shannon"} is a security scanner, so its run is a security run; the bug-hunt preset does not apply.
+              </p>
+            ) : (
             <Field label="Preset" hint="What the hunters look for. Security adds a pre-scan before launch and an operator checklist to the report.">
               <div role="radiogroup" aria-label="Preset" className="grid gap-2 sm:grid-cols-2">
                 {PRESETS.map((p) => (
@@ -300,6 +311,7 @@ export function WizardBody({
                 ))}
               </div>
             </Field>
+            )}
             <Field label="Repositories" hint="One run per repository. A repository that already has an active run is shown disabled and skipped.">
               {repos === null ? (
                 <p className="flex items-center gap-2 text-body-sm text-muted">
@@ -329,8 +341,8 @@ export function WizardBody({
             <Field label="Subagent model" hint="What the hunters delegate reading and reproduction to.">
               <ModelPicker value={subagentModel} onChange={setSubagentModel} models={models} emptyLabel="Agent default" ariaLabel="Subagent model" />
             </Field>
-            {hunter === "shannon" ? (
-              <p className="text-small-lg leading-snug text-muted">Shannon runs one colony per repository; there is no swarm size to set.</p>
+            {external ? (
+              <p className="text-small-lg leading-snug text-muted">{hunter === "strix" ? "Strix" : "Shannon"} runs one colony per repository; there is no swarm size to set.</p>
             ) : (
               <Field label={`Hunters per repository: ${swarm}`} hint="Each hunter is a full colony with its own microVM and focus area.">
                 <input type="range" min={1} max={8} value={swarm} onChange={(e) => setSwarm(Number(e.target.value))} aria-label="Hunters per repository" className="w-full accent-[var(--accent)]" />
@@ -353,7 +365,10 @@ export function WizardBody({
                   : "No spend history yet to estimate from — watch the first run's cost before scheduling more."}
               </p>
             </div>
-            {preset === "security" && (
+            {external && (
+              <p className="text-small-lg leading-snug text-muted">The scanner runs in one colony per repository and its report is filed as validated findings.</p>
+            )}
+            {effectivePreset === "security" && !external && (
               <p className="text-small-lg leading-snug text-muted">
                 Security preset: before the hunters launch, this machine pre-scans the repository&apos;s committed files and history (no model tokens, no repository code run) and
                 hands each lead to the hunter whose focus it matches. The report adds the leads and an operator checklist of what code cannot prove.
@@ -419,7 +434,7 @@ export function WizardBody({
       <div className="flex shrink-0 items-center gap-2 border-t border-border px-5 py-3">
         <span className="mr-auto text-small-lg text-muted">
           {plural(picked.length, "repository", "repositories")} · {plural(hunters, "hunter")}
-          {preset === "security" ? " · security" : ""}
+          {effectivePreset === "security" ? " · security" : ""}
         </span>
         {step > 0 && <Button onClick={() => setStep((s) => (s - 1) as Step)}>Back</Button>}
         {step < 2 ? (

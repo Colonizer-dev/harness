@@ -82,7 +82,7 @@ const MODELS: SwitchableModel[] = [
 const row = (role: string, title: string, value: string, source: "org" | "install" | "default", org_settable = true) => ({ role, title, value, source, org_settable });
 
 const ASSIGNMENTS: ModelAssignments = {
-  install: {
+  install: { enabled_models: [], enabled_models_set: false,
     module: "claude-code",
     roles: [
       row("model", "Orchestrator model", "claude-opus-5-5", "install"),
@@ -110,10 +110,10 @@ const ASSIGNMENTS: ModelAssignments = {
     { org: "beta", module: "opencode", module_source: "org", roles: [row("model", "Model", "zai/glm-5", "org"), row("small_model", "Small model", "", "default", false)] },
   ],
   modules: [
-    { id: "claude-code", name: "Claude Code", roles: [], blocked: null },
-    { id: "opencode", name: "OpenCode", roles: [{ role: "model", title: "Model", org_settable: true }, { role: "small_model", title: "Small model", org_settable: false }], blocked: null },
-    { id: "pi", name: "Pi", roles: [{ role: "model", title: "Model", org_settable: true }], blocked: null },
-    { id: "acp", name: "ACP", roles: [{ role: "model", title: "Model", org_settable: true }], blocked: "agent module `acp` needs the `grok` binary" },
+    { enabled_models: [], enabled_models_set: false, id: "claude-code", name: "Claude Code", roles: [], blocked: null },
+    { enabled_models: [], enabled_models_set: false, id: "opencode", name: "OpenCode", roles: [{ role: "model", title: "Model", org_settable: true }, { role: "small_model", title: "Small model", org_settable: false }], blocked: null },
+    { enabled_models: [], enabled_models_set: false, id: "pi", name: "Pi", roles: [{ role: "model", title: "Model", org_settable: true }], blocked: null },
+    { enabled_models: [], enabled_models_set: false, id: "acp", name: "ACP", roles: [{ role: "model", title: "Model", org_settable: true }], blocked: "agent module `acp` needs the `grok` binary" },
   ],
   models: MODELS,
 };
@@ -186,7 +186,8 @@ describe("the popover", () => {
     const html = render({ initialOpen: true, initialScope: { kind: "org", org: "acme" } });
     expect(html).toContain('aria-label="scope · acme"');
     expect(html).toContain("org override");
-    expect(html).toContain("install-wide only");
+    expect(html).not.toContain("install-wide only");
+    expect(html).toContain("install-wide · Enter to change for the whole install");
     expect(render({ initialOpen: true, initialScope: { kind: "org", org: "acme" }, initialView: { kind: "module" } })).toContain("Use install default (Claude Code)");
     expect(render({ initialOpen: true, initialScope: { kind: "org", org: "acme" }, initialView: { kind: "role", role: "background_model" } })).toContain("Use install default (Sonnet)");
   });

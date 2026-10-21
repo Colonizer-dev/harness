@@ -259,10 +259,11 @@ blocked pull request; `relay`, `rust-macos` and `conformance`, which run on ever
 are not in the script's list (`REQUIRED_CHECKS` in `scripts/require-ci-checks.mjs`); the `sbom` job,
 which is evidence, not a gate; and the release jobs, which paths and tags keep away from an ordinary
 pull request. Two settings travel with it and are flipped by hand in the repository's settings:
-"Allow auto-merge" on, because a colony pull request held for required checks is queued with
-`gh pr merge --squash --auto` and GitHub refuses that queue without it, and no merge queue, because
-no workflow here has a `merge_group` trigger and a queued pull request would never leave it. The
-script keeps `vulnerabilities` out of its list on purpose, because it can go red on a newly
-published advisory with no commit at all (the weekly run is the detection path); the live branch
-protection requires it anyway, so such an advisory blocks every merge until it is fixed
-([#935](https://github.com/Colonizer-dev/harness/issues/935)). Fixing it needs a repository admin, who removes `vulnerabilities` from the classic protection's required status checks (Settings → Branches → `main`).
+A colony pull request merges directly after the review passes and every non-advisory check on the head is
+green, pinned to that exact head with `--match-head-commit` so a commit pushed after the merge read is
+refused. No merge queue is used, because no workflow here has a `merge_group` trigger and a queued pull
+request would never leave it. The script keeps `vulnerabilities` out of its list on purpose, because it
+can go red on a newly published advisory with no commit at all (the weekly run is the detection path); the
+live branch protection requires it anyway, so such an advisory blocks every merge until it is fixed
+([#935](https://github.com/Colonizer-dev/harness/issues/935)). Fixing it needs a repository admin, who
+removes `vulnerabilities` from the classic protection's required status checks (Settings → Branches → `main`).
