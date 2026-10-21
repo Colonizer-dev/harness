@@ -148,6 +148,7 @@ mod push_access;
 mod push_guard;
 mod push_prefs;
 mod queue;
+mod queue_gates;
 mod queue_priority;
 mod queues;
 mod quota_cards;

@@ -218,13 +218,14 @@ pub(crate) async fn status(
     // Queued colonies hold no microVM (see `Session::holds_slot`), so this is disjoint from
     // `microvms_live`. Carried in `/api/status` so a fleet peer-poll of this endpoint (issue #231)
     // gets everything `fleet::HostSummary` needs without a second round trip.
-    let queue_depth = app
-        .sessions
-        .read()
-        .await
-        .iter()
-        .filter(|s| s.status == sessions::SessionStatus::Queued)
-        .count();
+    // Collect queued_ids here too to avoid a second read guard, which can deadlock a fair RwLock.
+    let (queue_depth, queued_ids) = {
+        let sessions = app.sessions.read().await;
+        let queued = sessions.iter().filter(|s| s.status == sessions::SessionStatus::Queued);
+        let queue_depth = queued.clone().count();
+        let queued_ids: Vec<String> = queued.map(|s| s.id.clone()).collect();
+        (queue_depth, queued_ids)
+    };
     // Cheap, no filesystem I/O: both predicates read in-memory session fields only.
     let (reclaimable, unpushed) = {
         let cfg = reclaim::ReclaimConfig::from_modules(&modules);
@@ -312,9 +313,26 @@ pub(crate) async fn status(
     // The observability export's one word (#850): `off`, `ok` or `degraded` — the full story stays
     // on `GET /api/observability/status`. Never blocks: it resolves in memory and reads two files.
     let observability = crate::observability::compact_status(&app).await;
+    // Compute the queue gate summary for this tick: every queued colony's gate, aggregated.
+    let queue_gate_summary = crate::queue_gates::summary(&queued_ids);
+    // If all queued colonies are blocked by gates (not admissible) and the host has room (room_for > 0),
+    // set sandbox.waiting_reason to the dominant gate kind so the cockpit can explain why nothing is starting.
+    let queue_waiting_reason = if queue_gate_summary.admissible == 0 && !queued_ids.is_empty() && capacity.room_for() > 0 {
+        crate::queue_gates::dominant_gate_kind(&queued_ids)
+    } else {
+        None
+    };
+    // Update sandbox.waiting_reason if we have a queue-based reason, overriding capacity's own.
+    if let Some(queue_reason) = queue_waiting_reason {
+        sandbox_status["waiting_reason"] = json!(queue_reason);
+    }
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
+        "queue": json!({
+            "admissible": queue_gate_summary.admissible,
+            "blocked_by": queue_gate_summary.blocked_by,
+        }),
         // Issue #880: whether the queue is held back while an update, a restart or an operator
         // drains in-flight colonies, so the cockpit can show a banner.
         "draining": app.drain.draining(),

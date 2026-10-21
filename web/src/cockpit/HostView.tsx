@@ -106,12 +106,13 @@ export function HostView({
   const runtime = status?.runtime;
   const sandbox = status?.sandbox;
   const mesh = status?.mesh;
+  const queue = status?.queue;
   const last = history[history.length - 1] ?? null;
   const alloc = allocation(sessions);
   const coloniesDisk = sessions.reduce((t, s) => t + (s.host_disk_bytes ?? 0), 0);
   const liveHere = sessions.filter((s) => isLive(s.status)).sort((a, b) => (b.boot_cpus ?? 0) - (a.boot_cpus ?? 0));
   const queued = sessions.filter((s) => s.status === "queued").length;
-  const capacityLine = autoCapacityLine(sandbox);
+  const capacityLine = autoCapacityLine(sandbox, queue);
   const os = runtime?.os ? `${runtime.os.name}${runtime.os.version ? ` ${runtime.os.version}` : ""}` : null;
 
   if (!host) {

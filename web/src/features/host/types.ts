@@ -46,8 +46,8 @@ export interface HarnessStatus {
     running?: number;
     /** How many more colonies fit right now. */
     room_for?: number;
-    /** Why the next colony waits, when none fits; null otherwise. */
-    waiting_reason?: "memory" | "cpu" | "cap" | null;
+    /** Why the next colony waits, when none fits; null otherwise. Capacity reasons (memory, cpu, cap) or gate reasons (repo_cap, org_cap, chain, held, superseded, host). */
+    waiting_reason?: "memory" | "cpu" | "cap" | "repo_cap" | "org_cap" | "chain" | "held" | "superseded" | "host" | null;
     /** Auto mode only: memory committed to live colonies (their sizes summed), in GB. */
     committed_gb?: number;
     /** Auto mode only: the tightest admission check. */
@@ -104,6 +104,8 @@ export interface HarnessStatus {
   draining?: boolean;
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
+  /** Queue summary (issue #1365): how many queued colonies are admissible and which gates block the others. Omitted by older builds. */
+  queue?: { admissible: number; blocked_by: Record<string, unknown> };
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
   ledger?: LedgerStatus | null;
 }

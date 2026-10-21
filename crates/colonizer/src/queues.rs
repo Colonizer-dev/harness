@@ -233,22 +233,28 @@ fn placed_at(placement: Option<&str>, hosts: &[QueueHost]) -> Option<usize> {
 
 /// The machine reason a row is in the queue, using the same keys the cockpit's cards already map
 /// to wording: a park's own reason, the waiting-on-a-person state, the blocked state, the
-/// watchdog's attention reason, or none of those for a plainly queued colony.
+/// watchdog's attention reason, a queued colony's gate kind, or none of those for a plainly queued colony.
 fn reason(s: &Session) -> Option<String> {
     let attention = || s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(str::to_string);
     match s.status {
         SessionStatus::Parked => s.parked.as_ref().map(|p| p.reason.clone()).or_else(attention),
         SessionStatus::WaitingForAnswer => Some("waiting_for_answer".to_string()),
         SessionStatus::Blocked => Some("blocked".to_string()),
+        SessionStatus::Queued => crate::queue_gates::get_published(&s.id)
+            .map(|gate| gate.kind.as_str().to_string())
+            .or_else(attention),
         _ => attention(),
     }
 }
 
-/// The human context text under the reason: why a colony is blocked, or the error its last run
-/// left, when either is on the record.
+/// The human context text under the reason: why a colony is blocked, the error its last run left,
+/// or the gate reason for a queued colony.
 fn detail(s: &Session) -> Option<String> {
     if s.status == SessionStatus::Blocked {
         s.blocked_reason.clone()
+    } else if s.status == SessionStatus::Queued {
+        // Return the gate text for a queued colony if available
+        crate::queue_gates::get_published(&s.id).map(|g| g.text)
     } else {
         s.error.clone()
     }
