@@ -8,7 +8,9 @@ import { test } from 'node:test';
 
 import {
   buildModelsConfig,
+  claudeSelection,
   commandQueue,
+  isClaudeModel,
   EFFORT_LEVELS,
   lfSplitter,
   packSkillPaths,
@@ -42,13 +44,13 @@ test('parseRoutes validates the route array like the claude-code router does', (
 });
 
 test('selectionProblem names the fix for every unusable model setting', () => {
-  for (const detail of [selectionProblem([], 'x/y'), selectionProblem(ROUTES, ''), selectionProblem(ROUTES, 'claude-opus-5')]) {
+  for (const detail of [selectionProblem([], 'x/y'), selectionProblem(ROUTES, ''), selectionProblem(ROUTES, 'nope-model')]) {
     assert.match(detail, /Pi reaches models only through the provider gateway/);
     assert.match(detail, /Settings → Providers/);
   }
   assert.match(selectionProblem([], 'x/y'), /no provider is configured/);
   assert.match(selectionProblem(ROUTES, ''), /model setting is empty/);
-  assert.match(selectionProblem(ROUTES, 'claude-opus-5'), /matches none of the configured providers/);
+  assert.match(selectionProblem(ROUTES, 'nope-model'), /matches none of the configured providers/);
   assert.equal(selectionProblem(ROUTES, 'fake/some-model'), null);
 });
 
@@ -488,4 +490,22 @@ test('without a usable route no pi is started and every message fails its turn',
   assert.ok(events[4].message.includes('ignored an answer'));
   assert.ok(events[5].message.includes('ignored a set_model'));
   assert.deepEqual(events.at(-1), { type: 'status', state: 'exited' });
+});
+
+test('a Claude model is selectable only with the colony\'s Claude credential mounted', () => {
+  assert.equal(isClaudeModel('claude-opus-5-5'), true);
+  assert.equal(isClaudeModel('deepseek/deepseek-chat'), false);
+  // Without a credential it is still a stop, and the message names the Claude account.
+  assert.match(selectionProblem(ROUTES, 'claude-opus-5-5'), /no Claude credential is mounted/);
+  assert.match(selectionProblem([], 'claude-opus-5-5', false), /Claude account/);
+  assert.equal(selectionProblem(ROUTES, 'claude-opus-5-5', true), null);
+  assert.equal(claudeSelection('claude-opus-5-5', {}), null);
+  const subscription = claudeSelection('claude-opus-5-5', { ANTHROPIC_OAUTH_TOKEN: 'placeholder' });
+  assert.deepEqual(subscription, { route: { provider: 'anthropic', prefix: 'anthropic/', builtin: true }, provider: 'anthropic', modelId: 'claude-opus-5-5' });
+  assert.equal(claudeSelection('deepseek/deepseek-chat', { ANTHROPIC_API_KEY: 'k' }), null);
+});
+
+test('a Claude model writes no gateway provider; Pi uses its built-in Anthropic provider', () => {
+  assert.deepEqual(buildModelsConfig(ROUTES, 'claude-opus-5-5', 'high'), { providers: {} });
+  assert.deepEqual(piArgs({ provider: 'anthropic', modelId: 'claude-opus-5-5', effort: 'high' }).slice(-8, -6), ['--provider', 'anthropic']);
 });

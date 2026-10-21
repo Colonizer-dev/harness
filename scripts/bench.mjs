@@ -7,6 +7,7 @@
 //   node scripts/bench.mjs seed --repo owner/bench-repo     # create the repo, its files and the issues (once)
 //   node scripts/bench.mjs run --repo owner/bench-repo --label before
 //   node scripts/bench.mjs run --repo owner/bench-repo --label after --only add-helper,readme-typo --heldout ~/bench-heldout
+//   node scripts/bench.mjs run --repo owner/bench-repo --label pi --agent pi --model claude-opus-5-5 --claude-account <name>
 //   node scripts/bench.mjs heldout add --heldout ~/bench-heldout --family cart-rounding --check my-check.test.mjs
 //   node scripts/bench.mjs compare bench-before.json bench-after.json
 //   node scripts/bench.mjs jev bench-before.json bench-after.json   # grade Jev compaction across the runs
@@ -217,7 +218,17 @@ const DONE = new Set(['pr_opened', 'no_changes', 'failed', 'stopped', 'merged'])
 async function runTask(task, repo, issue, options) {
   const answers = [];
   const started = Date.now();
-  const session = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ repo, issue, autopilot: true }) });
+  // Each colony runs on the agent module and model the run names (`--agent`, `--model`), when it
+  // names them; otherwise the org's own pick, as before.
+  const launch = {
+    repo,
+    issue,
+    autopilot: true,
+    ...(options.agent ? { agent_module: options.agent } : {}),
+    ...(options.model ? { model_override: options.model } : {}),
+    ...(options.claudeAccount ? { claude_account: options.claudeAccount } : {}),
+  };
+  const session = await api('/api/sessions', { method: 'POST', body: JSON.stringify(launch) });
   const close = autoAnswer(session.id, task, answers);
   let current = session;
   try {
@@ -1165,7 +1176,7 @@ export function formatRateReport(report) {
 
 export function parseArgs(argv) {
   // `threshold` defaults per command (below).
-  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, threshold: null, json: false, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [] };
+  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, threshold: null, json: false, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [], agent: null, model: null, claudeAccount: null };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // Refuse a missing value here: a flag left dangling would otherwise be read as undefined
@@ -1176,6 +1187,12 @@ export function parseArgs(argv) {
     };
     if (a === '--repo') args.repo = value();
     else if (a === '--label') args.label = value();
+    // Launch every bench colony on this agent module (`pi`, `opencode`, `claude-code` …) and, with
+    // --model, on this model; --claude-account bills it to a named Claude account. Results are tagged
+    // with the agent that ran them, so runs compare: a Claude run against a Pi run.
+    else if (a === '--agent') args.agent = value();
+    else if (a === '--model') args.model = value();
+    else if (a === '--claude-account') args.claudeAccount = value();
     else if (a === '--only') args.only = value().split(',').map((s) => s.trim());
     else if (a === '--timeout') {
       const seconds = Number(value());
@@ -1362,7 +1379,8 @@ async function main() {
   }
 
   const { seen, ...config } = configSummary(results);
-  const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: status.modules?.agent ?? null, heldout, config, results };
+  // The run is tagged with the agent its colonies ran on: the one the run named, else the install's.
+  const run = { label: args.label, repo: args.repo, at: new Date().toISOString(), agent: args.agent ?? status.modules?.agent ?? null, ...(args.agent ? { agent_module: args.agent } : {}), ...(args.model ? { model_override: args.model } : {}), heldout, config, results };
   const file = `bench-${args.label}.json`;
   writeFileSync(file, JSON.stringify(run, null, 2));
   if (heldout) {

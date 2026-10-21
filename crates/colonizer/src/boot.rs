@@ -2306,6 +2306,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         mounts.push(node_mount(source));
     }
     let mut secrets = Vec::new();
+    // Pi on a Claude model (the colony's own COLONIZER_MODEL, after overrides and routing) spends
+    // the Claude account instead of a gateway provider's key.
+    let pi_on_claude = !agent.needs_claude
+        && crate::sessions::pi_spends_claude(
+            &agent.id,
+            runner_env.get("COLONIZER_MODEL").and_then(Value::as_str).unwrap_or_default(),
+        );
     if agent.needs_claude {
         // The colony's own account, recorded at launch — never the install default by accident.
         let account = s.claude_account.clone().unwrap_or_else(|| "default".into());
@@ -2319,6 +2326,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         });
         secrets.push(Secret {
             env: cred.env.into(),
+            value: cred.value,
+            hosts: vec![CLAUDE_API_HOST.into()],
+        });
+    } else if pi_on_claude {
+        // Pi on a Claude model spends the colony's Claude account: the same stored credential the
+        // claude-code module mounts, handed to Pi under the variable its Anthropic provider reads
+        // (a subscription token is ANTHROPIC_OAUTH_TOKEN, a key ANTHROPIC_API_KEY), reachable only
+        // at api.anthropic.com. No Claude binary is mounted: Pi calls the API itself.
+        let account = s.claude_account.clone().unwrap_or_else(|| "default".into());
+        let cred = app
+            .claude_cred_for(s.claude_account.as_deref())
+            .with_context(|| format!("log in with Claude in Settings first (account '{account}')"))?;
+        let env = if cred.value.starts_with("sk-ant-oat") {
+            "ANTHROPIC_OAUTH_TOKEN"
+        } else {
+            "ANTHROPIC_API_KEY"
+        };
+        secrets.push(Secret {
+            env: env.into(),
             value: cred.value,
             hosts: vec![CLAUDE_API_HOST.into()],
         });
@@ -2398,6 +2424,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
     // its vendor's declared hosts without the operator restating them. Enabled packs' declared MCP
     // hosts join too, so the agent reaches the tool servers the packs' skills call.
+    if pi_on_claude {
+        // The Claude API host joins the allow list only for a Pi colony on a Claude model; every
+        // other Pi colony still reaches nothing but the gateway.
+        pack_hosts.push(("claude-api", vec![CLAUDE_API_HOST.into()]));
+    }
     let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent), &pack_hosts);
     // The fleet floor (#690): when this mothership belongs to a fleet, the owner's policy clamps
     // the colony's own — local tightens, never loosens. Refused loosenings are logged and recorded.

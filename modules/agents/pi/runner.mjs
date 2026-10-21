@@ -79,14 +79,36 @@ function resolveModel(routes, model) {
   return route ? { route, provider: name.slice(0, slash), modelId: name.slice(slash + 1) } : null;
 }
 
+/** Whether a model setting names a Claude model, which Pi runs on the colony's Claude account. */
+export function isClaudeModel(model) {
+  return typeof model === 'string' && model.trim().startsWith('claude-');
+}
+
 /**
- * Why the colony cannot run, or null when it can. Pi has no model of its own and no Anthropic
- * credential inside the VM, so an unusable model setting is a stop, not a fallback.
+ * The selection for a Claude model on Pi's built-in Anthropic provider, or null when the model is
+ * not a Claude one or no Claude credential is mounted. The harness mounts the account's token as
+ * ANTHROPIC_OAUTH_TOKEN (a subscription token) or ANTHROPIC_API_KEY (a key) only for a Pi colony
+ * on a Claude model, reachable only at api.anthropic.com, so its presence is the gate.
  */
-export function selectionProblem(routes, model) {
+export function claudeSelection(model, env = {}) {
+  if (!isClaudeModel(model)) return null;
+  if (!(env.ANTHROPIC_OAUTH_TOKEN || env.ANTHROPIC_API_KEY)) return null;
+  const modelId = model.trim();
+  return { route: { provider: 'anthropic', prefix: 'anthropic/', builtin: true }, provider: 'anthropic', modelId };
+}
+
+/**
+ * Why the colony cannot run, or null when it can. Pi has no model of its own, so an unusable model
+ * setting is a stop, not a fallback. A Claude model runs when `claudeReady` says the colony's Claude
+ * account is mounted (see claudeSelection).
+ */
+export function selectionProblem(routes, model, claudeReady = false) {
   const action = 'Pi reaches models only through the provider gateway: set the Pi agent\'s model to <provider>/<model> for a provider configured in Settings → Providers.';
-  if (!routes.length) return `no provider is configured, so Pi has no model to run on. ${action}`;
   const name = typeof model === 'string' ? model.trim() : '';
+  if (isClaudeModel(name)) {
+    return claudeReady ? null : `${name} runs on Pi through the colony's Claude account, and no Claude credential is mounted: log in with Claude in Settings for the account this colony uses, or set the Pi agent's model to <provider>/<model> for a provider configured in Settings → Providers.`;
+  }
+  if (!routes.length) return `no provider is configured, so Pi has no model to run on. ${action}`;
   if (!name) return `the model setting is empty, so Pi has no model to run on. ${action}`;
   if (!resolveModel(routes, name)) {
     return `${name} matches none of the configured providers (${routes.map((route) => route.prefix).join(', ')}). ${action}`;
@@ -103,7 +125,10 @@ export function selectionProblem(routes, model) {
  * level, a non-reasoning one clamps it.
  */
 export function buildModelsConfig(routes, model, effort = '') {
-  const { route, modelId } = resolveModel(routes, model);
+  const gateway = resolveModel(routes, model);
+  // A Claude model is Pi's built-in Anthropic provider: nothing to write for it.
+  if (!gateway) return { providers: {} };
+  const { route, modelId } = gateway;
   return {
     providers: {
       [route.provider]: {
@@ -556,7 +581,8 @@ async function main() {
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
 
   const model = (process.env.COLONIZER_MODEL ?? '').trim();
-  const problem = selectionProblem(routes, model);
+  const claude = claudeSelection(model, process.env);
+  const problem = selectionProblem(routes, model, Boolean(claude));
   if (problem) {
     await runUnconfigured({ commands, emit, detail: problem });
     process.exit(0);
@@ -577,7 +603,7 @@ async function main() {
   const agentDir = mkdtempSync(join(tmpdir(), 'colonizer-pi-'));
   writeFileSync(join(agentDir, 'models.json'), `${JSON.stringify(buildModelsConfig(routes, model, effort))}\n`, { mode: 0o600 });
   try {
-    await runAgent({ commands, emit, selection: resolveModel(routes, model), effort: EFFORT_LEVELS.has(effort) ? effort : '', disabledTools, skills, env: piEnv(process.env, agentDir), cwd: process.cwd() });
+    await runAgent({ commands, emit, selection: claude ?? resolveModel(routes, model), effort: EFFORT_LEVELS.has(effort) ? effort : '', disabledTools, skills, env: piEnv(process.env, agentDir), cwd: process.cwd() });
   } finally {
     rmSync(agentDir, { recursive: true, force: true });
   }
