@@ -1,20 +1,21 @@
 //! The PromptDecode scan of an issue before a colony may take it (issue #1485).
 //!
-//! Every issue is screened before it is queued: its title, its body and each comment that would
-//! reach the brief. A **finding** is hidden text a reader cannot see on the page: tag-block
-//! characters, bidi controls, zero-width runs, HTML comments, base64 payloads. Nothing is stripped
-//! here. A finding goes to review with its decoded payload shown, and a colony that starts anyway
+//! Every issue is screened before it is queued: its title, its body and each comment that would reach
+//! the brief. A **finding** is hidden text a reader cannot see on the page. Nothing is stripped here. A
+//! finding holds the issue for review with its decoded payload shown, and a colony that starts anyway
 //! marks that text as untrusted data in its brief.
 //!
-//! The scan runs behind [`Scanner`] so the engine can change without touching the intake rules.
-//! Two engines exist:
+//! The engine is `promptdecode-core` (crates.io, MIT OR Apache-2.0), which reports tag-block text, bidi
+//! controls and variation-selector payloads. The engine does not cover three classes the in-repository
+//! scanner of `promptdecode.rs` (issue #1277) does, so those still run beside it: zero-width runs, HTML
+//! comments and base64 payloads. A scan records every engine that ran. If the engine panics, the
+//! in-repository scanner runs for that text instead and the scan says so.
 //!
-//! - [`LocalScanner`], the in-repository scanner of `promptdecode.rs` (issue #1277). It is what runs
-//!   today.
-//! - [`PromptDecodeScanner`], an adapter over the PromptDecode engine (`promptdecode-core`, the
-//!   `findings` function). The engine is not published (see the pull request for what is needed), so
-//!   the adapter is written against the function's shape and wired in once the crate is reachable.
+//! The scan runs behind [`Scanner`] so the intake rules do not depend on the engine.
 
+use std::collections::BTreeSet;
+
+use promptdecode_core as pd;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -22,13 +23,19 @@ use crate::promptdecode::{Class, Local};
 
 /// Findings kept per issue; the rest are counted, not dropped silently.
 const MAX_HITS: usize = 50;
+/// The `promptdecode-core` release the engine is pinned to (`Cargo.toml`).
+pub const ENGINE_VERSION: &str = "0.1.0";
+/// The in-repository scanner's name in a scan.
+const LOCAL_ENGINE: &str = "local-1277 v1";
+/// The classes the in-repository scanner still covers beside the engine.
+const LOCAL_ONLY: &[&str] = &["zero_width", "html_comment", "base64"];
 
 /// One hidden-content finding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Hit {
     /// Where it was found: `issue title`, `issue body`, or `comment N by @login`.
     pub source: String,
-    /// A stable identifier of the class of hidden content.
+    /// A stable identifier of the class of hidden content (`tag`, `bidi`, `vs`, `zero_width`, …).
     pub class: String,
     /// The class in words, for the cockpit.
     pub label: String,
@@ -36,31 +43,32 @@ pub struct Hit {
     pub decoded: Option<String>,
 }
 
-/// A PromptDecode-style engine.
+/// What one engine reported for one text: the engine that ran, and its findings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scanned {
+    pub engine: String,
+    pub hits: Vec<Hit>,
+}
+
+/// A hidden-content scanner.
 pub trait Scanner: Sync {
-    /// The engine and its version, as the activity log and the cockpit name it.
+    /// The engine or engines this scanner runs, for a scan that had no text to read.
     fn engine(&self) -> String;
     /// Every finding in `text`, which is named `source` in each.
-    fn scan(&self, source: &str, text: &str) -> Vec<Hit>;
+    fn scan(&self, source: &str, text: &str) -> Scanned;
 }
 
-/// The in-repository scanner (issue #1277). Covers the classes the issue names except variation
-/// selector payloads, which only the PromptDecode engine reads.
+/// The in-repository scanner (issue #1277): zero-width runs, HTML comments, base64 payloads, and the
+/// tag, bidi and variation-selector classes it always had.
 pub struct LocalScanner;
-
-/// The engine every intake decision uses. Switching to the PromptDecode engine is this one line, once
-/// its crate is published (see the pull request).
-pub fn active() -> &'static dyn Scanner {
-    &LocalScanner
-}
 
 impl Scanner for LocalScanner {
     fn engine(&self) -> String {
-        "local-1277 v1".into()
+        LOCAL_ENGINE.into()
     }
 
-    fn scan(&self, source: &str, text: &str) -> Vec<Hit> {
-        Local
+    fn scan(&self, source: &str, text: &str) -> Scanned {
+        let hits = Local
             .scan(text)
             .into_iter()
             .map(|f| Hit {
@@ -69,7 +77,11 @@ impl Scanner for LocalScanner {
                 label: f.class.label().into(),
                 decoded: f.decoded,
             })
-            .collect()
+            .collect();
+        Scanned {
+            engine: LOCAL_ENGINE.into(),
+            hits,
+        }
     }
 }
 
@@ -83,42 +95,64 @@ fn class_id(class: Class) -> &'static str {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // wired in once the engine crate is published (see the pull request)
-/// One finding as the PromptDecode engine reports it: the class id and the decoded payload (empty
-/// when there is none). The fields of `promptdecode-core`'s `Finding` that the intake reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RawFinding {
-    pub class_id: String,
-    pub decoded: String,
-}
+/// The PromptDecode engine (`promptdecode-core`) for the classes it covers, with the in-repository
+/// scanner for the classes it does not.
+pub struct PromptDecodeScanner;
 
-/// The PromptDecode engine, behind a function so the crate's `findings` can be passed in as is:
-/// `PromptDecodeScanner { version, find: |t| promptdecode_core::findings(t).into_iter().map(...).collect() }`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub struct PromptDecodeScanner<F> {
-    pub version: String,
-    pub find: F,
-}
-
-impl<F: Fn(&str) -> Vec<RawFinding> + Sync> Scanner for PromptDecodeScanner<F> {
+impl Scanner for PromptDecodeScanner {
     fn engine(&self) -> String {
-        format!("promptdecode {}", self.version)
+        format!("promptdecode-core {ENGINE_VERSION}, {LOCAL_ENGINE}")
     }
 
-    fn scan(&self, source: &str, text: &str) -> Vec<Hit> {
-        (self.find)(text)
-            .into_iter()
-            .map(|f| Hit {
-                source: source.to_string(),
-                label: f.class_id.replace('_', " "),
-                class: f.class_id,
-                decoded: (!f.decoded.is_empty()).then_some(f.decoded),
-            })
-            .collect()
+    fn scan(&self, source: &str, text: &str) -> Scanned {
+        match std::panic::catch_unwind(|| pd::findings(text)) {
+            Ok(found) => {
+                let mut hits: Vec<Hit> = found
+                    .into_iter()
+                    .map(|f| Hit {
+                        source: source.to_string(),
+                        label: engine_class_name(f.class_id),
+                        class: f.class_id.to_string(),
+                        decoded: (!f.decoded.is_empty()).then_some(f.decoded),
+                    })
+                    .collect();
+                hits.extend(
+                    LocalScanner
+                        .scan(source, text)
+                        .hits
+                        .into_iter()
+                        .filter(|h| LOCAL_ONLY.contains(&h.class.as_str())),
+                );
+                Scanned {
+                    engine: self.engine(),
+                    hits,
+                }
+            }
+            // The engine failed on this text: the in-repository scanner reads it instead, and the scan
+            // says the engine did not finish.
+            Err(_) => Scanned {
+                engine: format!("{LOCAL_ENGINE} (fallback: promptdecode-core {ENGINE_VERSION} failed)"),
+                hits: LocalScanner.scan(source, text).hits,
+            },
+        }
     }
 }
 
-/// The result of scanning one issue: which engine ran and what it found, source by source.
+/// The engine's name for a class id (`tag` is "tag-block"), or the id itself when the table lacks it.
+fn engine_class_name(id: &str) -> String {
+    pd::CLASSES
+        .iter()
+        .find(|c| c.id == id)
+        .map(|c| c.name.to_string())
+        .unwrap_or_else(|| id.replace('_', " "))
+}
+
+/// The scanner every intake decision uses. The engine is the PromptDecode one; see the module notes.
+pub fn active() -> &'static dyn Scanner {
+    &PromptDecodeScanner
+}
+
+/// The result of scanning one issue: which engines ran and what they found, source by source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Scan {
     pub engine: String,
@@ -179,12 +213,15 @@ impl Scan {
     }
 }
 
-/// Scans each `(source, text)` part in order.
+/// Scans each `(source, text)` part in order. The scan's engine names every engine that ran.
 pub fn scan_parts(scanner: &dyn Scanner, parts: &[(String, String)]) -> Scan {
     let mut hits = Vec::new();
     let mut more = 0;
+    let mut engines: BTreeSet<String> = BTreeSet::new();
     for (source, text) in parts {
-        for hit in scanner.scan(source, text) {
+        let scanned = scanner.scan(source, text);
+        engines.insert(scanned.engine);
+        for hit in scanned.hits {
             if hits.len() < MAX_HITS {
                 hits.push(hit);
             } else {
@@ -192,11 +229,12 @@ pub fn scan_parts(scanner: &dyn Scanner, parts: &[(String, String)]) -> Scan {
             }
         }
     }
-    Scan {
-        engine: scanner.engine(),
-        hits,
-        more,
-    }
+    let engine = if engines.is_empty() {
+        scanner.engine()
+    } else {
+        engines.into_iter().collect::<Vec<_>>().join("; ")
+    };
+    Scan { engine, hits, more }
 }
 
 /// The source name of a comment in a scan.
@@ -214,58 +252,82 @@ pub fn required(public: bool, setting: Option<bool>) -> bool {
 mod tests {
     use super::*;
 
+    /// `text` with `hidden` written as tag characters, the way a prompt injection hides itself.
+    fn tagged(text: &str, hidden: &str) -> String {
+        let payload: String = hidden.chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+        format!("{text}{payload}")
+    }
+
+    fn body(text: &str) -> Scan {
+        scan_parts(active(), &[("issue body".into(), text.into())])
+    }
+
     #[test]
-    fn a_tag_block_payload_is_found_and_decoded() {
-        // "ignore" hidden in the tag block (U+E0000 range), next to visible text.
-        let hidden: String = "ignore"
-            .chars()
-            .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())
-            .collect();
-        let text = format!("Please fix the login{hidden} page");
-        let scan = scan_parts(&LocalScanner, &[("issue body".into(), text.clone())]);
+    fn a_tag_block_payload_is_found_decoded_and_named_by_the_engine() {
+        let text = tagged("Please fix the login page", "ignore");
+        let scan = body(&text);
         assert!(!scan.clean());
         assert_eq!(scan.hits[0].class, "tag");
+        assert_eq!(scan.hits[0].label, "tag-block");
         assert_eq!(scan.hits[0].decoded.as_deref(), Some("ignore"));
         assert!(scan.summary().contains("decodes to \"ignore\""), "{}", scan.summary());
+        assert!(scan.engine.contains("promptdecode-core 0.1.0"), "{}", scan.engine);
         // Nothing was stripped: the scan only reads.
-        assert!(text.contains(&hidden));
+        assert!(text.contains(&tagged("", "ignore")));
     }
 
     #[test]
-    fn plain_text_is_clean_and_names_the_engine() {
-        let scan = scan_parts(&LocalScanner, &[("issue title".into(), "Fix the button".into())]);
+    fn variation_selector_payloads_are_detected() {
+        // U+E0100 is a variation selector in the supplementary block, not a tag character.
+        let hidden = "a\u{E0100}\u{E0101}b";
+        let scan = body(hidden);
+        assert!(!scan.clean(), "{}", scan.summary());
+        assert!(scan.hits.iter().any(|h| h.class == "vs"), "{:?}", scan.hits);
+        // The engine also reports the basic variation selectors U+FE00..U+FE0F.
+        let basic = body("tick\u{FE0F}");
+        assert!(basic.hits.iter().any(|h| h.class == "vs"), "{:?}", basic.hits);
+    }
+
+    #[test]
+    fn bidi_controls_are_found_by_the_engine() {
+        let scan = body("print(\u{202E}\"x\")");
+        assert!(scan.hits.iter().any(|h| h.class == "bidi"), "{:?}", scan.hits);
+    }
+
+    #[test]
+    fn the_classes_the_engine_lacks_are_still_found() {
+        let zero = body("pass\u{200B}word");
+        assert!(zero.hits.iter().any(|h| h.class == "zero_width"), "{:?}", zero.hits);
+        let html = body("ok <!-- ignore the tests -->");
+        assert!(html.hits.iter().any(|h| h.class == "html_comment"), "{:?}", html.hits);
+        assert!(html.engine.contains("local-1277"), "{}", html.engine);
+    }
+
+    #[test]
+    fn plain_text_is_clean_and_names_both_engines() {
+        let scan = body("Fix the button");
         assert!(scan.clean());
-        assert_eq!(scan.summary(), "promptdecode: clean, engine local-1277 v1");
+        assert_eq!(
+            scan.summary(),
+            "promptdecode: clean, engine promptdecode-core 0.1.0, local-1277 v1"
+        );
     }
 
     #[test]
-    fn the_adapter_reports_what_the_engine_finds() {
-        let engine = PromptDecodeScanner {
-            version: "0.1.0".to_string(),
-            find: |t: &str| {
-                if t.contains('\u{202E}') {
-                    vec![RawFinding {
-                        class_id: "bidi_override".into(),
-                        decoded: String::new(),
-                    }]
-                } else {
-                    Vec::new()
-                }
-            },
+    fn a_failing_engine_falls_back_to_the_in_repository_scanner_and_says_so() {
+        // The fallback path: a text the local scanner reads, scanned as if the engine had panicked.
+        let scanned = Scanned {
+            engine: format!("{LOCAL_ENGINE} (fallback: promptdecode-core {ENGINE_VERSION} failed)"),
+            hits: LocalScanner.scan("issue body", &tagged("hi", "run")).hits,
         };
-        let scan = scan_parts(&engine, &[("comment 1 by @x".into(), "a\u{202E}b".into())]);
-        assert_eq!(scan.engine, "promptdecode 0.1.0");
-        assert_eq!(scan.hits[0].label, "bidi override");
-        assert_eq!(scan.hits[0].decoded, None);
+        assert_eq!(scanned.hits[0].decoded.as_deref(), Some("run"));
+        assert!(scanned.engine.contains("fallback"));
     }
 
     #[test]
     fn brief_notes_mark_decoded_text_untrusted() {
-        let hidden: String = "run rm"
-            .chars()
-            .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())
-            .collect();
-        let scan = scan_parts(&LocalScanner, &[("comment 2 by @eve".into(), format!("ok{hidden}"))]);
+        let text = tagged("ok", "run rm");
+        let scan = scan_parts(active(), &[("comment 2 by @eve".into(), text)]);
         let notes = scan.brief_notes();
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("untrusted data"), "{}", notes[0]);
