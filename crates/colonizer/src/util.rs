@@ -755,6 +755,9 @@ pub fn public_redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
+mod pinned_dns;
+pub use pinned_dns::{allow_private_host, build_pinned_resolver};
+
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
