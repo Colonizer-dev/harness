@@ -46,6 +46,8 @@ pub(crate) struct TrainSettings {
     pub(crate) forbid: String,
     /// Issue #1075: minutes a head must have been unchanged before it merges.
     pub(crate) quiet_minutes: u64,
+    /// Checks that should not block a merge even if they fail.
+    pub(crate) advisory_checks: String,
 }
 
 pub(crate) async fn train_settings(app: &App) -> TrainSettings {
@@ -61,6 +63,7 @@ pub(crate) async fn train_settings(app: &App) -> TrainSettings {
         quiet_minutes: crate::config::setting(&modules.publish, &schema, "merge_train_quiet_minutes")
             .and_then(Value::as_u64)
             .unwrap_or(crate::merge_head::DEFAULT_QUIET_MINUTES),
+        advisory_checks: read("merge_advisory_checks"),
     }
 }
 
@@ -124,6 +127,40 @@ pub(crate) fn validate_overrides(raw: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `merge_advisory_checks` grammar, checked at save time (modules.rs' `validate_settings`).
+pub(crate) fn validate_advisory_checks(raw: &str) -> Result<(), String> {
+    for entry in parse_list(raw) {
+        let Some((repo, checks)) = entry.split_once('=') else {
+            return Err(format!("entry {entry:?} has no `=`; write owner/repo=check|check"));
+        };
+        let repo = repo.trim();
+        if repo.is_empty() || repo.starts_with('/') || repo.ends_with('/') || repo.split('/').count() != 2 {
+            return Err(format!("entry {entry:?} does not name owner/repo"));
+        }
+        let checks = checks.trim();
+        if checks.is_empty() {
+            return Err(format!("entry {entry:?} has no check names after `=`"));
+        }
+    }
+    Ok(())
+}
+
+/// Parses advisory checks for a repository from the advisory checks setting.
+/// Returns a list of check names (lowercased) that should not block a merge for the given repo.
+pub(crate) fn advisory_checks(spec: &str, repo: &str) -> Vec<String> {
+    let repo = repo.to_ascii_lowercase();
+    for entry in parse_list(spec) {
+        let Some((key, checks)) = entry.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        if key == repo {
+            return checks.split('|').map(|c| c.trim().to_lowercase()).collect();
+        }
+    }
+    Vec::new()
 }
 
 /// The base branch's own checks: a merge lands on the base, so a red base holds the whole train.
@@ -419,7 +456,7 @@ enum DraftPromotion {
     Keep(String),         // keep draft for reason
 }
 
-pub(crate) fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
+pub(crate) fn decide(facts: &PrFacts, guards: &Guards, advisory: &[String]) -> Decision {
     let info = &facts.info;
     if info.state != PrState::Open {
         return Decision::Waiting("the pull request is no longer open".to_string());
@@ -464,13 +501,17 @@ pub(crate) fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
             // CLEAN is not enough when the repository does not require up-to-date branches: the
             // branch must contain the base tip, and when that cannot be counted nothing merges.
             match facts.behind_base {
-                Some(0) => match info.ci {
-                    CiState::Pending => Decision::WaitingCi,
-                    CiState::Failure => Decision::Skipped(CHECKS_FAILING.to_string()),
-                    CiState::Success => Decision::Merge,
-                    // The train's guarantee is green CI; a pull request nobody checks is not green.
-                    CiState::NoChecks => Decision::Skipped("no checks ran on this pull request".to_string()),
-                },
+                Some(0) => {
+                    // Check CI excluding advisory checks: non-advisory checks must be green.
+                    let ci = info.ci_excluding(advisory);
+                    match ci {
+                        CiState::Pending => Decision::WaitingCi,
+                        CiState::Failure => Decision::Skipped(CHECKS_FAILING.to_string()),
+                        CiState::Success => Decision::Merge,
+                        // The train's guarantee is green CI; a pull request nobody checks is not green.
+                        CiState::NoChecks => Decision::Skipped("no checks ran on this pull request".to_string()),
+                    }
+                }
                 Some(n) => Decision::NeedsRebase(NeedsRebase {
                     detail: format!(
                         "GitHub reports the branch clean, but it is {n} commit{} behind the base branch's tip; \
@@ -631,12 +672,14 @@ async fn tick_once(app: &Shared) {
             )
             .await;
         } else {
+            let advisory = advisory_checks(&settings.advisory_checks, repo);
             train_repo(
                 app,
                 repo,
                 &group,
                 &guards,
                 crate::merge_head::quiet_period(settings.quiet_minutes),
+                &advisory,
             )
             .await;
         }
@@ -699,7 +742,7 @@ async fn hold(app: &Shared, repo: &str, group: &[&Session], state: TrainState, s
 
 /// Runs one repository's tick: the base branch's CI gate, the candidates in train order, at most
 /// one merge, the bounded settle wait, and the reading stored for the route.
-async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guards, quiet: Duration) {
+async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guards, quiet: Duration, advisory: &[String]) {
     let now = Utc::now();
     let base = match github::default_branch(app, repo).await {
         Ok(base) => base,
@@ -848,7 +891,7 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
                             }
                         } else {
                             // Normal draft or not a draft at all.
-                            decide(f, guards)
+                            decide(f, guards, advisory)
                         }
                     }
                 };
@@ -913,6 +956,7 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
                     title: &title,
                     delete_branch: !has_stacked_child(&fresh, s),
                     require_ci: true,
+                    advisory,
                 };
                 let gh = merge_head::GhHead { app };
                 match merge_head::merge_quiet_head(&gh, &candidate, Utc::now(), quiet).await {
@@ -946,10 +990,22 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
         }
     }
     if let Some((ref url, ref s, ref head, ref drift)) = merged {
-        app.session_log(&s.id, "info", format!("the merge train squash-merged {url} at head {head}"))
-            .await;
+        // Get the check summary from the facts if available
+        let checks_summary = facts.iter().find_map(|f| f.as_ref().map(|x| x.info.checks_summary(advisory)));
+        let checks_info = checks_summary.as_ref().map(|c| format!("; checks: {c}")).unwrap_or_default();
+        app.session_log(
+            &s.id,
+            "info",
+            format!("the merge train squash-merged {url} at head {head}{checks_info}"),
+        )
+        .await;
         let mut entry = Entry::new("publish.merge_train", "colony").colony(s);
-        entry.detail = Some(format!("squash-merged by the merge train at head {head}"));
+        let detail = if let Some(checks) = checks_summary {
+            format!("squash-merged by the merge train at head {head}; checks: {checks}")
+        } else {
+            format!("squash-merged by the merge train at head {head}")
+        };
+        entry.detail = Some(detail);
         crate::activity::record(app, entry).await;
         if let Some(u) = drift {
             app.session_log(&s.id, "warn", format!("merge train: {}", u.sentence())).await;
@@ -1202,6 +1258,7 @@ mod tests {
                 base_ref_name: Some("main".to_string()),
                 green_checks: Vec::new(),
                 red_checks: Vec::new(),
+                pending_checks: Vec::new(),
             },
             commits: vec![commit("colonizer-settlers", "do the thing")],
             behind_base: Some(0),
@@ -1285,27 +1342,33 @@ mod tests {
     #[test]
     fn a_clean_green_pull_request_merges_and_everything_less_is_held_or_skipped() {
         let g = guards();
-        assert_eq!(decide(&facts(Mergeability::Clean, CiState::Success), &g), Decision::Merge);
+        assert_eq!(
+            decide(&facts(Mergeability::Clean, CiState::Success), &g, &[]),
+            Decision::Merge
+        );
         // The train's guarantee is green CI: a pull request nobody checks is not green, even though
         // GitHub's CLEAN already says the repository's requirements are met.
         assert_eq!(
-            decide(&facts(Mergeability::Clean, CiState::NoChecks), &g),
+            decide(&facts(Mergeability::Clean, CiState::NoChecks), &g, &[]),
             Decision::Skipped("no checks ran on this pull request".to_string())
         );
-        assert_eq!(decide(&facts(Mergeability::Clean, CiState::Pending), &g), Decision::WaitingCi);
         assert_eq!(
-            decide(&facts(Mergeability::Clean, CiState::Failure), &g),
+            decide(&facts(Mergeability::Clean, CiState::Pending), &g, &[]),
+            Decision::WaitingCi
+        );
+        assert_eq!(
+            decide(&facts(Mergeability::Clean, CiState::Failure), &g, &[]),
             Decision::Skipped("the pull request's checks are failing".to_string())
         );
         assert_eq!(
-            decide(&facts(Mergeability::Unknown, CiState::Success), &g),
+            decide(&facts(Mergeability::Unknown, CiState::Success), &g, &[]),
             Decision::Waiting("GitHub has not yet computed whether the pull request can merge".to_string())
         );
         // Fail closed: without a behind count nothing is merged, however clean GitHub says it is.
         let mut unverified = facts(Mergeability::Clean, CiState::Success);
         unverified.behind_base = None;
         assert_eq!(
-            decide(&unverified, &g),
+            decide(&unverified, &g, &[]),
             Decision::Waiting("could not verify the branch contains the base tip".to_string())
         );
     }
@@ -1316,20 +1379,20 @@ mod tests {
         let mut draft = facts(Mergeability::Clean, CiState::Success);
         draft.info.is_draft = true;
         assert_eq!(
-            decide(&draft, &g),
+            decide(&draft, &g, &[]),
             Decision::Skipped("the pull request is a draft".to_string())
         );
 
         let mut held = facts(Mergeability::Clean, CiState::Success);
         held.info.title = "WIP: add the thing".to_string();
         assert_eq!(
-            decide(&held, &g),
+            decide(&held, &g, &[]),
             Decision::Skipped("the pull request is marked wip".to_string())
         );
         held.info.title = "Add the thing".to_string();
         held.info.labels = vec!["do-not-merge".to_string()];
         assert_eq!(
-            decide(&held, &g),
+            decide(&held, &g, &[]),
             Decision::Skipped("the pull request is marked do-not-merge".to_string())
         );
         // A word starting with a marker is not a mark.
@@ -1339,7 +1402,7 @@ mod tests {
         let mut unreadable = facts(Mergeability::Clean, CiState::Success);
         unreadable.commits = Vec::new();
         assert_eq!(
-            decide(&unreadable, &g),
+            decide(&unreadable, &g, &[]),
             Decision::Skipped("no commits could be read".to_string())
         );
     }
@@ -1347,8 +1410,8 @@ mod tests {
     #[test]
     fn behind_conflicted_and_clean_but_behind_all_need_a_rebase_never_a_merge() {
         let g = guards();
-        let behind = decide(&facts(Mergeability::Behind, CiState::Success), &g);
-        let conflicted = decide(&facts(Mergeability::Conflicted, CiState::Success), &g);
+        let behind = decide(&facts(Mergeability::Behind, CiState::Success), &g, &[]);
+        let conflicted = decide(&facts(Mergeability::Conflicted, CiState::Success), &g, &[]);
         // GitHub's own readings are the watcher's auto-rebase path's to fix; it acts on them
         // unconditionally for an open pull request, so the train only reports them.
         assert!(
@@ -1361,10 +1424,10 @@ mod tests {
         let mut stale = facts(Mergeability::Clean, CiState::Success);
         stale.behind_base = Some(2);
         assert!(matches!(
-            decide(&stale, &g),
+            decide(&stale, &g, &[]),
             Decision::NeedsRebase(NeedsRebase { auto_rebase: true, .. })
         ));
-        for decided in [behind, conflicted, decide(&stale, &g)] {
+        for decided in [behind, conflicted, decide(&stale, &g, &[])] {
             assert_ne!(decided, Decision::Merge);
         }
 
@@ -1372,21 +1435,21 @@ mod tests {
         let mut child = facts(Mergeability::Clean, CiState::Success);
         child.base_is_default = false;
         child.info.base_ref_name = Some("colonizer/issue-1-parent".to_string());
-        assert!(matches!(decide(&child, &g), Decision::Waiting(_)));
+        assert!(matches!(decide(&child, &g, &[]), Decision::Waiting(_)));
     }
 
     #[test]
     fn the_identity_and_attribution_guards_refuse_outsiders_and_fail_closed() {
         let mut foreign = facts(Mergeability::Clean, CiState::Success);
         foreign.commits = vec![commit("someone-else", "do the thing")];
-        assert!(matches!(decide(&foreign, &guards()), Decision::Skipped(_)));
+        assert!(matches!(decide(&foreign, &guards(), &[]), Decision::Skipped(_)));
 
         // Configured authors (a login here) are accepted, case-insensitively.
         let g = Guards {
             allowed_authors: vec!["Someone-Else".to_string()],
             forbidden: Vec::new(),
         };
-        assert_eq!(decide(&foreign, &g), Decision::Merge);
+        assert_eq!(decide(&foreign, &g, &[]), Decision::Merge);
 
         // An unknown author on an otherwise readable commit is refused, and an empty allowed list
         // refuses rather than disabling the guard.
@@ -1395,7 +1458,7 @@ mod tests {
             authors: Vec::new(),
             message: "do the thing".to_string(),
         }];
-        assert!(matches!(decide(&unsigned, &guards()), Decision::Skipped(_)));
+        assert!(matches!(decide(&unsigned, &guards(), &[]), Decision::Skipped(_)));
         assert_eq!(foreign_author(&foreign.commits, &[]), Some("someone-else".to_string()));
 
         // The attribution guard matches case-insensitively.
@@ -1404,7 +1467,7 @@ mod tests {
             "colonizer-settlers",
             "Fix the leak\n\nCO-AUTHORED-BY: CLAUDE <noreply@anthropic.com>",
         )];
-        assert!(matches!(decide(&attributed, &guards()), Decision::Skipped(_)));
+        assert!(matches!(decide(&attributed, &guards(), &[]), Decision::Skipped(_)));
     }
 
     #[test]

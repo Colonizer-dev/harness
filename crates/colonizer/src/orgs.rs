@@ -299,6 +299,8 @@ pub struct OrgSettings {
     /// (sensitivity.rs).
     #[serde(default)]
     pub sensitivity: Option<SensitivityOverrides>,
+    #[serde(default)]
+    pub guest_agents: Option<crate::guest_agents::GuestAgents>,
     /// Trusted auto-colonize (issue #1219): whether a new issue from an org member, a collaborator
     /// with write access, an allowlisted login or Colonizer itself becomes a queued colony without a
     /// click. `None` is `off`; a stranger's issue never starts by itself (`auto_colonize.rs`).

@@ -6,7 +6,7 @@
 // card at the foot applies it (new colonies, or the running ones too after a counted confirm) through
 // the same POST /api/models/switch as before. The judge saves on pick through PUT /api/modules/autonomy
 // with its other settings merged in, never replaced.
-import { useMemo, useState, type ReactElement, type ReactNode, type RefObject } from "react";
+import { useEffect, useMemo, useState, type ReactElement, type ReactNode, type RefObject } from "react";
 
 import { cx } from "../components/ui";
 import type { LeftoverClaude, ModelAssignments, ModelProfile, PlanUsage, SwitchableModel } from "../types";
@@ -97,6 +97,10 @@ export interface ModelSwitcherPanelProps {
   judge?: JudgeSectionProps;
   /** For the tests: where the menu starts, and the clock the countdowns read. */
   initialView?: ModelView;
+  /** Navigate to this view after scope changes (issue #1402). */
+  navigateToView?: ModelView | null;
+  /** Called when user clicks to edit an install-wide role from org scope (issue #1402). */
+  onEditInstallWide?: (role: string) => void;
   nowMs?: number;
 }
 
@@ -144,6 +148,14 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
   const installModule = a.modules.find((m) => m.id === a.install.module);
   const nowMs = p.nowMs;
 
+  // Navigate to a specific view when navigateToView prop changes (issue #1402)
+  useEffect(() => {
+    if (p.navigateToView) {
+      setView(p.navigateToView);
+      setQuery("");
+    }
+  }, [p.navigateToView]);
+
   const go = (next: ModelView, text = "") => {
     setView(next);
     setQuery(text);
@@ -177,13 +189,16 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
         const value = effectiveValue(r, scope, draft);
         const badge = roleQuotaBadge(value, a.models, nowMs);
         const changed = r.role in draft.roles;
+        // Detect install-wide rows in org scope (issue #1402)
+        const isInstallWideInOrgScope = !r.editable && scope.kind === "org";
+
         return {
           id: `role:${r.role}`,
           title: r.title,
           subtitle: (
             [
               value ? shortModelName(value, a.models) : r.role === ACCOUNT_FALLBACK_ROLE ? "Off" : "Module default",
-              changed ? `was ${r.value ? shortModelName(r.value, a.models) : "module default"}` : !r.editable ? "install-wide only" : value ? sourceLabel(r.source, scope) : null,
+              changed ? `was ${r.value ? shortModelName(r.value, a.models) : "module default"}` : isInstallWideInOrgScope ? "install-wide · Enter to change for the whole install" : !r.editable ? "install-wide only" : value ? sourceLabel(r.source, scope) : null,
             ]
               .filter(Boolean)
               .join(" · ")
@@ -196,9 +211,9 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
           ) : changed ? (
             <span className="rounded-full bg-accent-soft px-2 py-0.5 text-meta-lg font-medium text-accent">changed</span>
           ) : undefined,
-          disabled: !r.editable,
+          disabled: !r.editable && !isInstallWideInOrgScope,
           verb: "choose",
-          onPick: () => go({ kind: "role", role: r.role }),
+          onPick: () => isInstallWideInOrgScope ? p.onEditInstallWide?.(r.role) : go({ kind: "role", role: r.role }),
         } satisfies PanelRow;
       });
     if (p.judge?.module && fits("judge", currentJudgeModel(p.judge.module))) {

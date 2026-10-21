@@ -1360,6 +1360,81 @@ pub struct PrInfo {
     /// Check names that failed on the PR head (issue #1364): used by the merge train to decide if a
     /// base-shared-red draft should be kept. Extracted from `statusCheckRollup`.
     pub red_checks: Vec<String>,
+    /// Check names that are still pending on the PR head (not SUCCESS, NEUTRAL, SKIPPED, STALE, or a failure).
+    /// Extracted from `statusCheckRollup`.
+    pub pending_checks: Vec<String>,
+}
+
+impl PrInfo {
+    /// The verdict on checks excluding those in `advisory`, for deciding whether to merge.
+    /// - If `ci` is NoChecks or all checks are in the advisory list, returns NoChecks.
+    /// - If any non-advisory check is failing, returns Failure.
+    /// - If any non-advisory check is pending, returns Pending.
+    /// - Otherwise returns Success (only if some non-advisory checks exist and are all green).
+    pub fn ci_excluding(&self, advisory: &[String]) -> CiState {
+        if self.ci == CiState::NoChecks {
+            return CiState::NoChecks;
+        }
+        // If no advisory filters are specified, return the original CI state.
+        if advisory.is_empty() {
+            return self.ci;
+        }
+        let advisory_lower: std::collections::HashSet<_> = advisory.iter().map(|s| s.to_lowercase()).collect();
+        for check in &self.red_checks {
+            if !advisory_lower.contains(check) {
+                return CiState::Failure;
+            }
+        }
+        for check in &self.pending_checks {
+            if !advisory_lower.contains(check) {
+                return CiState::Pending;
+            }
+        }
+        // No non-advisory checks found in green/red/pending; check if there are any non-advisory checks at all
+        if self.green_checks.iter().all(|c| advisory_lower.contains(c))
+            && self.red_checks.iter().all(|c| advisory_lower.contains(c))
+            && self.pending_checks.iter().all(|c| advisory_lower.contains(c))
+        {
+            return CiState::NoChecks;
+        }
+        CiState::Success
+    }
+
+    /// A summary of check outcomes, sorted and deterministic, for logging and records.
+    /// Format: "green: check1, check2; red: check3, check4 (advisory); pending: check5"
+    /// Advisory checks are marked in parentheses.
+    pub fn checks_summary(&self, advisory: &[String]) -> String {
+        let adv_lower: std::collections::HashSet<_> = advisory.iter().map(|s| s.to_lowercase()).collect();
+        let mut parts = Vec::new();
+        for (label, checks) in [
+            ("green", &self.green_checks),
+            ("red", &self.red_checks),
+            ("pending", &self.pending_checks),
+        ] {
+            if checks.is_empty() {
+                continue;
+            }
+            let (mut req, mut adv): (Vec<_>, Vec<_>) = checks.iter().partition(|c| !adv_lower.contains(*c));
+            req.sort();
+            adv.sort();
+            let mut s = req.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            if !adv.is_empty() {
+                if !s.is_empty() {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!(
+                    "{} (advisory)",
+                    adv.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            }
+            parts.push(format!("{}: {}", label, s));
+        }
+        if parts.is_empty() {
+            "no checks".to_string()
+        } else {
+            parts.join("; ")
+        }
+    }
 }
 
 /// A pull request's checks in one word, from `gh pr view`'s `statusCheckRollup`: any failed check
@@ -1381,27 +1456,35 @@ impl CiState {
     }
 }
 
+/// Extract verdict from check run/status fields: conclusion > state > status/PENDING.
+fn item_verdict(item: &Value) -> String {
+    let word = |key: &str| item[key].as_str().unwrap_or_default().trim().to_ascii_uppercase();
+    let conclusion = word("conclusion");
+    let state = word("state");
+    let status = word("status");
+    if !conclusion.is_empty() {
+        conclusion
+    } else if !state.is_empty() {
+        state
+    } else if !status.is_empty() && status != "COMPLETED" {
+        "PENDING".to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Reads a `statusCheckRollup` array: `CheckRun`s carry `status` + `conclusion`, `StatusContext`s a
 /// `state`. Anything that is not an array, or an empty one, is [`CiState::NoChecks`].
 pub fn ci_verdict(rollup: Option<&Value>) -> CiState {
     let Some(items) = rollup.and_then(Value::as_array).filter(|a| !a.is_empty()) else {
         return CiState::NoChecks;
     };
-    let word = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().trim().to_ascii_uppercase();
     let mut pending = false;
     for item in items {
-        let conclusion = word(item, "conclusion");
-        let state = word(item, "state");
-        let status = word(item, "status");
-        let verdict = if !conclusion.is_empty() {
-            conclusion
-        } else if !state.is_empty() {
-            state
-        } else if !status.is_empty() && status != "COMPLETED" {
-            "PENDING".to_string()
-        } else {
+        let verdict = item_verdict(item);
+        if verdict.is_empty() {
             continue;
-        };
+        }
         match verdict.as_str() {
             "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => {
                 return CiState::Failure;
@@ -1421,22 +1504,13 @@ pub fn check_names_from_rollup(rollup: Option<&Value>) -> (Vec<String>, Vec<Stri
     let Some(items) = rollup.and_then(Value::as_array) else {
         return (Vec::new(), Vec::new());
     };
-    let word = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().trim().to_ascii_uppercase();
     let mut green = Vec::new();
     let mut red = Vec::new();
     for item in items {
-        let conclusion = word(item, "conclusion");
-        let state = word(item, "state");
-        let status = word(item, "status");
-        let verdict = if !conclusion.is_empty() {
-            conclusion
-        } else if !state.is_empty() {
-            state
-        } else if !status.is_empty() && status != "COMPLETED" {
-            "PENDING".to_string()
-        } else {
+        let verdict = item_verdict(item);
+        if verdict.is_empty() {
             continue;
-        };
+        }
         let name = item["name"].as_str().unwrap_or("").to_lowercase();
         if name.is_empty() {
             continue;
@@ -1452,6 +1526,40 @@ pub fn check_names_from_rollup(rollup: Option<&Value>) -> (Vec<String>, Vec<Stri
         }
     }
     (green, red)
+}
+
+/// Extract pending check names from a `statusCheckRollup` array.
+/// Returns check names that are still in progress and have not completed.
+fn pending_check_names_from_rollup(rollup: Option<&Value>) -> Vec<String> {
+    let Some(items) = rollup.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut pending = Vec::new();
+    for item in items {
+        let verdict = item_verdict(item);
+        if verdict.is_empty() {
+            continue;
+        }
+        if !matches!(
+            verdict.as_str(),
+            "SUCCESS"
+                | "NEUTRAL"
+                | "SKIPPED"
+                | "STALE"
+                | "FAILURE"
+                | "CANCELLED"
+                | "TIMED_OUT"
+                | "ACTION_REQUIRED"
+                | "STARTUP_FAILURE"
+                | "ERROR"
+        ) {
+            let name = item["name"].as_str().unwrap_or("").to_lowercase();
+            if !name.is_empty() {
+                pending.push(name);
+            }
+        }
+    }
+    pending
 }
 
 /// The fields `pr_info` asks `gh pr view --json` for, which must be exactly the ones `PrView` reads.
@@ -1633,6 +1741,7 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         .trim()
         .to_ascii_uppercase();
     let (green_checks, red_checks) = check_names_from_rollup(view.status_check_rollup.as_ref());
+    let pending_checks = pending_check_names_from_rollup(view.status_check_rollup.as_ref());
     Ok(PrInfo {
         state,
         mergeability: mergeability_from(view.mergeable.as_deref(), Some(&merge_state_status)),
@@ -1649,6 +1758,7 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         base_ref_name: view.base_ref_name,
         green_checks,
         red_checks,
+        pending_checks,
     })
 }
 
@@ -4532,6 +4642,7 @@ mod tests {
                 base_ref_name: None,
                 green_checks: Vec::new(),
                 red_checks: Vec::new(),
+                pending_checks: Vec::new(),
             }
         );
         assert_eq!(
@@ -4552,6 +4663,7 @@ mod tests {
                 base_ref_name: None,
                 green_checks: Vec::new(),
                 red_checks: Vec::new(),
+                pending_checks: Vec::new(),
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -4573,6 +4685,7 @@ mod tests {
                 base_ref_name: None,
                 green_checks: Vec::new(),
                 red_checks: Vec::new(),
+                pending_checks: Vec::new(),
             }
         );
         // `baseRefOid` rides along when GitHub reports one, for the auto-rebase backoff (issue
@@ -6626,6 +6739,105 @@ mod tests {
         assert!(
             !red.iter()
                 .any(|r| r.contains("test c") || r.contains("test d") || r.contains("test e"))
+        );
+    }
+
+    #[test]
+    fn ci_excluding_filters_advisory_checks_and_returns_success_when_all_red_are_advisory() {
+        use super::{CiState, Mergeability, PrInfo, PrState};
+        let mut info = PrInfo {
+            state: PrState::Open,
+            mergeability: Mergeability::Clean,
+            merge_state_status: "CLEAN".to_string(),
+            merged_at: None,
+            base_ref_oid: None,
+            created_at: None,
+            ci: CiState::Failure,
+            is_draft: false,
+            title: String::new(),
+            labels: Vec::new(),
+            head_ref_name: None,
+            head_ref_oid: None,
+            base_ref_name: None,
+            green_checks: vec!["rust".to_string()],
+            red_checks: vec!["installer".to_string()],
+            pending_checks: Vec::new(),
+        };
+        // With no advisory list, failure is failure.
+        assert_eq!(info.ci_excluding(&[]), CiState::Failure);
+        // With the failing check advisory, result is Success.
+        assert_eq!(info.ci_excluding(&["installer".to_string()]), CiState::Success);
+        // Case-insensitive match.
+        assert_eq!(info.ci_excluding(&["INSTALLER".to_string()]), CiState::Success);
+
+        // Same for pending checks.
+        info.ci = CiState::Pending;
+        info.red_checks.clear();
+        info.pending_checks = vec!["scanner".to_string()];
+        assert_eq!(info.ci_excluding(&[]), CiState::Pending);
+        assert_eq!(info.ci_excluding(&["scanner".to_string()]), CiState::Success);
+
+        // NoChecks stays NoChecks.
+        info.ci = CiState::NoChecks;
+        info.red_checks.clear();
+        info.pending_checks.clear();
+        assert_eq!(info.ci_excluding(&[]), CiState::NoChecks);
+        assert_eq!(info.ci_excluding(&["anything".to_string()]), CiState::NoChecks);
+
+        // All checks are advisory: should be NoChecks (no non-advisory checks)
+        info.ci = CiState::Failure;
+        info.green_checks = vec!["advisory-only".to_string()];
+        info.red_checks = vec!["advisory-fail".to_string()];
+        info.pending_checks = vec![];
+        assert_eq!(
+            info.ci_excluding(&["advisory-only".to_string(), "advisory-fail".to_string()]),
+            CiState::NoChecks
+        );
+
+        // Mix of advisory and non-advisory checks; all non-advisory are green
+        info.ci = CiState::Failure;
+        info.green_checks = vec!["required".to_string(), "advisory-ok".to_string()];
+        info.red_checks = vec!["advisory-fail".to_string()];
+        info.pending_checks = vec![];
+        assert_eq!(
+            info.ci_excluding(&["advisory-ok".to_string(), "advisory-fail".to_string()]),
+            CiState::Success
+        );
+    }
+
+    #[test]
+    fn checks_summary_formats_checks_and_marks_advisory() {
+        use super::{CiState, Mergeability, PrInfo, PrState};
+        let info = PrInfo {
+            state: PrState::Open,
+            mergeability: Mergeability::Clean,
+            merge_state_status: "CLEAN".to_string(),
+            merged_at: None,
+            base_ref_oid: None,
+            created_at: None,
+            ci: CiState::Failure,
+            is_draft: false,
+            title: String::new(),
+            labels: Vec::new(),
+            head_ref_name: None,
+            head_ref_oid: None,
+            base_ref_name: None,
+            green_checks: vec!["rust".to_string(), "scripts".to_string()],
+            red_checks: vec!["installer".to_string(), "collector".to_string()],
+            pending_checks: vec!["image".to_string()],
+        };
+        let summary = info.checks_summary(&["installer".to_string()]);
+        assert!(summary.contains("green: rust, scripts"), "green checks sorted");
+        assert!(
+            summary.contains("red: collector, installer (advisory)"),
+            "red split and sorted"
+        );
+        assert!(summary.contains("pending: image"), "pending included");
+
+        let summary_no_advisory = info.checks_summary(&[]);
+        assert!(
+            summary_no_advisory.contains("red: collector, installer"),
+            "all red when no advisory"
         );
     }
 }
