@@ -259,10 +259,7 @@ mod tests {
         let mut store = GateStore::default();
         store.record("held1", GateKind::Held, "retry");
         store.publish();
-        assert_eq!(
-            store.summary(&["held1".to_string(), "admissible1".to_string()]).admissible,
-            1
-        );
+        assert_eq!(store.summary(&["held1".to_string(), "admissible1".to_string()]).admissible, 1);
     }
 
     #[test]
