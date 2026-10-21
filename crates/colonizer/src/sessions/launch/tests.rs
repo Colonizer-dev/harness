@@ -146,6 +146,7 @@ fn overlap_request(repo: &str, serialize: Option<bool>) -> Json<NewSession> {
         model_override: None,
         subagent_model_override: None,
         claude_account: None,
+        agent_module: None,
         after: None,
         stack: false,
         origin: None,
@@ -641,6 +642,7 @@ async fn a_switched_off_org_refuses_new_colonies_and_names_the_way_back_on() {
             model_override: None,
             subagent_model_override: None,
             claude_account: None,
+            agent_module: None,
             after: None,
             stack: false,
             origin: None,
@@ -729,6 +731,7 @@ async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_ab
             model_override: None,
             subagent_model_override: None,
             claude_account: None,
+            agent_module: None,
             after: None,
             stack: false,
             origin: None,
@@ -776,6 +779,7 @@ fn stack_request(repo: &str, after: Option<String>, stack: bool) -> Json<NewSess
         model_override: None,
         subagent_model_override: None,
         claude_account: None,
+        agent_module: None,
         after,
         stack,
         origin: None,
@@ -1621,4 +1625,134 @@ fn a_retry_follows_a_failed_stack_parent_to_its_replacement() {
         .collect();
     let walked = retry_parent(&chain, Some("c0")).expect("a chain resolves");
     assert!(walked.starts_with('c'), "the walk stopped on a colony in the chain: {walked}");
+}
+
+/// An install with two agent modules: claude-code (it runs on a Claude login) and pi (it runs
+/// on none of its own), so a launch can name either, and the org's pick can be the other one.
+fn app_with_claude_code_and_pi(root: &std::path::Path) -> Shared {
+    let assets = root.join("assets");
+    let dir = assets.join("modules/agents/claude-code");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
+    std::fs::create_dir_all(assets.join("bin")).unwrap();
+    std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
+    let claude = crate::modules::AgentModule::test("claude-code")
+        .name("Claude Code")
+        .dir(dir)
+        .entry(vec!["run".into()])
+        .needs_claude(true);
+    let pi = crate::modules::AgentModule::test("pi").name("Pi").entry(vec!["run".into()]);
+    crate::tests::test_app_with_agents(root, vec![claude, pi], |cfg| cfg.assets = Some(assets))
+}
+
+/// An agent module no install has is refused naming the installed ones, and nothing is created.
+#[tokio::test]
+async fn a_per_colony_agent_module_must_be_installed_and_is_named_in_the_refusal() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_with_claude_code_and_pi(&root);
+
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        Json(NewSession {
+            agent_module: Some("opencode".into()),
+            ..stack_request("acme/app", None, false).0
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    let message = err.1.to_string();
+    assert!(message.starts_with("unknown_agent:"), "{message}");
+    assert!(message.contains("\"opencode\""), "{message}");
+    assert!(message.contains("installed: claude-code, pi"), "{message}");
+    assert!(app.sessions.read().await.is_empty(), "nothing was created");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The launch's agent module beats the org's pick: an org on claude-code launches a colony that
+/// asks for pi on pi, and the colony records the module it runs on.
+#[tokio::test]
+async fn a_launch_naming_an_agent_module_overrides_the_org_pick() {
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_with_claude_code_and_pi(&root);
+    std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+    std::fs::write(
+        app.cfg.config_dir.join("orgs.json"),
+        r#"{"acme": {"agent": {"module": "claude-code"}}}"#,
+    )
+    .unwrap();
+
+    let created = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        Json(NewSession {
+            agent_module: Some("pi".into()),
+            ..stack_request("acme/app", None, false).0
+        }),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("create refused a pi colony: {:#}", e.1));
+    assert_eq!(created.agent, "pi");
+    assert_eq!(app.sessions.read().await.len(), 1);
+
+    // Without the field the org's own pick still wins, as before: claude-code, which needs a login
+    // this test does not have, so the refusal names that login rather than pi.
+    if crate::util::env_nonempty("CLAUDE_CODE_OAUTH_TOKEN").is_none() && crate::util::env_nonempty("ANTHROPIC_API_KEY").is_none()
+    {
+        let plain = create(
+            State(app.clone()),
+            None,
+            HeaderMap::new(),
+            stack_request("acme/app", None, false),
+        )
+        .await
+        .unwrap_err();
+        assert!(plain.1.to_string().contains("log in with Claude"), "{}", plain.1);
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Pi on a Claude model bills the colony's Claude account, so the launch needs that login just as
+/// a Claude-hosted colony does; the refusal names the account and the model.
+#[tokio::test]
+async fn a_pi_colony_on_a_claude_model_without_a_login_is_refused_naming_the_account() {
+    if crate::util::env_nonempty("CLAUDE_CODE_OAUTH_TOKEN").is_some() || crate::util::env_nonempty("ANTHROPIC_API_KEY").is_some()
+    {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    let app = app_with_claude_code_and_pi(&root);
+
+    let err = create(
+        State(app.clone()),
+        None,
+        HeaderMap::new(),
+        Json(NewSession {
+            agent_module: Some("pi".into()),
+            model_override: Some("claude-opus-5-5".into()),
+            ..stack_request("acme/app", None, false).0
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    let message = err.1.to_string();
+    assert!(
+        message.contains("log in with Claude") && message.contains("claude-opus-5-5"),
+        "{message}"
+    );
+    assert!(app.sessions.read().await.is_empty(), "nothing was created");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn only_pi_on_a_bare_claude_model_spends_the_claude_account() {
+    assert!(pi_spends_claude("pi", "claude-opus-5-5"));
+    assert!(!pi_spends_claude("pi", "deepseek/deepseek-chat"));
+    assert!(!pi_spends_claude("pi", ""));
+    assert!(!pi_spends_claude("opencode", "claude-opus-5-5"));
+    assert!(!pi_spends_claude("claude-code", "claude-opus-5-5"));
 }

@@ -4,3 +4,8 @@
 # here; Shannon installs via npx (a Node package), so it is not a binary download.
 strix  1.6.2  linux-x86_64   binary  f3f29fa64bee420bf64f8911fb9f38e20270d406f6df44cc2436252c2af0bc81  https://github.com/usestrix/strix/releases/download/v1.6.2/strix-1.6.2-linux-x86_64.tar.gz
 strix  1.6.2  linux-aarch64  binary  4a4cba115bda8b89d7bbfabe960246a480ff43563144959b2e33477955aa6df2  https://github.com/usestrix/strix/releases/download/v1.6.2/strix-1.6.2-linux-arm64.tar.gz
+# Strix's in-colony install (colony_scan) is the PyPI wheel: pipx installs strix-agent at the pinned
+# version, and the wheel's sha256 is recorded here from PyPI's digest. Only `binary` rows feed the host
+# installer (pin_for), so these rows never change the host download above.
+strix  1.6.2  linux-x86_64   wheel  1a93fbf0f18fad6bf4802c41fa5e032ce50880a655fddee47f6bec4f1ea2155b  https://files.pythonhosted.org/packages/05/45/84cd30b6fafe95c9dddaf450e2e393aa2a7450d594b4d9ff496d338addc3/strix_agent-1.6.2-py3-none-manylinux_2_17_x86_64.whl
+strix  1.6.2  linux-aarch64  wheel  b2939f8c6339817a2abeff2ba266838af3d45e4e05593fe89db11464c8e7a0d4  https://files.pythonhosted.org/packages/92/5f/3698b7b301fff82e4216c703ad2f5a96e16a0eb40fdb1171f755b71e0a3e/strix_agent-1.6.2-py3-none-manylinux_2_17_aarch64.whl

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, duplicateHolder, epicMarker, heldByFor, heldInBatch, isEpic } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
+import { AgentModelMenu } from "../cockpit/AgentModelMenu";
+import { getLaunchSelection, launchFields } from "../features/models/launchAgent";
 import { colonyLabel, needsYouFeed, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
@@ -721,6 +723,7 @@ export function NewSession({
           autopilot: autopilotDefault,
           allow_duplicate: shouldAllowDuplicate || undefined,
           queue_behind_holder: queueBehind || undefined,
+          ...launchFields(getLaunchSelection()),
         });
         if (session.status === "queued") {
           queued += 1;
@@ -757,6 +760,8 @@ export function NewSession({
 
   return (
     <div className="space-y-2 px-1">
+      <SectionLabel>Agent and model</SectionLabel>
+      <AgentModelMenu variant="inline" onManage={onOpenSettings} />
       <SectionLabel>{org ? `Repository in ${org}` : "Repository"}</SectionLabel>
       {!showPicker && activeRepo ? (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-panel py-1.5 pl-3 pr-1.5">
@@ -938,7 +943,12 @@ function OpenSessionRow({
   const start = async () => {
     setStarting(true);
     try {
-      const session = await api.createSession({ repo, instructions: instructions.trim() || undefined, autopilot: autopilot ?? undefined });
+      const session = await api.createSession({
+        repo,
+        instructions: instructions.trim() || undefined,
+        autopilot: autopilot ?? undefined,
+        ...launchFields(getLaunchSelection()),
+      });
       toast(session.status === "queued" ? `Queued on ${repo} — it starts when a colony finishes` : `Colony launched on ${repo}`);
       onCreated(session);
     } catch (error) {
@@ -1063,6 +1073,7 @@ function IssueRow({
         allow_duplicate: shouldAllowDuplicate || undefined,
         allow_epic: allowEpic || undefined,
         queue_behind_holder: queueBehind || undefined,
+        ...launchFields(getLaunchSelection()),
       });
       toast(
         session.status === "queued"

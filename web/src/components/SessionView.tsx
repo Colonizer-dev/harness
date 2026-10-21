@@ -331,7 +331,7 @@ export function SessionView({
                   {session.mesh.ip && <span className="font-mono text-faint">{session.mesh.ip}</span>}
                 </span>
               )}
-              <span>{session.agent}</span>
+              <span title="The agent module this colony runs on">agent: {session.agent}</span>
               {(() => {
                 const modelLabel = leadModelLabel(session);
                 return modelLabel ? <span title={modelLabel}>{modelLabel}</span> : null;

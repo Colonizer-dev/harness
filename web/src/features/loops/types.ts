@@ -119,7 +119,7 @@ export interface StartRedTeamRunRequest {
   hunter?: string;
   model?: string | null;
   subagent_model?: string | null;
-  /** `general` when unset. */
+  /** `general` when unset. Shannon and Strix are security scanners: they run `security`, and `general` is refused. */
   preset?: RedTeamPreset;
 }
 
@@ -509,6 +509,8 @@ export interface HunterProbe {
   manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };
   installed: string | null;
   probe: { runtime_ok: boolean; docker_ok: boolean; ready: boolean; detail: string };
+  /** Why the hunter cannot run in a colony in this build, or `null` when it can (the probe route's `colony_blocker`). */
+  colony_blocker?: string | null;
 }
 
 /** One colony's pull request and where it stands in its repository's merge train (issue #671). */

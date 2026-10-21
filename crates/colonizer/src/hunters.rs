@@ -41,6 +41,8 @@ pub enum Runtime {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingsFormat {
+    // Strix's own vulnerabilities.json, kept parseable; the manifest reads its SARIF instead.
+    #[allow(dead_code)]
     StrixJson,
     Sarif,
 }
@@ -69,6 +71,10 @@ pub struct Manifest {
     pub install: &'static str,
     /// Headless scan invocation template with `{target}`/`{mode}`/`{out}` placeholders.
     pub scan: &'static str,
+    /// The in-colony command line: the whole thing a colony runs in its microVM, with `{target}` (the
+    /// scope arguments), `{repo}` (the checkout) and `{out}` (where the report lands) filled in. Pins
+    /// the hunter's version. Read by [`colony_command`].
+    pub colony_scan: &'static str,
     /// Run-relative filenames the hunter writes.
     pub output: &'static [&'static str],
     /// Which parser reads the hunter's output.
@@ -91,9 +97,15 @@ fn strix() -> Manifest {
         runtime: Runtime::Binary,
         needs_docker: true,
         install: "POST /api/hunters/strix/install — pinned and checksum-verified from hunters.lock (requires COLONIZER_HUNTER_INSTALL=1)",
-        scan: "strix -n --target {target} --scan-mode {mode}",
-        output: &["vulnerabilities.json", "findings.sarif"],
-        findings_format: FindingsFormat::StrixJson,
+        scan: "strix -n --target {target} --scan-mode {mode} --max-budget 25 --max-turns 300",
+        // The in-colony run: pipx installs the pinned PyPI wheel (its sha256 is in hunters.lock), Strix
+        // writes `strix_runs/<run-name>/` under `{out}` (cd first, its default), and `timeout` holds the
+        // whole run to four hours (SCAN_TIMEOUT). Exit 0 is clean, 2 is findings; both are read back.
+        colony_scan: "pipx install strix-agent==1.6.2 && mkdir -p {out} && cd {out} && timeout 14400 strix -n -t {repo} --scan-mode deep --max-budget 25 --max-turns 300 {target}",
+        // Every Strix run writes findings.sarif (SARIF 2.1.0) beside vulnerabilities.json; SARIF is the
+        // one the red-team run files, and it reuses the SARIF parser.
+        output: &["findings.sarif", "vulnerabilities.json"],
+        findings_format: FindingsFormat::Sarif,
         gateway_env: "LLM_API_BASE",
         available: true,
     }
@@ -112,6 +124,7 @@ fn shannon() -> Manifest {
         needs_docker: true,
         install: "npx @keygraph/shannon@3.3.0 setup",
         scan: "npx @keygraph/shannon@3.3.0 start -u {target} -r {repo} -o {out}",
+        colony_scan: "npx @keygraph/shannon@3.3.0 start -u {target} -r {repo} -o {out}",
         output: &["report.sarif", "report.json"],
         findings_format: FindingsFormat::Sarif,
         gateway_env: "SHANNON_AI_BASE_URL",
@@ -418,6 +431,31 @@ fn probe_detail(runtime_ok: bool, runtime_msg: &str, docker_ok: bool) -> (bool, 
     } else {
         (true, "ready".into())
     }
+}
+
+/// Whether colony microVMs run a Docker daemon. They do not yet, and the host's daemon is never shared
+/// with a colony, so a hunter that needs Docker for its sandbox cannot run in a colony (see
+/// docs/security-hunters.md). Flip this only when the colony image ships a daemon.
+pub(crate) const COLONY_HAS_DOCKER: bool = false;
+
+/// The hunters whose colony run is refused until colonies have a Docker daemon. Shannon's colony path
+/// predates this gate and is left as it was, so it is not listed.
+const DOCKER_GATED_IN_COLONY: &[&str] = &["strix"];
+
+/// Why this hunter cannot run in a colony, or `None` when it can: a gated hunter is blocked until
+/// colonies have a daemon. The reason is what the cockpit and the API show.
+pub(crate) fn colony_blocker(m: &Manifest) -> Option<String> {
+    colony_blocker_with(m, COLONY_HAS_DOCKER)
+}
+
+/// [`colony_blocker`] with the colony's Docker availability given, so tests can show the gate opens.
+fn colony_blocker_with(m: &Manifest, colony_docker: bool) -> Option<String> {
+    (m.needs_docker && !colony_docker && DOCKER_GATED_IN_COLONY.contains(&m.id)).then(|| {
+        format!(
+            "{} needs a Docker daemon for its sandbox, and colony microVMs have none yet; the host's daemon is never shared with a colony (Docker socket access is host root), so a red-team run cannot start {} in a colony in this build",
+            m.name, m.name
+        )
+    })
 }
 
 /// Checks the hunter can actually run here: its runtime exists, and Docker is not needed. Docker is
@@ -808,7 +846,10 @@ pub async fn probe_handler(State(app): State<Shared>, Path(id): Path<String>) ->
     };
     let installed = installed(&app, &m);
     let p = probe(&m, installed.is_some()).await;
-    Ok(Json(json!({"manifest": m, "installed": installed, "probe": p})))
+    let colony = colony_blocker(&m);
+    Ok(Json(
+        json!({"manifest": m, "installed": installed, "probe": p, "colony_blocker": colony}),
+    ))
 }
 
 /// How a finished scan ended: the hunter reported vulnerabilities, or it ran clean.
@@ -902,19 +943,17 @@ fn render_scan(template: &str, target: &str, mode: &str, out: &str) -> Result<Ve
         .collect()
 }
 
-/// The in-colony command line for a Node hunter: its manifest's `scan` template rendered whole — the
-/// program word (`npx`) included, unlike [`render_scan`]. A hunter colony runs it inside its microVM,
-/// so a licence-incompatible hunter (Shannon, AGPL) is fetched only by that line, never run on the
-/// host. The template must name `m.pinned_version`.
+/// The in-colony command line for a hunter: its manifest's `colony_scan` template rendered whole — the
+/// program word included, unlike [`render_scan`]. A hunter colony runs it inside its microVM, so a
+/// licence-incompatible hunter (Shannon, AGPL) is fetched only by that line, never run on the host, and
+/// Strix is installed from its pinned PyPI wheel there. The template must name `m.pinned_version`.
 pub(crate) fn colony_command(m: &Manifest, target: &str, repo: &str, out: &str) -> Result<String> {
-    if !matches!(m.runtime, Runtime::Node) {
-        bail!("{} does not run as an in-colony command (it is not a Node hunter)", m.name);
-    }
     let line = m
-        .scan
+        .colony_scan
         .replace("{target}", target)
         .replace("{repo}", repo)
         .replace("{out}", out);
+    let line = line.trim_end().to_string();
     if line.contains('{') || line.contains('}') {
         bail!("the {} scan template holds an unknown placeholder", m.id);
     }
@@ -1722,9 +1761,62 @@ mod tests {
             line,
             "npx @keygraph/shannon@3.3.0 start -u http://127.0.0.1:3000 -r /workspace -o /harness/out/shannon"
         );
+        assert_eq!(
+            colony_command(
+                &find("strix").unwrap(),
+                "-t https://staging.example.com",
+                "/workspace",
+                "/harness/out/strix"
+            )
+            .unwrap(),
+            "pipx install strix-agent==1.6.2 && mkdir -p /harness/out/strix && cd /harness/out/strix && timeout 14400 strix -n -t /workspace --scan-mode deep --max-budget 25 --max-turns 300 -t https://staging.example.com"
+        );
+        assert_eq!(
+            colony_command(&find("strix").unwrap(), "", "/workspace", "/harness/out/strix").unwrap(),
+            "pipx install strix-agent==1.6.2 && mkdir -p /harness/out/strix && cd /harness/out/strix && timeout 14400 strix -n -t /workspace --scan-mode deep --max-budget 25 --max-turns 300",
+            "with no staging URL the scope is the checkout alone"
+        );
+    }
+
+    #[test]
+    fn strix_is_blocked_in_a_colony_until_colonies_have_docker_and_says_why() {
+        let strix = find("strix").unwrap();
+        let reason = colony_blocker_with(&strix, false).expect("no Docker in a colony blocks Strix");
         assert!(
-            colony_command(&find("strix").unwrap(), "t", "r", "o").is_err(),
-            "a binary hunter has no in-colony command"
+            reason.contains("Docker") && reason.contains("colony microVMs have none yet"),
+            "{reason}"
+        );
+        assert!(
+            colony_blocker_with(&strix, true).is_none(),
+            "a colony with Docker is not blocked"
+        );
+        assert!(colony_blocker(&strix).is_some(), "the shipped gate blocks Strix");
+        // Shannon's colony run predates this gate and stays open, whatever its manifest says about Docker.
+        assert!(
+            colony_blocker_with(&find("shannon").unwrap(), false).is_none(),
+            "shannon is not gated here"
+        );
+    }
+
+    #[test]
+    fn the_lock_pins_the_strix_wheel_by_sha256_beside_the_binary() {
+        let wheel = LOCK
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .find(|l| l.split_whitespace().nth(3) == Some("wheel") && l.contains("linux-x86_64"))
+            .expect("hunters.lock has a wheel row for strix on linux-x86_64");
+        let fields: Vec<&str> = wheel.split_whitespace().collect();
+        assert_eq!(fields[0], "strix");
+        assert_eq!(
+            fields[1],
+            find("strix").unwrap().pinned_version,
+            "the wheel is the pinned version"
+        );
+        assert_eq!(fields[4], "1a93fbf0f18fad6bf4802c41fa5e032ce50880a655fddee47f6bec4f1ea2155b");
+        assert!(fields[5].starts_with("https://files.pythonhosted.org/") && fields[5].ends_with(".whl"));
+        assert!(
+            pin_for(LOCK, "strix", "linux", "x86_64").unwrap().url.ends_with(".tar.gz"),
+            "the binary pin is still there"
         );
     }
 
@@ -1738,8 +1830,8 @@ mod tests {
 echo "$@" > argv.txt
 env | grep -E '^(LLM_API_BASE|LLM_API_KEY|STRIX_LLM|STRIX_TELEMETRY)=' > env.txt
 mkdir -p strix_runs/run-1
-cat > strix_runs/run-1/vulnerabilities.json <<'EOF'
-[{"id":"vuln-0001","title":"RCE in login","severity":"high"}]
+cat > strix_runs/run-1/findings.sarif <<'EOF'
+{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"strix","rules":[{"id":"vuln-0001"}]}},"results":[{"ruleId":"vuln-0001","level":"error","message":{"text":"RCE in login"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"app/auth.py"},"region":{"startLine":7}}}]}]}]}
 EOF
 printf '{"status":"completed","llm_usage":{"cost":0.42}}' > strix_runs/run-1/run.json
 exit 2
@@ -1815,7 +1907,7 @@ exit 2
         let err = scan(&strix(), &scan_request(binary, &work))
             .await
             .expect_err("exit 2 promises vulnerabilities the artifacts must back up");
-        assert!(err.to_string().contains("vulnerabilities.json"), "{err:#}");
+        assert!(err.to_string().contains("findings.sarif"), "{err:#}");
 
         std::fs::remove_dir_all(&work).unwrap();
     }

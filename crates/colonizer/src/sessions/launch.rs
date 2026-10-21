@@ -64,6 +64,11 @@ pub struct NewSession {
     /// Bill this colony to a named Claude account instead of the org's override or install default.
     #[serde(default)]
     pub claude_account: Option<String>,
+    /// Run THIS colony on the named agent module (`pi`, `opencode`, `claude-code`, …) instead of the
+    /// org's pick or the install's. Refused with **400** `unknown_agent` (naming the installed
+    /// modules) when no installed module has that id. Its model, when set, is `model_override`.
+    #[serde(default)]
+    pub agent_module: Option<String>,
     /// How a colony created with `after` relates to its parent. By default the colony queues until
     /// the parent's pull request merges, then starts from the fresh default branch — so a parent
     /// that merges with delete-branch never strands the child's pull request. Only `stack: true`
@@ -105,6 +110,28 @@ pub struct NewSession {
     /// that builds it (`retry`) is in-process — so it is skipped by serde like `handoff`.
     #[serde(skip)]
     pub(crate) retry_of: Option<String>,
+}
+
+/// The **400** for an agent module no install has, naming the ones that are (`unknown_agent`).
+pub(crate) fn unknown_agent_error(id: &str, agents: &[crate::modules::AgentModule]) -> crate::AppError {
+    let installed = agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ");
+    client_error(
+        StatusCode::BAD_REQUEST,
+        &format!("unknown_agent: \"{id}\" is not an installed agent module; installed: {installed}"),
+    )
+}
+
+/// Whether a model names one of Claude's own models — a bare `claude-…` ID, which no gateway
+/// provider prefix can be mistaken for — rather than a configured gateway provider's.
+pub(crate) fn is_claude_model(model: &str) -> bool {
+    model.trim().starts_with("claude-")
+}
+
+/// Whether a colony on `agent_id` running `model` spends a Claude account: Pi on a Claude model
+/// does, with the subscription (or key) of the account the colony names. Pi mounts no Claude
+/// login otherwise, so this is the one non-Claude module that bills one.
+pub(crate) fn pi_spends_claude(agent_id: &str, model: &str) -> bool {
+    agent_id == "pi" && is_claude_model(model)
 }
 
 /// A launch-time model choice, trimmed: empty is none, and a `<provider>/<model>` must name a
@@ -457,11 +484,18 @@ pub async fn create(
     let modules = app.modules.read().await.clone();
     // Which agent module the colony launches on: this org's pick, else the install's (issue #201).
     // Recorded on the session, so boot re-resolves from that and a later change moves new colonies only.
-    let agent = app
-        .agents
-        .iter()
-        .find(|a| a.id == orgs::effective_agent_module(&app.org_settings(owner), &modules))
-        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "the selected agent module is not installed"))?;
+    let agent = match req.agent_module.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(id) => app
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| unknown_agent_error(id, &app.agents))?,
+        None => app
+            .agents
+            .iter()
+            .find(|a| a.id == orgs::effective_agent_module(&app.org_settings(owner), &modules))
+            .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "the selected agent module is not installed"))?,
+    };
     // The colony's account: the request's explicit choice, else the org's override, else the
     // install default. Resolved before the gate so the refusal can name the account that is missing.
     let claude_account = crate::claude_accounts::resolve_account(
@@ -516,6 +550,24 @@ pub async fn create(
     };
     let model_override = launch_model(&app, req.model_override.as_deref(), "model")?;
     let subagent_model_override = launch_model(&app, req.subagent_model_override.as_deref(), "subagent model")?;
+    // A Pi colony on a Claude model bills the account it names, so it needs that login just as a
+    // Claude-hosted colony does. The model is the launch override, else the module's own setting
+    // as this org sees it.
+    let gate_model = match model_override.clone() {
+        Some(model) => model,
+        None => orgs::effective_agent_for(&modules, &app.org_settings(owner), &agent.id)
+            .settings
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if !agent.needs_claude && pi_spends_claude(&agent.id, &gate_model) && app.claude_cred_for(Some(&claude_account)).is_none() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            &format!("log in with Claude in Settings first (account '{claude_account}') to run {gate_model} on Pi"),
+        ));
+    }
     // A supply-chain target with a side missing would hold against other half-named targets it was
     // never really for: refused here, normalized (trimmed, lowercased) into the record.
     let supply_chain = match req.supply_chain.as_ref() {
@@ -1040,6 +1092,8 @@ pub async fn retry(
         model_override: source.model_override.clone(),
         subagent_model_override: source.subagent_model_override.clone(),
         claude_account: source.claude_account.clone(),
+        // A retry runs on the agent its colony did, whatever the org picks now.
+        agent_module: (!source.agent.is_empty()).then(|| source.agent.clone()),
         after: retry_parent(&app.sessions.read().await, source.parent.as_deref()),
         stack: source.stack,
         origin: source.origin.clone(),
