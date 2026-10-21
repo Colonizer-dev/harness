@@ -648,18 +648,6 @@ fn model_available_with_reset(model: &str, get_quota_state: &dyn Fn(&str) -> Opt
     }
 }
 
-/// Legacy function for checking availability without reset time.
-fn model_available(model: &str, is_provider_exhausted: &dyn Fn(&str) -> bool) -> bool {
-    if !model_is_set(model) {
-        return false;
-    }
-    // If no provider prefix, it's a Claude model: check account quota ("claude-account")
-    match provider_from_model(model) {
-        Some(provider) => !is_provider_exhausted(provider),
-        None => !is_provider_exhausted(crate::gateway::ACCOUNT_QUOTA_ID),
-    }
-}
-
 /// Route to a model, falling back if the tier's primary is quota-exhausted.
 /// Returns (model, reason) where reason describes the fallback; empty if primary is healthy.
 /// Pure function: depends only on settings, tier, and the quota state function.
@@ -726,23 +714,22 @@ fn route_with_quota_fallback_internal(
             return (candidate_model.to_string(), reason);
         }
     }
-    // Try account fallback
-    if let Some((fallback_provider, fallback_model)) = account_fallback {
-        if model_is_set(fallback_model) {
-            let (fallback_available, _) = model_available_with_reset(fallback_model, get_quota_state);
-            if fallback_available {
-                let reason = if let Some(provider) = provider_from_model(primary) {
-                    if let Some(reset) = &primary_reset_at {
-                        format!("{} out until {}; routed to {}", provider, reset, fallback_model)
-                    } else {
-                        format!("{}; routed to {}", provider, fallback_model)
-                    }
-                } else {
-                    fallback_model.to_string()
-                };
-                return (fallback_model.to_string(), reason);
+    // Try account fallback. Its quota is keyed by the provider the caller resolved
+    // (`fallback_provider`), which need not match the model string's prefix.
+    let healthy_fallback = account_fallback.filter(|(fallback_provider, fallback_model)| {
+        model_is_set(fallback_model) && get_quota_state(fallback_provider).is_none()
+    });
+    if let Some((_, fallback_model)) = healthy_fallback {
+        let reason = if let Some(provider) = provider_from_model(primary) {
+            if let Some(reset) = &primary_reset_at {
+                format!("{} out until {}; routed to {}", provider, reset, fallback_model)
+            } else {
+                format!("{}; routed to {}", provider, fallback_model)
             }
-        }
+        } else {
+            fallback_model.to_string()
+        };
+        return (fallback_model.to_string(), reason);
     }
     // All alternatives exhausted; return primary with informative reason
     if let Some(provider) = provider_from_model(primary) {

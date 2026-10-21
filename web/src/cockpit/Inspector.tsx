@@ -19,7 +19,7 @@ import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { CommitLink, FindingRecord, HarnessStatus, Question, QuotaAlternative, QuotaCard, RedTeamRun, Session, SessionDiffFile, UpdateStatus } from "../types";
+import type { CommitLink, FindingRecord, HarnessStatus, Question, QuotaCard, RedTeamRun, Session, SessionDiffFile, UpdateStatus } from "../types";
 import { bootMedians, bootView } from "./bootTiming";
 import { CommitLinks } from "./CommitLinks";
 import { CancelRunButton } from "./RedTeamCancel";
