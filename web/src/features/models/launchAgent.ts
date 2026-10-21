@@ -1,17 +1,33 @@
 // The agent and model new colonies start on (the cockpit's top-right menu). The menu lists only the
-// models on offer (GET /api/models/assignments `models`) for each installed agent module that can
-// launch (`modules`, not `blocked`), grouped by module. The choice is kept in this browser; a launch
+// models the install has enabled for each installed agent module that can launch (`modules`, not
+// `blocked`: its `enabled_models`), grouped by module. The choice is kept in this browser; a launch
 // sends `agent_module` and `model_override` (POST /api/sessions), and omits both when no choice has
-// been made, so the org's own default applies.
+// been made, so the org's own default applies. For a Claude model on Pi or Claude Code, a chosen
+// Claude account goes as `claude_account`; "Org default" (no account chosen) sends none.
 import { stored, store } from "../../components/ui";
 import type { AgentModuleRoles, ModelAssignments, SwitchableModel } from "./types";
 
 export const LAUNCH_AGENT_KEY = "colonizer.launch.agent";
 
+/** The note shown for Pi on a Claude model: what the run is billed as. */
+export const PI_CLAUDE_NOTE = "Billed as extra usage per token on your Claude subscription, not your plan limits.";
+
 /** The picked agent module and model. `model` null keeps the default model for the launch. */
 export interface LaunchSelection {
   module: string;
   model: string | null;
+  /** The Claude account id for a Claude model on Pi or Claude Code; null is the org's account. */
+  account?: string | null;
+}
+
+/** A bare Claude model id (`claude-opus-5-5`), as opposed to `<provider>/<model>`. */
+export function isClaudeModel(id: string): boolean {
+  return id.startsWith("claude-");
+}
+
+/** Whether the launch can name a Claude account: a Claude model on Pi or on Claude Code. */
+export function takesClaudeAccount(module: string, model: string | null): boolean {
+  return model !== null && isClaudeModel(model) && (module === "pi" || module === "claude-code");
 }
 
 /** One entry in the menu: an agent module running one model. */
@@ -35,14 +51,39 @@ export interface LaunchGroup {
   choices: LaunchChoice[];
 }
 
-/** Each installed agent module that can launch, with every model on offer (Claude's own first). */
+/**
+ * Each installed agent module that can launch, with the models the install enabled for it (Claude's
+ * own first). An enabled id missing from `models` is listed under its raw id; a module with nothing
+ * enabled has no group.
+ */
 export function launchGroups(a: Pick<ModelAssignments, "modules" | "models">): LaunchGroup[] {
   const launchable = a.modules.filter((m: AgentModuleRoles) => m.blocked === null);
-  return launchable.map((m) => ({
-    module: m.id,
-    name: m.name,
-    choices: [...a.models].sort(claudeFirst).map((model) => choiceFor(m, model)),
-  }));
+  return launchable
+    .map((m) => {
+      const offered = new Map(a.models.map((x) => [x.id, x]));
+      const enabled = [...new Set(m.enabled_models ?? [])].map((id) => offered.get(id) ?? rawModel(id));
+      return { module: m.id, name: m.name, choices: enabled.sort(claudeFirst).map((model) => choiceFor(m, model)) };
+    })
+    .filter((g) => g.choices.length > 0);
+}
+
+/** A model the models list does not describe: labelled by its id. */
+function rawModel(id: string): SwitchableModel {
+  const claude = isClaudeModel(id);
+  return {
+    id,
+    label: id,
+    provider: claude ? "anthropic" : (id.includes("/") ? id.slice(0, id.indexOf("/")) : id),
+    provider_name: claude ? "Anthropic" : "",
+    wire: null,
+    failure_pct: 0,
+    rated: false,
+    degraded: false,
+    healthy: true,
+    out_of_quota: false,
+    reset_at: null,
+    reset_unix: null,
+  };
 }
 
 function claudeFirst(x: SwitchableModel, y: SwitchableModel): number {
@@ -98,9 +139,13 @@ export function checkedChoice(groups: readonly LaunchGroup[], sel: LaunchSelecti
 }
 
 /** The launch body fields for a choice. Omitted fields keep the org's default. */
-export function launchFields(sel: LaunchSelection | null): { agent_module?: string; model_override?: string } {
+export function launchFields(sel: LaunchSelection | null): { agent_module?: string; model_override?: string; claude_account?: string } {
   if (!sel) return {};
-  return sel.model ? { agent_module: sel.module, model_override: sel.model } : { agent_module: sel.module };
+  const fields: { agent_module?: string; model_override?: string; claude_account?: string } = sel.model
+    ? { agent_module: sel.module, model_override: sel.model }
+    : { agent_module: sel.module };
+  if (sel.account && takesClaudeAccount(sel.module, sel.model)) fields.claude_account = sel.account;
+  return fields;
 }
 
 // The saved choice, read once per page and written through to this browser's storage.
@@ -112,7 +157,9 @@ function parse(raw: string | null): LaunchSelection | null {
   try {
     const v = JSON.parse(raw) as Partial<LaunchSelection>;
     if (typeof v.module !== "string" || !v.module) return null;
-    return { module: v.module, model: typeof v.model === "string" && v.model ? v.model : null };
+    const sel: LaunchSelection = { module: v.module, model: typeof v.model === "string" && v.model ? v.model : null };
+    if (typeof v.account === "string" && v.account) sel.account = v.account;
+    return sel;
   } catch {
     return null;
   }

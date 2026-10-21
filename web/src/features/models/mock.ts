@@ -9,6 +9,9 @@ import type { OrgSettings } from "../orgs/types";
 import type { ModelsApi } from "./api";
 import type {
   AgentModuleRoles,
+  ClaudeAccount,
+  EnabledModelsReply,
+  EnabledModelsRequest,
   ModelAssignments,
   ModelHost,
   ModelHostRanking,
@@ -26,8 +29,11 @@ const ORG_ROLES = ["model", "subagent_model", "background_model"];
 
 const role = (id: string, title: string) => ({ role: id, title, org_settable: ORG_ROLES.includes(id) });
 
+/** An agent module as the mothership declares it: the enabled lists come from the install's saved ones. */
+type MockAgentModule = Omit<AgentModuleRoles, "enabled_models" | "enabled_models_set">;
+
 /** The agent modules a stock install carries, with the roles their module.json declares. */
-export const MOCK_AGENT_MODULES: AgentModuleRoles[] = [
+export const MOCK_AGENT_MODULES: MockAgentModule[] = [
   {
     id: "claude-code",
     name: "Claude Code",
@@ -57,6 +63,24 @@ export const MOCK_AGENT_MODULES: AgentModuleRoles[] = [
 ];
 
 /** The demo's lab plan is out until five hours from now, so the pickers show a disabled model. */
+/** The models the install enabled per module, as saved in this demo; a module not here follows its roles. */
+let enabledLists: Record<string, string[]> = {
+  "claude-code": ["claude-opus-5-5", "claude-sonnet-5"],
+  pi: ["claude-opus-5-5", "claude-sonnet-5"],
+};
+
+const MOCK_ACCOUNTS: ClaudeAccount[] = [
+  { id: "work", label: "Work", is_default: true },
+  { id: "personal", label: "Personal", is_default: false },
+];
+
+/** The models a module may run: its saved list, or else the models its roles are assigned to. */
+function enabledModelsOf(ms: MockState, module: string): string[] {
+  if (module in enabledLists) return [...enabledLists[module]];
+  const assigned = rows(ms, null, module).map((r) => r.value).filter((v) => v !== "");
+  return [...new Set(assigned)];
+}
+
 const LAB_RESET_UNIX = Math.floor(Date.now() / 1000) + 5 * 3600;
 
 function mockModels(ms: MockState): SwitchableModel[] {
@@ -238,13 +262,17 @@ function moduleOf(ms: MockState, org: OrgSettings | undefined): string {
 function assignments(ms: MockState): ModelAssignments {
   const install = agentEntry(ms).provider;
   return {
-    install: { module: install, roles: rows(ms, null, install) },
+    install: { module: install, roles: rows(ms, null, install), enabled_models: enabledModelsOf(ms, install), enabled_models_set: install in enabledLists },
     orgs: orgNames(ms).map((org) => {
       const settings = ms.orgSettings[org] ?? {};
       const module = moduleOf(ms, settings);
       return { org, module, module_source: settings.agent?.module ? "org" : "install", roles: rows(ms, settings, module) };
     }),
-    modules: MOCK_AGENT_MODULES,
+    modules: MOCK_AGENT_MODULES.map((m) => ({
+      ...m,
+      enabled_models: enabledModelsOf(ms, m.id),
+      enabled_models_set: m.id in enabledLists,
+    })),
     models: mockModels(ms),
   };
 }
@@ -471,6 +499,27 @@ export function modelsMock(ms: MockState): ModelsApi {
       return clone(assignments(ms));
     },
     modelHosts: () => ms.later(hostRankings),
+    setEnabledModels: async (body: EnabledModelsRequest): Promise<EnabledModelsReply> => {
+      await sleep(150);
+      if (body.scope === "org") throw new ApiError("the demo keeps one list per module: save the install's", 400);
+      const spec = MOCK_AGENT_MODULES.find((m) => m.id === body.module);
+      if (!spec) throw new ApiError(`unknown agent module "${body.module}"`, 400);
+      if (body.models === null) {
+        delete enabledLists[body.module];
+      } else {
+        const offered = mockModels(ms);
+        for (const id of body.models) {
+          if (!offered.some((m) => m.id === id)) throw new ApiError(`${id} is not a model on offer`, 400);
+        }
+        enabledLists = { ...enabledLists, [body.module]: [...new Set(body.models)] };
+      }
+      ms.logActivity({ kind: "settings.save", actor: "you", via: "cockpit", org: null, target: `${spec.name} models`, section: "module:agent" });
+      return { scope: "install", org: null, module: body.module, enabled_models: enabledModelsOf(ms, body.module), enabled_models_set: body.models !== null };
+    },
+    claudeAccounts: async () => {
+      await sleep(60);
+      return clone(MOCK_ACCOUNTS);
+    },
     switchModels: async (body) => {
       await sleep(200);
       return clone(switchModels(ms, body));

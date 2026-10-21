@@ -59,6 +59,7 @@ mod doctor;
 mod drain;
 mod duplicates;
 mod egress;
+mod enabled_models;
 mod epic;
 mod events;
 mod exec_bits;

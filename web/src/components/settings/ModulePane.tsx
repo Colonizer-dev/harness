@@ -11,6 +11,7 @@ import { Pane, Row } from "./ui";
 import { AutonomyHealth } from "./AutonomyHealth";
 import { WebhookDeliveries } from "./WebhookDeliveries";
 import { ObservabilityRows, contentConfirmation } from "./ObservabilityRows";
+import { AgentModelLists } from "./AgentModelLists";
 import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestRow, isDirty, kindInfo, useHeadroom, valueOf, type ModuleDraft } from "./moduleFields";
 
 // ---------------------------------------------------------------------------
@@ -402,6 +403,7 @@ export function ModulePane({
       )}
       {module.kind === "publish" && <MergeTrainSection />}
       </div>
+      {module.kind === "agent" && <AgentModelLists />}
     </Pane>
   );
 }

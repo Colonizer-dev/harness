@@ -21,6 +21,10 @@ export interface ModelRoleRow {
 export interface InstallModelAssignment {
   module: string;
   roles: ModelRoleRow[];
+  /** The install's enabled model ids for its own module (GET /api/models/assignments). */
+  enabled_models: string[];
+  /** False until someone saves a list; the enabled models then are the ones the module's roles are assigned to. */
+  enabled_models_set: boolean;
 }
 
 export interface OrgModelAssignment {
@@ -38,6 +42,33 @@ export interface AgentModuleRoles {
   roles: { role: string; title: string; org_settable: boolean }[];
   /** Why it cannot launch on this install, in a launch refusal's words; null when it can. */
   blocked: string | null;
+  /** The install's enabled model ids for this module: the only ones the agent/model menu offers. */
+  enabled_models: string[];
+  /** False until a list is saved; then `enabled_models` is the models the module's roles are assigned to. */
+  enabled_models_set: boolean;
+}
+
+/** A Claude account a colony can spend: GET /api/claude-accounts. */
+export interface ClaudeAccount {
+  id: string;
+  label: string;
+  is_default: boolean;
+}
+
+/** PUT /api/models/enabled: `null` clears the saved list back to the assigned default. */
+export interface EnabledModelsRequest {
+  scope: "install" | "org";
+  org?: string;
+  module: string;
+  models: string[] | null;
+}
+
+export interface EnabledModelsReply {
+  scope: "install" | "org";
+  org: string | null;
+  module: string;
+  enabled_models: string[];
+  enabled_models_set: boolean;
 }
 
 /** One connected provider serving a canonical model, priced and ranked (issue #1039). */

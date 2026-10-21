@@ -29,10 +29,10 @@ function model(over: Partial<SwitchableModel> & Pick<SwitchableModel, "id" | "la
 }
 
 const MODULES: AgentModuleRoles[] = [
-  { id: "claude-code", name: "Claude Code", roles: [], blocked: null },
-  { id: "pi", name: "Pi", roles: [], blocked: null },
-  { id: "opencode", name: "OpenCode", roles: [], blocked: null },
-  { id: "acp", name: "ACP", roles: [], blocked: "the grok binary is not staged" },
+  { enabled_models: ["claude-opus-5-5"], enabled_models_set: true, id: "claude-code", name: "Claude Code", roles: [], blocked: null },
+  { enabled_models: ["claude-opus-5-5", "claude-sonnet-5", "minimax/MiniMax-M2"], enabled_models_set: true, id: "pi", name: "Pi", roles: [], blocked: null },
+  { enabled_models: ["minimax/MiniMax-M2"], enabled_models_set: true, id: "opencode", name: "OpenCode", roles: [], blocked: null },
+  { enabled_models: ["claude-opus-5-5"], enabled_models_set: true, id: "acp", name: "ACP", roles: [], blocked: "the grok binary is not staged" },
 ];
 
 const MODELS: SwitchableModel[] = [
@@ -43,7 +43,7 @@ const MODELS: SwitchableModel[] = [
 
 function assignments(over: Partial<ModelAssignments> = {}): ModelAssignments {
   return {
-    install: {
+    install: { enabled_models: [], enabled_models_set: false,
       module: "claude-code",
       roles: [{ role: "model", title: "Orchestrator model", value: "claude-opus-5-5", source: "install", org_settable: true }],
     },
@@ -74,12 +74,37 @@ describe("launchGroups", () => {
     expect(sonnet?.reason).toBe("out of quota");
   });
 
+  it("offers only the models the install enabled for each module", () => {
+    const groups = launchGroups(assignments({ modules: MODULES.map((m) => (m.id === "claude-code" ? { ...m, enabled_models: [] } : m)) }));
+    // Claude Code has nothing enabled, so it has no heading at all.
+    expect(groups.map((g) => g.name)).toEqual(["Pi", "OpenCode"]);
+    const opencode = groups.find((g) => g.module === "opencode");
+    expect(opencode?.choices.map((c) => c.model)).toEqual(["minimax/MiniMax-M2"]);
+  });
+
+  it("labels an enabled model that the models list does not describe with its raw id", () => {
+    const pi = launchGroups(assignments({ modules: MODULES.map((m) => (m.id === "pi" ? { ...m, enabled_models: ["claude-haiku-4-5"] } : m)) })).find((g) => g.module === "pi");
+    expect(pi?.choices.map((c) => [c.model, c.modelLabel])).toEqual([["claude-haiku-4-5", "claude-haiku-4-5 (subscription)"]]);
+  });
+
   it("lists nothing when no module can launch", () => {
     expect(launchGroups(assignments({ modules: MODULES.filter((m) => m.blocked) }))).toEqual([]);
   });
 });
 
 describe("launchFields (the launch body)", () => {
+  it("sends a Claude account only for a Claude model on Pi or Claude Code, and only when one is chosen", () => {
+    expect(launchFields({ module: "pi", model: "claude-opus-5-5", account: "work" })).toEqual({ agent_module: "pi", model_override: "claude-opus-5-5", claude_account: "work" });
+    expect(launchFields({ module: "claude-code", model: "claude-opus-5-5", account: "personal" })).toMatchObject({ claude_account: "personal" });
+    // Org default: no account chosen, so nothing is sent.
+    expect(launchFields({ module: "pi", model: "claude-opus-5-5", account: null })).not.toHaveProperty("claude_account");
+    expect(launchFields({ module: "pi", model: "claude-opus-5-5" })).not.toHaveProperty("claude_account");
+    // Not a Claude model, or not a Claude-accepting module: never sent.
+    expect(launchFields({ module: "pi", model: "minimax/MiniMax-M2", account: "work" })).not.toHaveProperty("claude_account");
+    expect(launchFields({ module: "opencode", model: "claude-opus-5-5", account: "work" })).not.toHaveProperty("claude_account");
+  });
+
+
   it("sends nothing when no choice is saved, so the org default applies", () => {
     expect(launchFields(null)).toEqual({});
   });
