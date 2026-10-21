@@ -19,7 +19,7 @@ import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { CommitLink, FindingRecord, HarnessStatus, Question, RedTeamRun, Session, SessionDiffFile, UpdateStatus } from "../types";
+import type { CommitLink, FindingRecord, HarnessStatus, Question, QuotaAlternative, QuotaCard, RedTeamRun, Session, SessionDiffFile, UpdateStatus } from "../types";
 import { bootMedians, bootView } from "./bootTiming";
 import { CommitLinks } from "./CommitLinks";
 import { CancelRunButton } from "./RedTeamCancel";
@@ -261,6 +261,14 @@ function FindingRow({ chain }: { chain: FindingChain }): ReactElement {
       )}
     </div>
   );
+}
+
+/** Find the quota card for a session parked on provider quota exhaustion. */
+function quotaCardForSession(session: Session, cards: readonly QuotaCard[]): QuotaCard | null {
+  if (session.attention?.reason !== "provider_quota_exhausted") return null;
+  const provider = session.attention.provider;
+  if (!provider) return null;
+  return cards.find((card) => card.provider === provider) ?? null;
 }
 
 export function Inspector({
@@ -599,7 +607,45 @@ export function Inspector({
                 </div>
               )}
 
-              {needsYou(session) && (
+              {session.attention?.reason === "provider_quota_exhausted" && status?.quota_cards ? (() => {
+                const card = quotaCardForSession(session, status.quota_cards);
+                const healthyAlternatives = card ? card.alternatives.filter((alt) => alt.healthy) : [];
+                const hasAlternatives = healthyAlternatives.length > 0;
+                const firstAlternative = healthyAlternatives[0];
+                return (
+                  <div className="border-y border-border border-l-2 border-l-warn bg-panel-2 px-3.5 py-3">
+                    <div className="text-small-lg font-medium text-warn">Waiting for quota reset</div>
+                    <div className="mt-1.5 text-body font-semibold [overflow-wrap:anywhere]">
+                      {card ? `Waiting for ${card.provider_name} until ${card.reset_at ?? "unknown"}` : "Waiting for provider quota reset"}
+                    </div>
+                    {hasAlternatives && (
+                      <div className="mt-2 text-body text-muted">
+                        — another model is available
+                      </div>
+                    )}
+                    <div className="mt-2.5 flex gap-2">
+                      {hasAlternatives ? (
+                        <button
+                          type="button"
+                          onClick={() => onResume(session.id)}
+                          className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
+                        >
+                          {firstAlternative ? `Resume on ${firstAlternative.label}` : "Resume"}
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => onOpenColony(session.id)}
+                        className={`${hasAlternatives ? "flex-1" : "w-full"} cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm font-medium hover:bg-bg`}
+                      >
+                        Open colony
+                      </button>
+                    </div>
+                  </div>
+                );
+              })() : null}
+
+              {needsYou(session) && session.attention?.reason !== "provider_quota_exhausted" && (
                 <div className="border-y border-border border-l-2 border-l-warn bg-panel-2 px-3.5 py-3">
                   <div className="text-small-lg font-medium text-warn">Waiting on you</div>
                   <div className="mt-1.5 text-body font-semibold [overflow-wrap:anywhere]">
