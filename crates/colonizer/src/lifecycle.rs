@@ -11,7 +11,7 @@
 use crate::queue_priority;
 use crate::store::SessionStore;
 use crate::{
-    ApiResult, App, Shared, archive, client_error,
+    ApiResult, App, Shared, archive, client_error, config,
     execution::ExecutionBackend,
     github, orgs, providers, spend,
     util::{dir_size, format_disk_size},
@@ -1384,9 +1384,41 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session, due: &(dyn Fn(&Session
     if orgs::discard_vm(&modules) {
         return None;
     }
-    let max_parallel = crate::capacity::max_parallel(app, &modules).await;
-    // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
     let org_settings = app.org_settings(&s.org);
+    // Issue #1403: if recomputed model would differ, fall back to cold resume
+    if let Some(routing) = s.model_routing.as_ref() {
+        let tier = routing
+            .get("tier")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::routing::Tier::parse);
+        if let Some(tier) = tier {
+            let agent = app.agents.iter().find(|a| a.id == s.agent).cloned()?;
+            let agent_choice = crate::orgs::effective_agent_for(&modules, &org_settings, &agent.id);
+            let model_low = config::setting_str(&agent_choice, &agent.schema, "model_low");
+            let model = config::setting_str(&agent_choice, &agent.schema, "model");
+            let model_high = config::setting_str(&agent_choice, &agent.schema, "model_high");
+            let account_fallback = (agent.id == "claude-code")
+                .then(|| {
+                    let fb = config::setting_str(&agent_choice, &agent.schema, "account_fallback_model");
+                    crate::routing::split_provider_model(&fb)
+                })
+                .flatten();
+            let (recomputed_model, _) = crate::routing::route_with_quota_fallback(
+                tier,
+                &model_low,
+                &model,
+                &model_high,
+                account_fallback.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                &|provider_id: &str| app.gateway.is_quota_exhausted(provider_id),
+            );
+            let parked_model = routing.get("model").and_then(serde_json::Value::as_str).unwrap_or("");
+            if recomputed_model != parked_model {
+                return None; // Model would change; use cold resume
+            }
+        }
+    }
+    let max_parallel = crate::capacity::max_parallel(app, &modules).await;
+    // `org_settings` was already fetched for the warm-resume check above
     let org_limit = orgs::org_max_parallel(&org_settings);
     let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
     let lifecycle = app.session_lock(id).await;
