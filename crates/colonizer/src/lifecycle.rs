@@ -641,10 +641,12 @@ pub(crate) async fn park_colony(
                     vm_kept,
                     question_risk,
                 });
-                // When parking for control_defeat (issue #1288), preserve the existing attention
-                // which carries the signature and evidence. For other parking reasons, set
-                // attention to the park reason alone.
-                if reason != crate::watchdog::CONTROL_DEFEAT_PARK_REASON {
+                // When parking for control_defeat or exec_policy_loop (issue #1288, #1378),
+                // preserve the existing attention which carries the signature and evidence. For
+                // other parking reasons, set attention to the park reason alone.
+                if reason != crate::watchdog::CONTROL_DEFEAT_PARK_REASON
+                    && reason != crate::watchdog::EXEC_POLICY_LOOP_PARK_REASON
+                {
                     x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
                 }
                 // Parked by the host ends the wait outright, as a stop does: the held answer and

