@@ -26,6 +26,7 @@ type FieldKey =
   | "merge_prs"
   | "auto_merge"
   | "auto_colonize"
+  | "auto_colonize_require_scan"
   | "merge_method"
   | "delete_branch"
   | "verify_locally_when_ci_blocked"
@@ -76,6 +77,7 @@ const FIELDS: FieldSpec[] = [
   { key: "open_code_review_model", group: "Open Code Review", label: "Review model", hint: "The model reviews run on, as provider/model; empty follows the install's cheap summary route", kind: "text" },
   { key: "promptdecode", group: "Hidden-text screening", label: "Mode", hint: "Screen colony inputs (GitHub issues and comments) for hidden text: zero-width characters, tag characters, bidi controls, HTML comments and base64 payloads (issue #1277). Shadow records findings; On removes hidden text and appends a note", kind: "choice" },
   { key: "auto_colonize", group: "Colonies", label: "Auto-colonize", hint: "Start a colony on a new issue by itself, but only when an org member, a collaborator with write access or an allowlisted login wrote it and nobody outside the org edited it. Strangers' issues wait in review; an issue labelled no-colonize or needs-human is left to a person. Only issues filed after you turn it on are taken", kind: "choice" },
+  { key: "auto_colonize_require_scan", group: "Colonies", label: "Scan before queueing", hint: "Screen every issue for hidden text before auto mode queues it (PromptDecode, issue #1485). A finding holds the issue for review with what it decodes to. Public repositories always scan; Off applies to private ones only", kind: "choice" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
@@ -106,6 +108,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       return settings.close_superseded_prs?.join(", ") ?? "";
     case "merge_prs":
       return settings.merge_prs?.join(", ") ?? "";
+    case "auto_colonize_require_scan":
+      return settings.auto_colonize_require_scan === false ? "off" : "on";
     case "auto_merge":
     case "auto_colonize":
     case "merge_method":
@@ -172,6 +176,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "auto_merge":
       // Org-only, with no module setting behind it: the steward is off until an org opts in.
       return "off";
+    case "auto_colonize_require_scan":
+      // Org-only: scanning is on unless an org turns it off for its private repositories.
+      return "on";
     case "auto_colonize":
       // Org-only: nothing configured is off, so a stranger's issue never starts by itself.
       return "off";
@@ -262,6 +269,12 @@ const REVIEWER_CHOICES: readonly (readonly [string, string])[] = [
   ["open-code-review", "open-code-review"],
   ["kodus", "Kodus"],
 ];
+/** What the scan-before-queueing select offers (issue #1485): on holds findings, off only for private repositories. */
+const REQUIRE_SCAN_CHOICES: readonly (readonly [string, string])[] = [
+  ["on", "On: hold for review"],
+  ["off", "Off (private repositories only)"],
+];
+
 /** What the promptdecode mode select offers (issue #1277): shadow records, on strips. */
 const PROMPTDECODE_CHOICES: readonly (readonly [string, string])[] = [
   ["off", "Off"],
@@ -364,6 +377,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     merge_prs: draft.merge_prs.override ? parseRepoList(String(draft.merge_prs.value)) : [],
     auto_merge: pick("auto_merge") as OrgSettings["auto_merge"],
     auto_colonize: pick("auto_colonize") as OrgSettings["auto_colonize"],
+    auto_colonize_require_scan: pick("auto_colonize_require_scan") === "off" ? false : null,
     merge_method: pick("merge_method") as OrgSettings["merge_method"],
     delete_branch: pick("delete_branch") as boolean | null,
     verify_locally_when_ci_blocked: pick("verify_locally_when_ci_blocked") as boolean | null,
@@ -717,12 +731,14 @@ export function OrgSettingsForm({
                         value={String(draft[spec.key].value)}
                         onChange={(e) => set(spec.key, { value: e.target.value })}
                         aria-label={`${spec.label} for ${org}`}
-                        className={cx(inputClass, spec.key === "auto_colonize" || spec.key === "open_code_review" || spec.key === "reviewer" || spec.key === "promptdecode" ? "w-56" : "w-40")}
+                        className={cx(inputClass, spec.key === "auto_colonize" || spec.key === "auto_colonize_require_scan" || spec.key === "open_code_review" || spec.key === "reviewer" || spec.key === "promptdecode" ? "w-56" : "w-40")}
                       >
                         {(spec.key === "auto_merge"
                           ? AUTO_MERGE_CHOICES
                           : spec.key === "auto_colonize"
                             ? AUTO_COLONIZE_CHOICES
+                          : spec.key === "auto_colonize_require_scan"
+                            ? REQUIRE_SCAN_CHOICES
                           : spec.key === "merge_method"
                             ? MERGE_METHOD_CHOICES
                             : spec.key === "open_code_review"

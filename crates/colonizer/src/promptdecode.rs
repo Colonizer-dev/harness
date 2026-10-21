@@ -142,7 +142,9 @@ fn scan_zeros(text: &str, out: &mut Vec<Finding>) {
 
 fn scan_tags(text: &str, out: &mut Vec<Finding>) {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
-    for (i, &(byte_idx, ch)) in chars.iter().enumerate() {
+    let mut i = 0;
+    while i < chars.len() {
+        let (byte_idx, ch) = chars[i];
         if ('\u{E0000}'..='\u{E007F}').contains(&ch) {
             let mut end_idx = i + 1;
             while end_idx < chars.len() && ('\u{E0000}'..='\u{E007F}').contains(&chars[end_idx].1) {
@@ -156,6 +158,10 @@ fn scan_tags(text: &str, out: &mut Vec<Finding>) {
                 .map(|c| char::from_u32(*c as u32 - 0xE_0000).unwrap_or('\u{FFFD}'))
                 .collect();
             push_finding(out, "payload", Class::Tag, keep(decoded), byte_idx..end);
+            // One finding per run: the characters after the first are part of it, not new findings.
+            i = end_idx;
+        } else {
+            i += 1;
         }
     }
 }

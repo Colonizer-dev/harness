@@ -560,8 +560,12 @@ handing each one to you as a colony that needs you.
   `after` waits while its parent is `stopped` or `parked`, since the parent may still be resumed.
   When the parent fails, the child moves onto the parent's own parent and keeps waiting there; a
   failed parent with nothing above it leaves the child queued. Only a parent whose record is gone,
-  or one that made no changes, still retires the child. A new `after` launch onto a parent that has
-  already failed is refused, as before.
+  or one that made no changes, still retires the child. The exception is a child that waits for its
+  parent's merge (`after` without `stack`). If the parent made no changes, or its pull request was
+  closed unmerged, while the parent's issue is still open, the child stays `blocked`, and so does
+  the chain below it, with a reason that names the issue (issue #1362). Closing the issue retires
+  the child as before; a newer colony launched for the same issue becomes its parent instead. A new
+  `after` launch onto a parent that has already failed is refused, as before.
 - **Claude accounts are health-checked** (issue #983). Every five minutes the mothership makes a
   cheap check against each configured Claude account. **Settings → Connections** shows the result
   on the Claude card — reachable, token rejected, or unreachable — with when it last ran, and

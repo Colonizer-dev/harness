@@ -27,6 +27,10 @@ pub struct BoundaryTrail {
     /// Tool calls in flight whose input names a refused target, by `tool_call_id`: a successful
     /// result for one is the deny-then-reach signature.
     reaching: HashMap<String, Boundary>,
+    /// Last time each (kind, control) pair fired an exec_policy_loop, to prevent repeated
+    /// exec_policy_loop on the same control within the window (issue #1378): boundaries remain
+    /// in `recent` for deny-then-reach detection, but are excluded from repeat-fire checks.
+    last_exec_policy_loop: HashMap<(String, String), DateTime<Utc>>,
 }
 
 /// A control-defeat signature that fired (issue #609): which pattern, a sentence for a person, and
@@ -105,14 +109,27 @@ pub fn note_boundary(trail: &mut BoundaryTrail, boundary: Boundary, now: DateTim
         "exec_policy_deny" if boundary.control == "exec_policy:git-read-only" => None,
         _ => {
             let since = now - Duration::minutes(CONTROL_DEFEAT_WINDOW_MINUTES);
+            // For exec_policy denials, check if we recently fired on this control, and if so,
+            // only count boundaries after that firing time (issue #1378).
+            let is_exec_policy = boundary.kind == "exec_policy_deny";
+            let min_time = if is_exec_policy {
+                let key = (boundary.kind.clone(), boundary.control.clone());
+                trail.last_exec_policy_loop.get(&key).copied().unwrap_or(since)
+            } else {
+                since
+            };
             let evidence: Vec<Boundary> = trail
                 .recent
                 .iter()
-                .filter(|(seen, b)| *seen >= since && b.kind == boundary.kind && b.control == boundary.control)
+                .filter(|(seen, b)| *seen >= min_time && b.kind == boundary.kind && b.control == boundary.control)
                 .map(|(_, b)| b.clone())
                 .collect();
             (evidence.len() >= REPEATED_DENIALS).then(|| Defeat {
-                signature: "repeated_denial",
+                signature: if is_exec_policy {
+                    "exec_policy_loop"
+                } else {
+                    "repeated_denial"
+                },
                 summary: format!(
                     "`{}` refused the colony {} times in {CONTROL_DEFEAT_WINDOW_MINUTES} min",
                     boundary.control,
@@ -123,7 +140,18 @@ pub fn note_boundary(trail: &mut BoundaryTrail, boundary: Boundary, now: DateTim
         }
     };
     if let Some(defeat) = &defeat {
-        trail.consume(&defeat.evidence);
+        if defeat.signature == "exec_policy_loop" {
+            // Track when exec_policy_loop fires for this control, so the next check on the same
+            // control only counts boundaries after this fire time (issue #1378). Keep evidence
+            // in the trail for deny-then-reach detection.
+            if let Some(b) = defeat.evidence.first() {
+                let key = (b.kind.clone(), b.control.clone());
+                trail.last_exec_policy_loop.insert(key, now);
+            }
+        } else {
+            // Consume evidence for non-exec-policy-loop defeats (repeated_denial, ask_bypass, etc.)
+            trail.consume(&defeat.evidence);
+        }
     }
     defeat
 }
@@ -294,28 +322,55 @@ pub fn note_reach_result(trail: &mut BoundaryTrail, tool_call_id: &str, is_error
 /// The park reason used when control_defeat fires (issue #1288): distinct from hold_timeout so
 /// auto-resume does not trigger.
 pub(crate) const CONTROL_DEFEAT_PARK_REASON: &str = "control_defeat";
+/// The park reason used when exec_policy_loop fires (issue #1378): a colony repeatedly hit the
+/// same exec-policy refusal; parking it frees the slot while the operator decides the next step.
+pub(crate) const EXEC_POLICY_LOOP_PARK_REASON: &str = "exec_policy_loop";
 
-/// Raises the control-defeat flag on a colony (issue #609): the attention item carries the
-/// signature, a sentence and the boundary events that are its evidence, and the log says why. Not a
-/// stop: a signature is a pattern, not proof, so a person decides (docs/boundaries.md). A colony
-/// already flagged for control-defeat keeps its first evidence and gets a log line only.
+/// Raises a control-defeat or exec-policy-loop flag on a colony (issue #609, #1378): the attention
+/// item carries the signature, a sentence and the boundary events as evidence, and the log says why.
+/// Not a stop: a signature is a pattern, not proof, so a person decides (docs/boundaries.md). A
+/// colony already flagged for control-defeat keeps its first evidence and gets a log line only.
+/// A colony already flagged for exec_policy_loop does not re-park for another exec_policy_loop.
 ///
-/// When a control-defeat signature fires, the colony is immediately parked (issue #1288): the
-/// microVM slot is freed while keeping the worktree and transcript, and only the operator's
-/// resume brings it back.
+/// When a control-defeat or exec_policy_loop signature fires, the colony is immediately parked
+/// (issue #1288, #1378): the microVM slot is freed while keeping the worktree and transcript,
+/// and only the operator's resume brings it back. A real defeat (ask_bypass, publish_rewrite,
+/// deny_then_reach) overrides an existing exec_policy_loop attention.
 pub(crate) async fn flag_control_defeat(app: &Shared, id: &str, defeat: Defeat) {
     let Some(s) = app.session(id).await else { return };
+    let attention_reason = match defeat.signature {
+        "exec_policy_loop" => "exec_policy_loop",
+        _ => CONTROL_DEFEAT_REASON,
+    };
+    let park_reason = match defeat.signature {
+        "exec_policy_loop" => EXEC_POLICY_LOOP_PARK_REASON,
+        _ => CONTROL_DEFEAT_PARK_REASON,
+    };
+    let is_real_defeat = matches!(defeat.signature, "ask_bypass" | "deny_then_reach" | "publish_rewrite");
+    let is_policy_loop = defeat.signature == "exec_policy_loop";
+
     let message = format!(
-        "watchdog: control-defeat signature ({}): {}; this colony needs you",
-        defeat.signature, defeat.summary
+        "watchdog: {}-{} signature ({}): {}; this colony needs you",
+        if is_policy_loop { "policy" } else { "control" },
+        if is_policy_loop { "loop" } else { "defeat" },
+        defeat.signature,
+        defeat.summary
     );
-    let already = s.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some(CONTROL_DEFEAT_REASON);
-    if !already {
+
+    let existing_reason = s.attention.as_ref().and_then(|a| a["reason"].as_str());
+    let already_flagged =
+        existing_reason == Some(CONTROL_DEFEAT_REASON) || (existing_reason == Some("exec_policy_loop") && !is_real_defeat);
+
+    if !already_flagged {
+        // Park only if this is the first defeat flag; if the colony is already parked (with
+        // exec_policy_loop), just update its attention.
+        let should_park = existing_reason.is_none();
+
         let evidence: Vec<Value> = defeat.evidence.iter().map(Boundary::to_event).collect();
         let since = Utc::now();
         app.update_session(id, |x| {
             x.attention = Some(json!({
-                "reason": CONTROL_DEFEAT_REASON,
+                "reason": attention_reason,
                 "since": since,
                 "nudges": 0,
                 "signature": defeat.signature,
@@ -324,17 +379,32 @@ pub(crate) async fn flag_control_defeat(app: &Shared, id: &str, defeat: Defeat) 
             }));
         })
         .await;
+
         // Park the colony immediately to free the VM slot. The evidence and other details are
         // preserved in the attention field; the park record's reason is distinct from the
         // attention reason so hold-timeout auto-resume does not apply.
-        if let Some(s) = app.session(id).await {
+        if should_park && let Some(s) = app.session(id).await {
+            let park_msg = match defeat.signature {
+                "exec_policy_loop" => format!(
+                    "the colony repeatedly hit the `{}` rule; it is parked to free its slot — you can resume with a message telling it another path, or allow the request in `.colonizer/exec-policy.json`",
+                    defeat.evidence.first().map(|b| &b.control).unwrap_or(&"unknown".to_string())
+                ),
+                _ => "a control-defeat signature was flagged; the colony is parked to release its slot — the worktree is kept, so you can resume it once you investigate".to_string(),
+            };
             crate::lifecycle::park_colony(
                 app,
                 &s,
-                CONTROL_DEFEAT_PARK_REASON,
+                park_reason,
                 None,
-                "a control-defeat signature was flagged; the colony is parked to release its slot — the worktree is kept, so you can resume it once you investigate".into(),
-                "control-defeat signature flagged; parked to release the slot — worktree kept, resume to continue".into(),
+                park_msg.clone(),
+                format!(
+                    "{} — parked to release the slot — worktree kept, resume to continue",
+                    if defeat.signature == "exec_policy_loop" {
+                        "Blocked by exec policy"
+                    } else {
+                        "Control-defeat signature flagged"
+                    }
+                ),
             )
             .await;
         }

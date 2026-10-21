@@ -18,6 +18,87 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.21] - 2026-10-21
+
+### Added
+
+- **Auto mode: a team member approves an outside issue, and PromptDecode scans every issue before it queues.** An issue from someone outside the org now waits in review until a trusted person adds the `colonize-approved` label or comments `/colonize`. Colonizer checks that person's permission through the API, ignores the same label from anyone else, and drops the approval when an outsider edits the issue afterwards. Every issue's title, body and trusted comments are scanned for hidden text before it queues. A finding holds the issue for review with the decoded text shown, and a trusted approval lets it proceed with the text marked as untrusted data in the brief. The scan is required on public repositories and can be turned off per org only for private ones (`auto_colonize_require_scan`). The approver and the scan result show in the issue list, and each decision is in the activity log. ([#1485])
+- **The cockpit has a Brain view: your Living Brain as a 3D map, with each running colony drawn as an ant walking over it.** A new Brain page (`/brain`) draws the team brain's graph in 3D, turned by drag, zoom or pinch, and places each running, queued or parked colony as an ant on the node its repository matches. The mothership reads the brain's map once a minute and shares only its structure: node kinds, degrees and links, with labels shown locally or replaced by keyed hashes in structure-only mode (always on over remote access). The brain's token stays in the mothership's secret store, and the map route is rate-limited and refuses a foreign Origin. Nothing is fetched from a CDN.
+
+### Changed
+
+- **Colonies run Claude Code 2.1.304 and a re-pinned Go image.** The Claude Code pin in
+  `crates/colonizer/claude-code.lock` moves from 2.1.292 to 2.1.304, and `golang:1-bookworm` in
+  `crates/colonizer/images.lock` moves to a new digest, so every colony built from the next release
+  boots the exact bytes the new pins name. ([#1460])
+
+### Fixed
+
+- **Exec-policy loop detection parks the colony and frees its slot, with guidance for the operator.** Three refusals by the same exec-policy rule within 10 minutes now park the colony as `exec_policy_loop`, freeing its microVM slot and showing "Blocked by exec policy" instead of falsely flagging a control breach. When a rule denies, the agent is told what to do instead (for `script-egress`: use a network-free path, leave fetching to CI, or ask the operator). A repo can allow pinned fetch scripts past `script-egress` with a `fetches` entry in `.colonizer/exec-policy.json` (script, sources, hosts, `verify: "sha256"`), honoured only when every URL names a listed host, the script checks sha256, and the policy file matches the base commit. ([#1378])
+- **Quota-parked colonies resume when alternatives become available.** When a provider runs out of quota and colonies park waiting for its recovery, colonies now also resume if changing the model settings (e.g., `model_low`) routes them to a healthier provider, or if that provider recovers. The resume sweep re-evaluates routes every tick; colonies that were stranded with stale models now resume automatically instead of waiting for the original provider's reset ([#1403]).
+
+### Security
+
+- **The vulnerability check passes again: the websocket relay dial trusts the operating system's certificate roots.** The `cargo audit` job failed every pull request on three RustSec advisories against the bundled root store (RUSTSEC-2026-0381, 0382 and 0383). `rustls-webpki` moves to 0.103.16, and `webpki-roots` / `webpki-root-certs` to 1.0.10. The `0.26` line has no fixed release, so the `wss://` relay dial now uses the operating system's root store (`rustls-tls-native-roots`) instead of the bundled Mozilla roots. No advisory is ignored. ([#1484])
+
+## [v0.2.20] - 2026-10-20
+
+### Added
+
+- **Default guest agents for code exploration and adversarial review, configurable per organization.** Colonizer ships with two new optional guest agents that run on each colony: `explore` (a read-only code locator on Haiku that answers "where is X defined" quickly and cheaply) and `judge` (an adversarial reviewer on Opus that finds issues before the expensive verify step). Both are on by default and configurable per organization via on/off switches and model overrides; `judge` integrates into the verify flow to catch defects early and save on downstream verification costs. Each colony tracks token usage and costs for every guest agent, and both agents fall back gracefully when provider quotas are exceeded. ([#1321])
+
+### Fixed
+
+- **The observability exporter stops re-413-ing a backend that has shrunk its request limit, and the health snapshot says how many records each signal dropped.** After a `413`, the exporter now remembers the smaller request size for that signal and builds its later batches within it, instead of rebuilding every batch at full size and being refused again on each tick (the refused batch itself is still bisected down to the offending record as before). The per-signal entries of `status.json` also gained `records_dropped` and `gaps`, so how many records each signal dropped and the holes in what could be read are visible per signal. ([#849])
+- **Release notes no longer have broken links.** When `release-prep.mjs prep` copies changelog fragments into `docs/release-notes/vX.Y.Z.md`, relative Markdown links are now rebased from the repository root to the notes file's directory, preserving fragments, query strings, and titles. Absolute URLs, protocol-relative links, root-absolute paths, and pure anchors are left unchanged. The release notes are validated with `check-doc-links` before the release PR is opened, so broken links fail the prep step instead of CI. ([#1381])
+- **The fix-colony review no longer merges pull requests whose non-required checks are failing.** The fix-colony review merged pull requests whose non-required checks were failing by using `gh pr merge --auto`, which waits only for required checks. It no longer arms GitHub auto-merge, and merges directly with `--match-head-commit`, pinning to the exact head read, only once every check on that head has passed — required or not. Both the merge train and fix-colony respect a new per-repo publish setting `merge_advisory_checks` (`owner/repo=check|check`) for checks allowed to fail, and both record the evaluated check set in their decision records. Note the behaviour change: fix pull requests whose checks are still running are left open for the merge train, not queued with auto-merge. ([#1384])
+- **Loop cards' "Runs on" picker works inside drawer modals.** The Popover component that backs the repository and org picker in loop card settings now portals into the nearest open modal dialog instead of always into `document.body`, so the picker appears above the modal's backdrop and can be used. The fix applies to the Docs & README, Merge train, Dependencies & supply chain, and TypeScript loop cards, and to the organization settings picker. When repositories fail to load, the picker now shows the error reason instead of an empty list, and retries automatically on the next open. ([#1389])
+- **Install-wide role rows are now editable from org scope.** The summary_model, small_model, model_low, and model_high role rows in the org scope model selector were previously greyed out with "install-wide only" text, preventing operators from fixing out-of-quota provider issues without manually switching to install scope. They now show "install-wide · Enter to change for the whole install" and are clickable; selecting one navigates to the install scope model chooser for that role, and after saving the selection, the cockpit automatically returns to org scope with a confirmation toast. This lets operators fix provider quota issues directly from org scope without context switching. ([#1402])
+
+## [v0.2.19] - 2026-10-20
+
+### Added
+
+- **Code review with Kodus (issue #1280).** The `reviewer` org setting lets you pick between open-code-review (the original ocr binary) and Kodus, a self-hosted AI reviewer service you install yourself using [kodus-installer](https://github.com/kodustech/kodus-installer). Both backends use the same `shadow` mode — findings are recorded, nothing changes — and share the diff snapshot. Store the Kodus URL and team key in Secrets, and the mothership sends only the redacted diff. Kodus's model is configured in Kodus itself, not in Colonizer. Findings land in the colony log and `sessions/<id>/kodus.json`. ([#1280])
+- **Settings → Colonies & runtime → Modules lists Cratefield modules as searchable cards.** Each shows name, summary, status (published/unreleased/planned), versions (catalogue and published to crates.io), required and optional ports, and links to docs.rs, crates.io, and the catalogue. Search and filters by status and port. "Copy use line" puts a module in the clipboard. Data fetches hourly from `CATALOG.json` and crates.io with in-memory cache, falling back gracefully to disk cache and bundled snapshot with a banner if the network is down. ([#1291])
+- **Shadow sentinel logs a verdict before risky tool calls run.** Colony tool calls in a narrow risky class — mount/umount/chroot/nsenter, writes to `.git/config`, `.git/hooks` or other protected paths, credential-shaped paths, curl/wget off the box, and kill of pid 1 or harness processes — now get an `allow`/`refuse`/`ask` verdict with a probability and a reason, bound to a digest of the exact call, written to the decisions ledger (point `sentinel`, shadow mode) next to what actually happened (`ran`, `refused_by_policy`, `error`). Read-only commands over credential paths (the `grep`/`node --check` shape behind false control_defeat holds) are recorded as `allow`. Nothing is blocked yet; exec and path policy stay the hard boundary. See `docs/sentinel.md`. ([#1323])
+- **Provenance ledger**: records every worktree, branch, and pull request the harness creates,
+  with colony id, issue, tool, reason, and verification status. The append-only JSONL ledger at
+  `<data_dir>/provenance.jsonl` is tolerant of malformed lines; `GET /api/provenance?impact=<id>`
+  returns entries, worktree reconciliation (orphans and missing), and optional removal impact.
+  Future slices will add Cloudflare/wrangler capture, GitHub issue/secret recording, scheduled
+  reconciliation, and cockpit UI. ([#1324])
+- **PlanetScale skillset: pscale CLI (Apache-2.0) and verified skills (MIT), off by default, downloaded on demand from pinned releases with sha256 verification.**
+
+  The optional **planetscale** downloadable skillset unpacks to `<data>/plugins/planetscale` and joins the colony PATH when switched on. Colonies authenticate with `PLANETSCALE_SERVICE_TOKEN_ID` and `PLANETSCALE_SERVICE_TOKEN` from colony secrets. The exec policy holds `pscale` commands with write roles (`--admin`, `--writer`, `--readwriter`) and `--force` for operator approval. The hosted PlanetScale MCP (`https://mcp.pscale.dev`) is egress-allowed when the skillset is on; it authenticates via OAuth and will support service tokens later. See [docs/planetscale.md](docs/planetscale.md) for setup, pins, authentication and approval gates. ([#1350])
+- **Bench and evolver check the configuration each colony ran under.** Every new session records
+  `config`: an overall digest plus one per component (harness version and commit, the agent module
+  and a digest of its directory, skillsets and their pins, model, autonomy and exec-policy layers,
+  resolved egress); older `sessions.json` files load with it absent. `bench.mjs run` copies it into
+  each result and writes a run-level summary, `compare` prints `Differs in:` and labels a run
+  **not comparable** when a component changed within it, and `evolve.mjs evaluate` refuses a candidate
+  whose baseline did not run on `base_commit`, that differs from the baseline in anything but the
+  agent module, or whose module is not `base_commit` with the diff applied. ([#1352])
+- **evolve draft: automate prompt generation** — `evolve.mjs draft` spawns a model to generate candidate prompts for a failure class, reads the class evidence and optionally colony transcripts into an evidence directory, and turns valid replies into proposals. The command receives a brief on stdin, sees `EVOLVER_LENS` and `EVOLVER_EVIDENCE` in the environment, and must output either `KEEP_BASE <reason>` or cite-annotated replacement text. A leak guard refuses to spawn if the evidence contains sensitive paths or markers. ([#1353])
+
+### Changed
+
+- **Every trace span carries the colony id.** Child spans (`turn`, `execute_tool`, `subagent`,
+  `question`, `chat`, `host_step`) now carry `colonizer.colony.id` like the root `invoke_agent`
+  span, so per-colony TraceQL is a plain attribute filter instead of a `>>` structural query that
+  Tempo runs unoptimized; the Colony dashboard's span panels use the simpler form. ([#1343])
+- **Self-host fonts: no external Google Fonts requests.** Geist and Geist Mono for the cockpit, and Instrument Sans and JetBrains Mono for crate banners, are now bundled as local WOFF2 files. The web UI no longer connects to `fonts.googleapis.com` or `fonts.gstatic.com`; banner rendering (`scripts/render-crate-banners.sh`) works offline. Font files are hashed at build time and cached for one year on CDN. ([#1351])
+
+### Fixed
+
+- **An `after` colony no longer starts without its parent's work when the parent made no changes and its issue is still open.** A colony queued to start once its parent's pull request merges (`after` without `stack`) used to be re-based on the default branch and started when the parent ended `no_changes` or its pull request was closed unmerged. Every colony queued behind it followed, each on a base that lacked the work it depends on. Now, while the parent's issue is still open, the child stays `blocked` (no slot, not failed) with a reason that names the issue, and so does the chain below it. Closing the issue re-bases and queues the child as before. A newer colony launched for the same issue becomes the child's parent, so its merge releases the chain. A parent without an issue, and `stack` children, behave as before. ([#1362])
+- **Pre-publish checks for `cargo fmt` and `cargo clippy` now succeed when the rust-toolchain is pinned with `profile = "minimal"`.** When a repository pins a Rust toolchain without bundled components, the verifier now automatically installs rustfmt and clippy in the guest sandbox, so these checks run to completion instead of failing with "component not installed". Failed pre-publish checks that fail on the base branch too now show a sample of their output in the PR note for audit, redacted like other log output ([#1363])
+- **Auto-promote drafts when base-shared CI failures are fixed.** When a pre-publish check fails on the base branch, the mothership opens the PR as a draft to hold it. Now, when the PR head's CI is green and all the base-shared red checks pass, the merge train automatically marks the PR ready and posts a comment identifying the now-passing checks. Operator-initiated drafts are never auto-promoted. ([#1364])
+- **Prevent saving model tiers with inverted pricing: tasks routed high now can't run on cheaper/weaker models than medium ones.** When saving agent settings, the mothership now checks whether `model_high` is cheaper than `model` (or `model_low` more expensive than `model`) and refuses with a clear error naming both models and their prices, unless the new `allow_inverted_tiers` setting is enabled. Every colony's `model_routing` now always names the lead model it ran with, and outcome activity entries (merged, failed, stopped, no_changes, etc.) now record the tier and model. Boot warns when tier inversions are detected. ([#1366])
+- **ECC agents with comma-separated `tools` are now accepted without warnings.** ECC agents with `tools: Read, Grep, Glob` (comma-separated, the form Claude Code accepts) were dropped from the ant registry with ~70 "must be an inline array" warnings per boot. Now `tools` and `disallowedTools` accept comma-separated strings (parens-aware, e.g., `Bash(git add:*, git commit:*)`), `skillsets` stays inline-array only, and unparseable agent files are reported as one warning line per pack. ([#1367])
+- **Copy buttons work when the cockpit is reached over plain HTTP.** On a tailnet IP there is no secure context, so `navigator.clipboard` is missing and Copy did nothing. Every copy button now goes through one helper that falls back to a hidden textarea and `execCommand("copy")`, shows "Copied" only when the text really reached the clipboard, and otherwise says "Press ⌘C to copy" (Ctrl+C elsewhere).
+- **One floating chat button on phones.** On a phone the cockpit showed two round accent buttons at the bottom right, search and Ask Colonizer. The Ask button now shows from the `sm` breakpoint up, and on a phone the search button opens Spotlight, whose Ask row opens the Ask panel. ⌘J is unchanged.
+
 ## [v0.2.18] - 2026-10-20
 
 ### Added
@@ -3529,6 +3610,7 @@ Macs. ([#74])
 [#1277]: https://github.com/Colonizer-dev/harness/issues/1277
 [#1278]: https://github.com/Colonizer-dev/harness/issues/1278
 [#1279]: https://github.com/Colonizer-dev/harness/issues/1279
+[#1280]: https://github.com/Colonizer-dev/harness/issues/1280
 [#1281]: https://github.com/Colonizer-dev/harness/issues/1281
 [#1282]: https://github.com/Colonizer-dev/harness/issues/1282
 [#1284]: https://github.com/Colonizer-dev/harness/issues/1284
@@ -3536,12 +3618,38 @@ Macs. ([#74])
 [#1287]: https://github.com/Colonizer-dev/harness/issues/1287
 [#1288]: https://github.com/Colonizer-dev/harness/issues/1288
 [#1290]: https://github.com/Colonizer-dev/harness/issues/1290
+[#1291]: https://github.com/Colonizer-dev/harness/issues/1291
 [#1301]: https://github.com/Colonizer-dev/harness/issues/1301
 [#1319]: https://github.com/Colonizer-dev/harness/issues/1319
 [#1320]: https://github.com/Colonizer-dev/harness/issues/1320
+[#1321]: https://github.com/Colonizer-dev/harness/issues/1321
+[#1323]: https://github.com/Colonizer-dev/harness/issues/1323
+[#1324]: https://github.com/Colonizer-dev/harness/issues/1324
 [#1331]: https://github.com/Colonizer-dev/harness/issues/1331
+[#1343]: https://github.com/Colonizer-dev/harness/issues/1343
+[#1350]: https://github.com/Colonizer-dev/harness/issues/1350
+[#1351]: https://github.com/Colonizer-dev/harness/issues/1351
+[#1352]: https://github.com/Colonizer-dev/harness/issues/1352
+[#1353]: https://github.com/Colonizer-dev/harness/issues/1353
+[#1362]: https://github.com/Colonizer-dev/harness/issues/1362
+[#1363]: https://github.com/Colonizer-dev/harness/issues/1363
+[#1364]: https://github.com/Colonizer-dev/harness/issues/1364
+[#1366]: https://github.com/Colonizer-dev/harness/issues/1366
+[#1367]: https://github.com/Colonizer-dev/harness/issues/1367
 [#1374]: https://github.com/Colonizer-dev/harness/issues/1374
+[#1378]: https://github.com/Colonizer-dev/harness/issues/1378
+[#1381]: https://github.com/Colonizer-dev/harness/issues/1381
+[#1384]: https://github.com/Colonizer-dev/harness/issues/1384
+[#1389]: https://github.com/Colonizer-dev/harness/issues/1389
 [#1396]: https://github.com/Colonizer-dev/harness/issues/1396
+[#1402]: https://github.com/Colonizer-dev/harness/issues/1402
+[#1403]: https://github.com/Colonizer-dev/harness/issues/1403
+[#1460]: https://github.com/Colonizer-dev/harness/issues/1460
+[#1484]: https://github.com/Colonizer-dev/harness/issues/1484
+[#1485]: https://github.com/Colonizer-dev/harness/issues/1485
+[v0.2.21]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.21
+[v0.2.20]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.20
+[v0.2.19]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.19
 [v0.2.18]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.18
 [v0.2.17]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.17
 [v0.2.16]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.16

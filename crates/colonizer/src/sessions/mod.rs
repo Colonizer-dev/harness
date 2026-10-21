@@ -59,6 +59,7 @@ mod attention;
 mod files;
 mod history;
 mod launch;
+pub(crate) use launch::{pi_spends_claude, unknown_agent_error};
 mod model;
 mod persist;
 mod readiness;

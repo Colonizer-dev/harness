@@ -328,7 +328,6 @@ pub(crate) fn stream(bundles: &[ArchivedColony], tx: std::sync::mpsc::SyncSender
             sent
         };
         let read = read_bundle(&colony.bundle, &mut on_line, &mut malformed);
-        drop(on_line);
         // The lines of a half-read bundle were still good lines; a consumer that is gone ends the
         // whole run, a bundle that would not read is counted and left behind.
         if !flush(&tx, &colony.colony, &colony.host, &mut lines) {

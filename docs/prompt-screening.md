@@ -102,3 +102,19 @@ modules (Codex, Pi, OpenCode, Grok Build, Hermes, ACP) have no preflight scan ye
 - Findings are not stripped and republished: `block` holds, `warn` annotates, and fixing the branch
   is on you.
 - The decoder reads code-point classes only — it is not a general prompt-injection detector.
+
+## Issue intake (auto mode)
+
+Separate from the publish gate above, auto mode (`auto_colonize`, issue #1485) screens every issue
+before it queues: the title, the body, and each comment that would reach the brief. The engine is
+[`promptdecode-core`](https://crates.io/crates/promptdecode-core) 0.1.0, pinned exactly in
+`crates/colonizer/Cargo.toml`. It reports tag-block text, bidi controls and variation-selector
+payloads. Zero-width runs, HTML comments and base64 payloads still come from the in-repository
+scanner, which the engine does not cover (`crates/colonizer/src/intake_scan.rs`).
+
+A finding holds the issue as "Needs review: PromptDecode finding" with its decoded payload shown.
+Nothing is stripped. A team member's approval (the `colonize-approved` label or a `/colonize` comment)
+lets it proceed, and the brief then marks the decoded text as untrusted data. A public repository
+always scans and holds; `auto_colonize_require_scan: false` applies to private repositories only.
+A scan records every engine that ran. If the engine fails on a text, the in-repository scanner reads
+that text and the scan's `engine` says so.

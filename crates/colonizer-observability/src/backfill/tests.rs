@@ -169,7 +169,12 @@ fn copy_dir(from: &Path, to: &Path) {
         if entry.file_type().unwrap().is_dir() {
             copy_dir(&entry.path(), &target);
         } else {
-            std::fs::copy(entry.path(), target).unwrap();
+            std::fs::copy(entry.path(), &target).unwrap();
+            // std::fs::copy keeps the source mtime on macOS; an hours-old checkout would make the
+            // `merged` fixture look drained past DRAIN_GRACE before the test writes to it (#1386).
+            std::fs::File::open(&target)
+                .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+                .expect("failed to update mtime of copied file");
         }
     }
 }

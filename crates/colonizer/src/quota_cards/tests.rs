@@ -146,23 +146,38 @@ fn a_wait_resumes_at_reset_at_and_not_before() {
         "resume_unix": reset,
     }));
     let still_out = |_: &str| true;
-    let due = |now| crate::queue::quota_resume_due(&s, &ids, &still_out, true, now);
+    let no_fallback = |_: &Session| false;
+    let due = |now| crate::queue::quota_resume_due(&s, &ids, &still_out, true, &no_fallback, now);
     assert!(!due(reset - 3600), "an hour early stays parked");
     assert!(!due(reset - 1), "a second early stays parked");
     assert!(due(reset), "due at the reset");
     assert!(due(reset + 60), "and after it");
     let recovered = |_: &str| false;
     assert!(
-        crate::queue::quota_resume_due(&s, &ids, &recovered, false, reset - 3600),
+        crate::queue::quota_resume_due(&s, &ids, &recovered, false, &no_fallback, reset - 3600),
         "a provider that recovers early releases the wait early"
     );
     // A colony whose worktree is gone, or that is not quota-parked, is never scheduled.
     let mut gone = s.clone();
     gone.cleaned_up = true;
-    assert!(!crate::queue::quota_resume_due(&gone, &ids, &still_out, true, reset));
+    assert!(!crate::queue::quota_resume_due(
+        &gone,
+        &ids,
+        &still_out,
+        true,
+        &no_fallback,
+        reset
+    ));
     let mut held = s.clone();
     held.attention = Some(json!({"reason": "hold_timeout", "resume_unix": reset}));
-    assert!(!crate::queue::quota_resume_due(&held, &ids, &still_out, true, reset));
+    assert!(!crate::queue::quota_resume_due(
+        &held,
+        &ids,
+        &still_out,
+        true,
+        &no_fallback,
+        reset
+    ));
 }
 
 #[tokio::test]
@@ -304,8 +319,9 @@ async fn wait_parks_the_colonies_until_the_reset() {
     assert_eq!(card["resume_unix"], reset, "the card counts down to it");
     let ids = vec!["bailian".to_string(), "zai".to_string()];
     let out = |_: &str| true;
-    assert!(!crate::queue::quota_resume_due(&s, &ids, &out, true, reset - 1));
-    assert!(crate::queue::quota_resume_due(&s, &ids, &out, true, reset));
+    let no_fallback = |_: &Session| false;
+    assert!(!crate::queue::quota_resume_due(&s, &ids, &out, true, &no_fallback, reset - 1));
+    assert!(crate::queue::quota_resume_due(&s, &ids, &out, true, &no_fallback, reset));
     let _ = std::fs::remove_dir_all(root);
 }
 

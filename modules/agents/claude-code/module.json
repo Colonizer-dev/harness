@@ -120,6 +120,12 @@
         "default": "",
         "env": "COLONIZER_MODEL_HIGH"
       },
+      "allow_inverted_tiers": {
+        "type": "boolean",
+        "title": "Allow inverted model tiers",
+        "description": "Skip the check that prevents saving model_high cheaper than model or model_low more expensive than model. When inverted, tasks routed to higher tiers would run on weaker or cheaper models than lower tiers. Off by default.",
+        "default": false
+      },
       "route_cost_gate": {
         "type": "boolean",
         "title": "Gate routing down on cost",

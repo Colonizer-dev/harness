@@ -39,6 +39,15 @@ pub(crate) fn validate(text: &str) -> Result<(), String> {
             .map_or_else(|| format!("rule {}", i + 1), |id| format!("rule {:?}", id));
         validate_rule(rule).map_err(|problem| format!("exec policy {name}: {problem}"))?;
     }
+    if let Some(fetches) = policy.get("fetches") {
+        if let Some(fetches) = fetches.as_array() {
+            for (i, fetch) in fetches.iter().enumerate() {
+                validate_fetch(fetch).map_err(|problem| format!("exec policy fetches[{i}]: {problem}"))?;
+            }
+        } else {
+            return Err(r#"exec policy "fetches" must be an array"#.into());
+        }
+    }
     Ok(())
 }
 
@@ -107,6 +116,43 @@ fn patterns(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// A fetch entry: `script`, `hosts`, and `verify` are required; `sources` is optional.
+fn validate_fetch(fetch: &Value) -> Result<(), String> {
+    let Some(fetch) = fetch.as_object() else {
+        return Err("a fetch must be an object".into());
+    };
+    let script = fetch
+        .get("script")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && !s.contains(".."));
+    if script.is_none() {
+        return Err(r#""script" must be a non-empty relative path without .."#.into());
+    }
+    let hosts = fetch.get("hosts").and_then(Value::as_array);
+    if let Some(hosts) = hosts {
+        if hosts.is_empty() || hosts.iter().any(|h| h.as_str().is_none_or(|s| s.is_empty())) {
+            return Err(r#""hosts" must be a non-empty array of non-empty strings"#.into());
+        }
+    } else {
+        return Err(r#""hosts" must be a non-empty array of non-empty strings"#.into());
+    }
+    let verify = fetch.get("verify").and_then(Value::as_str);
+    if verify != Some("sha256") {
+        return Err(r#""verify" must be "sha256""#.into());
+    }
+    if let Some(sources) = fetch.get("sources") {
+        let sources = sources.as_array().ok_or(r#""sources" must be an array of paths"#)?;
+        for source in sources {
+            let path = source
+                .as_str()
+                .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.contains(".."))
+                .ok_or(r#""sources" entries must be non-empty relative paths without .."#)?;
+            let _ = path; // use it to avoid unused variable warning
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +188,31 @@ mod tests {
             .contains("500")
         );
         assert!(refused(&format!(r#"{{"rules": [], "pad": "{}"}}"#, "a".repeat(MAX_LENGTH))).contains("64 KiB"));
+    }
+
+    #[test]
+    fn valid_fetches_pass() {
+        validate(
+            r#"{"rules": [], "fetches": [{"script": "scripts/fetch-vendor.sh", "hosts": ["github.com"], "sources": ["vendor/vendor.lock"], "verify": "sha256"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn invalid_fetches_are_refused() {
+        let refused = |text: &str| validate(text).unwrap_err();
+        assert!(refused(r#"{"rules": [], "fetches": "not an array"}"#).contains("must be an array"));
+        assert!(refused(r#"{"rules": [], "fetches": [{"hosts": [], "verify": "sha256"}]}"#).contains(r#""script""#));
+        assert!(
+            refused(r#"{"rules": [], "fetches": [{"script": "x/../y", "hosts": [], "verify": "sha256"}]}"#)
+                .contains(r#""script""#)
+        );
+        assert!(
+            refused(r#"{"rules": [], "fetches": [{"script": "x", "hosts": [], "verify": "sha256"}]}"#).contains(r#""hosts""#)
+        );
+        assert!(
+            refused(r#"{"rules": [], "fetches": [{"script": "x", "hosts": ["example.com"], "verify": "md5"}]}"#)
+                .contains(r#""verify""#)
+        );
     }
 }

@@ -84,14 +84,13 @@ pub(crate) fn parse_verdict(text: &str) -> Option<Verdict> {
     Some(Verdict { vote, body })
 }
 
-/// What a passing fix's mergeability licenses: merge now, queue an auto-merge once the required
-/// checks pass, update the pull request from its base branch first, or leave it open with the
-/// reason. Judged from GitHub's own mergeability before `gh pr merge` is tried, so a pull request
-/// that cannot merge is minuted as blocked with the reason instead of as a failed merge.
+/// What a passing fix's mergeability licenses: merge now, update the pull request from its base
+/// branch first, or leave it open with the reason. Judged from GitHub's own mergeability before
+/// `gh pr merge` is tried, so a pull request that cannot merge is minuted as blocked with the reason
+/// instead of as a failed merge. Never merges while any non-advisory check is failing or pending.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MergeAction {
     Merge,
-    AutoMerge,
     UpdateBranch,
     Skip(String),
 }
@@ -113,17 +112,16 @@ fn mergeability_stale(mergeability: crate::github::Mergeability, after_update: b
 /// A branch behind its base is updated from the base first rather than merged as-is: a squash merge
 /// of a stale branch is fine until branch protection requires an up-to-date branch, and updating
 /// first satisfies both shapes. Only one update is ever tried — still behind afterwards means
-/// something else is wrong, so the change is left open. A clean pull request held `BLOCKED` for
-/// required checks is queued with `gh pr merge --squash --auto` once the base was updated (GitHub
-/// merges when the re-run checks pass) and skipped before any update — the review runs the moment
-/// the pull request opens and nothing here waits for checks, so a plain merge would only be
-/// refused. A conflicted pull request is never merged, whatever else GitHub reports alongside.
+/// something else is wrong, so the change is left open. A conflicted pull request is never merged,
+/// whatever else GitHub reports alongside. A pull request never merges while any non-advisory check
+/// is failing or pending, even if `CLEAN`: the checks parameter must be `Success` to merge.
 pub(crate) fn merge_decision(
     mergeability: crate::github::Mergeability,
     merge_state_status: &str,
     updated_from_base: bool,
+    checks: crate::github::CiState,
 ) -> MergeAction {
-    use crate::github::Mergeability::*;
+    use crate::github::{CiState::*, Mergeability::*};
     let status = merge_state_status.trim().to_ascii_uppercase();
     match mergeability {
         Conflicted => MergeAction::Skip(format!(
@@ -143,23 +141,27 @@ pub(crate) fn merge_decision(
             }
             MergeAction::UpdateBranch
         }
-        Clean => match status.as_str() {
-            "BLOCKED" => {
-                if updated_from_base {
-                    return MergeAction::AutoMerge;
-                }
-                MergeAction::Skip(format!(
-                    "the base branch's required checks or reviews are not yet satisfied (merge state {status})"
-                ))
+        Clean => {
+            // Check the advisory-filtered verdict first: never merge if any non-advisory check is failing/pending.
+            match checks {
+                Failure => return MergeAction::Skip("a non-advisory check is failing".to_string()),
+                Pending => return MergeAction::Skip("a non-advisory check is still running".to_string()),
+                NoChecks => return MergeAction::Skip("no checks ran on this pull request".to_string()),
+                Success => {}
             }
-            "DRAFT" => MergeAction::Skip(format!("the pull request is still a draft (merge state {status})")),
-            // Unreachable through `pr_info_from_json` — an uncomputed status always reads as
-            // `Unknown` — but an uncomputed status is never a licence to merge, whatever the caller.
-            "UNKNOWN" => MergeAction::Skip(format!(
-                "GitHub has not yet computed whether the pull request can merge (merge state {status})"
-            )),
-            _ => MergeAction::Merge,
-        },
+            match status.as_str() {
+                "BLOCKED" => MergeAction::Skip(format!(
+                    "the base branch's required checks or reviews are not yet satisfied (merge state {status})"
+                )),
+                "DRAFT" => MergeAction::Skip(format!("the pull request is still a draft (merge state {status})")),
+                // Unreachable through `pr_info_from_json` — an uncomputed status always reads as
+                // `Unknown` — but an uncomputed status is never a licence to merge, whatever the caller.
+                "UNKNOWN" => MergeAction::Skip(format!(
+                    "GitHub has not yet computed whether the pull request can merge (merge state {status})"
+                )),
+                _ => MergeAction::Merge,
+            }
+        }
     }
 }
 
@@ -376,6 +378,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             model_override: None,
             subagent_model_override: None,
             claude_account: None,
+            agent_module: None,
             after: None,
             stack: false,
             origin: None,
@@ -496,22 +499,27 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
     } else if verdict.vote == "pass" && automerge_enabled(app, &fix).await {
         // GitHub computes mergeability lazily and this runs as the PR opens, so UNKNOWN is usually just "not yet".
         let mut info = read_mergeability(app, &pr_url, false).await?;
+        // Get the real advisory checks list from settings for this repository.
+        let train_settings = crate::merge_train::train_settings(app).await;
+        let advisory = crate::merge_train::advisory_checks(&train_settings.advisory_checks, &fix.repo);
         // A pull request behind its base is updated from the base first — a server-side merge via
         // `gh pr update-branch`, never a force push — then re-checked, waiting out GitHub's async
         // recompute. Only one update is ever tried: still behind afterwards is minuted as blocked
-        // like any other blocker, not looped. A clean pull request held BLOCKED after the update
-        // (CI re-running under strict branch protection) is queued with `--auto` rather than
-        // skipped, so it still merges once the checks pass.
+        // like any other blocker, not looped. The merge is pinned to the exact head so a push
+        // landing between the read and the merge is refused rather than merged.
         let mut updated_from_base = false;
         let mut behind_by: Option<u64> = None;
-        let auto = loop {
-            // All three writes — the update, the merge and the auto-merge — are refused while the
-            // kill-switch is on. The check runs every lap, including after the seconds of polling
-            // below (TOCTOU): the switch may have flipped while GitHub recomputed.
-            let action = match merge_decision(info.mergeability, &info.merge_state_status, updated_from_base) {
-                MergeAction::Merge | MergeAction::UpdateBranch | MergeAction::AutoMerge
-                    if crate::authority::external_writes_blocked() =>
-                {
+        loop {
+            // All writes — the update and the merge — are refused while the kill-switch is on.
+            // The check runs every lap, including after the seconds of polling below (TOCTOU):
+            // the switch may have flipped while GitHub recomputed.
+            let action = match merge_decision(
+                info.mergeability,
+                &info.merge_state_status,
+                updated_from_base,
+                info.ci_excluding(&advisory),
+            ) {
+                MergeAction::Merge | MergeAction::UpdateBranch if crate::authority::external_writes_blocked() => {
                     MergeAction::Skip(
                         "external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS); the pull request stays open".to_string(),
                     )
@@ -519,8 +527,7 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
                 action => action,
             };
             match action {
-                MergeAction::Merge => break false,
-                MergeAction::AutoMerge => break true,
+                MergeAction::Merge => break,
                 MergeAction::Skip(reason) => {
                     // After an update the ledger line must stand alone: it names the update, since
                     // the decision's reason alone would read as if nothing had been tried.
@@ -529,17 +536,20 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
                     } else {
                         reason
                     };
+                    let checks_summary = info.checks_summary(&advisory);
                     app.session_log(
                         fix_id,
                         "warn",
-                        format!("the independent review of {pr_url} passed, but it was not merged: {reason}"),
+                        format!(
+                            "the independent review of {pr_url} passed, but it was not merged: {reason}; checks: {checks_summary}"
+                        ),
                     )
                     .await;
                     if app.session(&hunter).await.is_some() {
                         record(
                             app,
                             &hunter,
-                            &json!({"title": fix_for.title.clone(), "state": "blocked", "reason": reason, "behind_by": behind_by, "pr": pr_url}),
+                            &json!({"title": fix_for.title.clone(), "state": "blocked", "reason": reason, "checks": checks_summary, "behind_by": behind_by, "pr": pr_url}),
                         )
                         .await;
                     }
@@ -570,37 +580,27 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
                     info = read_mergeability(app, &pr_url, true).await?;
                 }
             }
-        };
-        if auto {
-            // Strict branch protection held the updated pull request BLOCKED while CI re-runs: queue
-            // the merge and let GitHub merge once the checks pass. A refusal (auto-merge not
-            // enabled on the repo, `gh` too old, ...) is minuted like a skip — the pull request
-            // stays open with the reason — and never fails the review that already passed.
-            let outcome = crate::util::exec(&mut app.gh(["pr", "merge", pr_url.as_str(), "--squash", "--auto"])).await;
-            let refusal = outcome.as_ref().err().map(|e| format!("{e:#}"));
-            let minuted = auto_merge_outcome(&pr_url, refusal.as_deref());
-            app.session_log(fix_id, minuted.level, minuted.line).await;
-            if app.session(&hunter).await.is_some() {
-                record(
-                    app,
-                    &hunter,
-                    &json!({"title": fix_for.title.clone(), "state": minuted.state, "reason": minuted.reason, "behind_by": behind_by, "pr": pr_url}),
-                )
-                .await;
-            }
-            // Queued (or refused and minuted): either way the plain merge below must not run.
-            return Ok(());
         }
-        app.session_log(fix_id, "info", format!("the independent review of {pr_url} passed; merging"))
-            .await;
-        crate::util::exec(&mut app.gh(["pr", "merge", pr_url.as_str(), "--squash"]))
+        let checks_summary = info.checks_summary(&advisory);
+        app.session_log(
+            fix_id,
+            "info",
+            format!("the independent review of {pr_url} passed; merging; checks: {checks_summary}"),
+        )
+        .await;
+        let head_oid = info.head_ref_oid.clone().unwrap_or_default();
+        let mut merge_cmd = app.gh(["pr", "merge", pr_url.as_str(), "--squash"]);
+        if !head_oid.is_empty() {
+            merge_cmd.args(["--match-head-commit", &head_oid]);
+        }
+        crate::util::exec(&mut merge_cmd)
             .await
             .context("the review passed, but the merge failed")?;
         if app.session(&hunter).await.is_some() {
             record(
                 app,
                 &hunter,
-                &json!({"title": fix_for.title.clone(), "state": "merged", "behind_by": behind_by, "pr": pr_url}),
+                &json!({"title": fix_for.title.clone(), "state": "merged", "checks": checks_summary.clone(), "behind_by": behind_by, "pr": pr_url}),
             )
             .await;
             emit_chain(
@@ -640,42 +640,6 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
         .await;
     }
     Ok(())
-}
-
-/// How an auto-merge attempt is minuted: a queued auto-merge is recorded as queued — GitHub owns
-/// the merge once the required checks pass — while a `gh` refusal reads like any other skip, with
-/// the reason, and never fails the review that already passed.
-struct AutoMergeMinuted {
-    /// The hunter ledger's state.
-    state: &'static str,
-    /// The ledger's reason.
-    reason: String,
-    /// The session log's level and line.
-    level: &'static str,
-    line: String,
-}
-
-fn auto_merge_outcome(pr_url: &str, refusal: Option<&str>) -> AutoMergeMinuted {
-    match refusal {
-        None => {
-            let reason = "auto-merge is queued; GitHub merges the pull request once the required checks pass".to_string();
-            AutoMergeMinuted {
-                state: "automerge",
-                reason: reason.clone(),
-                level: "info",
-                line: format!("the independent review of {pr_url} passed; {reason}"),
-            }
-        }
-        Some(refusal) => {
-            let reason = format!("auto-merge could not be queued ({refusal}); the pull request is left open");
-            AutoMergeMinuted {
-                state: "blocked",
-                reason: reason.clone(),
-                level: "warn",
-                line: format!("the independent review of {pr_url} passed, but it was not merged: {reason}"),
-            }
-        }
-    }
 }
 
 /// Reads the pull request's mergeability through `github::pr_info` — the one place mergeability is
@@ -766,76 +730,99 @@ mod tests {
         );
     }
 
-    /// What GitHub's mergeability licenses: merge now, queue an auto-merge, update from the base
-    /// first, or stay open with the reason.
+    /// What GitHub's mergeability and check state license: merge now, update from the base first, or
+    /// stay open with the reason. Never merges while any non-advisory check is failing or pending.
     #[test]
     fn merge_decision_is_a_table_of_merges_updates_and_skips() {
-        use crate::github::Mergeability::*;
-        // (mergeability, merge state, updated-from-base already, expected action)
-        for (mergeability, status, updated, want) in [
-            (Clean, "CLEAN", false, "merge"),
-            (Clean, "clean", false, "merge"),
-            (Clean, "CLEAN", true, "merge"),
-            (Clean, "UNSTABLE", false, "merge"),
-            (Clean, "HAS_HOOKS", false, "merge"),
-            (Clean, "UNKNOWN", false, "skip"),
-            (Behind, "BEHIND", false, "update"),
-            (Behind, "BEHIND", true, "skip"),
-            (Conflicted, "DIRTY", false, "skip"),
-            (Conflicted, "DIRTY", true, "skip"),
-            (Conflicted, "CLEAN", false, "skip"),
-            (Conflicted, "BLOCKED", true, "skip"),
-            (Unknown, "UNKNOWN", false, "skip"),
-            (Unknown, "CLEAN", true, "skip"),
-            (Clean, "BLOCKED", false, "skip"),
-            (Clean, "BLOCKED", true, "automerge"),
-            (Clean, "DRAFT", false, "skip"),
-            (Clean, "DRAFT", true, "skip"),
+        use crate::github::{CiState::*, Mergeability::*};
+        // (mergeability, merge state, updated-from-base already, check state, expected action)
+        for (mergeability, status, updated, checks, want) in [
+            // Green checks: normal flow.
+            (Clean, "CLEAN", false, Success, "merge"),
+            (Clean, "clean", false, Success, "merge"),
+            (Clean, "CLEAN", true, Success, "merge"),
+            (Clean, "UNSTABLE", false, Success, "merge"),
+            (Clean, "HAS_HOOKS", false, Success, "merge"),
+            // Red/pending checks block the merge.
+            (Clean, "CLEAN", false, Failure, "skip"),
+            (Clean, "CLEAN", false, Pending, "skip"),
+            (Clean, "CLEAN", false, NoChecks, "skip"),
+            (Clean, "UNSTABLE", false, Failure, "skip"),
+            // Other states.
+            (Clean, "UNKNOWN", false, Success, "skip"),
+            (Behind, "BEHIND", false, Success, "update"),
+            (Behind, "BEHIND", true, Success, "skip"),
+            (Conflicted, "DIRTY", false, Success, "skip"),
+            (Conflicted, "DIRTY", true, Success, "skip"),
+            (Conflicted, "CLEAN", false, Success, "skip"),
+            (Conflicted, "BLOCKED", true, Success, "skip"),
+            (Unknown, "UNKNOWN", false, Success, "skip"),
+            (Unknown, "CLEAN", true, Success, "skip"),
+            (Clean, "BLOCKED", false, Success, "skip"),
+            (Clean, "BLOCKED", true, Success, "skip"),
+            (Clean, "DRAFT", false, Success, "skip"),
+            (Clean, "DRAFT", true, Success, "skip"),
         ] {
-            let action = merge_decision(mergeability, status, updated);
+            let action = merge_decision(mergeability, status, updated, checks);
             let got = match &action {
                 MergeAction::Merge => "merge",
-                MergeAction::AutoMerge => "automerge",
                 MergeAction::UpdateBranch => "update",
                 MergeAction::Skip(_) => "skip",
             };
-            assert_eq!(got, want, "{mergeability:?}/{status} (updated {updated}): got {action:?}");
+            assert_eq!(
+                got, want,
+                "{mergeability:?}/{status} (updated {updated}, checks {checks:?}): got {action:?}"
+            );
             if let (MergeAction::Skip(reason), "skip") = (&action, want) {
                 assert!(
-                    reason.contains(&status.to_ascii_uppercase()),
-                    "the reason names the state: {reason}"
+                    reason.contains(&status.to_ascii_uppercase()) || reason.contains("check"),
+                    "the reason names the state or checks: {reason}"
                 );
             }
         }
         // A behind PR's first answer is an update, with no reason to minute yet.
         assert_eq!(
-            merge_decision(crate::github::Mergeability::Behind, "BEHIND", false),
+            merge_decision(crate::github::Mergeability::Behind, "BEHIND", false, Success),
             MergeAction::UpdateBranch
         );
         // Still behind after the one update is a skip with a reason, never a second update.
-        let MergeAction::Skip(reason) = merge_decision(crate::github::Mergeability::Behind, "BEHIND", true) else {
+        let MergeAction::Skip(reason) = merge_decision(crate::github::Mergeability::Behind, "BEHIND", true, Success) else {
             panic!("a still-behind PR after one update must skip");
         };
         assert!(reason.starts_with("updated from the base, but"), "{reason}");
         assert!(reason.contains("still behind"), "{reason}");
-        // A clean-but-blocked PR queues an auto-merge only after the one update; before any update
-        // it is skipped like any other held pull request.
-        assert_eq!(
-            merge_decision(crate::github::Mergeability::Clean, "BLOCKED", true),
-            MergeAction::AutoMerge
-        );
+        // A clean BLOCKED PR is always skipped, never auto-merged.
         assert!(matches!(
-            merge_decision(crate::github::Mergeability::Clean, "BLOCKED", false),
+            merge_decision(crate::github::Mergeability::Clean, "BLOCKED", true, Success),
+            MergeAction::Skip(_)
+        ));
+        assert!(matches!(
+            merge_decision(crate::github::Mergeability::Clean, "BLOCKED", false, Success),
             MergeAction::Skip(_)
         ));
         // A conflicted skip carries the catch-up hint: merge the base in, no force pushes, and no
         // file list is promised (GitHub exposes none).
-        let MergeAction::Skip(reason) = merge_decision(crate::github::Mergeability::Conflicted, "DIRTY", false) else {
+        let MergeAction::Skip(reason) = merge_decision(crate::github::Mergeability::Conflicted, "DIRTY", false, Success) else {
             panic!("a conflicted PR must skip");
         };
         assert!(reason.contains("merging the base branch"), "{reason}");
         assert!(reason.contains("no force pushes"), "{reason}");
         assert!(reason.contains("does not list the conflicted files"), "{reason}");
+    }
+
+    /// A PR that is green on required checks but red on an extra check must not be merged.
+    #[test]
+    fn a_pr_green_on_required_checks_but_red_on_an_extra_check_is_never_merged() {
+        use crate::github::{CiState, Mergeability};
+        // A PR with all checks green merges.
+        let action = merge_decision(Mergeability::Clean, "CLEAN", false, CiState::Success);
+        assert_eq!(action, MergeAction::Merge);
+        // A PR with a failing check does not merge.
+        let action = merge_decision(Mergeability::Clean, "CLEAN", false, CiState::Failure);
+        assert!(matches!(action, MergeAction::Skip(_)));
+        // A PR with pending checks does not merge.
+        let action = merge_decision(Mergeability::Clean, "CLEAN", false, CiState::Pending);
+        assert!(matches!(action, MergeAction::Skip(_)));
     }
 
     /// The hard invariant of the automerge: a conflicted pull request is never merged, queued or
@@ -856,7 +843,10 @@ mod tests {
         ] {
             for updated in [false, true] {
                 assert!(
-                    matches!(merge_decision(Conflicted, status, updated), MergeAction::Skip(_)),
+                    matches!(
+                        merge_decision(Conflicted, status, updated, crate::github::CiState::Success),
+                        MergeAction::Skip(_)
+                    ),
                     "conflicted/{status} (updated {updated}) must always skip"
                 );
             }
@@ -883,36 +873,6 @@ mod tests {
                 "{mergeability:?}/{after_update}"
             );
         }
-    }
-
-    /// An auto-merge attempt is minuted truthfully: queued, never merged — GitHub owns the merge
-    /// once the checks pass — and a `gh` refusal reads like a skip, with the reason.
-    #[test]
-    fn auto_merge_outcome_is_queued_not_merged_and_a_refusal_reads_as_blocked() {
-        let url = "https://github.com/acme/repo/pull/7";
-        let minuted = auto_merge_outcome(url, None);
-        assert_eq!(minuted.state, "automerge");
-        assert_eq!(minuted.level, "info");
-        assert!(minuted.line.contains(url), "{}", minuted.line);
-        assert!(minuted.line.contains("queued"), "{}", minuted.line);
-        assert!(
-            !minuted.line.contains("merged"),
-            "a queued auto-merge is not a merge: {}",
-            minuted.line
-        );
-        assert!(minuted.reason.contains("once the required checks pass"), "{}", minuted.reason);
-
-        let minuted = auto_merge_outcome(url, Some("auto-merge is not enabled on this repository"));
-        assert_eq!(minuted.state, "blocked");
-        assert_eq!(minuted.level, "warn");
-        assert!(minuted.line.contains(url), "{}", minuted.line);
-        assert!(minuted.line.contains("was not merged"), "{}", minuted.line);
-        assert!(
-            minuted.reason.contains("auto-merge is not enabled on this repository"),
-            "{}",
-            minuted.reason
-        );
-        assert!(minuted.reason.contains("left open"), "{}", minuted.reason);
     }
 
     #[test]

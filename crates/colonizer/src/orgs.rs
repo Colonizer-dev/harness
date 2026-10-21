@@ -299,6 +299,8 @@ pub struct OrgSettings {
     /// (sensitivity.rs).
     #[serde(default)]
     pub sensitivity: Option<SensitivityOverrides>,
+    #[serde(default)]
+    pub guest_agents: Option<crate::guest_agents::GuestAgents>,
     /// Trusted auto-colonize (issue #1219): whether a new issue from an org member, a collaborator
     /// with write access, an allowlisted login or Colonizer itself becomes a queued colony without a
     /// click. `None` is `off`; a stranger's issue never starts by itself (`auto_colonize.rs`).
@@ -314,6 +316,11 @@ pub struct OrgSettings {
     /// The most colonies auto mode starts per repository per hour; `None` is 5, `0` pauses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_colonize_rate: Option<u32>,
+    /// Whether auto mode holds an issue for review when PromptDecode finds hidden text in it
+    /// (issue #1485). `None` and `true` hold; `false` is honoured for a private repository only, a
+    /// public one always scans and holds (`intake_scan::required`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_colonize_require_scan: Option<bool>,
 }
 
 pub fn valid_org(org: &str) -> bool {
@@ -1358,6 +1365,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("auto_colonize_rate") {
         incoming.auto_colonize_rate = saved.auto_colonize_rate;
+    }
+    if !named("auto_colonize_require_scan") {
+        incoming.auto_colonize_require_scan = saved.auto_colonize_require_scan;
     }
     if !named("merge_method") {
         incoming.merge_method = saved.merge_method;

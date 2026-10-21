@@ -109,16 +109,17 @@ describe("the red-team wizard", () => {
       </ApiContext.Provider>,
     );
 
-  it("step 1 offers the swarm and Shannon as startable, and Strix alone as coming soon", () => {
+  it("step 1 offers the swarm and Shannon as startable, and Strix alone as unavailable with its reason", () => {
     const html = wizard(0);
     expect(html).toContain("Colony swarm");
     expect(html).toMatch(/Shannon[\s\S]*Ready[\s\S]*runs in a colony/);
     // No pill wraps and no name truncates: the pill sits on its own line under the name.
     expect(html).not.toContain("Ready · runs in a colony");
-    expect(html).toMatch(/whitespace-nowrap[^"]*"[^>]*>Coming soon/);
+    expect(html).toMatch(/whitespace-nowrap[^"]*"[^>]*>Unavailable/);
+    expect(html).toContain("colonies have none yet");
     expect(html).not.toMatch(/<span class="truncate">(Colony swarm|Strix|Shannon)/);
     expect(html).toContain("grid-cols-1");
-    expect(html).toMatch(/Strix[\s\S]*Coming soon/);
+    expect(html).toMatch(/Strix[\s\S]*Unavailable/);
     // Swarm is picked by default and Shannon is selectable (an enabled, unpressed button); Strix alone is disabled.
     expect(html).toMatch(/<button type="button" aria-pressed="true" class="[^"]*">[\s\S]*?Colony swarm/);
     expect(html).toMatch(/<button type="button" aria-pressed="false" class="[^"]*">[\s\S]*?Shannon/);
@@ -138,6 +139,24 @@ describe("the red-team wizard", () => {
     expect(models).not.toContain("Hunters per repository");
     expect(models).toContain("there is no swarm size to set");
     expect(pinned(2)).toMatch(/\(1 per repository × \d+\)/);
+  });
+
+  it("the preset picker hides for Shannon and Strix, which are security scanners, and the review says security", () => {
+    const at = (hunter: "swarm" | "shannon" | "strix", step: 0 | 2) =>
+      renderToStaticMarkup(
+        <ApiContext.Provider value={api}>
+          <WizardBody org="acme" sessions={hunterSessions} runs={[]} onClose={noop} onDone={noop} onOpenHistory={noop} initialStep={step} initialHunter={hunter} />
+        </ApiContext.Provider>,
+      );
+    expect(at("swarm", 0)).toContain('aria-label="Preset"');
+    for (const hunter of ["shannon", "strix"] as const) {
+      const html = at(hunter, 0);
+      expect(html).not.toContain('aria-label="Preset"');
+      expect(html).not.toContain('role="radio"');
+      expect(html).toContain("is a security scanner");
+      expect(at(hunter, 2)).toContain("· security");
+    }
+    expect(at("swarm", 2)).not.toContain("· security");
   });
 
   it("step 2 picks the hunter and subagent models", () => {

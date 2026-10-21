@@ -22,6 +22,7 @@ import { handoffHttp, type HandoffApi } from "./features/handoff/api";
 import { decisionsHttp, type DecisionsApi } from "./features/decisions/api";
 import { modelsHttp, type ModelsApi } from "./features/models/api";
 import { livingBrainHttp, type LivingBrainApi } from "./features/livingBrain/api";
+import { brainMapHttp, type BrainMapApi } from "./features/brainMap/api";
 
 export { ApiError, SOCKET_OPEN, splitNdjson } from "./http";
 export type { SocketLike } from "./http";
@@ -29,7 +30,7 @@ export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor
 export type { SaveModuleRequest } from "./features/modules/api";
 export type { BehindInfo, CatchUpResult, StopReply } from "./features/sessions/api";
 
-export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, QueuesApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi, ModelsApi, BuiltWithApi, CratefieldApi, LivingBrainApi {
+export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, QueuesApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi, ModelsApi, BuiltWithApi, CratefieldApi, LivingBrainApi, BrainMapApi {
   readonly mock: boolean;
 }
 
@@ -55,6 +56,7 @@ export const httpApi: Api = {
   ...decisionsHttp,
   ...modelsHttp,
   ...livingBrainHttp,
+  ...brainMapHttp,
 };
 
 /** `?mock=1` swaps in an in-browser backend so the UI can be exercised without a harness; the demo build forces it on. */

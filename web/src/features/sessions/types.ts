@@ -36,6 +36,8 @@ export type AttentionReason =
   | "model_error"
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
   | "control_defeat"
+  /** Parked because the same exec-policy rule refused the colony's commands repeatedly (issue #1378); the card names the rule and what to do instead. */
+  | "exec_policy_loop"
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
   | "provider_retry"
   /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */
@@ -406,6 +408,10 @@ export interface Session {
   model_substitutions?: ModelSubstitution[];
   /** The colony this one retries: null for a fresh colony (issue #1073). */
   retry_of?: string | null;
+  /** The tier (e.g. "low", "medium", "high") the colony ran with; absent or null for older sessions. */
+  model_tier?: string | null;
+  /** Routing information including the model and tier for the colony; absent or null for older sessions. */
+  model_routing?: { tier?: string | null; model?: string | null; [k: string]: unknown } | null;
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -504,6 +510,12 @@ export interface NewSessionRequest {
   origin?: string;
   /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#1252). */
   host?: string;
+  /** The installed agent module the colony runs on (e.g. `claude-code`, `pi`); omitted keeps the org's agent. An unknown id is a 400 `unknown_agent:`. */
+  agent_module?: string;
+  /** The model for this colony: a bare Claude id (`claude-opus-5-5`) or `<provider>/<model>`; omitted keeps the org's model. */
+  model_override?: string;
+  /** The Claude account the colony spends, by id; omitted keeps the org's account. A Pi colony on a Claude model needs that account logged in. */
+  claude_account?: string;
 }
 
 /**

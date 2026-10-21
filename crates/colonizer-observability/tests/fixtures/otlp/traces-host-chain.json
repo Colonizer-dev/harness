@@ -27,6 +27,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "chat"
@@ -102,6 +108,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
                 {
                   "key": "gen_ai.operation.name",
                   "value": {
@@ -185,6 +197,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "chat"
@@ -255,6 +273,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "path_policy"
@@ -301,6 +325,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "boundary"
@@ -340,6 +370,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
                 {
                   "key": "gen_ai.operation.name",
                   "value": {
@@ -392,6 +428,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
                 {
                   "key": "colonizer.step",
                   "value": {
@@ -463,6 +505,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.origin",
                   "value": {
                     "stringValue": "user"
@@ -521,6 +569,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "watchdog_turn_end"
@@ -554,6 +608,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
                 {
                   "key": "colonizer.step",
                   "value": {
@@ -619,6 +679,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "screening"
@@ -665,6 +731,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "validated"
@@ -699,6 +771,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "rejected"
@@ -726,6 +804,12 @@
             },
             {
               "attributes": [
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
                 {
                   "key": "colonizer.step",
                   "value": {
@@ -761,6 +845,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "review"
@@ -795,6 +885,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "colonizer.step",
                   "value": {
                     "stringValue": "merged"
@@ -823,6 +919,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -830,12 +932,6 @@
                 },
                 {
                   "key": "gen_ai.agent.id",
-                  "value": {
-                    "stringValue": "6a7e3a11"
-                  }
-                },
-                {
-                  "key": "colonizer.colony.id",
                   "value": {
                     "stringValue": "6a7e3a11"
                   }

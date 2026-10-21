@@ -398,6 +398,11 @@ async fn requeue_stack_hold(app: &Shared, id: &str) -> bool {
                     x.blocked_reason = Some(reason.clone());
                     format!("blocked: {reason}; no slot is held while it waits")
                 }
+                crate::blocked::ParentState::Unmet { reason, .. } => {
+                    x.status = SessionStatus::Blocked;
+                    x.blocked_reason = Some(reason.clone());
+                    format!("blocked: {reason}; no slot is held while it waits")
+                }
                 crate::blocked::ParentState::Gone(why) => {
                     crate::blocked::rebase_on_default(x);
                     x.status = SessionStatus::Queued;
@@ -1525,6 +1530,21 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         ))
         .await;
     }
+    // Warn about tier inversions during boot (issue #1366): cheap-to-find now, logged as a structured field.
+    let price_fn = |m: &str| {
+        let providers = app.providers();
+        let feed = app.price_feed.entries();
+        crate::providers::pricing_for(&providers, m, Some(feed.as_ref())).map(|p| (p.input_per_mtok + p.output_per_mtok) / 2.0)
+    };
+    let inversions = crate::routing::tier_inversions(&model, &model_low, &model_high, price_fn);
+    if !inversions.is_empty() {
+        for msg in &inversions {
+            log.warn(format!("tier inversion: {msg}")).await;
+        }
+    }
+
+    // Will be computed after account_fallback is available (see issue #1403)
+    let mut effective_model_final = effective_model.clone();
     let mut record = json!({
         // Which decision this is and how Jev took part (issue #583), so a report can compare
         // Jev-acted decisions against rule ones by outcome without re-deriving either.
@@ -1537,7 +1557,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         "source": tier_decision.source,
         "score": tier_decision.score,
         "reason": tier_decision.reason,
-        "model": if model_changed { json!(effective_model) } else { Value::Null },
+        // Always set model to the resolved lead model, so the web can display which model ran (issue #1366).
+        "model": if effective_model_final.is_empty() { Value::Null } else { json!(effective_model_final) },
         // The harness the decision was made for, so a routing record can be joined against the
         // spend journal's per-harness rows (issue #296).
         "agent": agent.id.clone(),
@@ -1622,6 +1643,37 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     } else {
         None
     };
+    // Route around quota-exhausted providers (issue #1403): if the tier's model's provider is
+    // exhausted, try alternatives in order. This may change the effective_model and is recorded
+    // in model_routing.reason so the cockpit and the resume scheduler can see the fallback.
+    let (routed_model_final, quota_fallback_reason) = crate::routing::route_with_quota_fallback(
+        tier_decision.tier,
+        &model_low,
+        &model,
+        &model_high,
+        account_fallback.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+        &|provider_id: &str| app.gateway.is_quota_exhausted(provider_id),
+    );
+    if !quota_fallback_reason.is_empty() {
+        effective_model_final = routed_model_final.to_string();
+    }
+    // Update model in record if quota fallback applied
+    if !effective_model_final.is_empty() && effective_model_final != effective_model {
+        record["model"] = json!(effective_model_final);
+    }
+    // Log the quota fallback if a different model was picked
+    if !quota_fallback_reason.is_empty() {
+        log.info(format!("quota fallback: {}", quota_fallback_reason)).await;
+        let original_reason = record["reason"].as_str().unwrap_or("");
+        record["reason"] = json!(format!("{}; {}", original_reason, quota_fallback_reason));
+    }
+    // Persist the updated model_routing with quota fallback info (issue #1403)
+    if !quota_fallback_reason.is_empty() {
+        app.update_session(id, |x| {
+            x.model_routing = Some(record.clone());
+        })
+        .await;
+    }
     if account_fallback.is_some() {
         runner_env.insert(
             "COLONIZER_ACCOUNT_ROUTE".into(),
@@ -2254,6 +2306,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         mounts.push(node_mount(source));
     }
     let mut secrets = Vec::new();
+    // Pi on a Claude model (the colony's own COLONIZER_MODEL, after overrides and routing) spends
+    // the Claude account instead of a gateway provider's key.
+    let pi_on_claude = !agent.needs_claude
+        && crate::sessions::pi_spends_claude(
+            &agent.id,
+            runner_env.get("COLONIZER_MODEL").and_then(Value::as_str).unwrap_or_default(),
+        );
     if agent.needs_claude {
         // The colony's own account, recorded at launch — never the install default by accident.
         let account = s.claude_account.clone().unwrap_or_else(|| "default".into());
@@ -2267,6 +2326,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         });
         secrets.push(Secret {
             env: cred.env.into(),
+            value: cred.value,
+            hosts: vec![CLAUDE_API_HOST.into()],
+        });
+    } else if pi_on_claude {
+        // Pi on a Claude model spends the colony's Claude account: the same stored credential the
+        // claude-code module mounts, handed to Pi under the variable its Anthropic provider reads
+        // (a subscription token is ANTHROPIC_OAUTH_TOKEN, a key ANTHROPIC_API_KEY), reachable only
+        // at api.anthropic.com. No Claude binary is mounted: Pi calls the API itself.
+        let account = s.claude_account.clone().unwrap_or_else(|| "default".into());
+        let cred = app
+            .claude_cred_for(s.claude_account.as_deref())
+            .with_context(|| format!("log in with Claude in Settings first (account '{account}')"))?;
+        let env = if cred.value.starts_with("sk-ant-oat") {
+            "ANTHROPIC_OAUTH_TOKEN"
+        } else {
+            "ANTHROPIC_API_KEY"
+        };
+        secrets.push(Secret {
+            env: env.into(),
             value: cred.value,
             hosts: vec![CLAUDE_API_HOST.into()],
         });
@@ -2346,6 +2424,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
     // its vendor's declared hosts without the operator restating them. Enabled packs' declared MCP
     // hosts join too, so the agent reaches the tool servers the packs' skills call.
+    if pi_on_claude {
+        // The Claude API host joins the allow list only for a Pi colony on a Claude model; every
+        // other Pi colony still reaches nothing but the gateway.
+        pack_hosts.push(("claude-api", vec![CLAUDE_API_HOST.into()]));
+    }
     let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent), &pack_hosts);
     // The fleet floor (#690): when this mothership belongs to a fleet, the owner's policy clamps
     // the colony's own — local tightens, never loosens. Refused loosenings are logged and recorded.
