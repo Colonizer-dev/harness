@@ -186,7 +186,8 @@ describe("the popover", () => {
     const html = render({ initialOpen: true, initialScope: { kind: "org", org: "acme" } });
     expect(html).toContain('aria-label="scope · acme"');
     expect(html).toContain("org override");
-    expect(html).toContain("install-wide only");
+    expect(html).not.toContain("install-wide only");
+    expect(html).toContain("install-wide · Enter to change for the whole install");
     expect(render({ initialOpen: true, initialScope: { kind: "org", org: "acme" }, initialView: { kind: "module" } })).toContain("Use install default (Claude Code)");
     expect(render({ initialOpen: true, initialScope: { kind: "org", org: "acme" }, initialView: { kind: "role", role: "background_model" } })).toContain("Use install default (Sonnet)");
   });

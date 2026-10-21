@@ -363,8 +363,10 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     let parent = sessions.iter().find(|p| p.id == parent_id);
     // Issue #1140: a paused parent blocks the child without a slot, and one gone for good cuts the
     // child loose onto the default branch — neither fails it, so a stack never cascades.
+    // Issue #1362: a parent with no changes or closed unmerged but an open issue is unmet: stays blocked.
     match crate::blocked::parent_state(s, sessions) {
         crate::blocked::ParentState::Paused(reason) => return Gate::Block(reason),
+        crate::blocked::ParentState::Unmet { reason, .. } => return Gate::Block(reason),
         crate::blocked::ParentState::Gone(reason) => return Gate::Rebase(reason),
         crate::blocked::ParentState::Fine => {}
     }
@@ -5356,18 +5358,18 @@ mod tests {
     #[test]
     fn a_root_that_is_gone_for_good_re_bases_the_chain_on_the_default_branch() {
         // Failed with no parent of its own, closed unmerged, no changes, cleaned up while stopped.
+        // These parents have NO issue, so they're truly gone and children rebase.
         let mut cleaned = chain(SessionStatus::Stopped, 2);
         cleaned[0].cleaned_up = true;
-        let mut closed = chain(SessionStatus::Closed, 2);
-        for s in closed.iter_mut().skip(1) {
+        cleaned[0].issue = None; // Ensure no issue
+        let mut closed_no_issue = chain(SessionStatus::Closed, 2);
+        closed_no_issue[0].issue = None; // Ensure no issue
+        for s in closed_no_issue.iter_mut().skip(1) {
             s.stack = false;
         }
-        for mut sessions in [
-            chain(SessionStatus::Failed, 2),
-            chain(SessionStatus::NoChanges, 2),
-            cleaned,
-            closed,
-        ] {
+        let mut no_changes_no_issue = chain(SessionStatus::NoChanges, 2);
+        no_changes_no_issue[0].issue = None; // Ensure no issue
+        for mut sessions in [chain(SessionStatus::Failed, 2), no_changes_no_issue, cleaned, closed_no_issue] {
             let (blocked, rebased) = settle(&mut sessions);
             assert!(
                 blocked.is_empty(),
@@ -5397,6 +5399,57 @@ mod tests {
         assert!(blocked.is_empty());
         assert_eq!(rebased, ["orphan"]);
         assert_eq!(orphan[0].status, SessionStatus::Queued);
+    }
+
+    #[test]
+    fn a_root_with_an_issue_and_no_changes_keeps_the_chain_blocked_unmet() {
+        // NoChanges or Closed parents WITH an open issue stay unmet only for merge-gated (non-stack)
+        // children: they stay blocked waiting for the issue to close or a relaunch to appear
+        // (issue #1362). The whole chain stays blocked. Stacked children are re-based since they
+        // depend on the parent's branch, not on the issue.
+
+        // Stacked children with unmet parent: re-based on default branch.
+        let mut no_changes_stacked = chain(SessionStatus::NoChanges, 2);
+        // issue is already set to 5 by chain(), stack is true by queued_child()
+        let (blocked, rebased) = settle(&mut no_changes_stacked);
+        // c1 is explicitly rebased since its parent (root) is gone. c2 (child of c1) is not in
+        // the rebased list because it's not processing as a blocked colony (it's queued but still
+        // waiting on c1). The key is that both end up Queued, not Blocked.
+        assert_eq!(rebased, ["c1"], "direct child of gone parent gets rebased");
+        assert!(blocked.is_empty(), "no children stay blocked when parent is gone");
+        // Verify both are queued after settle completes
+        assert_eq!(no_changes_stacked[1].status, SessionStatus::Queued);
+        assert_eq!(no_changes_stacked[2].status, SessionStatus::Queued);
+
+        // Non-stack children with unmet parent: stay blocked.
+        let mut no_changes = chain(SessionStatus::NoChanges, 2);
+        for s in no_changes.iter_mut().skip(1) {
+            s.stack = false;
+        }
+        // issue is already set to 5 by chain()
+        let (blocked, rebased) = settle(&mut no_changes);
+        assert_eq!(blocked, ["c1", "c2"], "non-stack chain under unmet parent stays blocked");
+        assert!(rebased.is_empty());
+        let c1 = &no_changes[1];
+        assert!(c1.parent.is_some(), "still waits on the parent");
+        assert_eq!(c1.status, SessionStatus::Blocked, "blocked, not failed");
+        assert!(c1.blocked_reason.is_some(), "has a reason");
+        let c2 = &no_changes[2];
+        assert_eq!(c2.status, SessionStatus::Blocked, "grandchild also blocked");
+
+        // Closed non-stack with issue: same behavior as NoChanges non-stack
+        let mut closed = chain(SessionStatus::Closed, 2);
+        for s in closed.iter_mut().skip(1) {
+            s.stack = false;
+        }
+        // issue is already set to 5
+        let (blocked, rebased) = settle(&mut closed);
+        assert_eq!(
+            blocked,
+            ["c1", "c2"],
+            "non-stack chain under closed parent with issue stays blocked"
+        );
+        assert!(rebased.is_empty());
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@
 import { cloneElement, useEffect, useState, type FormEvent, type ReactElement, type ReactNode } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
+import { copyText, manualCopyHint } from "../copy";
 import type { ApiTokenMeta, ApiTokenScope, CreatedApiToken, NewApiToken } from "../types";
 import { Pane } from "./SettingsDialog";
 import { Badge, Button, Spinner, cx, inputClass, timeAgo, type Tone } from "./ui";
@@ -264,16 +265,8 @@ export function TokensPane({ back }: { back?: () => void }): ReactElement {
 
   const copySecret = async () => {
     if (!created) return;
-    if (!navigator.clipboard) {
-      toast("This browser has no clipboard to copy into", "error");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(created.token);
-      toast("Token copied");
-    } catch {
-      toast("Couldn't copy the token", "error");
-    }
+    if (await copyText(created.token)) toast("Token copied");
+    else toast(manualCopyHint(), "error");
   };
 
   const scopeHint = TOKEN_SCOPES.find((s) => s.id === form.scope)?.hint;

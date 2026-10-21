@@ -406,6 +406,10 @@ export interface Session {
   model_substitutions?: ModelSubstitution[];
   /** The colony this one retries: null for a fresh colony (issue #1073). */
   retry_of?: string | null;
+  /** The tier (e.g. "low", "medium", "high") the colony ran with; absent or null for older sessions. */
+  model_tier?: string | null;
+  /** Routing information including the model and tier for the colony; absent or null for older sessions. */
+  model_routing?: { tier?: string | null; model?: string | null; [k: string]: unknown } | null;
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */

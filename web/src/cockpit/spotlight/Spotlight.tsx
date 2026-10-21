@@ -32,6 +32,7 @@ import {
   type SpotlightAction,
   type SpotlightData,
 } from "./logic";
+import { ASK_OPEN_EVENT, askButtonShown } from "./Ask";
 import { Key, MOD, SpotlightFab, SpotlightPill, Tile } from "./Parts";
 import { PanelFooter, PanelFrame, PanelInput, PanelList, type PanelHint, type PanelRow, type PanelSection } from "./Panel";
 import { useSpotlightData } from "./useSpotlightData";
@@ -241,6 +242,12 @@ export function SpotlightDialog({ host, seed = "", onClose }: { host: SpotlightH
     switch (action.type) {
       case "ask":
         done(result);
+        // On a phone the floating chat button is hidden, so the Ask panel opens here instead of answering inline.
+        if (typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 639px)").matches && askButtonShown(host.view)) {
+          window.dispatchEvent(new CustomEvent(ASK_OPEN_EVENT, { detail: { text: action.text } }));
+          onClose();
+          return;
+        }
         setMode({ kind: "answer", question: action.text, n: Date.now() });
         return;
       case "propose":

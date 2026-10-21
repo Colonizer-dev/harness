@@ -976,6 +976,7 @@ mod tests {
             fix_for: None,
             pr_url: Some("https://github.com/acme-corp/secret-project/pull/7".into()),
             merged_at: None,
+            pr_draft_base_red: false,
             pr_opened_at: None,
             changed_paths: Vec::new(),
             ci_state: None,

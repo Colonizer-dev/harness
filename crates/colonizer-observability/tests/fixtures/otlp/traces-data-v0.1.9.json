@@ -27,6 +27,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "a1b2c3d4"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -34,12 +40,6 @@
                 },
                 {
                   "key": "gen_ai.agent.id",
-                  "value": {
-                    "stringValue": "a1b2c3d4"
-                  }
-                },
-                {
-                  "key": "colonizer.colony.id",
                   "value": {
                     "stringValue": "a1b2c3d4"
                   }
@@ -127,6 +127,12 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "e5f60718"
+                  }
+                },
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "invoke_agent"
@@ -134,12 +140,6 @@
                 },
                 {
                   "key": "gen_ai.agent.id",
-                  "value": {
-                    "stringValue": "e5f60718"
-                  }
-                },
-                {
-                  "key": "colonizer.colony.id",
                   "value": {
                     "stringValue": "e5f60718"
                   }

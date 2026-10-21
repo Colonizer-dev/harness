@@ -163,6 +163,9 @@ describe("the Ask panel", () => {
       expect(html, view).toContain("data-ask-button");
       expect(html).toContain('title="Ask Colonizer · ');
       expect(html).toContain('aria-label="Ask Colonizer"');
+      // Phone: SpotlightFab is the one floating button, so this one shows only from sm up.
+      expect(html).toContain("hidden size-12");
+      expect(html).toContain("sm:grid");
     }
     expect(withProvider("chat")).not.toContain("data-ask-button");
     expect(askButtonShown("chat")).toBe(false);

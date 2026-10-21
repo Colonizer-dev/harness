@@ -7,6 +7,7 @@ import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
 import { ContinueLocally } from "../features/handoff/ContinueLocally";
 import { LivingBrainLink } from "../features/livingBrain/LivingBrainLink";
+import { leadModelLabel } from "../features/sessions/modelLabel";
 import type { Session } from "../types";
 import { BoundaryRow } from "./BoundaryRow";
 import { ChatPanel } from "./ChatPanel";
@@ -331,6 +332,10 @@ export function SessionView({
                 </span>
               )}
               <span>{session.agent}</span>
+              {(() => {
+                const modelLabel = leadModelLabel(session);
+                return modelLabel ? <span title={modelLabel}>{modelLabel}</span> : null;
+              })()}
               {session.supply_chain && (
                 <span title="The supply-chain target this colony was launched to fix (package · advisory)">
                   {session.supply_chain.package} · {session.supply_chain.advisory}

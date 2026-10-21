@@ -2204,6 +2204,9 @@ pub(crate) mod tests {
             head_ref_name: None,
             head_ref_oid: None,
             base_ref_name: None,
+            green_checks: Vec::new(),
+            red_checks: Vec::new(),
+            pending_checks: Vec::new(),
         };
         assert!(apply_pr_facts(&mut s, &info));
         assert_eq!((s.pr_opened_at, s.ci_state), (Some(opened), Some(github::CiState::Success)));

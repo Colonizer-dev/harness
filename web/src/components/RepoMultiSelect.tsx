@@ -58,8 +58,18 @@ export function RepoMultiSelect({
   useEffect(() => {
     if (!open || fetched || !api || (repos && orgs)) return;
     let alive = true;
-    Promise.all([repos ? Promise.resolve([]) : api.repos().catch(() => []), orgs ? Promise.resolve(orgs) : api.orgs().catch(() => [])]).then(([r, o]) => {
-      if (alive) setFetched({ repos: r, orgs: o });
+    Promise.all([
+      repos ? Promise.resolve({ data: [], error: null }) : api.repos().then((r) => ({ data: r, error: null })).catch((e) => ({ data: [], error: e })),
+      orgs ? Promise.resolve({ data: orgs, error: null }) : api.orgs().then((o) => ({ data: o, error: null })).catch((e) => ({ data: [], error: e })),
+    ]).then(([rResult, oResult]) => {
+      if (alive) {
+        const hasError = rResult.error || oResult.error;
+        setFetched({ repos: rResult.data, orgs: oResult.data });
+        if (hasError) {
+          const errMsg = rResult.error?.message || oResult.error?.message || "Failed to load repositories";
+          setError(`Couldn't load repositories: ${errMsg}`);
+        }
+      }
     });
     return () => {
       alive = false;
@@ -77,6 +87,7 @@ export function RepoMultiSelect({
   const shown = filterGroups(groups, query, (r) => descriptions.get(r) ?? null);
 
   const rows = buildRows(shown, query, allowAll, (repo) => descriptions.get(repo) ?? null);
+  const hasRealData = allOrgs.length > 0 || names.length > 0;
 
   useEffect(() => {
     if (open) search.current?.focus();
@@ -91,8 +102,12 @@ export function RepoMultiSelect({
   const close = useCallback(() => {
     setOpen(false);
     setQuery("");
-    setError(null);
-  }, []);
+    // If there was an error, clear fetched so the next open will retry
+    if (error) {
+      setError(null);
+      setFetched(null);
+    }
+  }, [error]);
 
   const pick = (row: Row) => {
     const next = pickRow(value, row);
@@ -194,11 +209,15 @@ export function RepoMultiSelect({
             />
           </div>
           <div ref={list} id={`${base}-list`} role="listbox" aria-multiselectable="true" aria-label={label} className="scroll-thin min-h-0 flex-1 overflow-y-auto p-1">
-            {rows.length === 0 && <div className="px-3 py-3 text-small-lg text-faint">{api && !fetched && !repos ? "Loading…" : "Nothing matches."}</div>}
+            {rows.length === 0 && (
+              <div className="px-3 py-3 text-small-lg text-faint">
+                {api && !fetched && !repos ? "Loading…" : error ? error : query ? "Nothing matches." : "No repositories or orgs found: connect GitHub in Settings."}
+              </div>
+            )}
             {rows.map((row, i) => {
               const { checked, implied } = checkedOf(row);
               const text =
-                row.kind === "all" ? "All repositories" : row.kind === "org" ? `All in ${row.org}` : row.kind === "repo" ? row.repo.split("/")[1] : `Add “${row.text}”…`;
+                row.kind === "all" ? "All repositories" : row.kind === "org" ? `All in ${row.org}` : row.kind === "repo" ? row.repo.split("/")[1] : `Add "${row.text}"…`;
               return (
                 <div
                   key={`${row.kind}-${row.kind === "org" ? row.org : row.kind === "repo" ? row.repo : row.kind === "add" ? row.text : ""}`}
@@ -231,8 +250,12 @@ export function RepoMultiSelect({
                 </div>
               );
             })}
+            {rows.length > 0 && fetched !== null && (error || !hasRealData) && (
+              <div className={cx("border-t border-border px-3 py-2 text-small", error ? "text-err" : "text-faint")}>
+                {error ? error : "No repositories or orgs found: connect GitHub in Settings."}
+              </div>
+            )}
           </div>
-          {error && <div className="border-t border-border px-3 py-2 text-small text-err">{error}</div>}
         </div>
       </Popover>
     </div>
