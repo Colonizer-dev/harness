@@ -88,6 +88,7 @@ mod hunters;
 mod idle_park;
 mod ignore;
 mod img_proxy;
+mod intake_scan;
 mod ipv6;
 mod jev;
 mod jev_ladder;

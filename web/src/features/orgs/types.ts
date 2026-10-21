@@ -44,6 +44,8 @@ export interface OrgSettings {
    * `off` leave every issue to a person; a stranger's issue never starts by itself.
    */
   auto_colonize?: "off" | "trusted" | null;
+  /** Whether a PromptDecode finding holds an issue for review (issue #1485); a public repository always scans. */
+  auto_colonize_require_scan?: boolean | null;
   /** How the steward merges; null is squash. */
   merge_method?: MergeMethod | null;
   /** Whether the steward deletes the branch after merging; null keeps it. */

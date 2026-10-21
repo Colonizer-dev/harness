@@ -28,6 +28,15 @@
 //! The list reads each issue's verdict as `intake: {mode, reason, label, author, trusted, trust,
 //! dismissed}` (`github::list_issues`), the sweep (`start_tasks`) acts on the same verdicts, and
 //! GitHub sits behind [`TrustSource`] so both share every step with the tests.
+//!
+//! **Team approval (issue #1485).** A stranger's issue starts when a trusted person approves it: by
+//! adding the `colonize-approved` label, or by commenting `/colonize` alone on a line. The approver is
+//! checked through the API (`resolve_trust`) at every verdict, never taken from the event; a label
+//! added by someone outside the org is ignored. An edit by a non-trusted login after the approval
+//! revokes it (`ApprovalRevoked`). Every issue is also screened with PromptDecode (`intake_scan.rs`)
+//! before it is queued: a finding holds the issue for review, with what its hidden text decodes to,
+//! unless a trusted approval lets it proceed. Only trusted comments reach the brief; those are
+//! scanned too, and what they hide is named as untrusted data there.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -45,6 +54,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::intake_scan::{self, Scan, Scanner, comment_source, scan_parts};
+
 use crate::{
     ApiResult, App, Shared,
     activity::{self, Entry},
@@ -60,6 +71,10 @@ pub(crate) const ORIGIN: &str = "auto_colonize";
 pub(crate) const LABEL_OPT_OUT: &str = "no-colonize";
 /// A label that sends an issue to a person first.
 pub(crate) const LABEL_NEEDS_HUMAN: &str = "needs-human";
+/// The label a team member adds to approve an outside issue (issue #1485).
+pub(crate) const LABEL_APPROVED: &str = "colonize-approved";
+/// The comment a team member posts, alone on its line, to approve an outside issue (issue #1485).
+pub(crate) const APPROVE_COMMAND: &str = "/colonize";
 /// How long a trust answer is believed.
 pub(crate) const TRUST_TTL_SECS: i64 = 300;
 /// New colonies per repository per hour when the org sets no cap.
@@ -219,8 +234,65 @@ pub(crate) trait TrustSource {
     async fn org_role(&self, org: &str, login: &str) -> Result<Option<String>, String>;
     /// The login's effective permission on `repo`: `admin`, `write`, `read` or `none`.
     async fn permission(&self, repo: &str, login: &str) -> Result<String, String>;
-    /// The logins that edited each issue's body, by number.
-    async fn editors(&self, repo: &str, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<String>>, String>;
+    /// The edits of each issue's body, by number, each with its editor and when.
+    async fn editors(&self, repo: &str, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<Edit>>, String>;
+    /// The approval events of each issue, by number: the `colonize-approved` label added or removed,
+    /// and `/colonize` comments (issue #1485).
+    async fn approval_events(&self, repo: &str, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<ApprovalEvent>>, String>;
+    /// One issue's comments, shaped like `gh issue view --json comments` (`author.login`, `body`, `createdAt`).
+    async fn comments(&self, repo: &str, number: u64) -> Result<Vec<Value>, String>;
+}
+
+/// One edit of an issue's body: who made it, and when (GitHub keeps no time for some old edits).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Edit {
+    pub editor: String,
+    pub at: Option<DateTime<Utc>>,
+}
+
+/// How an approval was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Via {
+    Label,
+    Comment,
+}
+
+impl Via {
+    fn as_str(self) -> &'static str {
+        match self {
+            Via::Label => "label",
+            Via::Comment => "comment",
+        }
+    }
+}
+
+/// One approval event of an issue: the approval label added or removed, or a `/colonize` comment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApprovalEvent {
+    pub via: Via,
+    pub login: String,
+    pub at: DateTime<Utc>,
+    pub removed: bool,
+}
+
+/// A team member's approval of an outside issue, once their permission has been checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Approval {
+    pub login: String,
+    pub at: DateTime<Utc>,
+    pub via: Via,
+    pub trust: Trust,
+}
+
+impl Approval {
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "by": self.login,
+            "at": self.at,
+            "via": self.via.as_str(),
+            "trust": self.trust.kind(),
+        })
+    }
 }
 
 /// One remembered trust answer and when it was given.
@@ -322,6 +394,7 @@ pub(crate) async fn resolve_trust<S: TrustSource>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Reason {
     TrustedAuthor,
+    Approved,
     Started,
     RateCapped,
     AutoOff,
@@ -331,6 +404,9 @@ pub(crate) enum Reason {
     Dismissed,
     ExternalAuthor,
     EditedByStranger,
+    ApprovalRevoked,
+    PromptDecodeFinding,
+    ScanUnavailable,
     Unverified,
     PredatesAuto,
 }
@@ -339,6 +415,7 @@ impl Reason {
     pub(crate) fn code(self) -> &'static str {
         match self {
             Reason::TrustedAuthor => "trusted_author",
+            Reason::Approved => "approved",
             Reason::Started => "started",
             Reason::RateCapped => "rate_capped",
             Reason::AutoOff => "auto_off",
@@ -348,6 +425,9 @@ impl Reason {
             Reason::Dismissed => "dismissed",
             Reason::ExternalAuthor => "external_author",
             Reason::EditedByStranger => "edited_by_stranger",
+            Reason::ApprovalRevoked => "approval_revoked",
+            Reason::PromptDecodeFinding => "prompt_decode_finding",
+            Reason::ScanUnavailable => "scan_unavailable",
             Reason::Unverified => "unverified",
             Reason::PredatesAuto => "predates_auto",
         }
@@ -356,6 +436,7 @@ impl Reason {
     fn label(self) -> &'static str {
         match self {
             Reason::TrustedAuthor => "Auto: trusted author",
+            Reason::Approved => "Auto: approved by a team member",
             Reason::Started => "A colony already started",
             Reason::RateCapped => "Auto: waiting for the hourly cap",
             Reason::AutoOff => "Auto mode is off",
@@ -365,6 +446,9 @@ impl Reason {
             Reason::Dismissed => "Dismissed",
             Reason::ExternalAuthor => "Needs review: external author",
             Reason::EditedByStranger => "Needs review: edited by an outside author",
+            Reason::ApprovalRevoked => "Needs review: approval revoked by an outside edit",
+            Reason::PromptDecodeFinding => "Needs review: PromptDecode finding",
+            Reason::ScanUnavailable => "Needs review: PromptDecode scan could not run",
             Reason::Unverified => "Needs review: trust could not be checked",
             Reason::PredatesAuto => "Filed before auto mode was turned on",
         }
@@ -372,7 +456,10 @@ impl Reason {
 
     /// `auto` for an issue auto mode takes (or has taken), `review` for everything else.
     fn is_auto(self) -> bool {
-        matches!(self, Reason::TrustedAuthor | Reason::Started | Reason::RateCapped)
+        matches!(
+            self,
+            Reason::TrustedAuthor | Reason::Approved | Reason::Started | Reason::RateCapped
+        )
     }
 }
 
@@ -384,6 +471,10 @@ pub(crate) struct Intake {
     pub trust: Option<Trust>,
     /// The outside editor, when that is why it waits.
     pub editor: Option<String>,
+    /// The team member whose approval lets an outside issue start (issue #1485).
+    pub approval: Option<Approval>,
+    /// The PromptDecode scan: the title and body always, the trusted comments once the issue may start.
+    pub scan: Option<Scan>,
 }
 
 impl Intake {
@@ -393,7 +484,7 @@ impl Intake {
 
     /// Whether the sweep should start a colony for it now.
     fn launchable(&self) -> bool {
-        self.reason == Reason::TrustedAuthor
+        matches!(self.reason, Reason::TrustedAuthor | Reason::Approved)
     }
 
     pub(crate) fn to_json(&self) -> Value {
@@ -406,6 +497,9 @@ impl Intake {
             "trust": self.trust.as_ref().map(Trust::kind),
             "editor": self.editor,
             "dismissed": self.reason == Reason::Dismissed,
+            "approval": self.approval.as_ref().map(Approval::to_json),
+            "approved_by": self.approval.as_ref().map(|a| a.login.clone()),
+            "scan": self.scan.as_ref().map(Scan::to_json),
         })
     }
 }
@@ -415,6 +509,8 @@ impl Intake {
 pub(crate) struct Row {
     pub number: u64,
     pub author: String,
+    pub title: String,
+    pub body: String,
     pub labels: Vec<String>,
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -426,23 +522,88 @@ pub(crate) struct Policy {
     pub allow: Vec<String>,
     pub cap: u32,
     pub own: String,
-    /// When auto mode was armed for this repository; issues filed earlier are not taken.
+    /// When auto mode was armed for this repository; issues filed earlier are not taken unless approved.
     pub armed: Option<DateTime<Utc>>,
     pub dismissed: BTreeSet<u64>,
     /// Issues a colony was already started on, by auto mode or otherwise.
     pub started: BTreeSet<u64>,
     /// How many auto colonies this repository started in the last hour.
     pub started_last_hour: u32,
+    /// Whether a PromptDecode finding holds an issue for review (`intake_scan::required`).
+    pub require_scan: bool,
+    /// The issue list asks for display only: an outside issue is asked about its approval only when it
+    /// carries the approval label, so a list refresh does not read every outside issue's comments. The
+    /// sweep asks about all of them.
+    pub list_only: bool,
 }
 
 fn has_label(labels: &[String], wanted: &str) -> bool {
     labels.iter().any(|l| l.trim().eq_ignore_ascii_case(wanted))
 }
 
+/// What one row's verdict is built from, filled in as the checks run.
+struct Slot {
+    reason: Option<Reason>,
+    trust: Option<Trust>,
+    editor: Option<String>,
+    approval: Option<Approval>,
+    scan: Option<Scan>,
+}
+
+/// The title and body of an issue, as the scan reads them.
+fn title_body(row: &Row) -> Vec<(String, String)> {
+    vec![
+        ("issue title".to_string(), row.title.clone()),
+        ("issue body".to_string(), row.body.clone()),
+    ]
+}
+
+/// Whether an approval stands, and who gave it: the newest approval by a trusted person that no later
+/// removal of the label undid. A label approval needs the label still on the issue. An `Err` means a
+/// permission could not be checked, which is never trust.
+async fn approval_of<S: TrustSource>(
+    src: &S,
+    cache: &TrustCache,
+    ctx: &Ctx<'_>,
+    events: &[ApprovalEvent],
+    labels: &[String],
+    now: DateTime<Utc>,
+) -> Result<Option<Approval>, String> {
+    let label_on = has_label(labels, LABEL_APPROVED);
+    let removed_at = events.iter().filter(|e| e.via == Via::Label && e.removed).map(|e| e.at).max();
+    let mut live: Vec<&ApprovalEvent> = events
+        .iter()
+        .filter(|e| !e.removed)
+        .filter(|e| match e.via {
+            Via::Label => label_on && removed_at.is_none_or(|gone| e.at > gone),
+            Via::Comment => true,
+        })
+        .collect();
+    live.sort_by_key(|e| std::cmp::Reverse(e.at));
+    for e in live {
+        let trust = resolve_trust(src, cache, ctx, &e.login, now).await?;
+        if trust.trusted() {
+            return Ok(Some(Approval {
+                login: e.login.clone(),
+                at: e.at,
+                via: e.via,
+                trust,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// The verdict for every row, in order. Pure apart from the GitHub reads behind `src`.
+///
+/// The checks, in order: the opt-outs and the hidden org; the author's trust, where an outside author
+/// needs a team member's approval (`approval_of`); the edits (before an approval an outside edit sends a
+/// trusted author's issue back, after it an outside edit revokes the approval); the started and
+/// predates checks; the PromptDecode scan of the title, body and trusted comments; the hourly cap.
 pub(crate) async fn assess<S: TrustSource>(
     src: &S,
     cache: &TrustCache,
+    scanner: &dyn Scanner,
     repo: &str,
     policy: &Policy,
     rows: &[Row],
@@ -453,13 +614,16 @@ pub(crate) async fn assess<S: TrustSource>(
         allow: &policy.allow,
         own: &policy.own,
     };
-    let mut out: Vec<Option<Intake>> = vec![None; rows.len()];
-    let verdict = |row: &Row, reason: Reason, trust: Option<Trust>| Intake {
-        reason,
-        author: row.author.clone(),
-        trust,
-        editor: None,
-    };
+    let mut slots: Vec<Slot> = rows
+        .iter()
+        .map(|row| Slot {
+            reason: None,
+            trust: None,
+            editor: None,
+            approval: None,
+            scan: Some(scan_parts(scanner, &title_body(row))),
+        })
+        .collect();
     // Authors are looked up once each. A hidden org is never asked about.
     let mut authors: BTreeMap<String, Result<Trust, String>> = BTreeMap::new();
     if !policy.hidden {
@@ -472,9 +636,11 @@ pub(crate) async fn assess<S: TrustSource>(
     }
     let mut candidates: Vec<usize> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
-        let trust = authors.get(&row.author.to_ascii_lowercase()).cloned();
-        let known = trust.as_ref().and_then(|t| t.as_ref().ok()).cloned();
-        let reason = if policy.hidden {
+        slots[i].trust = authors
+            .get(&row.author.to_ascii_lowercase())
+            .and_then(|t| t.as_ref().ok())
+            .cloned();
+        slots[i].reason = if policy.hidden {
             Some(Reason::HiddenOrg)
         } else if has_label(&row.labels, LABEL_OPT_OUT) {
             Some(Reason::OptedOut)
@@ -485,20 +651,54 @@ pub(crate) async fn assess<S: TrustSource>(
         } else if policy.mode == AutoColonize::Off {
             Some(Reason::AutoOff)
         } else {
-            match &trust {
-                Some(Ok(t)) if t.trusted() => None,
-                Some(Ok(_)) => Some(Reason::ExternalAuthor),
-                _ => Some(Reason::Unverified),
-            }
+            None
         };
-        match reason {
-            Some(reason) => out[i] = Some(verdict(row, reason, known)),
-            None => candidates.push(i),
+        if slots[i].reason.is_none() {
+            candidates.push(i);
         }
     }
+    // An outside author's issue starts only with a team member's approval (issue #1485). One whose
+    // author could not be checked waits as unverified, whether or not it is approved.
+    let outside: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&i| !slots[i].trust.as_ref().is_some_and(Trust::trusted))
+        .collect();
+    let (outside, unasked): (Vec<usize>, Vec<usize>) = outside
+        .into_iter()
+        .partition(|&i| !policy.list_only || has_label(&rows[i].labels, LABEL_APPROVED));
+    for &i in &unasked {
+        slots[i].reason = Some(if slots[i].trust.is_some() {
+            Reason::ExternalAuthor
+        } else {
+            Reason::Unverified
+        });
+    }
+    if !outside.is_empty() {
+        let numbers: Vec<u64> = outside.iter().map(|&i| rows[i].number).collect();
+        let events = src.approval_events(repo, &numbers).await;
+        for &i in &outside {
+            let row = &rows[i];
+            let known = slots[i].trust.is_some();
+            let fallback = if known { Reason::ExternalAuthor } else { Reason::Unverified };
+            let found = match &events {
+                Ok(map) => map.get(&row.number).cloned().unwrap_or_default(),
+                Err(_) => {
+                    slots[i].reason = Some(Reason::Unverified);
+                    continue;
+                }
+            };
+            match approval_of(src, cache, &ctx, &found, &row.labels, now).await {
+                Ok(Some(approval)) => slots[i].approval = Some(approval),
+                Ok(None) => slots[i].reason = Some(fallback),
+                Err(_) => slots[i].reason = Some(Reason::Unverified),
+            }
+        }
+    }
+    candidates.retain(|&i| slots[i].reason.is_none());
     // Edits: asked only about issues that would otherwise start or already started.
-    let mut editors: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     let numbers: Vec<u64> = candidates.iter().map(|&i| rows[i].number).collect();
+    let mut editors: BTreeMap<u64, Vec<Edit>> = BTreeMap::new();
     for chunk in numbers.chunks(EDIT_BATCH) {
         // A history that cannot be read leaves its issues without editors, which reads as unverified.
         if let Ok(found) = src.editors(repo, chunk).await {
@@ -508,58 +708,118 @@ pub(crate) async fn assess<S: TrustSource>(
     let mut waiting: Vec<usize> = Vec::new();
     for &i in &candidates {
         let row = &rows[i];
-        let trust = authors
-            .get(&row.author.to_ascii_lowercase())
-            .and_then(|t| t.as_ref().ok())
-            .cloned();
+        let approval = slots[i].approval.clone();
         let Some(list) = editors.get(&row.number) else {
-            out[i] = Some(verdict(row, Reason::Unverified, trust));
+            slots[i].reason = Some(Reason::Unverified);
             continue;
         };
         let mut stranger: Option<String> = None;
         let mut unverified = false;
-        for editor in list {
-            if editor.eq_ignore_ascii_case(&row.author) {
-                continue;
-            }
-            match resolve_trust(src, cache, &ctx, editor, now).await {
+        for edit in list {
+            match resolve_trust(src, cache, &ctx, &edit.editor, now).await {
                 Ok(t) if t.trusted() => {}
                 Ok(_) => {
-                    stranger = Some(editor.clone());
-                    break;
+                    // An outside edit made after the approval (or any outside edit, with none) counts.
+                    let after = approval.as_ref().is_none_or(|a| edit.at.is_none_or(|at| at > a.at));
+                    if after {
+                        stranger = Some(edit.editor.clone());
+                        break;
+                    }
                 }
                 Err(_) => unverified = true,
             }
         }
         if let Some(editor) = stranger {
-            out[i] = Some(Intake {
-                editor: Some(editor),
-                ..verdict(row, Reason::EditedByStranger, trust)
+            slots[i].editor = Some(editor);
+            slots[i].reason = Some(if approval.is_some() {
+                Reason::ApprovalRevoked
+            } else {
+                Reason::EditedByStranger
             });
         } else if unverified {
-            out[i] = Some(verdict(row, Reason::Unverified, trust));
+            slots[i].reason = Some(Reason::Unverified);
         } else if policy.started.contains(&row.number) {
-            out[i] = Some(verdict(row, Reason::Started, trust));
-        } else if !row.created_at.zip(policy.armed).is_some_and(|(made, armed)| made > armed) {
-            out[i] = Some(verdict(row, Reason::PredatesAuto, trust));
+            slots[i].reason = Some(Reason::Started);
+        } else if approval.is_none() && !row.created_at.zip(policy.armed).is_some_and(|(made, armed)| made > armed) {
+            slots[i].reason = Some(Reason::PredatesAuto);
         } else {
             waiting.push(i);
         }
     }
-    // The hourly cap: the oldest issues take the room that is left, the rest wait for the next hour.
-    waiting.sort_by_key(|&i| (rows[i].created_at, rows[i].number));
-    let room = policy.cap.saturating_sub(policy.started_last_hour) as usize;
-    for (n, &i) in waiting.iter().enumerate() {
-        let trust = authors
-            .get(&rows[i].author.to_ascii_lowercase())
-            .and_then(|t| t.as_ref().ok())
-            .cloned();
-        let reason = if n < room { Reason::TrustedAuthor } else { Reason::RateCapped };
-        out[i] = Some(verdict(&rows[i], reason, trust));
+    // PromptDecode (issue #1485): the title, the body and the trusted comments are scanned. A finding
+    // holds the issue for review unless a team member's approval lets it proceed; the decoded text
+    // stays visible in the verdict.
+    let mut queue: Vec<usize> = Vec::new();
+    for &i in &waiting {
+        let row = &rows[i];
+        let comments = match src.comments(repo, row.number).await {
+            Ok(comments) => comments,
+            Err(_) => {
+                slots[i].reason = Some(Reason::ScanUnavailable);
+                continue;
+            }
+        };
+        let mut parts = title_body(row);
+        let mut unreadable = false;
+        for (idx, comment) in comments.iter().enumerate() {
+            let login = comment["author"]["login"].as_str().unwrap_or_default().to_string();
+            match resolve_trust(src, cache, &ctx, &login, now).await {
+                Ok(t) if t.trusted() => parts.push((
+                    comment_source(idx, &login),
+                    comment["body"].as_str().unwrap_or_default().to_string(),
+                )),
+                Ok(_) => {}
+                Err(_) => unreadable = true,
+            }
+        }
+        if unreadable {
+            slots[i].reason = Some(Reason::ScanUnavailable);
+            continue;
+        }
+        let scan = scan_parts(scanner, &parts);
+        let held = policy.require_scan && !scan.clean();
+        slots[i].scan = Some(scan);
+        if held && slots[i].approval.is_none() {
+            // A trusted author's issue with a finding needs a team member's approval too.
+            let approved = match src.approval_events(repo, &[row.number]).await {
+                Ok(events) => {
+                    let found = events.get(&row.number).cloned().unwrap_or_default();
+                    approval_of(src, cache, &ctx, &found, &row.labels, now).await.ok().flatten()
+                }
+                Err(_) => None,
+            };
+            match approved {
+                Some(approval) => slots[i].approval = Some(approval),
+                None => {
+                    slots[i].reason = Some(Reason::PromptDecodeFinding);
+                    continue;
+                }
+            }
+        }
+        queue.push(i);
     }
-    out.into_iter()
-        .zip(rows)
-        .map(|(v, row)| v.unwrap_or_else(|| verdict(row, Reason::Unverified, None)))
+    // The hourly cap: the oldest issues take the room that is left, the rest wait for the next hour.
+    queue.sort_by_key(|&i| (rows[i].created_at, rows[i].number));
+    let room = policy.cap.saturating_sub(policy.started_last_hour) as usize;
+    for (n, &i) in queue.iter().enumerate() {
+        slots[i].reason = Some(if n >= room {
+            Reason::RateCapped
+        } else if slots[i].approval.is_some() {
+            Reason::Approved
+        } else {
+            Reason::TrustedAuthor
+        });
+    }
+    rows.iter()
+        .zip(slots)
+        .map(|(row, slot)| Intake {
+            reason: slot.reason.unwrap_or(Reason::Unverified),
+            author: row.author.clone(),
+            trust: slot.trust,
+            editor: slot.editor,
+            approval: slot.approval,
+            scan: slot.scan,
+        })
         .collect()
 }
 
@@ -612,16 +872,17 @@ pub(crate) fn brief_comments(issue: &Value) -> impl Iterator<Item = &Value> {
         .filter(|c| c["trusted"].as_bool() == Some(true))
 }
 
-/// What the boot of an auto colony checks again, right before the colony reads the issue: the author
-/// is still trusted, no label has pulled it back, nobody outside the org edited it, and the comments
-/// are reduced to the trusted ones. An `Err` is the reason the colony must not start.
+/// What the boot of an auto colony checks again, right before the colony reads the issue: no label has
+/// pulled it back, its author is still trusted or still approved by a team member, nobody outside the
+/// org has edited it (after the approval, when there is one), and the comments are reduced to the
+/// trusted ones. Returns the approval, when there is one. An `Err` is the reason the colony must not start.
 pub(crate) async fn vet<S: TrustSource>(
     src: &S,
     cache: &TrustCache,
     ctx: &Ctx<'_>,
     issue: &mut Value,
     now: DateTime<Utc>,
-) -> Result<(), String> {
+) -> Result<Option<Approval>, String> {
     let number = issue["number"].as_u64().unwrap_or_default();
     let author = issue["author"]["login"].as_str().unwrap_or_default().to_string();
     let labels: Vec<String> = issue["labels"]
@@ -633,30 +894,78 @@ pub(crate) async fn vet<S: TrustSource>(
     if has_label(&labels, LABEL_OPT_OUT) || has_label(&labels, LABEL_NEEDS_HUMAN) {
         return Err("it now carries a no-colonize or needs-human label".into());
     }
-    match resolve_trust(src, cache, ctx, &author, now).await {
-        Ok(t) if t.trusted() => {}
-        Ok(_) => return Err(format!("@{author} is not an org member, collaborator or allowlisted login")),
-        Err(e) => return Err(format!("@{author}'s trust could not be checked ({e})")),
+    let author_trust = resolve_trust(src, cache, ctx, &author, now).await;
+    let author_trusted = matches!(&author_trust, Ok(t) if t.trusted());
+    let approval = if author_trusted {
+        None
+    } else {
+        let events = src
+            .approval_events(ctx.repo, &[number])
+            .await
+            .map_err(|e| format!("its approval could not be read ({e})"))?;
+        let found = events.get(&number).cloned().unwrap_or_default();
+        match approval_of(src, cache, ctx, &found, &labels, now).await {
+            Ok(Some(approval)) => Some(approval),
+            Ok(None) => {
+                return Err(match author_trust {
+                    Ok(_) => format!(
+                        "@{author} is not an org member, collaborator or allowlisted login, and no team member has approved it"
+                    ),
+                    Err(e) => format!("@{author}'s trust could not be checked ({e})"),
+                });
+            }
+            Err(e) => return Err(format!("its approval could not be checked ({e})")),
+        }
+    };
+    if let Some(approval) = &approval {
+        issue["approval"] = approval.to_json();
     }
     let editors = src
         .editors(ctx.repo, &[number])
         .await
         .map_err(|e| format!("its edit history could not be read ({e})"))?;
-    for editor in editors.get(&number).into_iter().flatten() {
-        if editor.eq_ignore_ascii_case(&author) {
-            continue;
-        }
-        match resolve_trust(src, cache, ctx, editor, now).await {
+    for edit in editors.get(&number).into_iter().flatten() {
+        match resolve_trust(src, cache, ctx, &edit.editor, now).await {
             Ok(t) if t.trusted() => {}
-            _ => return Err(format!("@{editor}, who is outside the org, edited it")),
+            _ => {
+                let after = approval.as_ref().is_none_or(|a| edit.at.is_none_or(|at| at > a.at));
+                if after {
+                    return Err(match approval {
+                        Some(_) => format!("@{}, who is outside the org, edited it after it was approved", edit.editor),
+                        None => format!("@{}, who is outside the org, edited it", edit.editor),
+                    });
+                }
+            }
         }
     }
     filter_comments(src, cache, ctx, issue, now).await;
-    Ok(())
+    Ok(approval)
 }
 
-/// The boot hook (`boot.rs`): vets the issue of an auto colony with the real GitHub. A colony that
-/// did not start on auto mode is untouched.
+/// The scan of what a colony's brief carries: the title, the body and the comments the brief keeps.
+pub(crate) fn brief_scan(issue: &Value) -> Scan {
+    let mut parts = vec![
+        (
+            "issue title".to_string(),
+            issue["title"].as_str().unwrap_or_default().to_string(),
+        ),
+        (
+            "issue body".to_string(),
+            issue["body"].as_str().unwrap_or_default().to_string(),
+        ),
+    ];
+    for (idx, comment) in brief_comments(issue).enumerate() {
+        let login = comment["author"]["login"].as_str().unwrap_or_default();
+        parts.push((
+            comment_source(idx, login),
+            comment["body"].as_str().unwrap_or_default().to_string(),
+        ));
+    }
+    scan_parts(intake_scan::active(), &parts)
+}
+
+/// The boot hook (`boot.rs`): vets the issue of an auto colony with the real GitHub, then scans what the
+/// brief will carry (issue #1485). A colony that did not start on auto mode is untouched.
 pub(crate) async fn vet_at_boot(app: &App, s: &Session, issue: &mut Value) -> Result<(), String> {
     if !is_auto(s) {
         return Ok(());
@@ -676,11 +985,24 @@ pub(crate) async fn vet_at_boot(app: &App, s: &Session, issue: &mut Value) -> Re
     let author = issue["author"]["login"].as_str().unwrap_or_default().to_string();
     let mut entry = Entry::new(if result.is_ok() { "intake.trust" } else { "intake.review" }, "colony").colony(s);
     entry.detail = Some(match &result {
-        Ok(()) => format!("boot re-check passed for @{author}"),
+        Ok(Some(a)) => format!(
+            "boot re-check passed for @{author}, approved by @{} ({})",
+            a.login,
+            a.via.as_str()
+        ),
+        Ok(None) => format!("boot re-check passed for @{author}"),
         Err(why) => format!("boot re-check refused the colony: {why}"),
     });
     activity::record(app, entry).await;
-    result.map_err(|why| format!("auto-colonize stopped this colony: {why}; the issue is back in review"))
+    result.map_err(|why| format!("auto-colonize stopped this colony: {why}; the issue is back in review"))?;
+    let scan = brief_scan(issue);
+    let mut entry = Entry::new("intake.scan", "colony").colony(s);
+    entry.detail = Some(scan.summary());
+    activity::record(app, entry).await;
+    if !scan.clean() {
+        issue["promptdecode_notes"] = json!(scan.brief_notes());
+    }
+    Ok(())
 }
 
 async fn own_login(app: &App) -> String {
@@ -704,11 +1026,79 @@ impl GhSource<'_> {
             .await
             .map_err(|e| format!("{e:#}"))
     }
+
+    /// The approval events of one issue: the label's additions and removals, and `/colonize` comments.
+    /// Read through GitHub's events and comments endpoints, so the author of each is the API's word.
+    async fn approval_events_of(&self, repo: &str, number: u64) -> Result<Vec<ApprovalEvent>, String> {
+        let labels = self
+            .api(vec![
+                "api".into(),
+                "--paginate".into(),
+                format!("repos/{repo}/issues/{number}/events?per_page=100"),
+                "--jq".into(),
+                r#".[] | select(.event == "labeled" or .event == "unlabeled") | select(.label.name == "colonize-approved") | {event: .event, login: .actor.login, at: .created_at} | tojson"#.into(),
+            ])
+            .await?;
+        let comments = self
+            .api(vec![
+                "api".into(),
+                "--paginate".into(),
+                format!("repos/{repo}/issues/{number}/comments?per_page=100"),
+                "--jq".into(),
+                r#".[] | select(.body | test("^\\s*/colonize\\s*(\\n|$)")) | {event: "comment", login: .user.login, at: .created_at} | tojson"#.into(),
+            ])
+            .await?;
+        let mut events = Vec::new();
+        for line in labels.lines().chain(comments.lines()) {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let (Some(login), Some(at)) = (v["login"].as_str(), v["at"].as_str().and_then(parse_time)) else {
+                continue;
+            };
+            let (via, removed) = match v["event"].as_str() {
+                Some("labeled") => (Via::Label, false),
+                Some("unlabeled") => (Via::Label, true),
+                Some("comment") => (Via::Comment, false),
+                _ => continue,
+            };
+            events.push(ApprovalEvent {
+                via,
+                login: login.to_string(),
+                at,
+                removed,
+            });
+        }
+        Ok(events)
+    }
 }
 
 fn not_found(error: &str) -> bool {
     let text = error.to_ascii_lowercase();
     text.contains("http 404") || text.contains("not found")
+}
+
+fn parse_time(text: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text).ok().map(|t| t.with_timezone(&Utc))
+}
+
+/// One remembered answer: when it was read, and what it said.
+type Remembered<T> = HashMap<String, (DateTime<Utc>, T)>;
+
+/// Approval events are read per issue and remembered for the trust TTL, so a list refresh does not ask
+/// GitHub twice for the same issue. Edits are never remembered: revocation is checked on every verdict.
+static APPROVALS: LazyLock<StdMutex<Remembered<Vec<ApprovalEvent>>>> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn approvals_memo(key: &str, now: DateTime<Utc>) -> Option<Vec<ApprovalEvent>> {
+    let map = APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
+    let (at, events) = map.get(key)?;
+    (now - *at < chrono::Duration::seconds(TRUST_TTL_SECS)).then(|| events.clone())
+}
+
+fn approvals_remember(key: String, now: DateTime<Utc>, events: Vec<ApprovalEvent>) {
+    let mut map = APPROVALS.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (at, _)| now - *at < chrono::Duration::seconds(TRUST_TTL_SECS));
+    map.insert(key, (now, events));
 }
 
 impl TrustSource for GhSource<'_> {
@@ -736,7 +1126,7 @@ impl TrustSource for GhSource<'_> {
         }
     }
 
-    async fn editors(&self, repo: &str, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<String>>, String> {
+    async fn editors(&self, repo: &str, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<Edit>>, String> {
         if numbers.is_empty() {
             return Ok(BTreeMap::new());
         }
@@ -757,6 +1147,40 @@ impl TrustSource for GhSource<'_> {
         let value: Value = serde_json::from_str(&out).map_err(|e| format!("unreadable GraphQL answer: {e}"))?;
         parse_editors(&value, numbers)
     }
+
+    async fn approval_events(&self, repo: &str, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<ApprovalEvent>>, String> {
+        let now = Utc::now();
+        let mut out = BTreeMap::new();
+        for &number in numbers {
+            let key = key(repo, number);
+            let events = match approvals_memo(&key, now) {
+                Some(events) => events,
+                None => {
+                    let events = self.approval_events_of(repo, number).await?;
+                    approvals_remember(key, now, events.clone());
+                    events
+                }
+            };
+            out.insert(number, events);
+        }
+        Ok(out)
+    }
+
+    async fn comments(&self, repo: &str, number: u64) -> Result<Vec<Value>, String> {
+        let out = self
+            .api(vec![
+                "api".into(),
+                "--paginate".into(),
+                format!("repos/{repo}/issues/{number}/comments?per_page=100"),
+                "--jq".into(),
+                ".[] | {author: {login: .user.login}, body: .body, createdAt: .created_at} | tojson".into(),
+            ])
+            .await?;
+        out.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<Value>(l).map_err(|e| format!("unreadable comment: {e}")))
+            .collect()
+    }
 }
 
 /// One GraphQL query naming every issue's edit history under its own alias (`i<number>`).
@@ -764,7 +1188,7 @@ pub(crate) fn edits_query(numbers: &[u64]) -> String {
     let mut q = String::from("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){");
     for n in numbers {
         q.push_str(&format!(
-            "i{n}:issue(number:{n}){{userContentEdits(first:50){{totalCount nodes{{editor{{login}}}}}}}} "
+            "i{n}:issue(number:{n}){{userContentEdits(first:50){{totalCount nodes{{editedAt editor{{login}}}}}}}} "
         ));
     }
     q.push_str("}}");
@@ -773,7 +1197,7 @@ pub(crate) fn edits_query(numbers: &[u64]) -> String {
 
 /// Reads [`edits_query`]'s answer. An edit whose editor is gone reads as `ghost`, and a history
 /// longer than the page reads as an editor nobody trusts, so neither can slip through.
-pub(crate) fn parse_editors(value: &Value, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<String>>, String> {
+pub(crate) fn parse_editors(value: &Value, numbers: &[u64]) -> Result<BTreeMap<u64, Vec<Edit>>, String> {
     if let Some(errors) = value.get("errors") {
         return Err(format!(
             "GraphQL refused the edit history: {}",
@@ -790,17 +1214,23 @@ pub(crate) fn parse_editors(value: &Value, numbers: &[u64]) -> Result<BTreeMap<u
         if edits.is_null() {
             return Err(format!("GraphQL answered without issue #{n}"));
         }
-        let mut logins: Vec<String> = edits["nodes"]
+        let mut list: Vec<Edit> = edits["nodes"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|node| node["editor"]["login"].as_str().unwrap_or("ghost").to_string())
+            .map(|node| Edit {
+                editor: node["editor"]["login"].as_str().unwrap_or("ghost").to_string(),
+                at: node["editedAt"].as_str().and_then(parse_time),
+            })
             .collect();
         let total = edits["totalCount"].as_u64().unwrap_or(0) as usize;
-        if total > logins.len() {
-            logins.push("<more edits>".into());
+        if total > list.len() {
+            list.push(Edit {
+                editor: "<more edits>".into(),
+                at: None,
+            });
         }
-        out.insert(*n, logins);
+        out.insert(*n, list);
     }
     Ok(out)
 }
@@ -869,14 +1299,13 @@ async fn policy_for(app: &App, repo: &str, state: &Memory, now: DateTime<Utc>) -
     let all = app.all_org_settings();
     let owner = repo.split('/').next().unwrap_or_default();
     let org = org_entry(&all, owner);
-    let (mode, source) = effective_mode(&all, repo);
+    let (mode, _source) = effective_mode(&all, repo);
     // The scope the sweep armed: the org's when the org itself runs trusted, else the repository's.
     let armed_key = if org.is_some_and(|o| o.auto_colonize == Some(AutoColonize::Trusted)) {
         format!("org:{}", owner.to_ascii_lowercase())
     } else {
         format!("repo:{}", repo.to_ascii_lowercase())
     };
-    let _ = source;
     let sessions = app.sessions.read().await;
     let mut started = Memory::numbers(&state.launched, repo);
     let mut last_hour = 0;
@@ -888,6 +1317,8 @@ async fn policy_for(app: &App, repo: &str, state: &Memory, now: DateTime<Utc>) -
             last_hour += 1;
         }
     }
+    drop(sessions);
+    let public = repo_is_public(app, repo, now).await;
     Policy {
         mode,
         hidden: org.is_some_and(org_hidden),
@@ -898,6 +1329,46 @@ async fn policy_for(app: &App, repo: &str, state: &Memory, now: DateTime<Utc>) -
         dismissed: Memory::numbers(&state.dismissed, repo),
         started,
         started_last_hour: last_hour,
+        require_scan: intake_scan::required(public, org.and_then(|o| o.auto_colonize_require_scan)),
+        list_only: false,
+    }
+}
+
+/// Visibility per repository, remembered for an hour.
+static VISIBILITY: LazyLock<StdMutex<Remembered<bool>>> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Whether `repo` is public on GitHub. One whose visibility cannot be read counts as public, so the
+/// scan is required: the safe side.
+pub(crate) async fn repo_is_public(app: &App, repo: &str, now: DateTime<Utc>) -> bool {
+    let key = repo.to_ascii_lowercase();
+    let cached = VISIBILITY.lock().unwrap_or_else(|e| e.into_inner()).get(&key).copied();
+    if let Some((at, public)) = cached
+        && now - at < chrono::Duration::hours(1)
+    {
+        return public;
+    }
+    match exec_within(
+        GH_LIMIT,
+        &mut app.gh(["repo", "view", repo, "--json", "visibility", "--jq", ".visibility"]),
+    )
+    .await
+    {
+        Ok(out) => {
+            let public = !matches!(out.trim(), "PRIVATE" | "INTERNAL");
+            VISIBILITY
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, (now, public));
+            public
+        }
+        Err(e) => {
+            tracing::warn!(
+                repo = %repo,
+                error = %format!("{e:#}"),
+                "auto-colonize: could not read the visibility of {repo}; its issues are scanned and held as if it were public"
+            );
+            true
+        }
     }
 }
 
@@ -909,16 +1380,15 @@ fn row_from_list(issue: &Value) -> Option<Row> {
     Some(Row {
         number: issue["number"].as_u64()?,
         author: issue["author"]["login"].as_str().unwrap_or_default().to_string(),
+        title: issue["title"].as_str().unwrap_or_default().to_string(),
+        body: issue["body"].as_str().unwrap_or_default().to_string(),
         labels: issue["labels"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|l| l["name"].as_str().map(str::to_string))
             .collect(),
-        created_at: issue["createdAt"]
-            .as_str()
-            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.with_timezone(&Utc)),
+        created_at: issue["createdAt"].as_str().and_then(parse_time),
     })
 }
 
@@ -933,21 +1403,35 @@ pub(crate) async fn annotate(app: &App, repo: &str, issues: Value) -> Value {
         .collect();
     let now = Utc::now();
     let state = load_state(app);
-    let policy = policy_for(app, repo, &state, now).await;
+    let mut policy = policy_for(app, repo, &state, now).await;
+    policy.list_only = true;
     let only_rows: Vec<Row> = rows.iter().map(|(_, r)| r.clone()).collect();
-    let verdicts = tokio::time::timeout(LIST_LIMIT, assess(&GhSource { app }, &CACHE, repo, &policy, &only_rows, now))
-        .await
-        .unwrap_or_else(|_| {
-            only_rows
-                .iter()
-                .map(|r| Intake {
-                    reason: Reason::Unverified,
-                    author: r.author.clone(),
-                    trust: None,
-                    editor: None,
-                })
-                .collect()
-        });
+    let verdicts = tokio::time::timeout(
+        LIST_LIMIT,
+        assess(
+            &GhSource { app },
+            &CACHE,
+            intake_scan::active(),
+            repo,
+            &policy,
+            &only_rows,
+            now,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        only_rows
+            .iter()
+            .map(|r| Intake {
+                reason: Reason::Unverified,
+                author: r.author.clone(),
+                trust: None,
+                editor: None,
+                approval: None,
+                scan: None,
+            })
+            .collect()
+    });
     for ((i, _), verdict) in rows.iter().zip(verdicts) {
         list[*i]["intake"] = verdict.to_json();
     }
@@ -966,10 +1450,12 @@ pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
     token_scope: None,
     activity: &[],
     kinds: &[
+        "intake.approve",
         "intake.auto",
         "intake.dismiss",
         "intake.mode",
         "intake.review",
+        "intake.scan",
         "intake.trust",
     ],
     start_tasks: Some(start_tasks),
@@ -1012,6 +1498,7 @@ async fn get_mode(State(app): State<Shared>, Path((owner, name)): Path<(String, 
         "started_last_hour": policy.started_last_hour,
         "allow": policy.allow,
         "armed_at": policy.armed,
+        "require_scan": policy.require_scan,
     })))
 }
 
@@ -1150,19 +1637,22 @@ fn parse_found(item: &Value) -> Option<Found> {
     let row = row_from_list(&json!({
         "number": item["number"],
         "author": {"login": item["user"]["login"]},
+        "title": item["title"],
+        "body": item["body"],
         "labels": item["labels"],
         "createdAt": item["created_at"],
     }))?;
     // `author_association` is deliberately not read: trust is looked up, never taken from the event.
     Some(Found {
         repo,
+        title: row.title.clone(),
         row,
-        title: item["title"].as_str().unwrap_or_default().to_string(),
     })
 }
 
-async fn search(app: &App, scope: &str, armed: DateTime<Utc>) -> Result<Vec<Found>, String> {
-    let query = format!("is:issue is:open {scope} created:>{}", armed.format("%Y-%m-%dT%H:%M:%SZ"));
+/// One search of issues. The three searches of a scope (new issues, the approval label, the `/colonize`
+/// comment) differ only in `query`.
+async fn search(app: &App, query: &str) -> Result<Vec<Found>, String> {
     let q = format!("q={query}");
     let args = [
         "api",
@@ -1193,10 +1683,18 @@ fn describe(i: &Intake) -> String {
         Some(t) => format!("@{} ({})", i.author, t.why()),
         None => format!("@{}", i.author),
     };
-    match &i.editor {
+    let mut text = match &i.editor {
         Some(editor) => format!("{}: {who}; edited by @{editor}", i.reason.label()),
         None => format!("{}: {who}", i.reason.label()),
+    };
+    if let Some(approval) = &i.approval {
+        text.push_str(&format!("; approved by @{} ({})", approval.login, approval.via.as_str()));
     }
+    // A finding is named with what its hidden text decodes to: the reviewer reads it here.
+    if let Some(scan) = i.scan.as_ref().filter(|s| !s.clean()) {
+        text.push_str(&format!("; {}", scan.summary()));
+    }
+    text
 }
 
 async fn sweep(app: &Shared) {
@@ -1215,27 +1713,34 @@ async fn sweep(app: &Shared) {
     }
     state.prune(now);
     let mut changed = before != state.armed;
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    // Each scope's new issues, plus its approved outside issues, which may be older than the arming
+    // (an approval is an act after the fact). One issue can match more than one search: merged here.
+    let mut by_repo: BTreeMap<String, Vec<Found>> = BTreeMap::new();
     for scope in &wanted {
         let armed = state.armed.get(&scope.to_ascii_lowercase()).copied().unwrap_or(now);
-        let found = match search(app, scope, armed).await {
-            Ok(found) => found,
-            Err(e) => {
-                tracing::warn!(scope = %scope, error = %e, "auto-colonize: could not search {scope}: {e}");
-                continue;
+        let queries = [
+            format!("is:issue is:open {scope} created:>{}", armed.format("%Y-%m-%dT%H:%M:%SZ")),
+            format!("is:issue is:open {scope} label:{LABEL_APPROVED}"),
+            format!("is:issue is:open {scope} \"{APPROVE_COMMAND}\" in:comments"),
+        ];
+        for query in &queries {
+            match search(app, query).await {
+                Ok(found) => {
+                    for f in found {
+                        by_repo.entry(f.repo.to_ascii_lowercase()).or_default().push(f);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(scope = %scope, error = %e, "auto-colonize: could not search {scope}: {e}");
+                }
             }
-        };
-        let mut by_repo: BTreeMap<String, Vec<Found>> = BTreeMap::new();
-        for f in found {
-            by_repo.entry(f.repo.to_ascii_lowercase()).or_default().push(f);
         }
-        for (repo_key, group) in by_repo {
-            if !seen.insert(repo_key) {
-                continue;
-            }
-            let repo = group[0].repo.clone();
-            changed |= sweep_repo(app, &mut state, &repo, &group, now).await;
-        }
+    }
+    for (_, mut group) in by_repo {
+        group.sort_by_key(|f| f.row.number);
+        group.dedup_by_key(|f| f.row.number);
+        let repo = group[0].repo.clone();
+        changed |= sweep_repo(app, &mut state, &repo, &group, now).await;
     }
     if changed {
         save_state(app, &state).await;
@@ -1249,7 +1754,7 @@ async fn sweep_repo(app: &Shared, state: &mut Memory, repo: &str, group: &[Found
         return false;
     }
     let rows: Vec<Row> = group.iter().map(|f| f.row.clone()).collect();
-    let verdicts = assess(&GhSource { app }, &CACHE, repo, &policy, &rows, now).await;
+    let verdicts = assess(&GhSource { app }, &CACHE, intake_scan::active(), repo, &policy, &rows, now).await;
     let org = repo.split('/').next().unwrap_or_default().to_string();
     let mut changed = false;
     for (found, verdict) in group.iter().zip(&verdicts) {
@@ -1276,16 +1781,39 @@ async fn sweep_repo(app: &Shared, state: &mut Memory, repo: &str, group: &[Found
         }
         // The verdict, each time it changes.
         let code = verdict.reason.code().to_string();
-        if state.decided.get(&k).map(|(c, _)| c.as_str()) != Some(code.as_str()) && !verdict.launchable() {
+        let moved = state.decided.get(&k).map(|(c, _)| c.as_str()) != Some(code.as_str());
+        if moved && !verdict.launchable() {
             if verdict.reason != Reason::Started {
                 let kind = if verdict.auto() { "intake.auto" } else { "intake.review" };
                 activity::record(app, line(kind, describe(verdict))).await;
             }
-            state.decided.insert(k.clone(), (code, now));
+            state.decided.insert(k.clone(), (code.clone(), now));
             changed = true;
+        }
+        // The PromptDecode result of a judged issue: a finding always, a clean scan when it may start.
+        if moved
+            && let Some(scan) = &verdict.scan
+            && (!scan.clean() || verdict.launchable())
+        {
+            activity::record(app, line("intake.scan", scan.summary())).await;
         }
         if !verdict.launchable() {
             continue;
+        }
+        if moved && let Some(approval) = &verdict.approval {
+            activity::record(
+                app,
+                line(
+                    "intake.approve",
+                    format!(
+                        "approved by @{} ({}) with the PromptDecode scan {}",
+                        approval.login,
+                        approval.via.as_str(),
+                        verdict.scan.as_ref().map(Scan::summary).unwrap_or_default()
+                    ),
+                ),
+            )
+            .await;
         }
         let body = json!({
             "repo": repo,
@@ -1298,7 +1826,10 @@ async fn sweep_repo(app: &Shared, state: &mut Memory, repo: &str, group: &[Found
         };
         match crate::sessions::create(State(app.clone()), None, HeaderMap::new(), Json(new_session)).await {
             Ok(Json(session)) => {
-                let note = format!("auto: trusted author @{}", verdict.author);
+                let note = match &verdict.approval {
+                    Some(approval) => format!("auto: approved by @{} ({})", approval.login, approval.via.as_str()),
+                    None => format!("auto: trusted author @{}", verdict.author),
+                };
                 app.update_session(&session.id, |s| s.auto_note = Some(note.clone())).await;
                 let mut e = line(
                     "intake.auto",

@@ -9,6 +9,7 @@ import { IconExternal } from "../components/icons";
 import { cx } from "../components/ui";
 import { epicMarker } from "../features/repos/claims";
 import { relative } from "./InboxView";
+import { intakeNote } from "./issueIntake";
 import {
   STATUS_LABEL,
   STATUS_ORDER,
@@ -212,6 +213,8 @@ export function issueRow({
   const epic = epicMarker(issue);
   const priority = issuePriority(issue);
   const canColonize = !disabled && state.status !== "colonizing" && state.status !== "blocked" && state.status !== "pr_open" && !epic;
+  // Who approved it, and what PromptDecode found in it (issue #1485).
+  const note = intakeNote(issue.intake);
   const opensColony = !canColonize && state.colony !== null && (state.status === "blocked" || state.status === "colonizing" || state.status === "pr_open");
   return {
     id,
@@ -227,6 +230,7 @@ export function issueRow({
         <span className="shrink-0 font-mono">#{issue.number}</span>
         {epic && <span className="shrink-0 text-warn">{epic}</span>}
         <span className="min-w-0 truncate">{plainSummary(issue)}</span>
+        {note && <span className={cx("hidden shrink-0 truncate md:inline", note.tone === "warn" ? "text-warn" : note.tone === "ok" ? "text-ok" : "text-muted")} title={note.text}>{note.text}</span>}
         {issue.labels.slice(0, 2).map((l) => (
           <span key={l.name} className="hidden shrink-0 rounded-full border border-current/25 px-1.5 text-meta-lg leading-4 sm:inline">
             {l.name}
