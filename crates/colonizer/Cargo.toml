@@ -88,10 +88,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 txcript = { version = "=0.14.4", default-features = false, features = ["opencode", "hermes"] }
 # PromptDecode (issue #1485, intake_scan.rs): hidden-Unicode findings in every issue and comment before a
 # colony takes it. Published on crates.io under MIT OR Apache-2.0; pinned exactly, as the other
-# harness-facing crates are. `promptdecode-content` is the repository scanner; the intake reads
-# issue text through `promptdecode-core` only.
+# harness-facing crates are.
 promptdecode-core = "=0.1.0"
-promptdecode-content = "=0.1.0"
 uuid = { version = "1.26.1", features = ["v4"] }
 
 # The system keychain for saved secrets (secrets.rs): Keychain on macOS, the Secret Service
