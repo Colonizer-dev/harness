@@ -209,6 +209,17 @@ async fn attempt(app: &App, client: &reqwest::Client, delivery: &Delivery) -> an
     let Some(secret) = signing else {
         anyhow::bail!("its webhook has no signing secret");
     };
+    // Allow private webhooks for owner-created subscriptions: before sending to an owner webhook
+    // or an owner-created subscription whose URL uses a hostname (not an IP literal), allowlist it
+    // so the pinned resolver permits its address.
+    let is_owner = delivery.target == OWNER || super::subscriptions::is_owner_created(app, &delivery.target);
+    if is_owner
+        && let Ok(url) = reqwest::Url::parse(&delivery.url)
+        && let Some(host) = url.host_str()
+        && !host.parse::<std::net::IpAddr>().is_ok()
+    {
+        crate::util::allow_private_host(host);
+    }
     post(client, &delivery.url, &secret, &delivery.event_id, &delivery.body).await
 }
 
@@ -352,6 +363,8 @@ pub(crate) async fn run(app: Shared) {
         // A redirect only to another public http(s) host, like every delivery client (the first
         // URL was checked where the subscription or the webhook was saved).
         .redirect(public_redirect_policy())
+        // Pin DNS resolutions to prevent rebinding attacks, like the webhook loop's client.
+        .dns_resolver(crate::util::build_pinned_resolver())
         .build()
     else {
         tracing::warn!("notify: could not build an HTTP client; webhook retries are off");
@@ -420,6 +433,8 @@ fn client() -> Result<reqwest::Client, crate::AppError> {
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
         // A redirect only to another public http(s) host, like the retry worker's client.
         .redirect(public_redirect_policy())
+        // Pin DNS resolutions to prevent rebinding attacks, like the webhook loop's client.
+        .dns_resolver(crate::util::build_pinned_resolver())
         .build()
         .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("no HTTP client: {e}")))
 }

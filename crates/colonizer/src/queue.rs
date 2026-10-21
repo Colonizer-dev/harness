@@ -323,12 +323,14 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     // resume fast-path below, which would otherwise admit the kept worktree at once; the 5 s tick
     // picks it up as soon as `retry_at` passes.
     if s.retry_at.is_some_and(|at| at > Utc::now()) {
+        crate::queue_gates::record_held(&s.id, "retrying after boot failure");
         return Gate::Hold;
     }
     // Issue #673: a colony a merge superseded stays put — held, not retired — until the operator
     // keeps it. Ahead of the resume fast-path below, which would otherwise admit a resumed-queued
     // colony the marker must hold; looked past this tick like any other wait.
     if crate::supersede::blocks_start(s) {
+        crate::queue_gates::record_superseded(&s.id);
         return Gate::Hold;
     }
     // A colony with a kept worktree came from Resume, and resuming reuses the base it recorded at
@@ -347,6 +349,7 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
         && let Some(issue) = s.issue
         && issue_held_by(sessions, &s.repo, issue).is_some_and(|holder| holder.id != s.id)
     {
+        crate::queue_gates::record_held(&s.id, "waiting to claim the issue (another colony holds it)");
         return Gate::Hold;
     }
     // Issue #453: a colony queued behind a live same-repo colony for overlap waits until that
@@ -355,6 +358,10 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     if let Some(holder) = s.queued_behind.as_deref()
         && sessions.iter().any(|p| p.id == holder && p.status.is_live())
     {
+        crate::queue_gates::record_held(
+            &s.id,
+            format!("queued behind colony {holder}: waits until that colony finishes"),
+        );
         return Gate::Hold;
     }
     let Some(parent_id) = s.parent.as_deref() else {
@@ -387,7 +394,10 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
     }
     match restack::queue_decision(parent_id, parent, s.stack) {
         Stacked::Ready(_) => Gate::Admit,
-        Stacked::Wait => Gate::Hold,
+        Stacked::Wait => {
+            crate::queue_gates::record_chain(&s.id, parent_id);
+            Gate::Hold
+        }
         // A parent that can never lend a branch no longer fails the child (issue #1140).
         Stacked::Refuse(reason) => Gate::Rebase(reason),
     }
@@ -550,6 +560,9 @@ fn next_queued(
     priority: impl Fn(&Session) -> i64,
     room: impl Fn(&Session) -> bool,
 ) -> Option<(&Session, Gate)> {
+    // Clear the scan map at the start of each call so the final call (returning None)
+    // holds a complete scan of all remaining queued colonies.
+    crate::queue_gates::begin_scan();
     let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
     // Issue #1156: highest effective priority first, the older colony within a priority. Every
     // priority at its default 0 is the plain oldest-first line.
@@ -691,10 +704,19 @@ pub(crate) async fn start_queued(app: &Shared) {
             |s| crate::queue_priority::effective(s, &org_settings, now),
             |s| {
                 let (org_limit, repo_limit) = limits(&s.org);
-                !held
+                let ok = !held
                     && !quota.held_ids.contains(&s.id)
                     && !troubled_accounts.contains(&crate::account_health::account_of(s))
-                    && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
+                    && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit);
+                if !ok
+                    && !(held
+                        || quota.held_ids.contains(&s.id)
+                        || troubled_accounts.contains(&crate::account_health::account_of(s)))
+                {
+                    // If only has_room failed, record which capacity gate is blocking
+                    crate::queue_gates::record_if_no_room(&s.id, &sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit);
+                }
+                ok
             },
         ) else {
             break;
@@ -834,6 +856,8 @@ pub(crate) async fn start_queued(app: &Shared) {
     if !held {
         prewarm_requested(app, &modules, claude.as_ref()).await;
     }
+    // Finalize the gate snapshots for this tick, making them available to /api/status and the Queues page.
+    crate::queue_gates::publish();
 }
 
 // ---------------------------------------------------------------------------

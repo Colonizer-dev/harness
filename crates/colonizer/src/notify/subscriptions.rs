@@ -192,6 +192,13 @@ pub(super) fn secret_for(app: &App, target: &str) -> Option<Option<String>> {
     load(app).into_iter().find(|s| s.id == id).map(|s| s.secret)
 }
 
+/// Whether the subscription at `target` was created by the owner (not by a scoped token).
+/// Used to determine whether a private webhook URL is allowed.
+pub(super) fn is_owner_created(app: &App, target: &str) -> bool {
+    let id = target.strip_prefix(TARGET_PREFIX).unwrap_or_default();
+    load(app).into_iter().any(|s| s.id == id && s.token.is_none())
+}
+
 /// Whether a scoped token may receive an event about `colony` (`None`: a host-level event). The
 /// token is read as it is now: one revoked, narrowed below `operate`, or limited away from the
 /// colony's org or repository gets nothing.

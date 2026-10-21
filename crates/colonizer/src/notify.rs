@@ -838,6 +838,9 @@ async fn post(client: &reqwest::Client, url: &str, secret: &str, event_id: &str,
     if !status.is_success() {
         bail!("the webhook answered {status}");
     }
+    if let Some(addr) = response.remote_addr() {
+        tracing::debug!(remote_addr = %addr, "webhook delivery succeeded to pinned address");
+    }
     Ok(())
 }
 
@@ -910,6 +913,9 @@ pub async fn run(app: Shared) {
         // A redirect is followed only to another public http(s) host, so a receiver's 302 cannot
         // aim the mothership's POST at itself or its network (the first URL is never checked here).
         .redirect(public_redirect_policy())
+        // Pin DNS resolutions to prevent rebinding attacks: a name that answers public at check time
+        // cannot rebind to a private address when the connection is made.
+        .dns_resolver(crate::util::build_pinned_resolver())
         .build()
         .ok();
     if client.is_none() {
@@ -1345,6 +1351,8 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
         .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
         // As the loop's client above: a redirect only to another public http(s) host.
         .redirect(public_redirect_policy())
+        // Pin DNS resolutions to prevent rebinding attacks, like the webhook loop's client.
+        .dns_resolver(crate::util::build_pinned_resolver())
         .build()
         .ok();
     let candidate = ledger::Candidate {

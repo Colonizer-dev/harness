@@ -18,6 +18,29 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.21] - 2026-10-21
+
+### Added
+
+- **Auto mode: a team member approves an outside issue, and PromptDecode scans every issue before it queues.** An issue from someone outside the org now waits in review until a trusted person adds the `colonize-approved` label or comments `/colonize`. Colonizer checks that person's permission through the API, ignores the same label from anyone else, and drops the approval when an outsider edits the issue afterwards. Every issue's title, body and trusted comments are scanned for hidden text before it queues. A finding holds the issue for review with the decoded text shown, and a trusted approval lets it proceed with the text marked as untrusted data in the brief. The scan is required on public repositories and can be turned off per org only for private ones (`auto_colonize_require_scan`). The approver and the scan result show in the issue list, and each decision is in the activity log. ([#1485])
+- **The cockpit has a Brain view: your Living Brain as a 3D map, with each running colony drawn as an ant walking over it.** A new Brain page (`/brain`) draws the team brain's graph in 3D, turned by drag, zoom or pinch, and places each running, queued or parked colony as an ant on the node its repository matches. The mothership reads the brain's map once a minute and shares only its structure: node kinds, degrees and links, with labels shown locally or replaced by keyed hashes in structure-only mode (always on over remote access). The brain's token stays in the mothership's secret store, and the map route is rate-limited and refuses a foreign Origin. Nothing is fetched from a CDN.
+
+### Changed
+
+- **Colonies run Claude Code 2.1.304 and a re-pinned Go image.** The Claude Code pin in
+  `crates/colonizer/claude-code.lock` moves from 2.1.292 to 2.1.304, and `golang:1-bookworm` in
+  `crates/colonizer/images.lock` moves to a new digest, so every colony built from the next release
+  boots the exact bytes the new pins name. ([#1460])
+
+### Fixed
+
+- **Exec-policy loop detection parks the colony and frees its slot, with guidance for the operator.** Three refusals by the same exec-policy rule within 10 minutes now park the colony as `exec_policy_loop`, freeing its microVM slot and showing "Blocked by exec policy" instead of falsely flagging a control breach. When a rule denies, the agent is told what to do instead (for `script-egress`: use a network-free path, leave fetching to CI, or ask the operator). A repo can allow pinned fetch scripts past `script-egress` with a `fetches` entry in `.colonizer/exec-policy.json` (script, sources, hosts, `verify: "sha256"`), honoured only when every URL names a listed host, the script checks sha256, and the policy file matches the base commit. ([#1378])
+- **Quota-parked colonies resume when alternatives become available.** When a provider runs out of quota and colonies park waiting for its recovery, colonies now also resume if changing the model settings (e.g., `model_low`) routes them to a healthier provider, or if that provider recovers. The resume sweep re-evaluates routes every tick; colonies that were stranded with stale models now resume automatically instead of waiting for the original provider's reset ([#1403]).
+
+### Security
+
+- **The vulnerability check passes again: the websocket relay dial trusts the operating system's certificate roots.** The `cargo audit` job failed every pull request on three RustSec advisories against the bundled root store (RUSTSEC-2026-0381, 0382 and 0383). `rustls-webpki` moves to 0.103.16, and `webpki-roots` / `webpki-root-certs` to 1.0.10. The `0.26` line has no fixed release, so the `wss://` relay dial now uses the operating system's root store (`rustls-tls-native-roots`) instead of the bundled Mozilla roots. No advisory is ignored. ([#1484])
+
 ## [v0.2.20] - 2026-10-20
 
 ### Added
@@ -3614,11 +3637,17 @@ Macs. ([#74])
 [#1366]: https://github.com/Colonizer-dev/harness/issues/1366
 [#1367]: https://github.com/Colonizer-dev/harness/issues/1367
 [#1374]: https://github.com/Colonizer-dev/harness/issues/1374
+[#1378]: https://github.com/Colonizer-dev/harness/issues/1378
 [#1381]: https://github.com/Colonizer-dev/harness/issues/1381
 [#1384]: https://github.com/Colonizer-dev/harness/issues/1384
 [#1389]: https://github.com/Colonizer-dev/harness/issues/1389
 [#1396]: https://github.com/Colonizer-dev/harness/issues/1396
 [#1402]: https://github.com/Colonizer-dev/harness/issues/1402
+[#1403]: https://github.com/Colonizer-dev/harness/issues/1403
+[#1460]: https://github.com/Colonizer-dev/harness/issues/1460
+[#1484]: https://github.com/Colonizer-dev/harness/issues/1484
+[#1485]: https://github.com/Colonizer-dev/harness/issues/1485
+[v0.2.21]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.21
 [v0.2.20]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.20
 [v0.2.19]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.19
 [v0.2.18]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.18

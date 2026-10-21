@@ -36,20 +36,72 @@ export function formatBootMs(totalMs: number): string {
 }
 
 const WAITING_ON = { memory: "memory", cpu: "CPU", cap: "the cap" } as const;
+const GATE_LABELS: Record<string, string> = {
+  repo_cap: "per-repo cap",
+  org_cap: "per-org cap",
+  chain: "after-chain waits",
+  held: "held",
+  superseded: "superseded",
+  host: "host capacity",
+};
 
 /**
  * The auto-mode capacity line (issue #1141): "auto: 7 running · room for 2 more (18 GB free, load 9/32)",
  * with what the next colony waits on appended when nothing fits. Null in fixed mode and for a
  * mothership that does not report the mode, so the host page shows nothing it cannot back up. A
- * measurement the host did not give drops its part of the parentheses.
+ * measurement the host did not give drops its part of the parentheses. When room_for > 0 but queued
+ * colonies are held by gates, shows a detailed breakdown (issue #1365).
  */
-export function autoCapacityLine(sandbox: HarnessStatus["sandbox"] | undefined): string | null {
+export function autoCapacityLine(
+  sandbox: HarnessStatus["sandbox"] | undefined,
+  queue?: HarnessStatus["queue"]
+): string | null {
   if (!sandbox || sandbox.mode !== "auto" || sandbox.room_for == null) return null;
   const parts: string[] = [];
   if (sandbox.free_bytes != null) parts.push(`${Math.round(sandbox.free_bytes / 2 ** 30)} GB free`);
   if (sandbox.load != null) parts.push(`load ${+sandbox.load.toFixed(1)}${sandbox.cpu_cores != null ? `/${sandbox.cpu_cores}` : ""}`);
   const live = `auto: ${sandbox.running ?? 0} running · room for ${sandbox.room_for} more${parts.length ? ` (${parts.join(", ")})` : ""}`;
-  return sandbox.waiting_reason ? `${live} · the next colony waits on ${WAITING_ON[sandbox.waiting_reason]}` : live;
+
+  // If no waiting_reason, return the basic line
+  if (!sandbox.waiting_reason) return live;
+
+  // Check if this is a gate-based waiting reason (not capacity reason like memory/cpu/cap)
+  if (sandbox.waiting_reason in GATE_LABELS && queue?.blocked_by && sandbox.room_for > 0) {
+    // Build detailed breakdown from queue.blocked_by
+    const breakdowns: string[] = [];
+    for (const [gateKind, details] of Object.entries(queue.blocked_by)) {
+      const label = GATE_LABELS[gateKind];
+      if (!label) continue;
+
+      if (typeof details === "number") {
+        // Simple count gates
+        breakdowns.push(`${details} ${label}`);
+      } else if (typeof details === "object" && details !== null) {
+        // Breakdown gates (repo_cap, org_cap)
+        const items: string[] = [];
+        for (const [key, count] of Object.entries(details as Record<string, unknown>)) {
+          if (typeof count === "number") {
+            const detail = gateKind === "repo_cap" ? " — raise repo_max_parallel to start more" : "";
+            items.push(`${count} by ${label} (${key}${detail})`);
+          }
+        }
+        if (items.length === 1) {
+          breakdowns.push(items[0]);
+        } else if (items.length > 1) {
+          breakdowns.push(items.join(", "));
+        }
+      }
+    }
+
+    if (breakdowns.length > 0) {
+      return `${live} · but every queued colony is held: ${breakdowns.join(", ")}`;
+    }
+  }
+
+  // Fallback for capacity reasons (memory/cpu/cap)
+  return sandbox.waiting_reason in WAITING_ON
+    ? `${live} · the next colony waits on ${WAITING_ON[sandbox.waiting_reason as keyof typeof WAITING_ON]}`
+    : live;
 }
 
 /**
