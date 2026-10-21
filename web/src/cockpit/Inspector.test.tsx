@@ -11,7 +11,7 @@ import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
 import { loadSessionDiff } from "../sessionDiff";
 import { initialStreamState, reduceFrame, type StreamState } from "../sessionStream";
-import type { ServerFrame, Session, SessionDiffFile } from "../types";
+import type { HarnessStatus, ServerFrame, Session, SessionDiffFile } from "../types";
 import type { Api } from "../api";
 import { Inspector, pendingQuestionsOf, type PendingQuestion } from "./Inspector";
 
@@ -60,6 +60,7 @@ function renderInspector(props: {
   session?: Session;
   sessions?: Session[];
   api?: Api;
+  status?: HarnessStatus | null;
 }): string {
   const selected = props.session ?? session();
   return renderToStaticMarkup(
@@ -71,7 +72,7 @@ function renderInspector(props: {
         pendingQuestions={props.pendingQuestions ?? []}
         questionActions={props.questionActions ?? CONNECTED}
         sessions={props.sessions ?? [selected]}
-        status={null}
+        status={props.status ?? null}
         liveCount={0}
         queuedCount={0}
         needCount={1}
@@ -166,6 +167,59 @@ describe("Inspector", () => {
     expect(markup).toContain("Retry now");
     expect(markup).toContain("attempt 1 of 3");
     expect(markup).not.toContain("watchdog");
+  });
+
+  it("a colony parked on provider quota exhaustion shows the reset time and alternatives", () => {
+    const markup = renderInspector({
+      session: session({
+        status: "parked",
+        attention: {
+          reason: "provider_quota_exhausted",
+          since: ASKED_AT,
+          nudges: 0,
+          provider: "openai",
+          action: "wait",
+          reset_at: "2026-10-22 14:00 UTC",
+        },
+      }),
+      status: {
+        github: { connected: false },
+        claude: { configured: false, source: null, kind: null },
+        sandbox: { msb_version: null, image: "", max_parallel: 1 },
+        quota_cards: [
+          {
+            provider: "openai",
+            provider_name: "OpenAI",
+            models: ["gpt-4"],
+            title: "openai · gpt-4 is out of quota",
+            reset_at: "2026-10-22 14:00 UTC",
+            reset_unix: null,
+            colonies: [],
+            orgs: [],
+            waiting: 1,
+            resume_unix: null,
+            fallback_model: null,
+            alternatives: [
+              {
+                id: "claude-opus",
+                label: "Claude Opus (latest)",
+                provider: "anthropic",
+                failure_pct: 0,
+                rated: false,
+                degraded: false,
+                healthy: true,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(markup).toContain("Waiting for quota reset");
+    expect(markup).toContain("Waiting for OpenAI until 2026-10-22 14:00 UTC");
+    expect(markup).toContain("another model is available");
+    expect(markup).toContain("Resume on Claude Opus (latest)");
+    expect(markup).toContain("Open colony");
+    expect(markup).not.toContain("Waiting on you");
   });
 
   it("nothing selected is its own labelled state", () => {

@@ -604,6 +604,146 @@ pub fn tier_inversions(model: &str, low: &str, high: &str, price: impl Fn(&str) 
     inversions
 }
 
+/// Extract the provider prefix from a model string (e.g., "zai/glm-5.3-flash" → "zai").
+/// Returns None for models with no provider prefix (assumed to be Claude models).
+pub(crate) fn provider_from_model(model: &str) -> Option<&str> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    if parts.len() >= 2 && !parts[0].is_empty() {
+        Some(parts[0])
+    } else {
+        None
+    }
+}
+
+/// Split a "provider/model" string into (provider, full_model), returning None if no "/" separator.
+pub(crate) fn split_provider_model(model_string: &str) -> Option<(String, String)> {
+    let trimmed = model_string.trim();
+    trimmed.find('/').map(|idx| (trimmed[..idx].to_string(), trimmed.to_string()))
+}
+
+/// Check if a model string is non-empty and has a value (after trimming).
+fn model_is_set(model: &str) -> bool {
+    !model.trim().is_empty()
+}
+
+/// Check if a model can be used: it has a value and its provider (if any) is not exhausted.
+/// Bare models (no "/") are Claude models and must be checked against the account quota.
+/// Returns (available, reset_at) where reset_at is only Some if exhausted.
+fn model_available_with_reset(model: &str, get_quota_state: &dyn Fn(&str) -> Option<String>) -> (bool, Option<String>) {
+    if !model_is_set(model) {
+        return (false, None);
+    }
+    // If no provider prefix, it's a Claude model: check account quota ("claude-account")
+    let provider = match provider_from_model(model) {
+        Some(p) => p.to_string(),
+        None => crate::gateway::ACCOUNT_QUOTA_ID.to_string(),
+    };
+    match get_quota_state(&provider) {
+        None => (true, None),                      // Not exhausted
+        Some(reset_at) => (false, Some(reset_at)), // Exhausted with reset time
+    }
+}
+
+/// Route to a model, falling back if the tier's primary is quota-exhausted.
+/// Returns (model, reason) where reason describes the fallback; empty if primary is healthy.
+/// Pure function: depends only on settings, tier, and the quota state function.
+pub fn route_with_quota_fallback(
+    tier: Tier,
+    model_low: &str,
+    model: &str,
+    model_high: &str,
+    account_fallback: Option<(&str, &str)>, // (provider, model)
+    is_provider_exhausted: &dyn Fn(&str) -> bool,
+) -> (String, String) {
+    // For backward compatibility, wrap the bool closure into a state closure
+    let get_quota_state = |provider_id: &str| {
+        if is_provider_exhausted(provider_id) {
+            Some(String::new()) // Exhausted, but no reset time info
+        } else {
+            None
+        }
+    };
+    route_with_quota_fallback_internal(tier, model_low, model, model_high, account_fallback, &get_quota_state)
+}
+
+/// Internal route function that handles reset times.
+/// The get_quota_state closure returns None if healthy, Some(reset_at) if exhausted.
+fn route_with_quota_fallback_internal(
+    tier: Tier,
+    model_low: &str,
+    model: &str,
+    model_high: &str,
+    account_fallback: Option<(&str, &str)>, // (provider, model)
+    get_quota_state: &dyn Fn(&str) -> Option<String>,
+) -> (String, String) {
+    let primary = model_for(tier, model_low, model, model_high);
+    let (primary_available, primary_reset_at) = model_available_with_reset(primary, get_quota_state);
+    if primary_available {
+        return (primary.to_string(), String::new());
+    }
+    // Try other tier models in order: model (medium), model_high, model_low
+    let candidates: Vec<&str> = {
+        let mut v: Vec<&str> = Vec::new();
+        if model_is_set(model) && model != primary {
+            v.push(model);
+        }
+        if model_is_set(model_high) && model_high != primary {
+            v.push(model_high);
+        }
+        if model_is_set(model_low) && model_low != primary {
+            v.push(model_low);
+        }
+        v
+    };
+    for candidate_model in candidates {
+        let (available, _) = model_available_with_reset(candidate_model, get_quota_state);
+        if available {
+            let reason = if let Some(provider) = provider_from_model(primary) {
+                if let Some(reset) = &primary_reset_at {
+                    format!("{} out until {}; routed to {}", provider, reset, candidate_model)
+                } else {
+                    format!("{}; routed to {}", provider, candidate_model)
+                }
+            } else {
+                candidate_model.to_string()
+            };
+            return (candidate_model.to_string(), reason);
+        }
+    }
+    // Try account fallback. Its quota is keyed by the provider the caller resolved
+    // (`fallback_provider`), which need not match the model string's prefix.
+    let healthy_fallback = account_fallback.filter(|(fallback_provider, fallback_model)| {
+        model_is_set(fallback_model) && get_quota_state(fallback_provider).is_none()
+    });
+    if let Some((_, fallback_model)) = healthy_fallback {
+        let reason = if let Some(provider) = provider_from_model(primary) {
+            if let Some(reset) = &primary_reset_at {
+                format!("{} out until {}; routed to {}", provider, reset, fallback_model)
+            } else {
+                format!("{}; routed to {}", provider, fallback_model)
+            }
+        } else {
+            fallback_model.to_string()
+        };
+        return (fallback_model.to_string(), reason);
+    }
+    // All alternatives exhausted; return primary with informative reason
+    if let Some(provider) = provider_from_model(primary) {
+        let reason = if let Some(reset) = primary_reset_at {
+            format!("{} out until {}; no healthy alternative", provider, reset)
+        } else {
+            format!("{} out; no healthy alternative", provider)
+        };
+        (primary.to_string(), reason)
+    } else {
+        (primary.to_string(), String::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1448,5 +1588,101 @@ mod tests {
         good.insert("model".into(), "medium".into());
         good.insert("model_high".into(), "expensive-low".into());
         assert!(tier_inversion_refusal(&good, price).is_none());
+    }
+
+    #[test]
+    fn route_with_quota_fallback_uses_primary_when_healthy() {
+        let all_healthy = |_: &str| false;
+        let (model, reason) = route_with_quota_fallback(
+            Tier::Low,
+            "zai/model-low",
+            "minimax/MiniMax",
+            "openai/gpt4",
+            None,
+            &all_healthy,
+        );
+        assert_eq!(model, "zai/model-low");
+        assert_eq!(reason, ""); // Empty reason when using primary
+    }
+
+    #[test]
+    fn route_with_quota_fallback_routes_to_alternatives_when_primary_exhausted() {
+        // Exhausted Low tier → falls back to Medium
+        let exhausted = |p: &str| p == "zai";
+        let (model, reason) =
+            route_with_quota_fallback(Tier::Low, "zai/model-low", "minimax/MiniMax", "openai/gpt4", None, &exhausted);
+        assert_eq!(model, "minimax/MiniMax");
+        assert!(reason.contains("zai") && reason.contains("minimax/MiniMax"));
+        // Empty Medium candidate is skipped
+        let (model, _) = route_with_quota_fallback(
+            Tier::Low,
+            "zai/model-low",
+            "", // Empty
+            "openai/gpt4",
+            None,
+            &exhausted,
+        );
+        assert_eq!(model, "openai/gpt4");
+    }
+
+    #[test]
+    fn route_with_quota_fallback_uses_account_fallback_when_tiers_exhausted() {
+        let exhausted = |p: &str| !matches!(p, "anthropic");
+        let (model, reason) = route_with_quota_fallback(
+            Tier::Low,
+            "zai/model-low",
+            "minimax/MiniMax",
+            "openai/gpt4",
+            Some(("anthropic", "claude-3.5-sonnet")),
+            &exhausted,
+        );
+        assert_eq!(model, "claude-3.5-sonnet");
+        assert!(reason.contains("zai"));
+    }
+
+    #[test]
+    fn route_with_quota_fallback_returns_primary_with_reason_when_all_exhausted() {
+        let all_exhausted = |_: &str| true;
+        let (model, reason) = route_with_quota_fallback(
+            Tier::Low,
+            "zai/model-low",
+            "minimax/MiniMax",
+            "openai/gpt4",
+            None,
+            &all_exhausted,
+        );
+        assert_eq!(model, "zai/model-low");
+        assert!(reason.contains("zai"));
+        assert!(reason.contains("out"));
+    }
+
+    #[test]
+    fn route_with_quota_fallback_handles_models_without_provider_prefix() {
+        let exhausted = |_: &str| false;
+        let (model, reason) = route_with_quota_fallback(
+            Tier::Medium,
+            "claude-opus",   // No prefix
+            "claude-sonnet", // No prefix
+            "openai/gpt4",
+            None,
+            &exhausted,
+        );
+        assert_eq!(model, "claude-sonnet");
+        assert_eq!(reason, ""); // No provider to be exhausted
+    }
+
+    /// Issue #1403: a new low-tier colony with zai exhausted should route to a healthy fallback (minimax)
+    /// instead of parking on the exhausted provider.
+    #[test]
+    fn route_with_quota_fallback_boots_on_healthy_tier_alternative() {
+        // Primary (low tier) is zai which is exhausted, but medium (minimax) is healthy
+        let exhausted = |p: &str| p == "zai";
+        let (model, reason) =
+            route_with_quota_fallback(Tier::Low, "zai/model-low", "minimax/MiniMax", "openai/gpt4", None, &exhausted);
+        // Should route to minimax without parking
+        assert_eq!(model, "minimax/MiniMax");
+        assert!(reason.contains("zai"));
+        assert!(reason.contains("minimax/MiniMax"));
+        // Colony would not be parked with this route, since minimax is healthy
     }
 }

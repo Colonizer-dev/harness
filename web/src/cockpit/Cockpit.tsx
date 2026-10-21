@@ -36,6 +36,7 @@ import { NavRail, type CockpitView } from "./NavRail";
 import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
+import { BrainMapView } from "./BrainMapView";
 import { QueuesView } from "./QueuesView";
 import { focusTurn } from "./turnFocus";
 import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
@@ -729,6 +730,12 @@ export function Cockpit({
         );
       case "loops":
         return <LoopsView org={selectedOrg} orgs={orgs} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
+      case "brain":
+        return (
+          <Page width="full">
+            <BrainMapView sessions={sessions} onOpenColony={openColonyById} />
+          </Page>
+        );
       case "queues":
         return <QueuesView sessions={sessions} />;
       case "chat":

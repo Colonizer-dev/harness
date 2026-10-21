@@ -92,7 +92,8 @@ event into the colony's trail, timed on the mothership's own receive clock, and 
 
 | Signature | Fires when |
 | :--- | :--- |
-| `repeated_denial` | 3 (`REPEATED_DENIALS`) events of the same kind and control within 10 minutes (`CONTROL_DEFEAT_WINDOW_MINUTES`) — a refused action retried with trivial variations matches the same rule each time. One denial, or one retry, is a wall the colony works around and fires nothing |
+| `repeated_denial` | 3 (`REPEATED_DENIALS`) events of a non-`exec_policy_deny` kind and control within 10 minutes (`CONTROL_DEFEAT_WINDOW_MINUTES`) — a refused action retried with trivial variations matches the same rule each time. One denial, or one retry, is a wall the colony works around and fires nothing |
+| `exec_policy_loop` | 3 denials of the same `exec_policy_deny` control within 10 minutes (issue #1378): the colony hit an exec-policy rule repeatedly. Parks the colony to free its slot; the operator can resume with a message telling it another path or update `.colonizer/exec-policy.json` to allow the request |
 | `ask_bypass` | Any `exec_policy_ask_bypass_attempt`: a rule a person refused, asking again |
 | `deny_then_reach` | A tool call whose input names a target a control refused within the last 30 minutes (`REACH_WINDOW_MINUTES`) — a host as `://host` or `@host`, a path as a whole path token, resolved against `/workspace`, naming the path itself, a path under it or a glob matching it (never just an ancestor such as the workspace root, and never the colony's own `/harness/out`) — returns a successful result: the egress-denied host reached another way, the refused write target written through another tool, a path agentd could not bind read anyway. An errored result is the wall holding again |
 | `publish_rewrite` | Any `publish_rewrite_refused`: colony output that crossed the publish wall |
@@ -102,10 +103,15 @@ target joins the deny-then-reach watch. The events a signature used are spent, s
 never flags twice. The trail is in memory, capped at 64 events, and a restart forgets it.
 
 **Response: attention and a log line, not a stop.** A signature sets the colony's attention to
-`control_defeat`, carrying `signature`, a one-sentence `detail` and the boundary events as
-`evidence`; the colony's log gets an error line naming the signature; the cockpit's attention
-banner lists the evidence; and an attention notification goes out if they are on. The watchdog does
-not nudge over the flag or replace it with a stall flag, the colony carrying on does not lift it,
-and only a person's own message (or the colony stopping) clears it. It does not stop the colony:
-"Defeated a control" above is a stop once a person has confirmed the boundary failed, and a
-signature is a pattern that says where to look, not that proof. Stopping is the person's call.
+`control_defeat` (for `ask_bypass`, `deny_then_reach`, `publish_rewrite`, `repeated_denial`) or
+`exec_policy_loop` (for repeated `exec_policy_deny`), carrying `signature`, a one-sentence `detail`
+and the boundary events as `evidence`. The `control_defeat` and `exec_policy_loop` reasons are
+parked with distinct park reasons: `control_defeat` for real breaches, `exec_policy_loop` for
+policy loops (issue #1378). The colony's log gets an error line naming the signature; the cockpit's
+attention banner lists the evidence; and an attention notification goes out if they are on. The
+watchdog does not nudge over the flag or replace it with a stall flag, the colony carrying on does
+not lift it, and only a person's own message (or the colony stopping) clears it. A real defeat
+(ask_bypass, deny_then_reach, publish_rewrite) overrides an existing `exec_policy_loop` attention.
+It does not stop the colony: "Defeated a control" above is a stop once a person has confirmed the
+boundary failed, and a signature is a pattern that says where to look, not that proof. Stopping is
+the person's call.

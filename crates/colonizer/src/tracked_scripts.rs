@@ -14,7 +14,9 @@ use std::{path::Path, time::Duration};
 
 /// The file in `vm_dir` (guest `/colonizer/tracked-scripts`).
 pub(crate) const TRACKED_SCRIPTS_FILE: &str = "tracked-scripts";
-/// The most entries written: the list is for check scripts, not a repository index.
+/// The exec policy file path (repo-relative), tracked like scripts for trust verification.
+pub(crate) const EXEC_POLICY_FILE: &str = ".colonizer/exec-policy.json";
+/// The most entries written: the list is for check scripts and the exec policy file, not a repository index.
 const MAX_ENTRIES: usize = 20_000;
 /// How long the host-side git reads may take before the list is left empty.
 const GIT_LIMIT: Duration = Duration::from_secs(30);
@@ -23,8 +25,8 @@ const GIT_LIMIT: Duration = Duration::from_secs(30);
 const SCRIPT_EXTENSIONS: [&str; 11] = ["sh", "bash", "zsh", "py", "js", "mjs", "cjs", "ts", "mts", "rb", "pl"];
 
 /// The list's text from `git ls-tree -r -z` output: `<object id> <path>` per regular-file blob with
-/// a script extension, newline-terminated. Symlinks, submodules and paths holding a newline are
-/// left out, so a line is always one real file.
+/// a script extension or the exec policy file, newline-terminated. Symlinks, submodules and paths
+/// holding a newline are left out, so a line is always one real file.
 pub(crate) fn list_text(ls_tree: &[u8]) -> String {
     let mut out = String::new();
     let mut count = 0;
@@ -37,8 +39,9 @@ pub(crate) fn list_text(ls_tree: &[u8]) -> String {
         let (Some(mode), Some("blob"), Some(id)) = (meta.next(), meta.next(), meta.next()) else {
             continue;
         };
-        let script = path.rsplit_once('.').is_some_and(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext));
-        if !matches!(mode, "100644" | "100755") || !script || path.contains('\n') {
+        let is_script = path.rsplit_once('.').is_some_and(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext));
+        let is_exec_policy = path == EXEC_POLICY_FILE;
+        if !matches!(mode, "100644" | "100755") || (!is_script && !is_exec_policy) || path.contains('\n') {
             continue;
         }
         if count == MAX_ENTRIES {
@@ -76,7 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_regular_script_blobs_are_listed() {
+    fn only_regular_script_blobs_and_exec_policy_are_listed() {
         let listing = [
             "100644 blob 1111111111111111111111111111111111111111\ttools/sync-nav.py",
             "100755 blob 2222222222222222222222222222222222222222\ttools/deploy.sh",
@@ -85,13 +88,15 @@ mod tests {
             "160000 commit 5555555555555555555555555555555555555555\tvendor/sub.py",
             "100644 blob 6666666666666666666666666666666666666666\tscripts/x.mjs",
             "100644 blob 7777777777777777777777777777777777777777\tMakefile",
+            "100644 blob 8888888888888888888888888888888888888888\t.colonizer/exec-policy.json",
         ]
         .join("\0");
         assert_eq!(
             list_text(listing.as_bytes()),
             "1111111111111111111111111111111111111111 tools/sync-nav.py\n\
              2222222222222222222222222222222222222222 tools/deploy.sh\n\
-             6666666666666666666666666666666666666666 scripts/x.mjs\n"
+             6666666666666666666666666666666666666666 scripts/x.mjs\n\
+             8888888888888888888888888888888888888888 .colonizer/exec-policy.json\n"
         );
         assert_eq!(list_text(b""), "");
     }

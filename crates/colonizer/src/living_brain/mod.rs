@@ -20,6 +20,7 @@
 //!   secret placeholder that is swapped for the value on TLS to the MCP host ([`colony_mcp`]).
 
 pub(crate) mod client;
+mod map;
 mod note;
 pub(crate) mod queue;
 pub(crate) mod record;
@@ -52,6 +53,7 @@ pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
 fn routes() -> axum::Router<Shared> {
     use axum::routing;
     axum::Router::new()
+        .route("/api/brain/graph", routing::get(map::get_graph))
         .route("/api/living-brain", routing::get(get_state).put(put_settings))
         .route("/api/living-brain/backfill", routing::post(queue::backfill))
         .route("/api/living-brain/colonies/{id}", routing::get(queue::colony))

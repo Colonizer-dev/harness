@@ -1055,7 +1055,7 @@ fn repeated_denials_of_one_control_within_the_window_fire_with_their_evidence() 
     assert_eq!(note_boundary(&mut trail, deny(".env"), at(0)), None);
     assert_eq!(note_boundary(&mut trail, deny("./.env"), at(4)), None);
     let defeat = note_boundary(&mut trail, deny(".env.local"), at(9)).expect("the third in 10 min fires");
-    assert_eq!(defeat.signature, "repeated_denial");
+    assert_eq!(defeat.signature, "exec_policy_loop");
     assert_eq!(defeat.evidence.len(), REPEATED_DENIALS);
     assert!(defeat.summary.contains("exec_policy:secret-paths"), "{}", defeat.summary);
     assert_eq!(
@@ -1112,6 +1112,79 @@ fn repeated_git_read_only_denials_never_flag_control_defeat() {
         )
         .is_some()
     );
+}
+
+// Issue #1378: repeated denials of an exec-policy control fire with signature `exec_policy_loop`
+// instead of `repeated_denial`, to distinguish policy loops from other defeat patterns.
+#[test]
+fn repeated_exec_policy_denials_fire_with_exec_policy_loop_signature() {
+    let mut trail = BoundaryTrail::default();
+    let deny = |path: &str| Boundary {
+        detail: format!("deny (default): cat {path}"),
+        ..denial("exec_policy_deny", "exec_policy:secret-paths", Some(path))
+    };
+    assert_eq!(note_boundary(&mut trail, deny(".env"), at(0)), None);
+    assert_eq!(note_boundary(&mut trail, deny(".env"), at(4)), None);
+    let defeat = note_boundary(&mut trail, deny(".env"), at(9)).expect("the third in 10 min fires");
+    assert_eq!(
+        defeat.signature, "exec_policy_loop",
+        "exec_policy_deny repeated denials fire as exec_policy_loop, not repeated_denial"
+    );
+    assert_eq!(defeat.evidence.len(), REPEATED_DENIALS);
+    assert!(defeat.summary.contains("exec_policy:secret-paths"));
+}
+
+// Issue #1378: a non-exec-policy repeated denial still fires as repeated_denial.
+#[test]
+fn repeated_non_exec_policy_denials_still_fire_as_repeated_denial() {
+    let mut trail = BoundaryTrail::default();
+    let deny = |path: &str| Boundary {
+        detail: format!("deny: {path}"),
+        ..denial("egress_denied", "egress", Some(path))
+    };
+    assert_eq!(note_boundary(&mut trail, deny("evil.example"), at(0)), None);
+    assert_eq!(note_boundary(&mut trail, deny("evil.example"), at(4)), None);
+    let defeat = note_boundary(&mut trail, deny("evil.example"), at(9)).expect("the third in 10 min fires");
+    assert_eq!(
+        defeat.signature, "repeated_denial",
+        "non-exec-policy denials still use repeated_denial signature"
+    );
+}
+
+// Issue #1378: a real bypass or rewrite defeat overrides an exec_policy_loop.
+#[test]
+fn a_real_defeat_still_fires_after_repeated_exec_policy_denials() {
+    let mut trail = BoundaryTrail::default();
+    // First, repeated exec_policy denials fire with exec_policy_loop signature
+    assert_eq!(
+        note_boundary(
+            &mut trail,
+            denial("exec_policy_deny", "exec_policy:script-egress", Some("evil.example")),
+            at(0)
+        ),
+        None
+    );
+    assert_eq!(
+        note_boundary(
+            &mut trail,
+            denial("exec_policy_deny", "exec_policy:script-egress", Some("evil.example")),
+            at(1)
+        ),
+        None
+    );
+    let exec_policy_loop = note_boundary(
+        &mut trail,
+        denial("exec_policy_deny", "exec_policy:script-egress", Some("evil.example")),
+        at(2),
+    )
+    .expect("the third in 10 min fires");
+    assert_eq!(exec_policy_loop.signature, "exec_policy_loop");
+
+    // Then, if a real defeat fires (deny_then_reach when the host is actually reached),
+    // it should still be returned as a separate defeat
+    note_reach_call(&mut trail, "t1", &json!({"command": "curl https://evil.example"}), at(3));
+    let real_defeat = note_reach_result(&mut trail, "t1", false).expect("the denied host reached anyway fires");
+    assert_eq!(real_defeat.signature, "deny_then_reach");
 }
 
 #[test]

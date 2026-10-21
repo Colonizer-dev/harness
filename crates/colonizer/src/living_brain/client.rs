@@ -241,6 +241,38 @@ impl Client {
         let request = self.request(reqwest::Method::POST, "/v1/notes").json(&payload);
         self.send(request).await.map(|(_, v)| v)
     }
+
+    /// `GET /v1/graph?limit=N`: the brain's map (nodes and links). Read chunk by chunk and refused
+    /// past `cap` bytes, so a brain cannot make the mothership hold an unbounded answer.
+    pub(crate) async fn graph(&self, limit: usize, cap: usize) -> Result<Value, LbError> {
+        let path = format!("/v1/graph?limit={limit}");
+        let mut response = self
+            .request(reqwest::Method::GET, &path)
+            .send()
+            .await
+            .map_err(LbError::transport)?;
+        let status = response.status().as_u16();
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(LbError::transport)? {
+            if body.len() + chunk.len() > cap {
+                return Err(LbError {
+                    status: Some(status),
+                    message: "Living Brain's map is larger than the brain map reads".into(),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if !(200..300).contains(&status) {
+            return Err(LbError {
+                status: Some(status),
+                message: refusal(status, &body[..body.len().min(4096)]),
+            });
+        }
+        serde_json::from_slice(&body).map_err(|_| LbError {
+            status: Some(status),
+            message: format!("Living Brain answered {status} with a body that is not JSON"),
+        })
+    }
 }
 
 /// The public half of a personal access token, `lbp_<id>` out of `lbp_<id>_<secret>` — what the

@@ -36,6 +36,8 @@ export type AttentionReason =
   | "model_error"
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
   | "control_defeat"
+  /** Parked because the same exec-policy rule refused the colony's commands repeatedly (issue #1378); the card names the rule and what to do instead. */
+  | "exec_policy_loop"
   /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
   | "provider_retry"
   /** The remediation playbook stopped the colony because a known stall kept happening after its fix (issue #1191); `signature` names it. */

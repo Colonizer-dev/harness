@@ -1,0 +1,11 @@
+{
+  "rules": [],
+  "fetches": [
+    {
+      "script": "scripts/fetch-vendor.sh",
+      "sources": ["vendor/vendor.lock"],
+      "hosts": ["github.com", "codeload.github.com", "pkgs.tailscale.com", "raw.githubusercontent.com"],
+      "verify": "sha256"
+    }
+  ]
+}

@@ -64,7 +64,8 @@ tokio = { version = "1.53.1", features = ["full"] }
 tokio-socks = "0.5.3"
 tokio-stream = "0.1.19"
 # `client_async` for tunnelled websockets (remote.rs, sessions.rs); rustls so the `wss://` relay dial works.
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+# Native roots, not the bundled webpki-roots: webpki-roots 0.26.x (RUSTSEC-2026-0381) has no fixed release.
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 toml = "1.1.6"
 # `ServiceExt::oneshot` answers tunnelled requests by calling the cockpit router in-process
 # (remote.rs); the auth tests drive it the same way.
