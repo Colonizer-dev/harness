@@ -1,5 +1,5 @@
 use super::*;
-use crate::intake_scan::LocalScanner;
+use crate::intake_scan::{self};
 use crate::sessions::{SessionStatus, tests::colony};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -146,7 +146,7 @@ async fn verdicts(src: &Fake, policy: &Policy, rows: &[Row]) -> Vec<Intake> {
     assess(
         src,
         &TrustCache::new(TRUST_TTL_SECS),
-        &LocalScanner,
+        intake_scan::active(),
         REPO,
         policy,
         rows,
@@ -228,12 +228,12 @@ async fn a_lookup_that_fails_never_counts_as_trust_and_is_not_remembered() {
     src.permission_down = true;
     let cache = TrustCache::new(TRUST_TTL_SECS);
     let rows = [row(1, "alice", &[])];
-    let v = assess(&src, &cache, &LocalScanner, REPO, &policy(), &rows, at(30)).await;
+    let v = assess(&src, &cache, intake_scan::active(), REPO, &policy(), &rows, at(30)).await;
     assert_eq!(v[0].reason, Reason::Unverified);
     assert!(!v[0].auto());
     // GitHub is back: nothing stale is believed.
     let src = fake();
-    let v = assess(&src, &cache, &LocalScanner, REPO, &policy(), &rows, at(31)).await;
+    let v = assess(&src, &cache, intake_scan::active(), REPO, &policy(), &rows, at(31)).await;
     assert_eq!(v[0].reason, Reason::TrustedAuthor);
     // A member lookup that fails but a write permission that answers still vouches for the person.
     let mut src = fake();
@@ -241,7 +241,7 @@ async fn a_lookup_that_fails_never_counts_as_trust_and_is_not_remembered() {
     let v = assess(
         &src,
         &TrustCache::new(TRUST_TTL_SECS),
-        &LocalScanner,
+        intake_scan::active(),
         REPO,
         &policy(),
         &[row(2, "carol", &[])],
@@ -592,7 +592,10 @@ async fn a_members_issue_auto_queues_after_a_clean_scan() {
     assert_eq!(v[0].reason, Reason::TrustedAuthor);
     let scan = v[0].scan.as_ref().expect("the title and body were scanned");
     assert!(scan.clean(), "{}", scan.summary());
-    assert_eq!(v[0].to_json()["scan"]["summary"], "promptdecode: clean, engine local-1277 v1");
+    assert_eq!(
+        v[0].to_json()["scan"]["summary"],
+        "promptdecode: clean, engine promptdecode-core 0.1.0, local-1277 v1"
+    );
 }
 
 #[tokio::test]
@@ -851,7 +854,7 @@ fn the_scan_result_is_part_of_the_intake_json() {
             via: Via::Label,
             trust: Trust::Member,
         }),
-        scan: Some(scan_parts(&LocalScanner, &[("issue body".into(), "plain".into())])),
+        scan: Some(scan_parts(intake_scan::active(), &[("issue body".into(), "plain".into())])),
     };
     let json = v.to_json();
     assert_eq!(json["approved_by"], "alice");
