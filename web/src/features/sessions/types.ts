@@ -510,6 +510,12 @@ export interface NewSessionRequest {
   origin?: string;
   /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#1252). */
   host?: string;
+  /** The installed agent module the colony runs on (e.g. `claude-code`, `pi`); omitted keeps the org's agent. An unknown id is a 400 `unknown_agent:`. */
+  agent_module?: string;
+  /** The model for this colony: a bare Claude id (`claude-opus-5-5`) or `<provider>/<model>`; omitted keeps the org's model. */
+  model_override?: string;
+  /** The Claude account the colony spends, by id; omitted keeps the org's account. A Pi colony on a Claude model needs that account logged in. */
+  claude_account?: string;
 }
 
 /**

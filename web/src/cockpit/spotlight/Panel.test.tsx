@@ -59,7 +59,7 @@ describe("every menu renders through SpotlightPanel", () => {
   it("the model menu, as a compact panel under the pill", () => {
     const html = renderToStaticMarkup(
       <ApiContext.Provider value={api}>
-        <ModelSwitcher initialOpen initialAssignments={{ install: { module: "claude-code", roles: [{ role: "model", title: "Orchestrator model", value: "opus", source: "install", org_settable: true }] }, orgs: [], modules: [{ id: "claude-code", name: "Claude Code", roles: [], blocked: null }], models: [] }} initialRecent={[]} />
+        <ModelSwitcher initialOpen initialAssignments={{ install: { enabled_models: [], enabled_models_set: false, module: "claude-code", roles: [{ role: "model", title: "Orchestrator model", value: "opus", source: "install", org_settable: true }] }, orgs: [], modules: [{ enabled_models: [], enabled_models_set: false, id: "claude-code", name: "Claude Code", roles: [], blocked: null }], models: [] }} initialRecent={[]} />
       </ApiContext.Provider>,
     );
     expectSpotlight(html);
@@ -132,7 +132,7 @@ describe("the same keys everywhere", () => {
 
 describe("the model menu's role rows", () => {
   const view = scopeView(
-    { install: { module: "claude-code", roles: [{ role: "model", title: "Orchestrator model", value: "opus", source: "install", org_settable: true }, { role: "subagent_model", title: "Subagent model", value: "", source: "default", org_settable: true }, { role: "summary_model", title: "Summary", value: "", source: "default", org_settable: false }] }, orgs: [], modules: [{ id: "claude-code", name: "Claude Code", roles: [{ role: "model", title: "m", org_settable: true }, { role: "subagent_model", title: "s", org_settable: true }, { role: "summary_model", title: "x", org_settable: false }], blocked: null }], models: [] },
+    { install: { enabled_models: [], enabled_models_set: false, module: "claude-code", roles: [{ role: "model", title: "Orchestrator model", value: "opus", source: "install", org_settable: true }, { role: "subagent_model", title: "Subagent model", value: "", source: "default", org_settable: true }, { role: "summary_model", title: "Summary", value: "", source: "default", org_settable: false }] }, orgs: [], modules: [{ enabled_models: [], enabled_models_set: false, id: "claude-code", name: "Claude Code", roles: [{ role: "model", title: "m", org_settable: true }, { role: "subagent_model", title: "s", org_settable: true }, { role: "summary_model", title: "x", org_settable: false }], blocked: null }], models: [] },
     INSTALL_SCOPE,
   );
   it("switch the right role, and only that one", () => {

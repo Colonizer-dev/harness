@@ -1392,14 +1392,16 @@ pub(crate) fn routes_through_claude_account(
     let Some(agent) = agent else {
         return true;
     };
-    if !agent.needs_claude {
-        return false;
-    }
     let mut env = agent_env(agent, choice);
     for (var, over) in [(MODEL_VARS[0], model_override), (MODEL_VARS[1], subagent_override)] {
         if let Some(model) = over.filter(|m| !m.trim().is_empty()) {
             env.insert(var.to_string(), Value::String(model.to_string()));
         }
+    }
+    if !agent.needs_claude {
+        // Pi mounts no Claude login, but on a Claude model it runs on the account the colony names.
+        let model = env.get(MODEL_VARS[0]).and_then(Value::as_str).unwrap_or_default();
+        return crate::sessions::pi_spends_claude(&agent.id, model);
     }
     !claude_used_by(providers, &[env]).is_empty()
 }
@@ -2940,6 +2942,33 @@ mod tests {
         // An agent module nobody knows waits rather than starting on a model it cannot run.
         assert!(routes_through_claude_account(
             None,
+            &choice,
+            &providers,
+            Some("byteplus/seed-2.0-code"),
+            None
+        ));
+    }
+
+    /// Pi mounts no Claude login, but on a Claude model it runs on the colony's account, so only that
+    /// colony holds the account; a gateway model leaves it alone.
+    #[test]
+    fn a_pi_colony_spends_the_claude_account_only_on_a_claude_model() {
+        let providers = vec![provider("byteplus")];
+        let choice = crate::config::ModuleChoice {
+            provider: "pi".into(),
+            enabled: true,
+            settings: Default::default(),
+        };
+        let pi = AgentModule::test("pi");
+        assert!(routes_through_claude_account(
+            Some(&pi),
+            &choice,
+            &providers,
+            Some("claude-opus-5-5"),
+            None
+        ));
+        assert!(!routes_through_claude_account(
+            Some(&pi),
             &choice,
             &providers,
             Some("byteplus/seed-2.0-code"),

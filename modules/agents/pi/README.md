@@ -39,6 +39,14 @@ All three settings are edited in the cockpit as the module's `model`, `effort` a
 
 ## Models
 
+A launch can run a colony on Pi with a Claude model instead of a gateway provider: `POST /api/sessions`
+with `agent_module: "pi"` and `model_override: "claude-opus-5-5"` (the bench: `node scripts/bench.mjs run
+--agent pi --model claude-opus-5-5 --claude-account <name>`). Such a colony mounts the colony's Claude
+account credential as `ANTHROPIC_OAUTH_TOKEN` (a subscription token, `sk-ant-oat…`) or `ANTHROPIC_API_KEY`
+(a key), reachable only at `api.anthropic.com`, and Pi runs the model on its built-in Anthropic provider.
+Pi's own bundled warning applies: third-party harness use of a subscription token draws from extra usage
+and is billed per token, not the plan limits.
+
 Pi reaches models only through the provider gateway: there is no Claude login inside the VM and no
 credential for Anthropic, so a provider must be configured under Settings → Model providers and the `model`
 setting must name one of its models (`deepseek/deepseek-chat`). An empty or unmatched setting stops

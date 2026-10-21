@@ -804,3 +804,16 @@ test('formatComparison includes the config lines', () => {
   const text = formatComparison(before, after);
   assert.match(text, /Differs in: nothing/);
 });
+
+test('run takes --agent, --model and --claude-account, and they default to nothing', () => {
+  const run = parseArgs(['run', '--repo', 'o/bench', '--label', 'pi', '--agent', 'pi', '--model', 'claude-opus-5-5', '--claude-account', 'work']);
+  assert.equal(run.agent, 'pi');
+  assert.equal(run.model, 'claude-opus-5-5');
+  assert.equal(run.claudeAccount, 'work');
+  const plain = parseArgs(['run', '--repo', 'o/bench']);
+  assert.equal(plain.agent, null);
+  assert.equal(plain.model, null);
+  assert.equal(plain.claudeAccount, null);
+  // A flag left without its value is refused, not read as undefined.
+  assert.throws(() => parseArgs(['run', '--repo', 'o/bench', '--agent']), /--agent needs a value/);
+});

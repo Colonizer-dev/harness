@@ -28,7 +28,7 @@ import { ColonizeProvider } from "./Colonize";
 import { AskProvider } from "./spotlight/Ask";
 import { SpotlightProvider, SpotlightSearch, type SpotlightHost } from "./spotlight/Spotlight";
 import { Header } from "./Header";
-import { ModelSwitcher } from "./ModelSwitcher";
+import { AgentModelMenu } from "./AgentModelMenu";
 import { HostView } from "./HostView";
 import { autoCeilingLabel } from "./host";
 import { recordHost } from "./hostHistory";
@@ -922,7 +922,7 @@ export function Cockpit({
         onOpenObservability={() => onOpenSettings("module:observability")}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
-        models={<ModelSwitcher selectedOrg={selectedOrg} judge={judge} />}
+        models={<AgentModelMenu variant="pill" onManage={() => onOpenSettings("providers")} />}
         search={<SpotlightSearch />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
