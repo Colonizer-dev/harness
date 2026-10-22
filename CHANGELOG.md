@@ -18,6 +18,30 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.22] - 2026-10-22
+
+### Added
+
+- **A colony, or a bench run, can run entirely on Pi.** `POST /api/sessions` takes `agent_module` to run one colony on a named agent module (`pi`, `opencode`, `claude-code`, …) whatever the org's pick, refused with **400** `unknown_agent` when no install has it. With `agent_module: pi` and a Claude model in `model_override`, Pi runs on the colony's Claude account (the stored subscription token or key, reachable only at `api.anthropic.com`). The cockpit's agent/model menu chooses the agent and model for new colonies, lists only the models the owner enabled in Settings → Models (`PUT /api/models/enabled`), and sends the chosen Claude account, and `node scripts/bench.mjs run --agent pi --model claude-opus-5-5 --claude-account <name>` launches a bench on it, tagged with the agent that ran it. Harness-side summaries, the shadow review and the autonomy judge still use the install's models ([#403])
+
+### Changed
+
+- **Issue intake scans with the PromptDecode engine, not only the in-repository scanner.** Before auto mode queues an issue, its title, body and trusted comments are read by `promptdecode-core` 0.1.0 (crates.io, MIT OR Apache-2.0), which now also catches variation-selector payloads. The in-repository scanner still covers zero-width runs, HTML comments and base64 payloads, which the engine does not. Each scan records every engine that ran, and if the engine fails on a text, the in-repository scanner reads it instead and the scan says so. Nothing is stripped: a finding still holds the issue for review with its decoded text shown. ([#1485])
+- **Security runs: Strix can be a red-team hunter, and Shannon and Strix always run the security preset.** A red-team run can name Strix, which drives its pinned PyPI wheel in one colony against the repository and an optional https staging host the owner declares; its SARIF report is filed as findings. Strix needs a Docker daemon for its sandbox and colonies have none yet, so its start is refused with that reason, shown on its card in the wizard. Shannon and Strix are security scanners: the wizard hides the security/bugs choice for them, an unset preset means security, and `"preset": "general"` is refused with a message saying why. ([#1487])
+
+### Fixed
+
+- **The cockpit now shows why queued colonies wait when the host has capacity.** New `/api/status.queue`
+  object reports `admissible` (colonies ready to start) and `blocked_by` (per-repo/org cap counts).
+  `sandbox.waiting_reason` names the dominant gate (`repo_cap`, `org_cap`, `chain`, `held`, or
+  `superseded`) when the host has room but no queued colony is admissible. The Queues page shows
+  `reason` and `detail` on each queued row. The cockpit capacity line includes a breakdown with
+  `repo_max_parallel` hint when gates hold all queued colonies. ([#1365])
+
+### Security
+
+- **DNS rebinding protection for webhook and subscription deliveries.** A webhook address pointing at a public-looking domain name no longer opens the mothership to DNS rebinding attacks, where the name answers with the checked public address at validation time but rebinds to `127.0.0.1` or another private address when the connection is made. This required two changes: a pinned DNS resolver enforces that every address a domain resolves to remains public or allowlisted across the full request lifetime; and owner-created webhooks and subscriptions (not scoped-token-limited ones) can point to private addresses on allowlisted hostnames. The redirect policy's per-hop lookup keeps its existing check as a second layer ([#1377])
+
 ## [v0.2.21] - 2026-10-21
 
 ### Added
@@ -3634,9 +3658,11 @@ Macs. ([#74])
 [#1362]: https://github.com/Colonizer-dev/harness/issues/1362
 [#1363]: https://github.com/Colonizer-dev/harness/issues/1363
 [#1364]: https://github.com/Colonizer-dev/harness/issues/1364
+[#1365]: https://github.com/Colonizer-dev/harness/issues/1365
 [#1366]: https://github.com/Colonizer-dev/harness/issues/1366
 [#1367]: https://github.com/Colonizer-dev/harness/issues/1367
 [#1374]: https://github.com/Colonizer-dev/harness/issues/1374
+[#1377]: https://github.com/Colonizer-dev/harness/issues/1377
 [#1378]: https://github.com/Colonizer-dev/harness/issues/1378
 [#1381]: https://github.com/Colonizer-dev/harness/issues/1381
 [#1384]: https://github.com/Colonizer-dev/harness/issues/1384
@@ -3647,6 +3673,8 @@ Macs. ([#74])
 [#1460]: https://github.com/Colonizer-dev/harness/issues/1460
 [#1484]: https://github.com/Colonizer-dev/harness/issues/1484
 [#1485]: https://github.com/Colonizer-dev/harness/issues/1485
+[#1487]: https://github.com/Colonizer-dev/harness/issues/1487
+[v0.2.22]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.22
 [v0.2.21]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.21
 [v0.2.20]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.20
 [v0.2.19]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.19
