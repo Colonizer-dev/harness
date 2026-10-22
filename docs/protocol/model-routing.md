@@ -110,6 +110,14 @@ models resolve through the same provider routes as `model` (§6.5's `used_by` co
 env variables are stripped from the colony's environment once the tier is chosen, so only the
 provider actually in use is probed at boot.
 
+When the route is chosen, a tier model whose provider is quota-exhausted gives way to the first
+healthy alternative among the `model` setting, `model_high`, `model_low` and, for claude-code,
+`account_fallback_model`; unset models are skipped. `model_routing.reason` gains a note naming
+the exhausted provider and the model routed to; with no healthy alternative the tier model is
+kept and the note says so. The resume sweep runs the same check for a colony parked on quota and
+requeues it on a healthy alternative when one exists. The gateway's own per-provider fallback is
+in [Quota exhaustion](providers.md#65-provider-gateway-v12-issue-5).
+
 Every model the boot settles on — the orchestrator (a tier pick or the operator's `model_override`),
 `subagent_model`, `background_model` and `small_model` — is then resolved against the task's
 sensitivity class before it is used (issue #704). The gateway refuses a class more sensitive than the
