@@ -440,6 +440,10 @@ handshake at spawn, and preview/test needing the add-on installed first.
    joinable hashing key and an operator's locally exported history, both of which outlive one add-on
    install.
 
+Not built yet: the `colonizer` CLI has no `add` or `remove` subcommand and the mothership serves
+no install route, so neither path above exists; see
+[Uninstalling](../observability/reset.md#uninstalling) for manual removal.
+
 ### Supervision
 
 1. The mothership spawns the add-on as a child process when the `observability` module is
