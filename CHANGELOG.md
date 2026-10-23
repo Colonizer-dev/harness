@@ -18,6 +18,12 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.23] - 2026-10-23
+
+### Security
+
+- **Dependency audit fixes supply-chain vulnerabilities.** The Claude Code module's `ip-address` (10.7.3 → 10.7.4) fixes GHSA-rxp7-6hxx-x8q5: Address6 zone identifier parsing that ran in quadratic time (a single long string could stall the process); it comes in through @modelcontextprotocol/sdk → express-rate-limit as a runtime dependency of the agent module. The cockpit's `dompurify` override goes 3.4.16 → 3.4.17, clearing GHSA-cg2g-xh64-v4q7 and GHSA-mrv2-3pqr-j5jr. The bundled DOMPurify 3.4.15 in monaco-editor 0.57.0 still runs in the cockpit, since monaco imports its own copy and sets neither SAFE_FOR_TEMPLATES nor IN_PLACE, so neither advisory is reachable through it; the bundled copy updates when monaco releases a newer version.
+
 ## [v0.2.22] - 2026-10-22
 
 ### Added
@@ -3674,6 +3680,7 @@ Macs. ([#74])
 [#1484]: https://github.com/Colonizer-dev/harness/issues/1484
 [#1485]: https://github.com/Colonizer-dev/harness/issues/1485
 [#1487]: https://github.com/Colonizer-dev/harness/issues/1487
+[v0.2.23]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.23
 [v0.2.22]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.22
 [v0.2.21]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.21
 [v0.2.20]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.20
