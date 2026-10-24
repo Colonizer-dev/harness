@@ -22,7 +22,7 @@
         "version": "0.61.0",
         "integrity": "sha512-dbQ9A0qBtFJNi6XBkHvfZ6Azpn6PNgH/P8h2MZ67RLlX8hSAVjup39CRWqdRxZv7YXIuhrFaytr8y0jKnkoxnQ==",
         "source": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.61.0.tgz",
-        "install": "npm install -g @google/gemini-cli@0.61.0"
+        "install": "bun install -g @google/gemini-cli@0.61.0"
       }
     }
   },

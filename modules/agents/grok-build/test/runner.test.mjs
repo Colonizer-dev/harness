@@ -818,7 +818,7 @@ test('a loop colony on a fixed schedule gets loop_stop but no loop_next', async 
 // pinned grok binary (a wrapper intercepts the turn and runs `grok inspect --json` in the
 // workspace instead, which needs no xAI key), so it asserts what the forced gate actually makes
 // grok resolve — not just what env the runner hands over. Run it with:
-//   COLONIZER_GROK_LIVE_BIN=/path/to/grok npm test
+//   COLONIZER_GROK_LIVE_BIN=/path/to/grok bun run test
 const liveBin = String(process.env.COLONIZER_GROK_LIVE_BIN ?? '').trim();
 
 test('live grok: the forced gate leaves the real binary with an untrusted workspace and none of the project config', { skip: liveBin ? false : 'set COLONIZER_GROK_LIVE_BIN to the pinned grok binary (install.sh 1.0.34) to run the live contract test' }, async (t) => {

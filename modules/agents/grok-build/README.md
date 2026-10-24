@@ -127,7 +127,7 @@ slice wants them off.
 
 ## Tests
 
-`npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
+`bun run test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv, env,
 TTY state and trust store it received, and — when a test scripts `GROK_FAKE_MCP_CALLS` — plays the
 model against the registered colonizer MCP server, so findings, memory, the loop tools, wait and an
@@ -142,7 +142,7 @@ no key) and asserts grok itself reports `projectTrusted: false` with none of a p
 loadable:
 
 ```
-COLONIZER_GROK_LIVE_BIN=/path/to/grok npm test
+COLONIZER_GROK_LIVE_BIN=/path/to/grok bun run test
 ```
 
 Without the variable the test skips. `inspect` lists project MCP servers even when untrusted — it

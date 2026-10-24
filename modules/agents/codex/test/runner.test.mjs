@@ -646,7 +646,7 @@ test('a missing binary is a named error carrying the pinned install command', as
   t.after(() => runner.child.kill('SIGKILL'));
   const problem = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the binary error');
   assert.match(problem.message, /^CODEX_BINARY_MISSING:/);
-  assert.match(problem.message, /npm install -g @openai\/codex@0\.156\.1/);
+  assert.match(problem.message, /bun install -g @openai\/codex@0\.156\.1/);
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'error' && e.detail === 'CODEX_BINARY_MISSING'), 'the error status');
   await stop(runner);
 });

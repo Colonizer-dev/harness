@@ -203,9 +203,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: |
-            modules/agents/claude-code/package-lock.json
-            modules/agents/pi/package-lock.json
+          cache-dependency-path: modules/agents/claude-code/package-lock.json
+
+      # Bun runs every module's tests and installs the bun-locked ones (pi). claude-code stays on npm
+      # for its release recorder and supply-chain audit, which read its package-lock.json.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.6'
 
       - name: Install the Claude Code runner's dependencies
         working-directory: modules/agents/claude-code
@@ -217,11 +221,11 @@ jobs:
 
       - name: Install the Pi runner's dependencies
         working-directory: modules/agents/pi
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Test the Pi runner
         working-directory: modules/agents/pi
-        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- bun run test
 
       # The OpenCode runner has no dependencies (its MCP server is hand-rolled), so there is
       # nothing to install: plain `node --test` from the repository root.
@@ -229,29 +233,29 @@ jobs:
         run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test modules/agents/opencode/test/*.test.mjs
 
       # The Grok Build runner has no dependencies either: its tests drive the real runner.mjs over
-      # stdio against a stub grok CLI, so `npm test` is a bare `node --test`.
+      # stdio against a stub grok CLI, so `bun run test` is a bare `node --test`.
       - name: Test the Grok Build runner
         working-directory: modules/agents/grok-build
-        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- bun run test
 
-      # The Hermes runner has no dependencies (its package-lock.json exists only because install.sh
-      # runs `npm ci` on every module with a package.json); its tests drive the real runner.mjs
+      # The Hermes runner has no dependencies (install.sh installs only the modules that carry a
+      # lockfile); its tests drive the real runner.mjs
       # against a stub of the hermes CLI — no hermes install, no network, no microVM.
       - name: Test the Hermes runner
         working-directory: modules/agents/hermes
-        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- bun run test
 
       # The Codex runner is shaped like the Grok Build and Hermes runners: no dependencies, the
       # real runner.mjs driven over stdio against a stub codex CLI — no OpenAI, no network.
       - name: Test the Codex runner
         working-directory: modules/agents/codex
-        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- bun run test
 
       # The ACP runner is shaped the same way: no dependencies, the real runner.mjs driven over
       # stdio against a scriptable fake ACP agent — no gemini install, no network.
       - name: Test the ACP runner
         working-directory: modules/agents/acp
-        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- bun run test
 
       - name: Upload the flake report
         if: always()

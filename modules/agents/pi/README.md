@@ -24,7 +24,7 @@ Org settings → Agent module; an org without a pick uses the mothership's choic
 
 The runner has driven the real Pi binary (0.87.1, pinned in `package.json`) through a tool turn and
 a text turn, but only against a stand-in gateway outside a microVM; no colony launched from the
-cockpit has run on it yet. CI runs the fake-Pi tests (`npm test` in this directory).
+cockpit has run on it yet. CI runs the fake-Pi tests (`bun run test` in this directory).
 
 ## Configuration
 
@@ -119,7 +119,7 @@ not applied either: the harness refuses to launch a Pi colony while one is set (
 ## Develop
 
 ```sh
-npm ci
-npm test          # fake-Pi tests, no network
+bun install --frozen-lockfile
+bun run test     # fake-Pi tests, no network
 printf '%s\n' '{"type":"user_message","id":"initial","text":"hello"}' | node runner.mjs
 ```

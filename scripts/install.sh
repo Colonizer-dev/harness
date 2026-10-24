@@ -32,7 +32,7 @@ done
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
 # The build needs these; gh is for running the app, and a bundle is not run where it is built.
-for c in npm node git curl tar; do need "$c"; done
+for c in npm node bun git curl tar; do need "$c"; done
 [ "$bundle" = 1 ] || need gh
 [ -n "$prebuilt" ] && [ -x "$prebuilt/colonizer" ] || need cargo
 # GNU calls it sha256sum, macOS ships shasum; either will do.
@@ -226,6 +226,16 @@ echo "==> agent modules"
 mkdir -p "$dist/scripts"
 install -m 755 "$root/scripts/install-release.sh" "$dist/scripts/install-release.sh"
 
+# Production dependencies for one agent module. A module that keeps a package-lock.json installs with npm
+# (claude-code); one with a bun.lock installs with bun; a module with neither has no dependencies.
+install_module_deps() {
+  if [ -f "$1/package-lock.json" ]; then
+    (cd "$1" && npm ci --omit=dev --no-audit --no-fund --silent)
+  elif [ -f "$1/bun.lock" ]; then
+    (cd "$1" && bun install --frozen-lockfile --omit=dev)
+  fi
+}
+
 mkdir -p "$dist/modules/agents"
 for module in "$root"/modules/agents/*/; do
   id=$(basename "$module")
@@ -233,21 +243,22 @@ for module in "$root"/modules/agents/*/; do
   rm -rf "$target"
   mkdir -p "$target"
   (cd "$module" && tar --exclude=./node_modules --exclude=./test -cf - .) | tar -xf - -C "$target"
-  if [ -f "$target/package.json" ] && [ "$bundle" = 1 ]; then
+  if [ -f "$target/package-lock.json" ] && [ "$bundle" = 1 ]; then
     # A release carries no Anthropic code. The Agent SDK is "all rights reserved", and its optional
     # platform packages are Claude Code itself. Colonies run the Claude Code binary the install provides
     # (pathToClaudeCodeExecutable in the runner), so the platform packages are left out, and the SDK is
     # recorded in fetch-at-install for scripts/install-release.sh to fetch from the npm registry.
     # Not every module runs on the Agent SDK (pi does not), and recording one that is not there
     # fails the build, so only a module that installed it records it.
+    # Only claude-code is bundled from a package-lock.json: the recorder below reads it, so it stays on npm.
     (cd "$target" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent) ||
-      { echo "install.sh: npm ci failed for agent module $id (does it ship a package-lock.json?)" >&2; exit 1; }
+      { echo "install.sh: npm ci failed for agent module $id" >&2; exit 1; }
     if [ -d "$target/node_modules/@anthropic-ai/claude-agent-sdk" ]; then
       (cd "$target" && node "$root/scripts/record-fetch-at-install.mjs" node_modules/@anthropic-ai/claude-agent-sdk)
     fi
   elif [ -f "$target/package.json" ]; then
-    (cd "$target" && npm ci --omit=dev --no-audit --no-fund --silent) ||
-      { echo "install.sh: npm ci failed for agent module $id (does it ship a package-lock.json?)" >&2; exit 1; }
+    install_module_deps "$target" ||
+      { echo "install.sh: dependency install failed for agent module $id" >&2; exit 1; }
   fi
   echo "installed agent module $id"
 done

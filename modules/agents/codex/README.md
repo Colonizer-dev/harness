@@ -75,7 +75,7 @@ module declares them under `egress.extra`).
 `status error` with the name as `detail`:
 
 - `CODEX_CREDENTIAL_MISSING` — neither `CODEX_API_KEY` nor `OPENAI_API_KEY` is set. Fix below.
-- `CODEX_BINARY_MISSING` — the binary could not be resolved: no `codex` at `COLONIZER_CODEX_BIN`/PATH and the pinned build could not be fetched (no cache row for the platform, or a failed download); the log carries `npm install -g @openai/codex@0.156.1`.
+- `CODEX_BINARY_MISSING` — the binary could not be resolved: no `codex` at `COLONIZER_CODEX_BIN`/PATH and the pinned build could not be fetched (no cache row for the platform, or a failed download); the log carries `bun install -g @openai/codex@0.156.1`.
 - `CODEX_VERSION_DRIFT` — `codex --version` (prints `codex-cli X.Y.Z`) is not the pinned version.
 - `CODEX_MODEL_PROVIDER` — a model setting that names a provider with no gateway route, or one whose route speaks the anthropic wire (see below).
 
@@ -151,7 +151,7 @@ the rollouts that do persist carry no credentials.
 
 ## Tests
 
-`npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
+`bun run test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-codex.mjs`, a stub codex CLI that records the argv,
 stdin prompt and env it received, models the rollout store resume needs (a fresh thread writes
 `$CODEX_HOME/sessions/<thread id>.jsonl`; `resume <id>` fails without its file), and — when a test

@@ -135,7 +135,7 @@ sh scripts/ci/check-exec-bits.sh
 sh scripts/ci/check-rust-file-size.sh               # non-test Rust files stay under 2,000 lines
 sh scripts/ci/check-case-collisions.sh              # no two tracked paths differ only in letter case
 (cd web && npm ci && npm run build && npm test)     # when web/ changed
-(cd modules/agents/<id> && npm test)                # when that agent module changed; run npm ci first where it has a package-lock.json
+(cd modules/agents/<id> && bun run test)            # when that agent module changed; run bun install --frozen-lockfile first where it has a bun.lock (claude-code keeps npm: see its README)
 node --test modules/agents/opencode/test/*.test.mjs  # opencode has no package.json
 ```
 

@@ -193,7 +193,7 @@ export async function preflight({ env, spawnFn = spawn, pin = readPin(), lockTex
   // credential (§6.5), so the check only gates direct api.openai.com runs.
   const routed = resolveModel(env.COLONIZER_MODEL, parseRoutes(env.COLONIZER_MODEL_ROUTES).routes).route;
   const credential = String(env.CODEX_API_KEY ?? '').trim() || String(env.OPENAI_API_KEY ?? '').trim();
-  const install = `npm install -g @openai/codex@${pin.version}`;
+  const install = `bun install -g @openai/codex@${pin.version}`;
   if (!credential && !routed) {
     return {
       problem: {

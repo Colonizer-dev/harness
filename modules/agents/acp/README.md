@@ -205,9 +205,9 @@ nothing stages.
 
 ## Tests
 
-`npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
+`bun run test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-acp-agent.mjs`, a scriptable fake ACP agent, driven by
 the custom-command setting. Every `session/update` type, the permission flow, the exec policy gate,
-the fs and terminal surface, and the failure paths are covered. CI runs `npm test` in this directory
+the fs and terminal surface, and the failure paths are covered. CI runs `bun run test` in this directory
 (the "Test the ACP runner" step). These stubbed tests are all CI exercises: the end-to-end colony
 job runs only the claude-code module.
