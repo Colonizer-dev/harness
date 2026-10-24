@@ -3,7 +3,7 @@
   "venture": "FZ-006",
   "venture_name": "Colonizer",
   "venture_page": "https://factory0.ventures/ventures/colonizer/",
-  "retrieved": "2026-10-05",
+  "retrieved": "2026-10-24",
   "uses": [
     {
       "id": "FZ-004",
@@ -74,6 +74,16 @@
       "phrase": "Deploys by",
       "status": "planned",
       "note": "Every venture site and Worker deployed from the Keep Shipping console."
+    },
+    {
+      "id": "google-fonts",
+      "name": "Google Fonts",
+      "kind": "third-party",
+      "url": "https://fonts.google.com",
+      "role": "fonts",
+      "phrase": "Typefaces from",
+      "status": "live",
+      "note": "The site’s typefaces (Instrument Sans, JetBrains Mono), loaded from Google."
     },
     {
       "id": "cloudflare",

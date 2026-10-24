@@ -207,11 +207,11 @@ test('a retrieved that is not a date is reported', () => {
 
 test('a retrieved later than today is reported: the file claims a day it was not taken on', () => {
   const differences = meta({ retrieved: '2099-01-01' });
-  assert.deepEqual(differences, ['retrieved: "2099-01-01" is later than today ("2026-10-05")']);
+  assert.deepEqual(differences, ['retrieved: "2099-01-01" is later than today ("2026-10-24")']);
 });
 
 test('a retrieved a day behind today is not drift either — only a day ahead of it is', () => {
-  assert.deepEqual(meta({}, { today: '2026-10-06' }), []);
+  assert.deepEqual(meta({}, { today: '2026-10-25' }), []);
 });
 
 test('a retrieved older than today is not drift, so the check cannot fail on its own schedule', () => {

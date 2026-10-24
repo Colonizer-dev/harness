@@ -191,9 +191,9 @@ pub(crate) fn print() {
 mod tests {
     use super::*;
 
-    /// The eight products the registry's FZ-006 entry lists, so a refresh that quietly drops one
+    /// The nine products the registry's FZ-006 entry lists, so a refresh that quietly drops one
     /// is a failing test and not a shorter footer page.
-    const USE_COUNT: usize = 8;
+    const USE_COUNT: usize = 9;
 
     fn use_(role: &str, status: Status) -> Use {
         Use {
