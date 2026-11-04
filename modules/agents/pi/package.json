@@ -10,7 +10,7 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.1"
+    "@earendil-works/pi-coding-agent": "1.5.0"
   },
   "engines": {
     "node": ">=22.19"
